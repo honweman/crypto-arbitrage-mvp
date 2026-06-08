@@ -1,0 +1,53 @@
+{
+  "poll_seconds": 10,
+  "order_book_depth": 20,
+  "notional_quote": 1000.0,
+  "min_profit_quote": 3.0,
+  "min_profit_bps": 8.0,
+  "min_basis_bps": 15.0,
+  "spot_symbols": [
+    "BTC/USDT",
+    "ETH/USDT"
+  ],
+  "cash_and_carry_pairs": [
+    {
+      "spot_symbol": "BTC/USDT",
+      "derivative_symbol": "BTC/USDT:USDT"
+    },
+    {
+      "spot_symbol": "ETH/USDT",
+      "derivative_symbol": "ETH/USDT:USDT"
+    }
+  ],
+  "spot_exchanges": [
+    {
+      "id": "binance",
+      "label": "binance-spot",
+      "market_type": "spot",
+      "fee_bps": 10.0
+    },
+    {
+      "id": "okx",
+      "label": "okx-spot",
+      "market_type": "spot",
+      "fee_bps": 10.0
+    }
+  ],
+  "derivative_exchanges": [
+    {
+      "id": "binanceusdm",
+      "label": "binance-usdm",
+      "market_type": "swap",
+      "fee_bps": 4.0
+    },
+    {
+      "id": "okx",
+      "label": "okx-swap",
+      "market_type": "swap",
+      "fee_bps": 5.0,
+      "options": {
+        "defaultType": "swap"
+      }
+    }
+  ]
+}

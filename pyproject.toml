@@ -1,0 +1,12 @@
+[project]
+name = "crypto-arbitrage-mvp"
+version = "0.1.0"
+description = "A dry-run crypto arbitrage scanner for spot spreads and spot-futures basis."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "ccxt>=4.4.0"
+]
+
+[project.scripts]
+crypto-arb = "arbitrage_bot.main:main"
