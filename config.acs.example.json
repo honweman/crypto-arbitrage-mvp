@@ -53,9 +53,13 @@
   },
   "portfolio": {
     "enabled": true,
-    "asset": "ACS",
-    "position_base": 0.0,
-    "average_entry_price": 0.0,
+    "positions": [
+      {
+        "asset": "ACS",
+        "position_base": 0.0,
+        "average_entry_price": 0.0
+      }
+    ],
     "cash_balances": {
       "USDC": 0.0,
       "USDT": 0.0,

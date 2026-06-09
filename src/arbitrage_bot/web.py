@@ -382,6 +382,7 @@ HTML = """<!doctype html>
       <div class="metric">
         <div class="label">Position</div>
         <div id="portfolio-position" class="value">--</div>
+        <div id="portfolio-position-detail" class="subtle detail">--</div>
       </div>
       <div class="metric">
         <div class="label">Cash Position</div>
@@ -668,9 +669,29 @@ HTML = """<!doctype html>
       return pieces.length === 0 ? "--" : pieces.join(" · ");
     }
 
+    function formatPositionDetail(portfolio) {
+      const positions = portfolio?.positions || [];
+      if (positions.length === 0) {
+        return portfolio?.asset ? `${compact.format(portfolio.position_base || 0)} ${portfolio.asset}` : "--";
+      }
+      return positions
+        .map((position) => `${position.asset} ${compact.format(position.position_base || 0)}`)
+        .join(" · ");
+    }
+
+    function formatMarkDetail(portfolio) {
+      return (portfolio?.positions || [])
+        .map((position) => {
+          const mark = position.mark_price == null ? "--" : `$${fmt.format(position.mark_price)}`;
+          return `${position.asset} ${mark}`;
+        })
+        .join(" · ");
+    }
+
     function renderPortfolio(portfolio) {
       if (!portfolio || portfolio.status === "disabled") {
         text("portfolio-position", "--");
+        text("portfolio-position-detail", "--");
         text("portfolio-cash", "--");
         text("portfolio-cash-detail", "--");
         text("portfolio-mark", "--");
@@ -682,13 +703,29 @@ HTML = """<!doctype html>
         return;
       }
 
-      text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
+      const positions = portfolio.positions || [];
+      const positionDetail = formatPositionDetail(portfolio);
+      if (positions.length > 1) {
+        text("portfolio-position", `${positions.length} assets`);
+        text("portfolio-position-detail", positionDetail);
+      } else {
+        text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
+        text("portfolio-position-detail", "--");
+      }
+      document.getElementById("portfolio-position-detail").title = positionDetail;
       const cashValue = portfolio.cash_value == null ? null : portfolio.cash_value;
       text("portfolio-cash", cashValue == null ? "--" : `$${money.format(cashValue)}`);
       const cashDetail = formatCashDetail(portfolio);
       text("portfolio-cash-detail", cashDetail);
       document.getElementById("portfolio-cash-detail").title = cashDetail;
-      text("portfolio-mark", portfolio.mark_price == null ? "--" : `$${fmt.format(portfolio.mark_price)}`);
+      const markDetail = formatMarkDetail(portfolio);
+      text(
+        "portfolio-mark",
+        positions.length > 1
+          ? "Mixed"
+          : portfolio.mark_price == null ? "--" : `$${fmt.format(portfolio.mark_price)}`
+      );
+      document.getElementById("portfolio-mark").title = markDetail || "";
       text("portfolio-value", portfolio.position_value == null ? "--" : `$${money.format(portfolio.position_value)}`);
       setPnl("portfolio-total-pnl", portfolio.total_pnl);
       setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);
@@ -889,6 +926,20 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "quote_currency": cfg.common_quote_currency,
             "position_base": cfg.portfolio.position_base,
             "average_entry_price": cfg.portfolio.average_entry_price,
+            "positions": [
+                {
+                    "asset": position.asset,
+                    "position_base": position.position_base,
+                    "average_entry_price": position.average_entry_price,
+                    "mark_price": None,
+                    "mark_source_count": 0,
+                    "position_value": None,
+                    "price_move_pnl": 0.0,
+                    "status": "starting",
+                }
+                for position in cfg.portfolio.positions
+            ],
+            "position_missing_marks": [],
             "cash_balances": cfg.portfolio.cash_balances,
             "cash_balances_common": {},
             "cash_value": 0.0,

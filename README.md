@@ -88,16 +88,20 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
   --port 8080
 ```
 
-Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted ACS bid/ask prices, quote rates, and any live opportunities. The program switch next to the status pill pauses or resumes scanning without stopping the web server.
+Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted bid/ask prices, quote rates, and any live opportunities. The program switch next to the status pill pauses or resumes scanning without stopping the web server.
 
-The top row shows configured ACS position and P/L attribution:
+The top row shows configured positions, cash balances, and P/L attribution:
 
 ```json
 "portfolio": {
   "enabled": true,
-  "asset": "ACS",
-  "position_base": 0.0,
-  "average_entry_price": 0.0,
+  "positions": [
+    {
+      "asset": "ACS",
+      "position_base": 0.0,
+      "average_entry_price": 0.0
+    }
+  ],
   "cash_balances": {
     "USDC": 0.0,
     "USDT": 0.0,
@@ -110,7 +114,43 @@ The top row shows configured ACS position and P/L attribution:
 }
 ```
 
-`Cash Position` combines configured USDC, USDT, and KRW balances into the common quote currency using `quote_rates`; the small line below it keeps the per-currency amounts visible. `Price Move` is calculated from `position_base * (current_mark_price - average_entry_price)`, where the mark price is the average converted mid price across available ACS spot books. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
+`Cash Position` combines configured USDC, USDT, and KRW balances into the common quote currency using `quote_rates`; the small line below it keeps the per-currency amounts visible. `Price Move` is calculated per asset from `position_base * (current_mark_price - average_entry_price)`, then summed across all configured positions. The mark price for each asset is the average converted mid price across available spot books for that asset. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
+
+To add another spot asset later, add its markets to `spot_markets`, add one position entry under `portfolio.positions`, and add any new quote-currency conversion to `quote_rates` or `quote_rate_sources`:
+
+```json
+{
+  "portfolio": {
+    "enabled": true,
+    "positions": [
+      {
+        "asset": "ACS",
+        "position_base": 0.0,
+        "average_entry_price": 0.0
+      },
+      {
+        "asset": "XYZ",
+        "position_base": 0.0,
+        "average_entry_price": 0.0
+      }
+    ]
+  },
+  "spot_markets": [
+    {
+      "asset": "ACS",
+      "exchange": "bybit-spot",
+      "symbol": "ACS/USDT",
+      "quote_currency": "USDT"
+    },
+    {
+      "asset": "XYZ",
+      "exchange": "bybit-spot",
+      "symbol": "XYZ/USDT",
+      "quote_currency": "USDT"
+    }
+  ]
+}
+```
 
 The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. With the ACS config and `--poll-seconds 1`, the page fetches the latest REST order book every second and recalculates the 20 planned bid/ask orders from the fresh mid price. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
 

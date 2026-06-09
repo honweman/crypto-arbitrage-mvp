@@ -80,11 +80,19 @@ class MarketMakerConfig:
 
 
 @dataclass(frozen=True)
+class AssetPosition:
+    asset: str
+    position_base: float = 0.0
+    average_entry_price: float = 0.0
+
+
+@dataclass(frozen=True)
 class PortfolioConfig:
     enabled: bool = False
     asset: str = ""
     position_base: float = 0.0
     average_entry_price: float = 0.0
+    positions: list[AssetPosition] = field(default_factory=list)
     cash_balances: dict[str, float] = field(default_factory=dict)
     realized_pnl: dict[str, float] = field(default_factory=dict)
 
@@ -127,6 +135,32 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
         ws_socks_proxy_env=raw.get("ws_socks_proxy_env"),
         options=dict(raw.get("options", {})),
     )
+
+
+def _asset_position_from_dict(raw: dict[str, Any]) -> AssetPosition:
+    return AssetPosition(
+        asset=str(raw["asset"]).upper(),
+        position_base=float(raw.get("position_base", 0.0)),
+        average_entry_price=float(raw.get("average_entry_price", 0.0)),
+    )
+
+
+def _portfolio_positions_from_dict(raw: dict[str, Any]) -> list[AssetPosition]:
+    positions_raw = raw.get("positions")
+    if positions_raw is not None:
+        return [_asset_position_from_dict(item) for item in positions_raw]
+
+    legacy_asset = str(raw.get("asset", "")).upper()
+    if not legacy_asset and "position_base" not in raw and "average_entry_price" not in raw:
+        return []
+
+    return [
+        AssetPosition(
+            asset=legacy_asset,
+            position_base=float(raw.get("position_base", 0.0)),
+            average_entry_price=float(raw.get("average_entry_price", 0.0)),
+        )
+    ]
 
 
 def load_config(path: str | Path) -> BotConfig:
@@ -205,6 +239,7 @@ def load_config(path: str | Path) -> BotConfig:
             average_entry_price=float(
                 portfolio_raw.get("average_entry_price", 0.0)
             ),
+            positions=_portfolio_positions_from_dict(portfolio_raw),
             cash_balances={
                 str(currency).upper(): float(value)
                 for currency, value in portfolio_raw.get(

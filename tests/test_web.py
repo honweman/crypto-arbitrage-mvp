@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from arbitrage_bot.config import (
+    AssetPosition,
     BotConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
@@ -128,6 +129,7 @@ class WebMonitorTest(unittest.TestCase):
 
         self.assertEqual(payload["status"], "ok")
         self.assertAlmostEqual(payload["mark_price"], 0.00015)
+        self.assertEqual(payload["positions"][0]["asset"], "ACS")
         self.assertAlmostEqual(payload["cash_balances_common"]["USDC"], 10.0)
         self.assertAlmostEqual(payload["cash_balances_common"]["USDT"], 20.0)
         self.assertAlmostEqual(payload["cash_balances_common"]["KRW"], 7.5)
@@ -136,6 +138,64 @@ class WebMonitorTest(unittest.TestCase):
         self.assertAlmostEqual(payload["sources"]["market_maker"], 1.25)
         self.assertAlmostEqual(payload["sources"]["arbitrage"], 2.5)
         self.assertAlmostEqual(payload["total_pnl"], 4.25)
+
+    def test_build_portfolio_pnl_sums_multiple_assets(self) -> None:
+        cfg = make_config(
+            portfolio=PortfolioConfig(
+                enabled=True,
+                positions=[
+                    AssetPosition(
+                        asset="ACS",
+                        position_base=10_000.0,
+                        average_entry_price=0.00010,
+                    ),
+                    AssetPosition(
+                        asset="XYZ",
+                        position_base=2.0,
+                        average_entry_price=2.0,
+                    ),
+                ],
+                realized_pnl={"market_maker": 1.0, "arbitrage": 2.0},
+            ),
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+                SpotMarketConfig(
+                    asset="XYZ",
+                    exchange="bybit-spot",
+                    symbol="XYZ/USDT",
+                    quote_currency="USDT",
+                ),
+            ],
+        )
+        books = {
+            ("bybit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            ),
+            ("bybit-spot", "XYZ/USDT"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="XYZ/USDT",
+                bids=[BookLevel(price=2.9, amount=10)],
+                asks=[BookLevel(price=3.1, amount=10)],
+            ),
+        }
+
+        payload = build_portfolio_pnl(cfg, books, {"USDT": 1.0})
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(len(payload["positions"]), 2)
+        self.assertAlmostEqual(payload["positions"][0]["position_value"], 1.5)
+        self.assertAlmostEqual(payload["positions"][1]["position_value"], 6.0)
+        self.assertAlmostEqual(payload["position_value"], 7.5)
+        self.assertAlmostEqual(payload["sources"]["price_move"], 2.5)
+        self.assertAlmostEqual(payload["total_pnl"], 5.5)
 
     def test_build_portfolio_pnl_reports_missing_cash_rates(self) -> None:
         cfg = make_config(
