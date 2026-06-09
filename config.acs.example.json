@@ -1,6 +1,6 @@
 {
-  "poll_seconds": 10,
-  "order_book_depth": 50,
+  "poll_seconds": 1,
+  "order_book_depth": 20,
   "notional_quote": 200.0,
   "min_profit_quote": 0.1,
   "min_profit_bps": 1.0,

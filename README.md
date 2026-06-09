@@ -48,6 +48,36 @@ cp config.acs.example.json config.acs.json
 python -m arbitrage_bot.main --config config.acs.json --strategy spot-spread --once
 ```
 
+For 24-hour monitoring, run continuous mode. This reuses exchange clients across scans, polls on a fixed cadence, and keeps going until stopped:
+
+```bash
+python -m arbitrage_bot.main --config config.acs.json --strategy spot-spread --only-opportunities
+```
+
+For a faster local override:
+
+```bash
+python -m arbitrage_bot.main --config config.acs.json --strategy spot-spread --poll-seconds 0.5 --only-opportunities
+```
+
+The REST scanner is bounded by exchange rate limits and network latency. If a scan takes longer than the configured interval, the next scan starts immediately. For sub-second production latency, use exchange WebSocket order book streams.
+
+To leave it running for a full day and save logs:
+
+```bash
+mkdir -p logs
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.main \
+  --config config.acs.json \
+  --strategy spot-spread \
+  --poll-seconds 1 \
+  --only-opportunities \
+  --heartbeat-seconds 60 \
+  > logs/opportunities.jsonl \
+  2> logs/scanner.log
+```
+
+`opportunities.jsonl` contains only actionable opportunity JSON lines. `scanner.log` contains heartbeat and warning output.
+
 That config treats USD as the common reporting currency and compares:
 
 - Bithumb `ACS/KRW`
