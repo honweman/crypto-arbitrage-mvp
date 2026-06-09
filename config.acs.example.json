@@ -80,6 +80,12 @@
       "exchange": "coinbase-spot",
       "symbol": "ACS/USDC",
       "quote_currency": "USDC"
+    },
+    {
+      "asset": "ACS",
+      "exchange": "upbit-spot",
+      "symbol": "ACS/USDT",
+      "quote_currency": "USDT"
     }
   ],
   "cash_and_carry_pairs": [],
@@ -106,6 +112,12 @@
       "label": "coinbase-spot",
       "market_type": "spot",
       "fee_bps": 60.0
+    },
+    {
+      "id": "upbit",
+      "label": "upbit-spot",
+      "market_type": "spot",
+      "fee_bps": 25.0
     }
   ],
   "derivative_exchanges": []

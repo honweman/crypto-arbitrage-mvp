@@ -34,6 +34,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.portfolio.asset, "ACS")
         self.assertEqual(cfg.portfolio.realized_pnl["market_maker"], 0.0)
         self.assertEqual(cfg.portfolio.realized_pnl["arbitrage"], 0.0)
+        self.assertTrue(
+            any(
+                market.exchange == "upbit-spot"
+                and market.symbol == "ACS/USDT"
+                and market.quote_currency == "USDT"
+                for market in cfg.spot_markets
+            )
+        )
+        self.assertTrue(any(exchange.key == "upbit-spot" for exchange in cfg.spot_exchanges))
 
 
 if __name__ == "__main__":

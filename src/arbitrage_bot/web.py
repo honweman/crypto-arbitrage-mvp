@@ -355,7 +355,7 @@ HTML = """<!doctype html>
   <header>
     <div>
       <h1>ACS Arbitrage Monitor</h1>
-      <div class="subtle">Bithumb ACS/KRW · Bybit ACS/USDT · Coinbase ACS/USDC</div>
+      <div class="subtle">Bithumb ACS/KRW · Bybit ACS/USDT · Coinbase ACS/USDC · Upbit ACS/USDT</div>
     </div>
     <div class="header-actions">
       <label class="program-switch" title="Pause or resume scans">

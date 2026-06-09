@@ -41,7 +41,7 @@ python -m arbitrage_bot.main --config config.json
 
 ## ACS spot arbitrage
 
-Use `config.acs.example.json` when monitoring ACS across Bithumb, Bybit, and Coinbase:
+Use `config.acs.example.json` when monitoring ACS across Bithumb, Bybit, Coinbase, and Upbit:
 
 ```bash
 cp config.acs.example.json config.acs.json
@@ -195,6 +195,7 @@ That config treats USD as the common reporting currency and compares:
 - Bithumb `ACS/KRW`
 - Bybit `ACS/USDT`
 - Coinbase `ACS/USDC`
+- Upbit `ACS/USDT`
 
 KRW is not comparable to USD, USDT, or USDC directly. The config includes a fallback `KRW` to `USD` rate and a `quote_rate_sources` entry that tries to derive the live KRW conversion from Bithumb `USDT/KRW` order book mid price. USDT and USDC are treated as 1.0 USD by default; adjust `quote_rates` if you want to model a stablecoin discount or premium.
 
