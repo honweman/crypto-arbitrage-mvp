@@ -39,6 +39,25 @@ python -m arbitrage_bot.main --config config.json --strategy cash-and-carry --on
 python -m arbitrage_bot.main --config config.json
 ```
 
+## ACS spot arbitrage
+
+Use `config.acs.example.json` when monitoring ACS across Bithumb, Bybit, and Coinbase:
+
+```bash
+cp config.acs.example.json config.acs.json
+python -m arbitrage_bot.main --config config.acs.json --strategy spot-spread --once
+```
+
+That config treats USD as the common reporting currency and compares:
+
+- Bithumb `ACS/KRW`
+- Bybit `ACS/USDT`
+- Coinbase `ACS/USD`
+
+KRW is not comparable to USD or USDT directly. The config includes a fallback `KRW` to `USD` rate and a `quote_rate_sources` entry that tries to derive the live KRW conversion from Bithumb `USDT/KRW` order book mid price.
+
+Before trading, update `fee_bps` to match your account tier and confirm all three exchanges support ACS deposits, withdrawals, and the same ACS network.
+
 ## Important assumptions
 
 - Fees are configured manually in basis points.

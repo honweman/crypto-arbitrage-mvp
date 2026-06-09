@@ -46,9 +46,13 @@ class OpportunityLeg:
     quantity_base: float
     average_price: float
     fee_quote: float
+    quote_currency: str | None = None
+    gross_quote: float | None = None
+    net_quote: float | None = None
+    common_quote_rate: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "exchange": self.exchange,
             "symbol": self.symbol,
             "side": self.side,
@@ -56,6 +60,15 @@ class OpportunityLeg:
             "average_price": self.average_price,
             "fee_quote": self.fee_quote,
         }
+        if self.quote_currency is not None:
+            data["quote_currency"] = self.quote_currency
+        if self.gross_quote is not None:
+            data["gross_quote"] = self.gross_quote
+        if self.net_quote is not None:
+            data["net_quote"] = self.net_quote
+        if self.common_quote_rate is not None:
+            data["common_quote_rate"] = self.common_quote_rate
+        return data
 
 
 @dataclass(frozen=True)

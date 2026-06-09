@@ -1,9 +1,12 @@
 import unittest
 
-from arbitrage_bot.config import CashAndCarryPair, ExchangeConfig
+from arbitrage_bot.config import CashAndCarryPair, ExchangeConfig, SpotMarketConfig
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.strategies.cash_and_carry import find_cash_and_carry_opportunities
-from arbitrage_bot.strategies.spot_spread import find_spot_spread_opportunities
+from arbitrage_bot.strategies.spot_spread import (
+    find_converted_spot_spread_opportunities,
+    find_spot_spread_opportunities,
+)
 
 
 def book(exchange: str, symbol: str, bid: float, ask: float) -> OrderBookSnapshot:
@@ -75,6 +78,58 @@ class StrategyTest(unittest.TestCase):
 
         self.assertEqual(len(opportunities), 1)
         self.assertGreater(opportunities[0].metadata["basis_bps"], 0)
+
+    def test_converted_spot_spread_compares_different_quote_currencies(self) -> None:
+        exchanges = [
+            ExchangeConfig(id="bithumb", label="bithumb-spot", fee_bps=0),
+            ExchangeConfig(id="coinbase", label="coinbase-spot", fee_bps=0),
+        ]
+        markets = [
+            SpotMarketConfig(
+                asset="ACS",
+                exchange="bithumb-spot",
+                symbol="ACS/KRW",
+                quote_currency="KRW",
+            ),
+            SpotMarketConfig(
+                asset="ACS",
+                exchange="coinbase-spot",
+                symbol="ACS/USD",
+                quote_currency="USD",
+            ),
+        ]
+        books = {
+            ("bithumb-spot", "ACS/KRW"): OrderBookSnapshot(
+                exchange="bithumb-spot",
+                symbol="ACS/KRW",
+                bids=[BookLevel(price=0.19, amount=1_000_000)],
+                asks=[BookLevel(price=0.20, amount=1_000_000)],
+            ),
+            ("coinbase-spot", "ACS/USD"): OrderBookSnapshot(
+                exchange="coinbase-spot",
+                symbol="ACS/USD",
+                bids=[BookLevel(price=0.00018, amount=1_000_000)],
+                asks=[BookLevel(price=0.00019, amount=1_000_000)],
+            ),
+        }
+
+        opportunities = find_converted_spot_spread_opportunities(
+            books=books,
+            exchanges=exchanges,
+            markets=markets,
+            notional_quote=100,
+            min_profit_quote=1,
+            min_profit_bps=1,
+            quote_rates={"USD": 1.0, "KRW": 0.00075},
+            common_quote_currency="USD",
+        )
+
+        self.assertEqual(len(opportunities), 1)
+        self.assertEqual(opportunities[0].legs[0].symbol, "ACS/KRW")
+        self.assertEqual(opportunities[0].legs[0].quote_currency, "KRW")
+        self.assertEqual(opportunities[0].legs[1].symbol, "ACS/USD")
+        self.assertEqual(opportunities[0].metadata["common_quote_currency"], "USD")
+        self.assertGreater(opportunities[0].profit_quote, 1)
 
 
 if __name__ == "__main__":
