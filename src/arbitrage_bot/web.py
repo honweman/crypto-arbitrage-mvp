@@ -653,8 +653,13 @@ HTML = """<!doctype html>
 
     function formatCashDetail(portfolio) {
       const balances = portfolio?.cash_balances || {};
+      const preferredOrder = { USDC: 0, USDT: 1, KRW: 2 };
       const pieces = Object.entries(balances)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => {
+          const leftRank = preferredOrder[left] ?? 99;
+          const rightRank = preferredOrder[right] ?? 99;
+          return leftRank === rightRank ? left.localeCompare(right) : leftRank - rightRank;
+        })
         .map(([currency, amount]) => `${currency} ${compact.format(amount || 0)}`);
       const missing = portfolio?.cash_missing_rates || [];
       if (missing.length > 0) {
