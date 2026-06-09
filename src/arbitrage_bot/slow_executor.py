@@ -89,6 +89,34 @@ async def place_plan(
     }
 
 
+async def cancel_order_ids(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    order_ids: list[str],
+) -> dict[str, Any]:
+    exec_cfg = cfg.slow_execution
+    exchange_cfg = _find_exchange(cfg, exec_cfg.exchange)
+    canceled = []
+    errors = []
+    for order_id in order_ids:
+        try:
+            canceled.append(
+                await manager.cancel_order(
+                    exchange_cfg,
+                    symbol=exec_cfg.symbol,
+                    order_id=order_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"order_id": order_id, "error": str(exc)})
+    return {
+        "type": "slow_execution_cancel",
+        "order_ids": order_ids,
+        "canceled_count": len(canceled),
+        "errors": errors,
+    }
+
+
 async def run_cycle(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -106,7 +134,7 @@ async def run_cycle(
         "mode": "live" if live else "dry_run",
         "status": plan.status,
         "plan": plan.to_dict(),
-        "submitted_based": True,
+        "tracks_submitted_base": True,
     }
 
     if live and plan.order is not None:
@@ -150,7 +178,28 @@ async def run_loop(
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
             sys.stdout.flush()
 
-            if not loop or payload["status"] in {"complete", "below_min_order_quote"}:
+            ttl = cfg.slow_execution.order_ttl_seconds
+            execution = payload.get("execution", {})
+            placed_order_ids = [
+                order_id
+                for order_id in execution.get("placed_order_ids", [])
+                if isinstance(order_id, str)
+            ]
+            if live and ttl > 0 and placed_order_ids:
+                await asyncio.sleep(ttl)
+                cancel_payload = await cancel_order_ids(
+                    cfg,
+                    manager,
+                    placed_order_ids,
+                )
+                print(json.dumps(cancel_payload, ensure_ascii=True, sort_keys=True))
+                sys.stdout.flush()
+
+            if not loop or payload["status"] in {
+                "complete",
+                "below_min_order_quote",
+                "stopped_by_price",
+            }:
                 return
 
             sleep_for = max(0.0, interval - (time.monotonic() - started))

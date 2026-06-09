@@ -7,11 +7,12 @@ import json
 import time
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import asdict, replace
 from typing import Any
 
 from aiohttp import web
 
-from .config import BotConfig, SpotMarketConfig, load_config
+from .config import BotConfig, SlowExecutionConfig, SpotMarketConfig, load_config
 from .exchanges import ExchangeManager
 from .main import (
     StrategyName,
@@ -352,12 +353,77 @@ HTML = """<!doctype html>
       font-size: 14px;
     }
 
+    .control-panel {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .field label,
+    .check-field {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfb;
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .check-field {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      align-self: end;
+    }
+
+    .control-button {
+      min-height: 34px;
+      align-self: end;
+      border: 1px solid var(--focus);
+      border-radius: 6px;
+      background: var(--focus);
+      color: white;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    .control-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       .header-actions { width: 100%; justify-content: space-between; }
       main { padding: 14px; }
       .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .opportunity { grid-template-columns: 1fr; }
     }
   </style>
@@ -507,6 +573,48 @@ HTML = """<!doctype html>
         <h2>Slow Execution</h2>
         <span id="slow-meta" class="subtle"></span>
       </div>
+      <form id="slow-form" class="control-panel">
+        <label class="check-field">
+          <input id="slow-enabled" type="checkbox">
+          Enabled
+        </label>
+        <div class="field">
+          <label for="slow-side">Side</label>
+          <select id="slow-side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="slow-total-base">Total Base</label>
+          <input id="slow-total-base" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-slice-min">Min/Order</label>
+          <input id="slow-slice-min" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-slice-max">Max/Order</label>
+          <input id="slow-slice-max" type="number" min="0" step="any">
+        </div>
+        <label class="check-field">
+          <input id="slow-randomize" type="checkbox">
+          Random
+        </label>
+        <div class="field">
+          <label for="slow-interval">Place Sec</label>
+          <input id="slow-interval" type="number" min="1" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-ttl">Cancel Sec</label>
+          <input id="slow-ttl" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-stop-price">Stop Price</label>
+          <input id="slow-stop-price" type="number" min="0" step="any">
+        </div>
+        <button id="slow-apply" class="control-button" type="submit">Apply</button>
+      </form>
       <div class="table-wrap">
         <table>
           <thead>
@@ -520,6 +628,8 @@ HTML = """<!doctype html>
               <th class="num">Submitted</th>
               <th class="num">Remaining</th>
               <th class="num">Interval</th>
+              <th class="num">Cancel</th>
+              <th class="num">Stop</th>
             </tr>
           </thead>
           <tbody id="slow-orders"></tbody>
@@ -672,7 +782,7 @@ HTML = """<!doctype html>
       body.innerHTML = "";
       if (!slowExecution || !slowExecution.plan || !slowExecution.plan.order) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="9">${slowExecution?.status || "disabled"}</td>`;
+        tr.innerHTML = `<td colspan="11">${slowExecution?.status || "disabled"}</td>`;
         body.appendChild(tr);
         return;
       }
@@ -690,6 +800,8 @@ HTML = """<!doctype html>
         <td class="num">${compact.format(order.submitted_base_before)} / ${compact.format(plan.total_base)}</td>
         <td class="num">${compact.format(plan.remaining_base)}</td>
         <td class="num">${plan.interval_seconds}s</td>
+        <td class="num">${plan.order_ttl_seconds || 0}s</td>
+        <td class="num">${plan.stop_price ? fmt.format(plan.stop_price) : "--"}</td>
       `;
       body.appendChild(tr);
     }
@@ -832,6 +944,8 @@ HTML = """<!doctype html>
     }
 
     let programToggleBusy = false;
+    let slowFormDirty = false;
+    let slowFormBusy = false;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -851,6 +965,62 @@ HTML = """<!doctype html>
       } finally {
         toggle.disabled = false;
         programToggleBusy = false;
+      }
+    }
+
+    function numericValue(id) {
+      const value = document.getElementById(id).value;
+      if (value === "") return 0;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function setNumericField(id, value) {
+      document.getElementById(id).value = value == null ? "" : String(value);
+    }
+
+    function renderSlowExecutionConfig(config) {
+      if (!config || slowFormDirty || slowFormBusy) return;
+      document.getElementById("slow-enabled").checked = Boolean(config.enabled);
+      document.getElementById("slow-side").value = config.side || "sell";
+      setNumericField("slow-total-base", config.total_base || 0);
+      setNumericField("slow-slice-min", config.slice_base_min || config.slice_base || 0);
+      setNumericField("slow-slice-max", config.slice_base_max || config.slice_base || 0);
+      document.getElementById("slow-randomize").checked = Boolean(config.randomize_slice);
+      setNumericField("slow-interval", config.interval_seconds || 60);
+      setNumericField("slow-ttl", config.order_ttl_seconds || 0);
+      setNumericField("slow-stop-price", config.stop_price || 0);
+    }
+
+    async function applySlowExecutionConfig(event) {
+      event.preventDefault();
+      if (slowFormBusy) return;
+      slowFormBusy = true;
+      const button = document.getElementById("slow-apply");
+      button.disabled = true;
+      const payload = {
+        enabled: document.getElementById("slow-enabled").checked,
+        side: document.getElementById("slow-side").value,
+        total_base: numericValue("slow-total-base"),
+        slice_base_min: numericValue("slow-slice-min"),
+        slice_base_max: numericValue("slow-slice-max"),
+        randomize_slice: document.getElementById("slow-randomize").checked,
+        interval_seconds: numericValue("slow-interval"),
+        order_ttl_seconds: numericValue("slow-ttl"),
+        stop_price: numericValue("slow-stop-price"),
+      };
+      try {
+        const res = await fetch("/api/slow-execution", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error("slow execution update failed");
+        slowFormDirty = false;
+        await refresh();
+      } finally {
+        button.disabled = false;
+        slowFormBusy = false;
       }
     }
 
@@ -877,6 +1047,7 @@ HTML = """<!doctype html>
         text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
         text("slow-meta", data.slow_execution?.plan ? `${data.slow_execution.mode || "dry_run"} · ${data.slow_execution.plan.exchange} ${data.slow_execution.plan.symbol} · ${data.slow_execution.plan.side.toUpperCase()} · mid ${fmt.format(data.slow_execution.plan.mid_price)}` : (data.slow_execution?.status || "disabled"));
 
+        renderSlowExecutionConfig(data.slow_execution?.config);
         renderMarkets(data.markets);
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
@@ -895,6 +1066,10 @@ HTML = """<!doctype html>
     document.getElementById("program-toggle").addEventListener("change", (event) => {
       setProgramRunning(event.target.checked);
     });
+    document.getElementById("slow-form").addEventListener("input", () => {
+      slowFormDirty = true;
+    });
+    document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     setInterval(refresh, 1000);
   </script>
 </body>
@@ -941,6 +1116,54 @@ def build_market_rows(
     return rows
 
 
+def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def _slow_execution_overrides_from_payload(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            raise ValueError("enabled must be a boolean")
+        overrides["enabled"] = payload["enabled"]
+
+    if "side" in payload:
+        side = str(payload["side"]).lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        overrides["side"] = side
+
+    numeric_fields = {
+        "total_base",
+        "slice_base_min",
+        "slice_base_max",
+        "interval_seconds",
+        "order_ttl_seconds",
+        "stop_price",
+    }
+    for field in numeric_fields:
+        if field not in payload:
+            continue
+        value = float(payload[field])
+        if value < 0:
+            raise ValueError(f"{field} must be non-negative")
+        overrides[field] = value
+
+    if "randomize_slice" in payload:
+        if not isinstance(payload["randomize_slice"], bool):
+            raise ValueError("randomize_slice must be a boolean")
+        overrides["randomize_slice"] = payload["randomize_slice"]
+
+    if "interval_seconds" in overrides and overrides["interval_seconds"] <= 0:
+        raise ValueError("interval_seconds must be positive")
+
+    overrides["slice_base"] = 0.0
+    overrides["slice_quote"] = 0.0
+    return overrides
+
+
 def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any]:
     return {
         "status": "starting",
@@ -979,6 +1202,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
+            "config": slow_execution_config_to_dict(cfg.slow_execution),
             "error": None,
         },
         "portfolio": {
@@ -1029,6 +1253,7 @@ class MonitorState:
         self._lock = asyncio.Lock()
         self._program_running = True
         self._program_updated_at = time.time()
+        self._slow_execution_overrides: dict[str, Any] = {}
         self._payload = _build_initial_payload(cfg, poll_seconds)
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
 
@@ -1039,6 +1264,24 @@ class MonitorState:
     async def is_running(self) -> bool:
         async with self._lock:
             return self._program_running
+
+    async def slow_execution_config(
+        self,
+        base_config: SlowExecutionConfig,
+    ) -> SlowExecutionConfig:
+        async with self._lock:
+            return replace(base_config, **self._slow_execution_overrides)
+
+    async def set_slow_execution_overrides(
+        self,
+        overrides: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            self._slow_execution_overrides.update(overrides)
+            if "slow_execution" in self._payload:
+                current_config = self._payload["slow_execution"].get("config", {})
+                current_config.update(overrides)
+                self._payload["slow_execution"]["config"] = current_config
 
     async def set_running(self, running: bool) -> dict[str, Any]:
         async with self._lock:
@@ -1205,13 +1448,16 @@ def build_market_maker_payload(
 def build_slow_execution_payload(
     cfg: BotConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
+    exec_cfg: SlowExecutionConfig | None = None,
 ) -> dict[str, Any]:
-    exec_cfg = cfg.slow_execution
+    exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
+    config_payload = slow_execution_config_to_dict(exec_cfg)
     if not exec_cfg.enabled:
         return {
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
+            "config": config_payload,
             "error": None,
         }
 
@@ -1221,6 +1467,7 @@ def build_slow_execution_payload(
             "status": "error",
             "mode": "dry_run",
             "plan": None,
+            "config": config_payload,
             "error": f"Missing {exec_cfg.exchange} {exec_cfg.symbol}",
         }
 
@@ -1231,6 +1478,7 @@ def build_slow_execution_payload(
             "status": "error",
             "mode": "dry_run",
             "plan": None,
+            "config": config_payload,
             "error": str(exc),
         }
 
@@ -1238,6 +1486,7 @@ def build_slow_execution_payload(
         "status": plan.status,
         "mode": "dry_run",
         "plan": plan.to_dict(),
+        "config": config_payload,
         "error": None,
     }
 
@@ -1350,10 +1599,23 @@ async def monitor_loop(
             started_at = time.time()
             scan_count += 1
             try:
+                runtime_slow_execution = await state.slow_execution_config(
+                    cfg.slow_execution
+                )
                 if strategy in {"all", "spot-spread"} and cfg.spot_markets:
+                    symbols_by_exchange = _symbols_for_configured_spot_markets(cfg)
+                    if (
+                        runtime_slow_execution.enabled
+                        and runtime_slow_execution.exchange
+                        and runtime_slow_execution.symbol
+                    ):
+                        symbols_by_exchange.setdefault(
+                            runtime_slow_execution.exchange,
+                            set(),
+                        ).add(runtime_slow_execution.symbol)
                     books = await manager.fetch_order_books(
                         cfg.spot_exchanges,
-                        _symbols_for_configured_spot_markets(cfg),
+                        symbols_by_exchange,
                         cfg.order_book_depth,
                     )
                     quote_rates = _quote_rates_from_sources(cfg, books)
@@ -1370,7 +1632,11 @@ async def monitor_loop(
                     )
                     warnings = _missing_market_warnings(rows)
                     market_maker_payload = build_market_maker_payload(cfg, books)
-                    slow_execution_payload = build_slow_execution_payload(cfg, books)
+                    slow_execution_payload = build_slow_execution_payload(
+                        cfg,
+                        books,
+                        runtime_slow_execution,
+                    )
                     portfolio_payload = build_portfolio_pnl(cfg, books, quote_rates)
                 else:
                     opportunities = await scan_with_manager(cfg, strategy, manager)
@@ -1387,6 +1653,9 @@ async def monitor_loop(
                         "status": "disabled",
                         "mode": "dry_run",
                         "plan": None,
+                        "config": slow_execution_config_to_dict(
+                            runtime_slow_execution
+                        ),
                         "error": None,
                     }
                     portfolio_payload = _build_initial_payload(cfg, poll_seconds)[
@@ -1491,6 +1760,25 @@ async def api_control(request: web.Request) -> web.Response:
     return web.json_response(await state.set_running(running))
 
 
+async def api_slow_execution(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        overrides = _slow_execution_overrides_from_payload(payload)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    await state.set_slow_execution_overrides(overrides)
+    current_config = await state.slow_execution_config(cfg.slow_execution)
+    return web.json_response(
+        {
+            "ok": True,
+            "config": slow_execution_config_to_dict(current_config),
+        }
+    )
+
+
 async def api_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -1504,6 +1792,7 @@ def create_app(
     app = web.Application()
     state = MonitorState(cfg, interval)
     app["monitor_state"] = state
+    app["config"] = cfg
 
     async def monitor_context(app_: web.Application) -> Any:
         task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
@@ -1519,6 +1808,7 @@ def create_app(
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)
+    app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_get("/api/health", api_health)
     return app
 

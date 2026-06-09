@@ -212,7 +212,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
 
 The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
 
-The monitor can also show a dry-run slow execution plan when `slow_execution.enabled` is true. This tool submits one buy or sell limit order at the current midpoint between best bid and best ask. The speed is configured with `slice_base` or `slice_quote` plus `interval_seconds`.
+The monitor can also show and configure a dry-run slow execution plan when `slow_execution.enabled` is true. This tool submits one buy or sell limit order at the current midpoint between best bid and best ask. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`.
 
 ```json
 "slow_execution": {
@@ -221,9 +221,14 @@ The monitor can also show a dry-run slow execution plan when `slow_execution.ena
   "symbol": "ACS/USDT",
   "side": "sell",
   "total_base": 100000.0,
-  "slice_base": 5000.0,
+  "slice_base": 0.0,
+  "slice_base_min": 3000.0,
+  "slice_base_max": 5000.0,
   "slice_quote": 0.0,
+  "randomize_slice": true,
   "interval_seconds": 60.0,
+  "order_ttl_seconds": 20.0,
+  "stop_price": 0.00012,
   "min_order_quote": 0.1,
   "post_only": true,
   "cancel_existing_orders": false,
@@ -231,7 +236,11 @@ The monitor can also show a dry-run slow execution plan when `slow_execution.ena
 }
 ```
 
-Use exactly one of `slice_base` or `slice_quote`. For example, `slice_base: 5000` and `interval_seconds: 60` means submit up to 5,000 ACS every 60 seconds. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current midpoint.
+Use exactly one sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current midpoint.
+
+The web page exposes runtime controls for `enabled`, `side`, `total_base`, the min/max order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
+
+For `stop_price`, a sell schedule stops when midpoint price is at or below the stop price. A buy schedule stops when midpoint price is at or above the stop price.
 
 To preview the next slice without placing anything:
 

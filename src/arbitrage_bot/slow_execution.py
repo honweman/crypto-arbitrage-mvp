@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from time import time
-from typing import Any
+from typing import Any, Callable
 
 from .config import SlowExecutionConfig
 from .models import OrderBookSnapshot, Side
@@ -41,8 +42,13 @@ class SlowExecutionPlan:
     submitted_base: float
     remaining_base: float
     interval_seconds: float
+    order_ttl_seconds: float
     slice_base: float
+    slice_base_min: float
+    slice_base_max: float
     slice_quote: float
+    randomize_slice: bool
+    stop_price: float
     order: SlowExecutionOrder | None
     status: str
     observed_at: float
@@ -60,8 +66,13 @@ class SlowExecutionPlan:
             "submitted_base": self.submitted_base,
             "remaining_base": self.remaining_base,
             "interval_seconds": self.interval_seconds,
+            "order_ttl_seconds": self.order_ttl_seconds,
             "slice_base": self.slice_base,
+            "slice_base_min": self.slice_base_min,
+            "slice_base_max": self.slice_base_max,
             "slice_quote": self.slice_quote,
+            "randomize_slice": self.randomize_slice,
+            "stop_price": self.stop_price,
             "order": None if self.order is None else self.order.to_dict(),
             "status": self.status,
             "observed_at": self.observed_at,
@@ -74,21 +85,74 @@ def _validate_side(side: str) -> Side:
     return side  # type: ignore[return-value]
 
 
+def _range_slice_base(
+    cfg: SlowExecutionConfig,
+    random_value: float,
+) -> float | None:
+    if cfg.slice_base_min <= 0 and cfg.slice_base_max <= 0:
+        return None
+    if cfg.slice_base_min <= 0 or cfg.slice_base_max <= 0:
+        raise ValueError(
+            "slow_execution.slice_base_min and slice_base_max must both be positive"
+        )
+    if cfg.slice_base_max < cfg.slice_base_min:
+        raise ValueError(
+            "slow_execution.slice_base_max must be greater than or equal to slice_base_min"
+        )
+    if cfg.randomize_slice:
+        return cfg.slice_base_min + (cfg.slice_base_max - cfg.slice_base_min) * random_value
+    return cfg.slice_base_min
+
+
+def _configured_slice_base(
+    cfg: SlowExecutionConfig,
+    mid_price: float,
+    random_value: float,
+) -> float:
+    range_slice = _range_slice_base(cfg, random_value)
+    slice_sources = [
+        cfg.slice_base > 0,
+        cfg.slice_quote > 0,
+        range_slice is not None,
+    ]
+    if sum(1 for item in slice_sources if item) != 1:
+        raise ValueError(
+            "configure exactly one of slow_execution.slice_base, "
+            "slice_quote, or slice_base_min/slice_base_max"
+        )
+    if range_slice is not None:
+        return range_slice
+    if cfg.slice_base > 0:
+        return cfg.slice_base
+    return cfg.slice_quote / mid_price
+
+
+def _is_stopped_by_price(
+    side: Side,
+    mid_price: float,
+    stop_price: float,
+) -> bool:
+    if stop_price <= 0:
+        return False
+    if side == "sell":
+        return mid_price <= stop_price
+    return mid_price >= stop_price
+
+
 def build_slow_execution_plan(
     book: OrderBookSnapshot,
     cfg: SlowExecutionConfig,
     *,
     submitted_base: float = 0.0,
+    random_fn: Callable[[], float] | None = None,
 ) -> SlowExecutionPlan:
     side = _validate_side(cfg.side)
     if cfg.total_base <= 0:
         raise ValueError("slow_execution.total_base must be positive")
     if cfg.interval_seconds <= 0:
         raise ValueError("slow_execution.interval_seconds must be positive")
-    if cfg.slice_base <= 0 and cfg.slice_quote <= 0:
-        raise ValueError("slow_execution.slice_base or slice_quote must be positive")
-    if cfg.slice_base > 0 and cfg.slice_quote > 0:
-        raise ValueError("configure only one of slow_execution.slice_base or slice_quote")
+    if cfg.order_ttl_seconds < 0:
+        raise ValueError("slow_execution.order_ttl_seconds must be non-negative")
     if not book.bids or not book.asks:
         raise ValueError("order book must have both bid and ask levels")
 
@@ -99,6 +163,11 @@ def build_slow_execution_plan(
 
     mid_price = (best_bid + best_ask) / 2
     existing_spread_bps = (best_ask - best_bid) / mid_price * 10_000
+    selected_slice_base = _configured_slice_base(
+        cfg,
+        mid_price,
+        (random_fn or random.random)(),
+    )
     safe_submitted = min(max(0.0, submitted_base), cfg.total_base)
     remaining_base = max(0.0, cfg.total_base - safe_submitted)
 
@@ -115,15 +184,44 @@ def build_slow_execution_plan(
             submitted_base=safe_submitted,
             remaining_base=0.0,
             interval_seconds=cfg.interval_seconds,
+            order_ttl_seconds=cfg.order_ttl_seconds,
             slice_base=cfg.slice_base,
+            slice_base_min=cfg.slice_base_min,
+            slice_base_max=cfg.slice_base_max,
             slice_quote=cfg.slice_quote,
+            randomize_slice=cfg.randomize_slice,
+            stop_price=cfg.stop_price,
             order=None,
             status="complete",
             observed_at=time(),
         )
 
-    configured_slice_base = cfg.slice_base if cfg.slice_base > 0 else cfg.slice_quote / mid_price
-    order_base = min(remaining_base, configured_slice_base)
+    if _is_stopped_by_price(side, mid_price, cfg.stop_price):
+        return SlowExecutionPlan(
+            exchange=cfg.exchange,
+            symbol=cfg.symbol,
+            side=side,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            mid_price=mid_price,
+            existing_spread_bps=existing_spread_bps,
+            total_base=cfg.total_base,
+            submitted_base=safe_submitted,
+            remaining_base=remaining_base,
+            interval_seconds=cfg.interval_seconds,
+            order_ttl_seconds=cfg.order_ttl_seconds,
+            slice_base=cfg.slice_base,
+            slice_base_min=cfg.slice_base_min,
+            slice_base_max=cfg.slice_base_max,
+            slice_quote=cfg.slice_quote,
+            randomize_slice=cfg.randomize_slice,
+            stop_price=cfg.stop_price,
+            order=None,
+            status="stopped_by_price",
+            observed_at=time(),
+        )
+
+    order_base = min(remaining_base, selected_slice_base)
     quote_notional = order_base * mid_price
     if quote_notional < cfg.min_order_quote:
         return SlowExecutionPlan(
@@ -138,8 +236,13 @@ def build_slow_execution_plan(
             submitted_base=safe_submitted,
             remaining_base=remaining_base,
             interval_seconds=cfg.interval_seconds,
+            order_ttl_seconds=cfg.order_ttl_seconds,
             slice_base=cfg.slice_base,
+            slice_base_min=cfg.slice_base_min,
+            slice_base_max=cfg.slice_base_max,
             slice_quote=cfg.slice_quote,
+            randomize_slice=cfg.randomize_slice,
+            stop_price=cfg.stop_price,
             order=None,
             status="below_min_order_quote",
             observed_at=time(),
@@ -165,8 +268,13 @@ def build_slow_execution_plan(
         submitted_base=safe_submitted,
         remaining_base=remaining_base,
         interval_seconds=cfg.interval_seconds,
+        order_ttl_seconds=cfg.order_ttl_seconds,
         slice_base=cfg.slice_base,
+        slice_base_min=cfg.slice_base_min,
+        slice_base_max=cfg.slice_base_max,
         slice_quote=cfg.slice_quote,
+        randomize_slice=cfg.randomize_slice,
+        stop_price=cfg.stop_price,
         order=order,
         status="planned",
         observed_at=time(),

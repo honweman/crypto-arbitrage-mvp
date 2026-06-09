@@ -15,6 +15,7 @@ from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
 from arbitrage_bot.web import (
     MonitorState,
+    _slow_execution_overrides_from_payload,
     build_market_maker_payload,
     build_market_rows,
     build_slow_execution_payload,
@@ -130,6 +131,62 @@ class WebMonitorTest(unittest.TestCase):
         self.assertAlmostEqual(payload["plan"]["mid_price"], 0.00015)
         self.assertAlmostEqual(payload["plan"]["order"]["amount"], 1_000.0)
         self.assertAlmostEqual(payload["plan"]["order"]["quote_notional"], 0.15)
+
+    def test_slow_execution_payload_uses_range_config(self) -> None:
+        cfg = make_config(
+            slow_execution=SlowExecutionConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                side="buy",
+                total_base=10_000.0,
+                slice_base_min=1_000.0,
+                slice_base_max=2_000.0,
+                randomize_slice=False,
+                interval_seconds=30.0,
+                order_ttl_seconds=5.0,
+                stop_price=0.001,
+            )
+        )
+        books = {
+            ("bybit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            )
+        }
+
+        payload = build_slow_execution_payload(cfg, books)
+
+        self.assertEqual(payload["status"], "planned")
+        self.assertEqual(payload["config"]["slice_base_min"], 1_000.0)
+        self.assertEqual(payload["config"]["slice_base_max"], 2_000.0)
+        self.assertEqual(payload["config"]["order_ttl_seconds"], 5.0)
+        self.assertEqual(payload["plan"]["order"]["amount"], 1_000.0)
+
+    def test_slow_execution_update_payload_is_sanitized(self) -> None:
+        overrides = _slow_execution_overrides_from_payload(
+            {
+                "enabled": True,
+                "side": "buy",
+                "total_base": "1000",
+                "slice_base_min": "10",
+                "slice_base_max": "20",
+                "randomize_slice": True,
+                "interval_seconds": "5",
+                "order_ttl_seconds": "2",
+                "stop_price": "0.01",
+            }
+        )
+
+        self.assertTrue(overrides["enabled"])
+        self.assertEqual(overrides["side"], "buy")
+        self.assertEqual(overrides["slice_base"], 0.0)
+        self.assertEqual(overrides["slice_quote"], 0.0)
+        self.assertEqual(overrides["slice_base_min"], 10.0)
+        self.assertEqual(overrides["slice_base_max"], 20.0)
+        self.assertTrue(overrides["randomize_slice"])
 
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(

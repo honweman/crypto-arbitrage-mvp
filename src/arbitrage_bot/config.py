@@ -87,8 +87,13 @@ class SlowExecutionConfig:
     side: str = "sell"
     total_base: float = 0.0
     slice_base: float = 0.0
+    slice_base_min: float = 0.0
+    slice_base_max: float = 0.0
     slice_quote: float = 0.0
+    randomize_slice: bool = False
     interval_seconds: float = 60.0
+    order_ttl_seconds: float = 0.0
+    stop_price: float = 0.0
     min_order_quote: float = 0.0
     post_only: bool = True
     cancel_existing_orders: bool = False
@@ -257,10 +262,19 @@ def load_config(path: str | Path) -> BotConfig:
             side=slow_execution_raw.get("side", "sell").lower(),
             total_base=float(slow_execution_raw.get("total_base", 0.0)),
             slice_base=float(slow_execution_raw.get("slice_base", 0.0)),
+            slice_base_min=float(slow_execution_raw.get("slice_base_min", 0.0)),
+            slice_base_max=float(slow_execution_raw.get("slice_base_max", 0.0)),
             slice_quote=float(slow_execution_raw.get("slice_quote", 0.0)),
+            randomize_slice=bool(
+                slow_execution_raw.get("randomize_slice", False)
+            ),
             interval_seconds=float(
                 slow_execution_raw.get("interval_seconds", 60.0)
             ),
+            order_ttl_seconds=float(
+                slow_execution_raw.get("order_ttl_seconds", 0.0)
+            ),
+            stop_price=float(slow_execution_raw.get("stop_price", 0.0)),
             min_order_quote=float(slow_execution_raw.get("min_order_quote", 0.0)),
             post_only=bool(slow_execution_raw.get("post_only", True)),
             cancel_existing_orders=bool(

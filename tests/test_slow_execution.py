@@ -101,8 +101,105 @@ class SlowExecutionTest(unittest.TestCase):
             interval_seconds=60.0,
         )
 
-        with self.assertRaisesRegex(ValueError, "only one"):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
             build_slow_execution_plan(book, cfg)
+
+    def test_randomized_slice_uses_configured_range(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="sell",
+            total_base=10.0,
+            slice_base_min=2.0,
+            slice_base_max=6.0,
+            randomize_slice=True,
+            interval_seconds=60.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg, random_fn=lambda: 0.25)
+
+        self.assertIsNotNone(plan.order)
+        self.assertAlmostEqual(plan.order.amount, 3.0)
+        self.assertTrue(plan.randomize_slice)
+        self.assertEqual(plan.slice_base_min, 2.0)
+        self.assertEqual(plan.slice_base_max, 6.0)
+
+    def test_fixed_range_uses_minimum_slice(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="buy",
+            total_base=10.0,
+            slice_base_min=2.0,
+            slice_base_max=6.0,
+            randomize_slice=False,
+            interval_seconds=60.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg, random_fn=lambda: 1.0)
+
+        self.assertIsNotNone(plan.order)
+        self.assertAlmostEqual(plan.order.amount, 2.0)
+
+    def test_stop_price_blocks_sell_below_floor(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="sell",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            stop_price=100.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.status, "stopped_by_price")
+        self.assertIsNone(plan.order)
+
+    def test_stop_price_blocks_buy_above_ceiling(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="buy",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            stop_price=100.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.status, "stopped_by_price")
+        self.assertIsNone(plan.order)
 
 
 if __name__ == "__main__":
