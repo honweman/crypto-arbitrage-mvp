@@ -123,6 +123,7 @@ async def run_loop(
         if poll_seconds is None
         else poll_seconds
     )
+    interval = max(1.0, interval)
     manager = ExchangeManager()
     try:
         while True:
@@ -160,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--poll-seconds",
         type=float,
         default=None,
-        help="Override market_maker.poll_seconds",
+        help="Override market_maker.poll_seconds. Minimum effective interval is 1 second.",
     )
     parser.add_argument(
         "--live",

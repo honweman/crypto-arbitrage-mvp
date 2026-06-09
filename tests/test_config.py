@@ -29,6 +29,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.market_maker.levels, 10)
         self.assertEqual(cfg.market_maker.price_band_pct, 10.0)
         self.assertEqual(cfg.market_maker.quote_per_level, 1.0)
+        self.assertEqual(cfg.market_maker.poll_seconds, 1.0)
 
 
 if __name__ == "__main__":

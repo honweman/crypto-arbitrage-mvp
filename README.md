@@ -90,7 +90,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted ACS bid/ask prices, quote rates, and any live opportunities.
 
-The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
+The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. With the ACS config and `--poll-seconds 1`, the page fetches the latest REST order book every second and recalculates the 20 planned bid/ask orders from the fresh mid price. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
 
 ```json
 "market_maker": {
@@ -102,7 +102,7 @@ The web monitor also shows a dry-run market maker ladder when `market_maker.enab
   "quote_per_level": 1.0,
   "min_order_quote": 0.1,
   "min_distance_bps": 0.0,
-  "poll_seconds": 5,
+  "poll_seconds": 1,
   "post_only": true,
   "cancel_existing_orders": false,
   "client_order_prefix": "crypto-arb-mm"
@@ -114,6 +114,15 @@ To preview the exact orders without placing anything:
 ```bash
 PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
   --config config.acs.json
+```
+
+To recalculate the dry-run ladder every second from the current order book:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
+  --config config.acs.json \
+  --loop \
+  --poll-seconds 1
 ```
 
 To place real orders, configure API env vars on the target exchange entry, fund the account, and run with explicit live confirmation:
@@ -138,6 +147,8 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
   --confirm-live-orders \
   --replace-existing
 ```
+
+The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
 
 The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, and balance changes between Solana polling rounds.
 

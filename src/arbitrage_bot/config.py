@@ -67,7 +67,7 @@ class MarketMakerConfig:
     quote_per_level: float = 1.0
     min_order_quote: float = 0.0
     min_distance_bps: float = 0.0
-    poll_seconds: float = 5.0
+    poll_seconds: float = 1.0
     post_only: bool = True
     cancel_existing_orders: bool = False
     client_order_prefix: str = "crypto-arb-mm"
@@ -164,7 +164,7 @@ def load_config(path: str | Path) -> BotConfig:
             quote_per_level=float(market_maker_raw.get("quote_per_level", 1.0)),
             min_order_quote=float(market_maker_raw.get("min_order_quote", 0.0)),
             min_distance_bps=float(market_maker_raw.get("min_distance_bps", 0.0)),
-            poll_seconds=float(market_maker_raw.get("poll_seconds", 5.0)),
+            poll_seconds=float(market_maker_raw.get("poll_seconds", 1.0)),
             post_only=bool(market_maker_raw.get("post_only", True)),
             cancel_existing_orders=bool(
                 market_maker_raw.get("cancel_existing_orders", False)

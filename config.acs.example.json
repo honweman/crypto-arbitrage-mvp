@@ -46,7 +46,7 @@
     "quote_per_level": 1.0,
     "min_order_quote": 0.1,
     "min_distance_bps": 0.0,
-    "poll_seconds": 5,
+    "poll_seconds": 1,
     "post_only": true,
     "cancel_existing_orders": false,
     "client_order_prefix": "crypto-arb-mm"

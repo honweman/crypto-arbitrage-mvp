@@ -1,6 +1,9 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 
 from arbitrage_bot.config import MarketMakerConfig
+from arbitrage_bot.market_maker import run_loop
 from arbitrage_bot.market_making import build_symmetric_market_maker_plan
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 
@@ -56,6 +59,78 @@ class MarketMakingTest(unittest.TestCase):
         self.assertEqual(len(plan.orders), 12)
         self.assertEqual(plan.orders[0].level, 5)
         self.assertAlmostEqual(plan.orders[0].distance_bps, 500.0)
+
+
+class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_run_loop_clamps_interval_to_one_second(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        sleep_calls = []
+        original_sleep = __import__("asyncio").sleep
+
+        async def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            raise StopLoop
+
+        class FakeManager:
+            async def close(self) -> None:
+                return None
+
+        import arbitrage_bot.market_maker as market_maker_module
+
+        original_manager = market_maker_module.ExchangeManager
+        original_run_cycle = market_maker_module.run_cycle
+        market_maker_module.ExchangeManager = lambda: FakeManager()
+        market_maker_module.run_cycle = self._fake_run_cycle
+        __import__("asyncio").sleep = fake_sleep
+        try:
+            with redirect_stdout(StringIO()):
+                with self.assertRaises(StopLoop):
+                    await run_loop(
+                        self._cfg(),
+                        live=False,
+                        loop=True,
+                        poll_seconds=0.1,
+                        replace_existing=False,
+                    )
+        finally:
+            __import__("asyncio").sleep = original_sleep
+            market_maker_module.ExchangeManager = original_manager
+            market_maker_module.run_cycle = original_run_cycle
+
+        self.assertEqual(len(sleep_calls), 1)
+        self.assertGreaterEqual(sleep_calls[0], 0.9)
+
+    async def _fake_run_cycle(self, *_: object, **__: object) -> dict[str, object]:
+        return {"type": "market_maker", "status": "planned"}
+
+    def _cfg(self) -> object:
+        from arbitrage_bot.config import BotConfig, OnchainMonitorConfig
+
+        return BotConfig(
+            poll_seconds=1.0,
+            order_book_depth=20,
+            notional_quote=200.0,
+            min_profit_quote=0.1,
+            min_profit_bps=1.0,
+            min_basis_bps=15.0,
+            common_quote_currency="USD",
+            quote_rates={"USD": 1.0},
+            quote_rate_sources=[],
+            onchain_monitor=OnchainMonitorConfig(),
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                poll_seconds=0.1,
+            ),
+            spot_symbols=[],
+            spot_markets=[],
+            cash_and_carry_pairs=[],
+            spot_exchanges=[],
+            derivative_exchanges=[],
+        )
 
 
 if __name__ == "__main__":
