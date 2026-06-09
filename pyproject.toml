@@ -10,3 +10,4 @@ dependencies = [
 
 [project.scripts]
 crypto-arb = "arbitrage_bot.main:main"
+crypto-arb-web = "arbitrage_bot.web:main"

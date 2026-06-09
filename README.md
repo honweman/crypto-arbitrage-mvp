@@ -78,6 +78,18 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.main \
 
 `opportunities.jsonl` contains only actionable opportunity JSON lines. `scanner.log` contains heartbeat and warning output.
 
+To run the local monitor web UI:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
+  --config config.acs.json \
+  --strategy spot-spread \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted ACS bid/ask prices, quote rates, and any live opportunities.
+
 That config treats USD as the common reporting currency and compares:
 
 - Bithumb `ACS/KRW`
