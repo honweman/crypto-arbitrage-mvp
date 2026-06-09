@@ -22,6 +22,7 @@ from .main import (
 from .market_making import build_symmetric_market_maker_plan
 from .models import OrderBookSnapshot, Opportunity
 from .pnl import build_portfolio_pnl
+from .slow_execution import build_slow_execution_plan
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
 
@@ -503,6 +504,31 @@ HTML = """<!doctype html>
 
     <section>
       <div class="section-title">
+        <h2>Slow Execution</h2>
+        <span id="slow-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th>Exchange</th>
+              <th>Symbol</th>
+              <th class="num">Mid Price</th>
+              <th class="num">Slice Amount</th>
+              <th class="num">Quote</th>
+              <th class="num">Submitted</th>
+              <th class="num">Remaining</th>
+              <th class="num">Interval</th>
+            </tr>
+          </thead>
+          <tbody id="slow-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">
         <h2>Quote Rates</h2>
       </div>
       <div class="table-wrap">
@@ -639,6 +665,33 @@ HTML = """<!doctype html>
         `;
         body.appendChild(tr);
       }
+    }
+
+    function renderSlowExecution(slowExecution) {
+      const body = document.getElementById("slow-orders");
+      body.innerHTML = "";
+      if (!slowExecution || !slowExecution.plan || !slowExecution.plan.order) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="9">${slowExecution?.status || "disabled"}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      const plan = slowExecution.plan;
+      const order = plan.order;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
+        <td>${plan.exchange}</td>
+        <td>${plan.symbol}</td>
+        <td class="num">${fmt.format(order.price)}</td>
+        <td class="num">${compact.format(order.amount)}</td>
+        <td class="num">${money.format(order.quote_notional)}</td>
+        <td class="num">${compact.format(order.submitted_base_before)} / ${compact.format(plan.total_base)}</td>
+        <td class="num">${compact.format(plan.remaining_base)}</td>
+        <td class="num">${plan.interval_seconds}s</td>
+      `;
+      body.appendChild(tr);
     }
 
     function pnlClass(value) {
@@ -822,10 +875,12 @@ HTML = """<!doctype html>
         text("warnings", (data.warnings || []).join(" · "));
         text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
         text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
+        text("slow-meta", data.slow_execution?.plan ? `${data.slow_execution.mode || "dry_run"} · ${data.slow_execution.plan.exchange} ${data.slow_execution.plan.symbol} · ${data.slow_execution.plan.side.toUpperCase()} · mid ${fmt.format(data.slow_execution.plan.mid_price)}` : (data.slow_execution?.status || "disabled"));
 
         renderMarkets(data.markets);
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
+        renderSlowExecution(data.slow_execution);
         renderRates(data.quote_rates);
         renderOpportunities(data.opportunities);
         renderHolders(data.onchain);
@@ -915,6 +970,12 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "error": None,
         },
         "market_maker": {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "error": None,
+        },
+        "slow_execution": {
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
@@ -1018,6 +1079,7 @@ class MonitorState:
         warnings: list[str],
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
+        slow_execution: dict[str, Any],
         portfolio: dict[str, Any],
     ) -> None:
         opportunity_dicts = [item.to_dict() for item in opportunities]
@@ -1047,6 +1109,7 @@ class MonitorState:
                 "recent_opportunities": list(self._recent_opportunities),
                 "onchain": onchain,
                 "market_maker": market_maker,
+                "slow_execution": slow_execution,
                 "portfolio": portfolio,
                 "program": {
                     "running": self._program_running,
@@ -1133,6 +1196,46 @@ def build_market_maker_payload(
 
     return {
         "status": "planned",
+        "mode": "dry_run",
+        "plan": plan.to_dict(),
+        "error": None,
+    }
+
+
+def build_slow_execution_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    exec_cfg = cfg.slow_execution
+    if not exec_cfg.enabled:
+        return {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "error": None,
+        }
+
+    book = books.get((exec_cfg.exchange, exec_cfg.symbol))
+    if book is None:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "error": f"Missing {exec_cfg.exchange} {exec_cfg.symbol}",
+        }
+
+    try:
+        plan = build_slow_execution_plan(book, exec_cfg)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "error": str(exc),
+        }
+
+    return {
+        "status": plan.status,
         "mode": "dry_run",
         "plan": plan.to_dict(),
         "error": None,
@@ -1229,6 +1332,9 @@ async def monitor_loop(
     )
     onchain_payload = _build_initial_payload(cfg, poll_seconds)["onchain"]
     market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
+    slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
+        "slow_execution"
+    ]
     portfolio_payload = _build_initial_payload(cfg, poll_seconds)["portfolio"]
     previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
@@ -1264,6 +1370,7 @@ async def monitor_loop(
                     )
                     warnings = _missing_market_warnings(rows)
                     market_maker_payload = build_market_maker_payload(cfg, books)
+                    slow_execution_payload = build_slow_execution_payload(cfg, books)
                     portfolio_payload = build_portfolio_pnl(cfg, books, quote_rates)
                 else:
                     opportunities = await scan_with_manager(cfg, strategy, manager)
@@ -1271,6 +1378,12 @@ async def monitor_loop(
                     quote_rates = cfg.quote_rates
                     warnings = []
                     market_maker_payload = {
+                        "status": "disabled",
+                        "mode": "dry_run",
+                        "plan": None,
+                        "error": None,
+                    }
+                    slow_execution_payload = {
                         "status": "disabled",
                         "mode": "dry_run",
                         "plan": None,
@@ -1310,6 +1423,11 @@ async def monitor_loop(
                         *warnings,
                         f"Market maker: {market_maker_payload.get('error')}",
                     ]
+                if slow_execution_payload.get("status") == "error":
+                    warnings = [
+                        *warnings,
+                        f"Slow execution: {slow_execution_payload.get('error')}",
+                    ]
 
                 elapsed = time.monotonic() - monotonic_started
                 if not await state.is_running():
@@ -1327,6 +1445,7 @@ async def monitor_loop(
                     warnings=warnings,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
+                    slow_execution=slow_execution_payload,
                     portfolio=portfolio_payload,
                 )
             except Exception as exc:  # noqa: BLE001

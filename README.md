@@ -212,6 +212,54 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
 
 The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
 
+The monitor can also show a dry-run slow execution plan when `slow_execution.enabled` is true. This tool submits one buy or sell limit order at the current midpoint between best bid and best ask. The speed is configured with `slice_base` or `slice_quote` plus `interval_seconds`.
+
+```json
+"slow_execution": {
+  "enabled": true,
+  "exchange": "bybit-spot",
+  "symbol": "ACS/USDT",
+  "side": "sell",
+  "total_base": 100000.0,
+  "slice_base": 5000.0,
+  "slice_quote": 0.0,
+  "interval_seconds": 60.0,
+  "min_order_quote": 0.1,
+  "post_only": true,
+  "cancel_existing_orders": false,
+  "client_order_prefix": "crypto-arb-slow"
+}
+```
+
+Use exactly one of `slice_base` or `slice_quote`. For example, `slice_base: 5000` and `interval_seconds: 60` means submit up to 5,000 ACS every 60 seconds. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current midpoint.
+
+To preview the next slice without placing anything:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
+  --config config.acs.json
+```
+
+To simulate the full schedule in dry-run mode:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
+  --config config.acs.json \
+  --loop
+```
+
+To place real midpoint orders, configure API env vars on the target exchange entry, fund the account, and run with explicit live confirmation:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
+  --config config.acs.json \
+  --loop \
+  --live \
+  --confirm-live-orders
+```
+
+The slow executor tracks submitted base amount, not confirmed fills. If an order rests unfilled, it still counts toward the submitted schedule. For fill-aware execution, add order and trade polling before using it for larger live sizes.
+
 ## Cloud deployment and per-account IPs
 
 For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.

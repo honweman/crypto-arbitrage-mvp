@@ -80,6 +80,22 @@ class MarketMakerConfig:
 
 
 @dataclass(frozen=True)
+class SlowExecutionConfig:
+    enabled: bool = False
+    exchange: str = ""
+    symbol: str = ""
+    side: str = "sell"
+    total_base: float = 0.0
+    slice_base: float = 0.0
+    slice_quote: float = 0.0
+    interval_seconds: float = 60.0
+    min_order_quote: float = 0.0
+    post_only: bool = True
+    cancel_existing_orders: bool = False
+    client_order_prefix: str = "crypto-arb-slow"
+
+
+@dataclass(frozen=True)
 class AssetPosition:
     asset: str
     position_base: float = 0.0
@@ -110,6 +126,7 @@ class BotConfig:
     quote_rate_sources: list[QuoteRateSource]
     onchain_monitor: OnchainMonitorConfig
     market_maker: MarketMakerConfig
+    slow_execution: SlowExecutionConfig
     portfolio: PortfolioConfig
     spot_symbols: list[str]
     spot_markets: list[SpotMarketConfig]
@@ -167,6 +184,7 @@ def load_config(path: str | Path) -> BotConfig:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     onchain_raw = raw.get("onchain_monitor", {})
     market_maker_raw = raw.get("market_maker", {})
+    slow_execution_raw = raw.get("slow_execution", {})
     portfolio_raw = raw.get("portfolio", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
@@ -230,6 +248,27 @@ def load_config(path: str | Path) -> BotConfig:
             client_order_prefix=market_maker_raw.get(
                 "client_order_prefix",
                 "crypto-arb-mm",
+            ),
+        ),
+        slow_execution=SlowExecutionConfig(
+            enabled=bool(slow_execution_raw.get("enabled", False)),
+            exchange=slow_execution_raw.get("exchange", ""),
+            symbol=slow_execution_raw.get("symbol", ""),
+            side=slow_execution_raw.get("side", "sell").lower(),
+            total_base=float(slow_execution_raw.get("total_base", 0.0)),
+            slice_base=float(slow_execution_raw.get("slice_base", 0.0)),
+            slice_quote=float(slow_execution_raw.get("slice_quote", 0.0)),
+            interval_seconds=float(
+                slow_execution_raw.get("interval_seconds", 60.0)
+            ),
+            min_order_quote=float(slow_execution_raw.get("min_order_quote", 0.0)),
+            post_only=bool(slow_execution_raw.get("post_only", True)),
+            cancel_existing_orders=bool(
+                slow_execution_raw.get("cancel_existing_orders", False)
+            ),
+            client_order_prefix=slow_execution_raw.get(
+                "client_order_prefix",
+                "crypto-arb-slow",
             ),
         ),
         portfolio=PortfolioConfig(

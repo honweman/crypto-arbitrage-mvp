@@ -40,6 +40,14 @@ def _symbols_for_configured_spot_markets(cfg: BotConfig) -> dict[str, set[str]]:
         symbols_by_exchange.setdefault(cfg.market_maker.exchange, set()).add(
             cfg.market_maker.symbol
         )
+    if (
+        cfg.slow_execution.enabled
+        and cfg.slow_execution.exchange
+        and cfg.slow_execution.symbol
+    ):
+        symbols_by_exchange.setdefault(cfg.slow_execution.exchange, set()).add(
+            cfg.slow_execution.symbol
+        )
     return symbols_by_exchange
 
 

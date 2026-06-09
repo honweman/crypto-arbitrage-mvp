@@ -8,16 +8,23 @@ from arbitrage_bot.config import (
     MarketMakerConfig,
     OnchainMonitorConfig,
     PortfolioConfig,
+    SlowExecutionConfig,
     SpotMarketConfig,
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
-from arbitrage_bot.web import MonitorState, build_market_maker_payload, build_market_rows
+from arbitrage_bot.web import (
+    MonitorState,
+    build_market_maker_payload,
+    build_market_rows,
+    build_slow_execution_payload,
+)
 
 
 def make_config(
     *,
     market_maker: MarketMakerConfig | None = None,
+    slow_execution: SlowExecutionConfig | None = None,
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
 ) -> BotConfig:
@@ -33,6 +40,7 @@ def make_config(
         quote_rate_sources=[],
         onchain_monitor=OnchainMonitorConfig(),
         market_maker=market_maker or MarketMakerConfig(),
+        slow_execution=slow_execution or SlowExecutionConfig(),
         portfolio=portfolio or PortfolioConfig(),
         spot_symbols=[],
         spot_markets=spot_markets or [],
@@ -92,6 +100,36 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["status"], "planned")
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(len(payload["plan"]["orders"]), 20)
+
+    def test_build_slow_execution_payload_returns_midpoint_order(self) -> None:
+        cfg = make_config(
+            slow_execution=SlowExecutionConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                side="sell",
+                total_base=10_000.0,
+                slice_base=1_000.0,
+                interval_seconds=30.0,
+            )
+        )
+        books = {
+            ("bybit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            )
+        }
+
+        payload = build_slow_execution_payload(cfg, books)
+
+        self.assertEqual(payload["status"], "planned")
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["plan"]["side"], "sell")
+        self.assertAlmostEqual(payload["plan"]["mid_price"], 0.00015)
+        self.assertAlmostEqual(payload["plan"]["order"]["amount"], 1_000.0)
+        self.assertAlmostEqual(payload["plan"]["order"]["quote_notional"], 0.15)
 
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(
