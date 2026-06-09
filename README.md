@@ -90,7 +90,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted ACS bid/ask prices, quote rates, and any live opportunities.
 
-The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 10 owner wallets inferred from the largest ACS token accounts, their balances, supply share, and balance changes between Solana polling rounds.
+The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, and balance changes between Solana polling rounds.
 
 ```json
 "onchain_monitor": {
@@ -99,8 +99,15 @@ The same monitor also tracks the ACS Solana token mint configured in `onchain_mo
   "rpc_url": "https://solana-rpc.publicnode.com",
   "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
   "label": "ACS",
-  "top_n": 10,
-  "poll_seconds": 60
+  "top_n": 20,
+  "poll_seconds": 60,
+  "address_labels": {
+    "8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH": "Bithumb Hot Wallet 1",
+    "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2": "Bybit Hot Wallet",
+    "9obNtb5GyUegcs3a1CbBkLuc5hEWynWfJC6gjz5uWQkE": "Coinbase Hot Wallet",
+    "22Wnk8PwyWZV7BfkZGJEKT9jGGdtvu7xY6EXeRh7zkBa": "Crypto.com Hot Wallet 3",
+    "CbxqZdi1EQneomjjkCkZBmsQenHxEEfs5nDiZxveYoGB": "Access Protocol Upgrade Authority"
+  }
 }
 ```
 

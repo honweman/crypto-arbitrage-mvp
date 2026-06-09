@@ -161,7 +161,7 @@ HTML = """<!doctype html>
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 940px;
+      min-width: 1080px;
     }
 
     th, td {
@@ -195,6 +195,34 @@ HTML = """<!doctype html>
     .side-sell { color: var(--red); font-weight: 700; }
     .missing { color: var(--amber); font-weight: 650; }
     .ok { color: var(--green); font-weight: 650; }
+
+    .holder-label {
+      display: inline-flex;
+      align-items: center;
+      max-width: 260px;
+      min-height: 24px;
+      padding: 3px 8px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fbfcfb;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+    }
+
+    .holder-label.known {
+      color: var(--blue);
+      background: #e8f0fa;
+      border-color: #bfd2ea;
+    }
+
+    .holder-label.unknown {
+      color: var(--muted);
+      background: var(--surface-2);
+    }
 
     .feed {
       display: grid;
@@ -345,6 +373,7 @@ HTML = """<!doctype html>
           <thead>
             <tr>
               <th>Rank</th>
+              <th>Label</th>
               <th>Owner Wallet</th>
               <th class="num">Balance</th>
               <th class="num">Supply Share</th>
@@ -438,12 +467,22 @@ HTML = """<!doctype html>
       return `${address.slice(0, 6)}...${address.slice(-6)}`;
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[char]));
+    }
+
     function renderHolders(onchain) {
       const body = document.getElementById("holders");
       body.innerHTML = "";
       if (!onchain || !onchain.holders || onchain.holders.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="6">No holder data yet.</td>`;
+        tr.innerHTML = `<td colspan="7">No holder data yet.</td>`;
         body.appendChild(tr);
         return;
       }
@@ -452,9 +491,12 @@ HTML = """<!doctype html>
         const delta = holder.delta_amount;
         const deltaText = delta == null ? "--" : `${delta >= 0 ? "+" : ""}${compact.format(delta)}`;
         const deltaClass = delta == null ? "" : delta >= 0 ? "ok" : "missing";
+        const label = holder.label || "Unknown";
+        const labelClass = holder.is_labeled ? "known" : "unknown";
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${holder.rank}</td>
+          <td><span class="holder-label ${labelClass}" title="${escapeHtml(label)}">${escapeHtml(label)}</span></td>
           <td title="${holder.owner}">${shortAddress(holder.owner)}</td>
           <td class="num">${compact.format(holder.amount)}</td>
           <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(4) + "%"}</td>
@@ -718,11 +760,15 @@ async def fetch_onchain_payload(
     )
     holders = data["holders"]
     next_amounts = {item["owner"]: item["amount"] for item in holders}
+    labels = onchain_cfg.address_labels
     for holder in holders:
         previous = previous_amounts.get(holder["owner"])
         holder["delta_amount"] = (
             None if previous is None else holder["amount"] - previous
         )
+        label = labels.get(holder["owner"])
+        holder["label"] = label or "Unknown"
+        holder["is_labeled"] = label is not None
 
     return (
         {

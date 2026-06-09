@@ -52,8 +52,9 @@ class OnchainMonitorConfig:
     rpc_url: str = "https://solana-rpc.publicnode.com"
     token_mint: str = ""
     label: str = "Token"
-    top_n: int = 10
+    top_n: int = 20
     poll_seconds: float = 60.0
+    address_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
 
 def load_config(path: str | Path) -> BotConfig:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    onchain_raw = raw.get("onchain_monitor", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -120,18 +122,20 @@ def load_config(path: str | Path) -> BotConfig:
             for item in raw.get("quote_rate_sources", [])
         ],
         onchain_monitor=OnchainMonitorConfig(
-            enabled=bool(raw.get("onchain_monitor", {}).get("enabled", False)),
-            network=raw.get("onchain_monitor", {}).get("network", "solana"),
-            rpc_url=raw.get("onchain_monitor", {}).get(
+            enabled=bool(onchain_raw.get("enabled", False)),
+            network=onchain_raw.get("network", "solana"),
+            rpc_url=onchain_raw.get(
                 "rpc_url",
                 "https://solana-rpc.publicnode.com",
             ),
-            token_mint=raw.get("onchain_monitor", {}).get("token_mint", ""),
-            label=raw.get("onchain_monitor", {}).get("label", "Token"),
-            top_n=int(raw.get("onchain_monitor", {}).get("top_n", 10)),
-            poll_seconds=float(
-                raw.get("onchain_monitor", {}).get("poll_seconds", 60.0)
-            ),
+            token_mint=onchain_raw.get("token_mint", ""),
+            label=onchain_raw.get("label", "Token"),
+            top_n=int(onchain_raw.get("top_n", 20)),
+            poll_seconds=float(onchain_raw.get("poll_seconds", 60.0)),
+            address_labels={
+                str(address): str(label)
+                for address, label in onchain_raw.get("address_labels", {}).items()
+            },
         ),
         spot_symbols=list(raw.get("spot_symbols", [])),
         spot_markets=[

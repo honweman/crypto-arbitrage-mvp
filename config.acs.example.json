@@ -27,8 +27,15 @@
     "rpc_url": "https://solana-rpc.publicnode.com",
     "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
     "label": "ACS",
-    "top_n": 10,
-    "poll_seconds": 60
+    "top_n": 20,
+    "poll_seconds": 60,
+    "address_labels": {
+      "8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH": "Bithumb Hot Wallet 1",
+      "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2": "Bybit Hot Wallet",
+      "9obNtb5GyUegcs3a1CbBkLuc5hEWynWfJC6gjz5uWQkE": "Coinbase Hot Wallet",
+      "22Wnk8PwyWZV7BfkZGJEKT9jGGdtvu7xY6EXeRh7zkBa": "Crypto.com Hot Wallet 3",
+      "CbxqZdi1EQneomjjkCkZBmsQenHxEEfs5nDiZxveYoGB": "Access Protocol Upgrade Authority"
+    }
   },
   "spot_symbols": [],
   "spot_markets": [
