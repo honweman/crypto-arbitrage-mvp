@@ -21,6 +21,7 @@ from .main import (
 )
 from .market_making import build_symmetric_market_maker_plan
 from .models import OrderBookSnapshot, Opportunity
+from .pnl import build_portfolio_pnl
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
 
@@ -84,6 +85,17 @@ HTML = """<!doctype html>
       grid-template-columns: repeat(7, minmax(120px, 1fr));
       gap: 1px;
       overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--line);
+    }
+
+    .portfolio-bar {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      margin-bottom: 18px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--line);
@@ -257,6 +269,9 @@ HTML = """<!doctype html>
     .side-sell { color: var(--red); font-weight: 700; }
     .missing { color: var(--amber); font-weight: 650; }
     .ok { color: var(--green); font-weight: 650; }
+    .pnl-positive { color: var(--green); }
+    .pnl-negative { color: var(--red); }
+    .pnl-flat { color: var(--muted); }
 
     .holder-label {
       display: inline-flex;
@@ -330,6 +345,7 @@ HTML = """<!doctype html>
       header { align-items: flex-start; flex-direction: column; }
       .header-actions { width: 100%; justify-content: space-between; }
       main { padding: 14px; }
+      .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .opportunity { grid-template-columns: 1fr; }
     }
@@ -352,6 +368,37 @@ HTML = """<!doctype html>
   </header>
 
   <main>
+    <div class="portfolio-bar">
+      <div class="metric">
+        <div class="label">Position</div>
+        <div id="portfolio-position" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Mark Price</div>
+        <div id="portfolio-mark" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Position Value</div>
+        <div id="portfolio-value" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Total P/L</div>
+        <div id="portfolio-total-pnl" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">MM P/L</div>
+        <div id="portfolio-mm-pnl" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Arb P/L</div>
+        <div id="portfolio-arb-pnl" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Price Move</div>
+        <div id="portfolio-price-pnl" class="value">--</div>
+      </div>
+    </div>
+
     <div class="statusbar">
       <div class="metric">
         <div class="label">Scans</div>
@@ -578,6 +625,38 @@ HTML = """<!doctype html>
       }
     }
 
+    function pnlClass(value) {
+      if (value == null || Math.abs(value) < 1e-12) return "pnl-flat";
+      return value > 0 ? "pnl-positive" : "pnl-negative";
+    }
+
+    function setPnl(id, value) {
+      const el = document.getElementById(id);
+      el.textContent = value == null ? "--" : `$${money.format(value)}`;
+      el.className = `value ${pnlClass(value)}`;
+    }
+
+    function renderPortfolio(portfolio) {
+      if (!portfolio || portfolio.status === "disabled") {
+        text("portfolio-position", "--");
+        text("portfolio-mark", "--");
+        text("portfolio-value", "--");
+        setPnl("portfolio-total-pnl", null);
+        setPnl("portfolio-mm-pnl", null);
+        setPnl("portfolio-arb-pnl", null);
+        setPnl("portfolio-price-pnl", null);
+        return;
+      }
+
+      text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
+      text("portfolio-mark", portfolio.mark_price == null ? "--" : `$${fmt.format(portfolio.mark_price)}`);
+      text("portfolio-value", portfolio.position_value == null ? "--" : `$${money.format(portfolio.position_value)}`);
+      setPnl("portfolio-total-pnl", portfolio.total_pnl);
+      setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);
+      setPnl("portfolio-arb-pnl", portfolio.sources?.arbitrage);
+      setPnl("portfolio-price-pnl", portfolio.sources?.price_move);
+    }
+
     function shortAddress(address) {
       if (!address || address.length < 12) return address || "--";
       return `${address.slice(0, 6)}...${address.slice(-6)}`;
@@ -669,6 +748,7 @@ HTML = """<!doctype html>
         text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
 
         renderMarkets(data.markets);
+        renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
         renderRates(data.quote_rates);
         renderOpportunities(data.opportunities);
@@ -764,6 +844,23 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "plan": None,
             "error": None,
         },
+        "portfolio": {
+            "status": "disabled",
+            "asset": cfg.portfolio.asset,
+            "quote_currency": cfg.common_quote_currency,
+            "position_base": cfg.portfolio.position_base,
+            "average_entry_price": cfg.portfolio.average_entry_price,
+            "mark_price": None,
+            "mark_source_count": 0,
+            "position_value": None,
+            "total_pnl": 0.0,
+            "sources": {
+                "market_maker": 0.0,
+                "arbitrage": 0.0,
+                "price_move": 0.0,
+            },
+            "observed_at": None,
+        },
         "program": {
             "running": True,
             "updated_at": time.time(),
@@ -827,6 +924,7 @@ class MonitorState:
         warnings: list[str],
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
+        portfolio: dict[str, Any],
     ) -> None:
         opportunity_dicts = [item.to_dict() for item in opportunities]
         for item in opportunity_dicts:
@@ -855,6 +953,7 @@ class MonitorState:
                 "recent_opportunities": list(self._recent_opportunities),
                 "onchain": onchain,
                 "market_maker": market_maker,
+                "portfolio": portfolio,
                 "program": {
                     "running": self._program_running,
                     "updated_at": self._program_updated_at,
@@ -1036,6 +1135,7 @@ async def monitor_loop(
     )
     onchain_payload = _build_initial_payload(cfg, poll_seconds)["onchain"]
     market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
+    portfolio_payload = _build_initial_payload(cfg, poll_seconds)["portfolio"]
     previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
     scan_count = 0
@@ -1070,6 +1170,7 @@ async def monitor_loop(
                     )
                     warnings = _missing_market_warnings(rows)
                     market_maker_payload = build_market_maker_payload(cfg, books)
+                    portfolio_payload = build_portfolio_pnl(cfg, books, quote_rates)
                 else:
                     opportunities = await scan_with_manager(cfg, strategy, manager)
                     rows = []
@@ -1081,6 +1182,9 @@ async def monitor_loop(
                         "plan": None,
                         "error": None,
                     }
+                    portfolio_payload = _build_initial_payload(cfg, poll_seconds)[
+                        "portfolio"
+                    ]
 
                 now = time.monotonic()
                 if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
@@ -1129,6 +1233,7 @@ async def monitor_loop(
                     warnings=warnings,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
+                    portfolio=portfolio_payload,
                 )
             except Exception as exc:  # noqa: BLE001
                 elapsed = time.monotonic() - monotonic_started

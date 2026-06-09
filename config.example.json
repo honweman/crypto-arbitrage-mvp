@@ -33,6 +33,16 @@
     "cancel_existing_orders": false,
     "client_order_prefix": "crypto-arb-mm"
   },
+  "portfolio": {
+    "enabled": false,
+    "asset": "BTC",
+    "position_base": 0.0,
+    "average_entry_price": 0.0,
+    "realized_pnl": {
+      "market_maker": 0.0,
+      "arbitrage": 0.0
+    }
+  },
   "spot_exchanges": [
     {
       "id": "binance",

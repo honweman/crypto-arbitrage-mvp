@@ -74,6 +74,15 @@ class MarketMakerConfig:
 
 
 @dataclass(frozen=True)
+class PortfolioConfig:
+    enabled: bool = False
+    asset: str = ""
+    position_base: float = 0.0
+    average_entry_price: float = 0.0
+    realized_pnl: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class BotConfig:
     poll_seconds: float
     order_book_depth: int
@@ -86,6 +95,7 @@ class BotConfig:
     quote_rate_sources: list[QuoteRateSource]
     onchain_monitor: OnchainMonitorConfig
     market_maker: MarketMakerConfig
+    portfolio: PortfolioConfig
     spot_symbols: list[str]
     spot_markets: list[SpotMarketConfig]
     cash_and_carry_pairs: list[CashAndCarryPair]
@@ -110,6 +120,7 @@ def load_config(path: str | Path) -> BotConfig:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     onchain_raw = raw.get("onchain_monitor", {})
     market_maker_raw = raw.get("market_maker", {})
+    portfolio_raw = raw.get("portfolio", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -173,6 +184,18 @@ def load_config(path: str | Path) -> BotConfig:
                 "client_order_prefix",
                 "crypto-arb-mm",
             ),
+        ),
+        portfolio=PortfolioConfig(
+            enabled=bool(portfolio_raw.get("enabled", False)),
+            asset=portfolio_raw.get("asset", "").upper(),
+            position_base=float(portfolio_raw.get("position_base", 0.0)),
+            average_entry_price=float(
+                portfolio_raw.get("average_entry_price", 0.0)
+            ),
+            realized_pnl={
+                str(source): float(value)
+                for source, value in portfolio_raw.get("realized_pnl", {}).items()
+            },
         ),
         spot_symbols=list(raw.get("spot_symbols", [])),
         spot_markets=[

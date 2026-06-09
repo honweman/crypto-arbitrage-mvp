@@ -106,7 +106,7 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         return {"type": "market_maker", "status": "planned"}
 
     def _cfg(self) -> object:
-        from arbitrage_bot.config import BotConfig, OnchainMonitorConfig
+        from arbitrage_bot.config import BotConfig, OnchainMonitorConfig, PortfolioConfig
 
         return BotConfig(
             poll_seconds=1.0,
@@ -125,6 +125,7 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
                 symbol="ACS/USDT",
                 poll_seconds=0.1,
             ),
+            portfolio=PortfolioConfig(),
             spot_symbols=[],
             spot_markets=[],
             cash_and_carry_pairs=[],

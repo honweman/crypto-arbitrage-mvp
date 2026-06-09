@@ -30,6 +30,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.market_maker.price_band_pct, 10.0)
         self.assertEqual(cfg.market_maker.quote_per_level, 1.0)
         self.assertEqual(cfg.market_maker.poll_seconds, 1.0)
+        self.assertTrue(cfg.portfolio.enabled)
+        self.assertEqual(cfg.portfolio.asset, "ACS")
+        self.assertEqual(cfg.portfolio.realized_pnl["market_maker"], 0.0)
+        self.assertEqual(cfg.portfolio.realized_pnl["arbitrage"], 0.0)
 
 
 if __name__ == "__main__":
