@@ -7,7 +7,7 @@ from arbitrage_bot.config import (
     SpotMarketConfig,
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
-from arbitrage_bot.web import build_market_maker_payload, build_market_rows
+from arbitrage_bot.web import MonitorState, build_market_maker_payload, build_market_rows
 
 
 class WebMonitorTest(unittest.TestCase):
@@ -75,6 +75,41 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["status"], "planned")
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(len(payload["plan"]["orders"]), 20)
+
+
+class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_program_switch_updates_running_state(self) -> None:
+        state = MonitorState(self._cfg(), 1.0)
+
+        paused = await state.set_running(False)
+        self.assertFalse(await state.is_running())
+        self.assertEqual(paused["status"], "paused")
+        self.assertFalse(paused["program"]["running"])
+
+        resumed = await state.set_running(True)
+        self.assertTrue(await state.is_running())
+        self.assertEqual(resumed["status"], "starting")
+        self.assertTrue(resumed["program"]["running"])
+
+    def _cfg(self) -> BotConfig:
+        return BotConfig(
+            poll_seconds=1.0,
+            order_book_depth=20,
+            notional_quote=200.0,
+            min_profit_quote=0.1,
+            min_profit_bps=1.0,
+            min_basis_bps=15.0,
+            common_quote_currency="USD",
+            quote_rates={"USD": 1.0},
+            quote_rate_sources=[],
+            onchain_monitor=OnchainMonitorConfig(),
+            market_maker=MarketMakerConfig(),
+            spot_symbols=[],
+            spot_markets=[],
+            cash_and_carry_pairs=[],
+            spot_exchanges=[],
+            derivative_exchanges=[],
+        )
 
 
 if __name__ == "__main__":

@@ -133,6 +133,67 @@ HTML = """<!doctype html>
     .pill.degraded { color: var(--amber); background: #fff4df; border-color: #edd2a7; }
     .pill.error { color: var(--red); background: #fbe9e6; border-color: #e6bbb4; }
     .pill.starting { color: var(--blue); background: #e8f0fa; border-color: #bfd2ea; }
+    .pill.paused { color: var(--muted); background: var(--surface-2); border-color: var(--line); }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .program-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      user-select: none;
+    }
+
+    .program-switch input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .switch-track {
+      position: relative;
+      width: 42px;
+      height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-2);
+      transition: background 160ms ease, border-color 160ms ease;
+    }
+
+    .switch-track::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--surface);
+      box-shadow: 0 1px 3px rgb(23 33 27 / 18%);
+      transition: transform 160ms ease;
+    }
+
+    .program-switch input:checked + .switch-track {
+      border-color: #b8dccb;
+      background: #d9eee5;
+    }
+
+    .program-switch input:checked + .switch-track::after {
+      transform: translateX(18px);
+    }
+
+    .program-switch input:focus-visible + .switch-track {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
 
     section {
       margin-top: 18px;
@@ -267,6 +328,7 @@ HTML = """<!doctype html>
 
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
+      .header-actions { width: 100%; justify-content: space-between; }
       main { padding: 14px; }
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .opportunity { grid-template-columns: 1fr; }
@@ -279,7 +341,14 @@ HTML = """<!doctype html>
       <h1>ACS Arbitrage Monitor</h1>
       <div class="subtle">Bithumb ACS/KRW · Bybit ACS/USDT · Coinbase ACS/USDC</div>
     </div>
-    <span id="status" class="pill starting">Starting</span>
+    <div class="header-actions">
+      <label class="program-switch" title="Pause or resume scans">
+        Program
+        <input id="program-toggle" type="checkbox" checked>
+        <span class="switch-track"></span>
+      </label>
+      <span id="status" class="pill starting">Starting</span>
+    </div>
   </header>
 
   <main>
@@ -554,6 +623,29 @@ HTML = """<!doctype html>
       }
     }
 
+    let programToggleBusy = false;
+
+    async function setProgramRunning(running) {
+      if (programToggleBusy) return;
+      programToggleBusy = true;
+      const toggle = document.getElementById("program-toggle");
+      toggle.disabled = true;
+      try {
+        const res = await fetch("/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ running }),
+        });
+        if (!res.ok) throw new Error("control failed");
+        await refresh();
+      } catch (error) {
+        toggle.checked = !running;
+      } finally {
+        toggle.disabled = false;
+        programToggleBusy = false;
+      }
+    }
+
     async function refresh() {
       try {
         const res = await fetch("/api/state", { cache: "no-store" });
@@ -562,6 +654,7 @@ HTML = """<!doctype html>
         const status = document.getElementById("status");
         status.textContent = data.status || "unknown";
         status.className = `pill ${data.status || "error"}`;
+        document.getElementById("program-toggle").checked = data.program?.running !== false;
 
         text("scan-count", data.scan?.count ?? 0);
         text("latency", data.scan?.elapsed_ms == null ? "--" : `${data.scan.elapsed_ms} ms`);
@@ -588,6 +681,9 @@ HTML = """<!doctype html>
     }
 
     refresh();
+    document.getElementById("program-toggle").addEventListener("change", (event) => {
+      setProgramRunning(event.target.checked);
+    });
     setInterval(refresh, 1000);
   </script>
 </body>
@@ -668,6 +764,10 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "plan": None,
             "error": None,
         },
+        "program": {
+            "running": True,
+            "updated_at": time.time(),
+        },
         "warnings": ["Waiting for first scan"],
     }
 
@@ -675,12 +775,43 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
 class MonitorState:
     def __init__(self, cfg: BotConfig, poll_seconds: float) -> None:
         self._lock = asyncio.Lock()
+        self._program_running = True
+        self._program_updated_at = time.time()
         self._payload = _build_initial_payload(cfg, poll_seconds)
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
 
     async def get(self) -> dict[str, Any]:
         async with self._lock:
             return json.loads(json.dumps(self._payload))
+
+    async def is_running(self) -> bool:
+        async with self._lock:
+            return self._program_running
+
+    async def set_running(self, running: bool) -> dict[str, Any]:
+        async with self._lock:
+            self._program_running = running
+            self._program_updated_at = time.time()
+            self._payload["program"] = {
+                "running": self._program_running,
+                "updated_at": self._program_updated_at,
+            }
+            if running:
+                self._payload["status"] = "starting"
+                self._payload["warnings"] = ["Resuming scans"]
+            else:
+                self._payload["status"] = "paused"
+                self._payload["warnings"] = ["Program paused"]
+            return json.loads(json.dumps(self._payload))
+
+    async def set_paused(self) -> None:
+        async with self._lock:
+            self._payload["status"] = "paused"
+            self._payload["program"] = {
+                "running": self._program_running,
+                "updated_at": self._program_updated_at,
+            }
+            self._payload["warnings"] = ["Program paused"]
 
     async def set_scan_result(
         self,
@@ -724,6 +855,10 @@ class MonitorState:
                 "recent_opportunities": list(self._recent_opportunities),
                 "onchain": onchain,
                 "market_maker": market_maker,
+                "program": {
+                    "running": self._program_running,
+                    "updated_at": self._program_updated_at,
+                },
                 "warnings": warnings,
             }
 
@@ -755,6 +890,10 @@ class MonitorState:
                         "last_finished": time.time(),
                     },
                     "warnings": [error],
+                    "program": {
+                        "running": self._program_running,
+                        "updated_at": self._program_updated_at,
+                    },
                 }
             )
 
@@ -902,6 +1041,11 @@ async def monitor_loop(
     scan_count = 0
     try:
         while True:
+            if not await state.is_running():
+                await state.set_paused()
+                await asyncio.sleep(0.5)
+                continue
+
             monotonic_started = time.monotonic()
             started_at = time.time()
             scan_count += 1
@@ -970,6 +1114,9 @@ async def monitor_loop(
                     ]
 
                 elapsed = time.monotonic() - monotonic_started
+                if not await state.is_running():
+                    await state.set_paused()
+                    continue
                 await state.set_scan_result(
                     cfg=cfg,
                     poll_seconds=poll_seconds,
@@ -1012,6 +1159,20 @@ async def api_state(request: web.Request) -> web.Response:
     return web.json_response(await state.get())
 
 
+async def api_control(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    running = payload.get("running")
+    if not isinstance(running, bool):
+        return web.json_response({"error": "running must be a boolean"}, status=400)
+
+    return web.json_response(await state.set_running(running))
+
+
 async def api_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -1039,6 +1200,7 @@ def create_app(
     app.cleanup_ctx.append(monitor_context)
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
+    app.router.add_post("/api/control", api_control)
     app.router.add_get("/api/health", api_health)
     return app
 
