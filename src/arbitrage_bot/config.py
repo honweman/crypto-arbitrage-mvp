@@ -15,6 +15,12 @@ class ExchangeConfig:
     api_key_env: str | None = None
     secret_env: str | None = None
     password_env: str | None = None
+    http_proxy_env: str | None = None
+    https_proxy_env: str | None = None
+    socks_proxy_env: str | None = None
+    ws_proxy_env: str | None = None
+    wss_proxy_env: str | None = None
+    ws_socks_proxy_env: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -112,6 +118,12 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
         api_key_env=raw.get("api_key_env"),
         secret_env=raw.get("secret_env"),
         password_env=raw.get("password_env"),
+        http_proxy_env=raw.get("http_proxy_env"),
+        https_proxy_env=raw.get("https_proxy_env"),
+        socks_proxy_env=raw.get("socks_proxy_env"),
+        ws_proxy_env=raw.get("ws_proxy_env"),
+        wss_proxy_env=raw.get("wss_proxy_env"),
+        ws_socks_proxy_env=raw.get("ws_socks_proxy_env"),
         options=dict(raw.get("options", {})),
     )
 

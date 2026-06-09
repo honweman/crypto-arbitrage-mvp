@@ -12,6 +12,51 @@ from .models import OrderBookSnapshot, Side
 from .orderbook import normalize_levels
 
 
+REST_PROXY_ENV_OPTIONS = (
+    ("http_proxy_env", "httpProxy"),
+    ("https_proxy_env", "httpsProxy"),
+    ("socks_proxy_env", "socksProxy"),
+)
+
+WEBSOCKET_PROXY_ENV_OPTIONS = (
+    ("ws_proxy_env", "wsProxy"),
+    ("wss_proxy_env", "wssProxy"),
+    ("ws_socks_proxy_env", "wsSocksProxy"),
+)
+
+
+def _single_proxy_option(
+    cfg: ExchangeConfig,
+    env_options: Iterable[tuple[str, str]],
+    proxy_type: str,
+) -> dict[str, str]:
+    active = []
+    for env_field, option_key in env_options:
+        env_name = getattr(cfg, env_field)
+        if env_name and os.environ.get(env_name):
+            active.append((option_key, env_name, os.environ[env_name]))
+
+    if len(active) > 1:
+        names = ", ".join(env_name for _, env_name, _ in active)
+        raise ValueError(
+            f"exchange {cfg.key} has multiple {proxy_type} proxy env vars set: "
+            f"{names}. Configure only one proxy per account."
+        )
+
+    if not active:
+        return {}
+
+    option_key, _, proxy_url = active[0]
+    return {option_key: proxy_url}
+
+
+def _proxy_options_from_env(cfg: ExchangeConfig) -> dict[str, str]:
+    return {
+        **_single_proxy_option(cfg, REST_PROXY_ENV_OPTIONS, "REST"),
+        **_single_proxy_option(cfg, WEBSOCKET_PROXY_ENV_OPTIONS, "WebSocket"),
+    }
+
+
 class ExchangeManager:
     def __init__(self) -> None:
         self._clients: dict[str, Any] = {}
@@ -24,6 +69,7 @@ class ExchangeManager:
             "enableRateLimit": True,
             "options": dict(cfg.options),
         }
+        options.update(_proxy_options_from_env(cfg))
         if cfg.market_type != "spot":
             options["options"].setdefault("defaultType", cfg.market_type)
 

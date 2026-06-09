@@ -167,6 +167,51 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
 
 The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
 
+## Cloud deployment and per-account IPs
+
+For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.
+
+The config `label` is the account identity used by the rest of the bot. Multiple accounts on the same exchange should be configured as separate exchange entries with the same `id` and different labels:
+
+```json
+{
+  "id": "bybit",
+  "label": "bybit-mm-a",
+  "market_type": "spot",
+  "api_key_env": "BYBIT_MM_A_API_KEY",
+  "secret_env": "BYBIT_MM_A_SECRET",
+  "options": {
+    "defaultType": "spot"
+  }
+}
+```
+
+If you need to route an account through a proxy instead of cloud-level static egress, keep the proxy URL in an environment variable and reference only the variable name in config:
+
+```json
+{
+  "id": "bybit",
+  "label": "bybit-mm-a",
+  "market_type": "spot",
+  "api_key_env": "BYBIT_MM_A_API_KEY",
+  "secret_env": "BYBIT_MM_A_SECRET",
+  "https_proxy_env": "BYBIT_MM_A_HTTPS_PROXY",
+  "options": {
+    "defaultType": "spot"
+  }
+}
+```
+
+```bash
+export BYBIT_MM_A_API_KEY="..."
+export BYBIT_MM_A_SECRET="..."
+export BYBIT_MM_A_HTTPS_PROXY="http://user:password@proxy-a.example.com:8080"
+```
+
+Supported proxy env fields are `http_proxy_env`, `https_proxy_env`, and `socks_proxy_env` for REST calls, plus `ws_proxy_env`, `wss_proxy_env`, and `ws_socks_proxy_env` for future WebSocket clients. Configure only one REST proxy env and one WebSocket proxy env per exchange entry. SOCKS proxies require the optional `aiohttp_socks` package used by CCXT.
+
+Do not commit API keys, proxy URLs, or IP allowlist secrets. Put those values in local shell env vars, Docker/Kubernetes secrets, or the cloud secret manager for each account runner.
+
 The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, and balance changes between Solana polling rounds.
 
 ```json
