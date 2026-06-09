@@ -238,7 +238,7 @@ The monitor can also show and configure a dry-run slow execution plan when `slow
 
 Use exactly one sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current midpoint.
 
-The web page exposes runtime controls for `enabled`, `side`, `total_base`, the min/max order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
+The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, the min/max order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
 
 For `stop_price`, a sell schedule stops when midpoint price is at or below the stop price. A buy schedule stops when midpoint price is at or above the stop price.
 

@@ -5,6 +5,7 @@ import unittest
 from arbitrage_bot.config import (
     AssetPosition,
     BotConfig,
+    ExchangeConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
     PortfolioConfig,
@@ -19,6 +20,7 @@ from arbitrage_bot.web import (
     build_market_maker_payload,
     build_market_rows,
     build_slow_execution_payload,
+    slow_execution_accounts,
 )
 
 
@@ -28,6 +30,7 @@ def make_config(
     slow_execution: SlowExecutionConfig | None = None,
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
+    spot_exchanges: list[ExchangeConfig] | None = None,
 ) -> BotConfig:
     return BotConfig(
         poll_seconds=1.0,
@@ -46,7 +49,7 @@ def make_config(
         spot_symbols=[],
         spot_markets=spot_markets or [],
         cash_and_carry_pairs=[],
-        spot_exchanges=[],
+        spot_exchanges=spot_exchanges or [],
         derivative_exchanges=[],
     )
 
@@ -165,10 +168,46 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["config"]["order_ttl_seconds"], 5.0)
         self.assertEqual(payload["plan"]["order"]["amount"], 1_000.0)
 
+    def test_slow_execution_payload_includes_configured_accounts(self) -> None:
+        cfg = make_config(
+            slow_execution=SlowExecutionConfig(exchange="bybit-spot"),
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+        )
+
+        payload = build_slow_execution_payload(cfg, {})
+
+        self.assertEqual(
+            payload["accounts"],
+            [
+                {
+                    "key": "bybit-spot",
+                    "label": "bybit-spot",
+                    "id": "bybit",
+                    "market_type": "spot",
+                },
+                {
+                    "key": "coinbase-spot",
+                    "label": "coinbase-spot",
+                    "id": "coinbase",
+                    "market_type": "spot",
+                },
+            ],
+        )
+
+    def test_slow_execution_accounts_uses_key_fallback(self) -> None:
+        accounts = slow_execution_accounts([ExchangeConfig(id="bybit")])
+
+        self.assertEqual(accounts[0]["key"], "bybit:spot")
+        self.assertEqual(accounts[0]["label"], "bybit:spot")
+
     def test_slow_execution_update_payload_is_sanitized(self) -> None:
         overrides = _slow_execution_overrides_from_payload(
             {
                 "enabled": True,
+                "exchange": "bybit-spot",
                 "side": "buy",
                 "total_base": "1000",
                 "slice_base_min": "10",
@@ -177,16 +216,25 @@ class WebMonitorTest(unittest.TestCase):
                 "interval_seconds": "5",
                 "order_ttl_seconds": "2",
                 "stop_price": "0.01",
-            }
+            },
+            allowed_exchanges={"bybit-spot"},
         )
 
         self.assertTrue(overrides["enabled"])
+        self.assertEqual(overrides["exchange"], "bybit-spot")
         self.assertEqual(overrides["side"], "buy")
         self.assertEqual(overrides["slice_base"], 0.0)
         self.assertEqual(overrides["slice_quote"], 0.0)
         self.assertEqual(overrides["slice_base_min"], 10.0)
         self.assertEqual(overrides["slice_base_max"], 20.0)
         self.assertTrue(overrides["randomize_slice"])
+
+    def test_slow_execution_update_payload_rejects_unknown_account(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown exchange account"):
+            _slow_execution_overrides_from_payload(
+                {"exchange": "coinbase-spot"},
+                allowed_exchanges={"bybit-spot"},
+            )
 
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(

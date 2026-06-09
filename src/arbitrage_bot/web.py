@@ -12,7 +12,13 @@ from typing import Any
 
 from aiohttp import web
 
-from .config import BotConfig, SlowExecutionConfig, SpotMarketConfig, load_config
+from .config import (
+    BotConfig,
+    ExchangeConfig,
+    SlowExecutionConfig,
+    SpotMarketConfig,
+    load_config,
+)
 from .exchanges import ExchangeManager
 from .main import (
     StrategyName,
@@ -399,6 +405,59 @@ HTML = """<!doctype html>
       align-self: end;
     }
 
+    .account-field {
+      grid-column: span 2;
+    }
+
+    .account-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      min-height: 34px;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfb;
+    }
+
+    .account-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 24px;
+      max-width: 100%;
+      padding: 3px 8px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .account-option input {
+      width: 13px;
+      height: 13px;
+      margin: 0;
+      flex: 0 0 auto;
+    }
+
+    .account-option span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .account-option:has(input:checked) {
+      color: var(--blue);
+      border-color: #bfd2ea;
+      background: #e8f0fa;
+    }
+
     .control-button {
       min-height: 34px;
       align-self: end;
@@ -424,6 +483,7 @@ HTML = """<!doctype html>
       .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .account-field { grid-column: 1 / -1; }
       .opportunity { grid-template-columns: 1fr; }
     }
   </style>
@@ -578,6 +638,10 @@ HTML = """<!doctype html>
           <input id="slow-enabled" type="checkbox">
           Enabled
         </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="slow-accounts" class="account-options"></div>
+        </div>
         <div class="field">
           <label for="slow-side">Side</label>
           <select id="slow-side">
@@ -979,9 +1043,59 @@ HTML = """<!doctype html>
       document.getElementById(id).value = value == null ? "" : String(value);
     }
 
-    function renderSlowExecutionConfig(config) {
+    function selectedSlowAccount() {
+      return document.querySelector('input[name="slow-account"]:checked')?.value || "";
+    }
+
+    function renderSlowExecutionAccounts(accounts, selectedExchange) {
+      const body = document.getElementById("slow-accounts");
+      const list = Array.isArray(accounts) ? accounts : [];
+      const signature = JSON.stringify({
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type]),
+        selectedExchange,
+      });
+      if (body.dataset.signature === signature) return;
+      body.dataset.signature = signature;
+      body.innerHTML = "";
+      if (list.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "subtle";
+        empty.textContent = "No accounts";
+        body.appendChild(empty);
+        return;
+      }
+
+      for (const account of list) {
+        const label = document.createElement("label");
+        label.className = "account-option";
+        label.title = `${account.id || account.key} · ${account.market_type || "spot"}`;
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.name = "slow-account";
+        checkbox.value = account.key;
+        checkbox.checked = account.key === selectedExchange;
+        checkbox.addEventListener("change", (event) => {
+          if (event.target.checked) {
+            document.querySelectorAll('input[name="slow-account"]').forEach((item) => {
+              if (item !== event.target) item.checked = false;
+            });
+          } else if (!selectedSlowAccount()) {
+            event.target.checked = true;
+          }
+          slowFormDirty = true;
+        });
+        const textNode = document.createElement("span");
+        textNode.textContent = account.label || account.key;
+        label.appendChild(checkbox);
+        label.appendChild(textNode);
+        body.appendChild(label);
+      }
+    }
+
+    function renderSlowExecutionConfig(config, accounts) {
       if (!config || slowFormDirty || slowFormBusy) return;
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
+      renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "");
       document.getElementById("slow-side").value = config.side || "sell";
       setNumericField("slow-total-base", config.total_base || 0);
       setNumericField("slow-slice-min", config.slice_base_min || config.slice_base || 0);
@@ -1000,6 +1114,7 @@ HTML = """<!doctype html>
       button.disabled = true;
       const payload = {
         enabled: document.getElementById("slow-enabled").checked,
+        exchange: selectedSlowAccount(),
         side: document.getElementById("slow-side").value,
         total_base: numericValue("slow-total-base"),
         slice_base_min: numericValue("slow-slice-min"),
@@ -1047,7 +1162,7 @@ HTML = """<!doctype html>
         text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
         text("slow-meta", data.slow_execution?.plan ? `${data.slow_execution.mode || "dry_run"} · ${data.slow_execution.plan.exchange} ${data.slow_execution.plan.symbol} · ${data.slow_execution.plan.side.toUpperCase()} · mid ${fmt.format(data.slow_execution.plan.mid_price)}` : (data.slow_execution?.status || "disabled"));
 
-        renderSlowExecutionConfig(data.slow_execution?.config);
+        renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderMarkets(data.markets);
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
@@ -1120,14 +1235,35 @@ def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
+def slow_execution_accounts(exchanges: Iterable[ExchangeConfig]) -> list[dict[str, str]]:
+    return [
+        {
+            "key": exchange.key,
+            "label": exchange.key,
+            "id": exchange.id,
+            "market_type": exchange.market_type,
+        }
+        for exchange in exchanges
+    ]
+
+
 def _slow_execution_overrides_from_payload(
     payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
 ) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     if "enabled" in payload:
         if not isinstance(payload["enabled"], bool):
             raise ValueError("enabled must be a boolean")
         overrides["enabled"] = payload["enabled"]
+
+    if "exchange" in payload:
+        exchange = str(payload["exchange"]).strip()
+        if not exchange:
+            raise ValueError("exchange is required")
+        if allowed_exchanges is not None and exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        overrides["exchange"] = exchange
 
     if "side" in payload:
         side = str(payload["side"]).lower()
@@ -1203,6 +1339,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "mode": "dry_run",
             "plan": None,
             "config": slow_execution_config_to_dict(cfg.slow_execution),
+            "accounts": slow_execution_accounts(cfg.spot_exchanges),
             "error": None,
         },
         "portfolio": {
@@ -1452,12 +1589,14 @@ def build_slow_execution_payload(
 ) -> dict[str, Any]:
     exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     config_payload = slow_execution_config_to_dict(exec_cfg)
+    accounts = slow_execution_accounts(cfg.spot_exchanges)
     if not exec_cfg.enabled:
         return {
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
             "config": config_payload,
+            "accounts": accounts,
             "error": None,
         }
 
@@ -1468,6 +1607,7 @@ def build_slow_execution_payload(
             "mode": "dry_run",
             "plan": None,
             "config": config_payload,
+            "accounts": accounts,
             "error": f"Missing {exec_cfg.exchange} {exec_cfg.symbol}",
         }
 
@@ -1479,6 +1619,7 @@ def build_slow_execution_payload(
             "mode": "dry_run",
             "plan": None,
             "config": config_payload,
+            "accounts": accounts,
             "error": str(exc),
         }
 
@@ -1487,6 +1628,7 @@ def build_slow_execution_payload(
         "mode": "dry_run",
         "plan": plan.to_dict(),
         "config": config_payload,
+        "accounts": accounts,
         "error": None,
     }
 
@@ -1656,6 +1798,7 @@ async def monitor_loop(
                         "config": slow_execution_config_to_dict(
                             runtime_slow_execution
                         ),
+                        "accounts": slow_execution_accounts(cfg.spot_exchanges),
                         "error": None,
                     }
                     portfolio_payload = _build_initial_payload(cfg, poll_seconds)[
@@ -1765,7 +1908,12 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     try:
         payload = await request.json()
-        overrides = _slow_execution_overrides_from_payload(payload)
+        accounts = slow_execution_accounts(cfg.spot_exchanges)
+        allowed_exchanges = {account["key"] for account in accounts}
+        overrides = _slow_execution_overrides_from_payload(
+            payload,
+            allowed_exchanges=allowed_exchanges,
+        )
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -1775,6 +1923,7 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         {
             "ok": True,
             "config": slow_execution_config_to_dict(current_config),
+            "accounts": slow_execution_accounts(cfg.spot_exchanges),
         }
     )
 
