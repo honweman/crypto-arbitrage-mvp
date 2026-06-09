@@ -2,8 +2,8 @@
   "poll_seconds": 10,
   "order_book_depth": 50,
   "notional_quote": 200.0,
-  "min_profit_quote": 1.0,
-  "min_profit_bps": 15.0,
+  "min_profit_quote": 0.1,
+  "min_profit_bps": 1.0,
   "min_basis_bps": 15.0,
   "common_quote_currency": "USD",
   "quote_rates": {
