@@ -90,6 +90,22 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted ACS bid/ask prices, quote rates, and any live opportunities.
 
+The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 10 owner wallets inferred from the largest ACS token accounts, their balances, supply share, and balance changes between Solana polling rounds.
+
+```json
+"onchain_monitor": {
+  "enabled": true,
+  "network": "solana",
+  "rpc_url": "https://solana-rpc.publicnode.com",
+  "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
+  "label": "ACS",
+  "top_n": 10,
+  "poll_seconds": 60
+}
+```
+
+Public Solana RPC endpoints can rate-limit holder calls. For production 24-hour monitoring, replace `onchain_monitor.rpc_url` with a dedicated Helius, QuickNode, Alchemy, or similar RPC URL.
+
 That config treats USD as the common reporting currency and compares:
 
 - Bithumb `ACS/KRW`

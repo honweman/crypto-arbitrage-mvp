@@ -21,6 +21,15 @@
       "base_to_common_rate": 1.0
     }
   ],
+  "onchain_monitor": {
+    "enabled": true,
+    "network": "solana",
+    "rpc_url": "https://solana-rpc.publicnode.com",
+    "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
+    "label": "ACS",
+    "top_n": 10,
+    "poll_seconds": 60
+  },
   "spot_symbols": [],
   "spot_markets": [
     {

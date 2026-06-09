@@ -46,6 +46,17 @@ class QuoteRateSource:
 
 
 @dataclass(frozen=True)
+class OnchainMonitorConfig:
+    enabled: bool = False
+    network: str = "solana"
+    rpc_url: str = "https://solana-rpc.publicnode.com"
+    token_mint: str = ""
+    label: str = "Token"
+    top_n: int = 10
+    poll_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
 class BotConfig:
     poll_seconds: float
     order_book_depth: int
@@ -56,6 +67,7 @@ class BotConfig:
     common_quote_currency: str
     quote_rates: dict[str, float]
     quote_rate_sources: list[QuoteRateSource]
+    onchain_monitor: OnchainMonitorConfig
     spot_symbols: list[str]
     spot_markets: list[SpotMarketConfig]
     cash_and_carry_pairs: list[CashAndCarryPair]
@@ -107,6 +119,20 @@ def load_config(path: str | Path) -> BotConfig:
             )
             for item in raw.get("quote_rate_sources", [])
         ],
+        onchain_monitor=OnchainMonitorConfig(
+            enabled=bool(raw.get("onchain_monitor", {}).get("enabled", False)),
+            network=raw.get("onchain_monitor", {}).get("network", "solana"),
+            rpc_url=raw.get("onchain_monitor", {}).get(
+                "rpc_url",
+                "https://solana-rpc.publicnode.com",
+            ),
+            token_mint=raw.get("onchain_monitor", {}).get("token_mint", ""),
+            label=raw.get("onchain_monitor", {}).get("label", "Token"),
+            top_n=int(raw.get("onchain_monitor", {}).get("top_n", 10)),
+            poll_seconds=float(
+                raw.get("onchain_monitor", {}).get("poll_seconds", 60.0)
+            ),
+        ),
         spot_symbols=list(raw.get("spot_symbols", [])),
         spot_markets=[
             SpotMarketConfig(

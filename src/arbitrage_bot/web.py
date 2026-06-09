@@ -20,6 +20,7 @@ from .main import (
     scan_with_manager,
 )
 from .models import OrderBookSnapshot, Opportunity
+from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
 
 
@@ -79,7 +80,7 @@ HTML = """<!doctype html>
 
     .statusbar {
       display: grid;
-      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
       gap: 1px;
       overflow: hidden;
       border: 1px solid var(--line);
@@ -278,6 +279,10 @@ HTML = """<!doctype html>
         <div class="label">Updated</div>
         <div id="updated" class="value">--</div>
       </div>
+      <div class="metric">
+        <div class="label">On-chain</div>
+        <div id="onchain-status" class="value">--</div>
+      </div>
     </div>
 
     <section>
@@ -326,6 +331,28 @@ HTML = """<!doctype html>
             </tr>
           </thead>
           <tbody id="rates"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <h2>Solana Top Holders</h2>
+        <span id="onchain-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Owner Wallet</th>
+              <th class="num">Balance</th>
+              <th class="num">Supply Share</th>
+              <th class="num">Change</th>
+              <th class="num">Token Accts</th>
+            </tr>
+          </thead>
+          <tbody id="holders"></tbody>
         </table>
       </div>
     </section>
@@ -406,6 +433,38 @@ HTML = """<!doctype html>
       }
     }
 
+    function shortAddress(address) {
+      if (!address || address.length < 12) return address || "--";
+      return `${address.slice(0, 6)}...${address.slice(-6)}`;
+    }
+
+    function renderHolders(onchain) {
+      const body = document.getElementById("holders");
+      body.innerHTML = "";
+      if (!onchain || !onchain.holders || onchain.holders.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">No holder data yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const holder of onchain.holders) {
+        const delta = holder.delta_amount;
+        const deltaText = delta == null ? "--" : `${delta >= 0 ? "+" : ""}${compact.format(delta)}`;
+        const deltaClass = delta == null ? "" : delta >= 0 ? "ok" : "missing";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${holder.rank}</td>
+          <td title="${holder.owner}">${shortAddress(holder.owner)}</td>
+          <td class="num">${compact.format(holder.amount)}</td>
+          <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(4) + "%"}</td>
+          <td class="num ${deltaClass}">${deltaText}</td>
+          <td class="num">${holder.token_account_count}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     async function refresh() {
       try {
         const res = await fetch("/api/state", { cache: "no-store" });
@@ -421,12 +480,15 @@ HTML = """<!doctype html>
         text("notional", data.config ? `$${money.format(data.config.notional_quote)}` : "--");
         text("threshold", data.config ? `$${data.config.min_profit_quote} / ${data.config.min_profit_bps} bps` : "--");
         text("updated", formatAge(data.scan?.last_finished));
+        text("onchain-status", data.onchain?.status || "off");
         text("common-quote", data.config?.common_quote_currency || "USD");
         text("warnings", (data.warnings || []).join(" · "));
+        text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
 
         renderMarkets(data.markets);
         renderRates(data.quote_rates);
         renderOpportunities(data.opportunities);
+        renderHolders(data.onchain);
       } catch (error) {
         const status = document.getElementById("status");
         status.textContent = "error";
@@ -501,6 +563,14 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
         "quote_rates": cfg.quote_rates,
         "opportunities": [],
         "recent_opportunities": [],
+        "onchain": {
+            "status": "disabled",
+            "label": cfg.onchain_monitor.label,
+            "mint": cfg.onchain_monitor.token_mint,
+            "holders": [],
+            "last_finished": None,
+            "error": None,
+        },
         "warnings": ["Waiting for first scan"],
     }
 
@@ -527,6 +597,7 @@ class MonitorState:
         quote_rates: dict[str, float],
         opportunities: list[Opportunity],
         warnings: list[str],
+        onchain: dict[str, Any],
     ) -> None:
         opportunity_dicts = [item.to_dict() for item in opportunities]
         for item in opportunity_dicts:
@@ -553,6 +624,7 @@ class MonitorState:
                 "quote_rates": quote_rates,
                 "opportunities": opportunity_dicts,
                 "recent_opportunities": list(self._recent_opportunities),
+                "onchain": onchain,
                 "warnings": warnings,
             }
 
@@ -596,6 +668,78 @@ def _missing_market_warnings(rows: Iterable[dict[str, Any]]) -> list[str]:
     ]
 
 
+async def fetch_onchain_payload(
+    cfg: BotConfig,
+    client: SolanaTokenClient | None,
+    previous_amounts: dict[str, float],
+) -> tuple[dict[str, Any], dict[str, float]]:
+    onchain_cfg = cfg.onchain_monitor
+    if not onchain_cfg.enabled:
+        return (
+            {
+                "status": "disabled",
+                "label": onchain_cfg.label,
+                "mint": onchain_cfg.token_mint,
+                "holders": [],
+                "last_finished": None,
+                "error": None,
+            },
+            previous_amounts,
+        )
+    if onchain_cfg.network.lower() != "solana":
+        return (
+            {
+                "status": "error",
+                "label": onchain_cfg.label,
+                "mint": onchain_cfg.token_mint,
+                "holders": [],
+                "last_finished": time.time(),
+                "error": f"Unsupported network: {onchain_cfg.network}",
+            },
+            previous_amounts,
+        )
+    if client is None:
+        return (
+            {
+                "status": "error",
+                "label": onchain_cfg.label,
+                "mint": onchain_cfg.token_mint,
+                "holders": [],
+                "last_finished": time.time(),
+                "error": "Solana client is not configured",
+            },
+            previous_amounts,
+        )
+
+    data = await fetch_top_token_owners(
+        client,
+        onchain_cfg.token_mint,
+        top_n=onchain_cfg.top_n,
+    )
+    holders = data["holders"]
+    next_amounts = {item["owner"]: item["amount"] for item in holders}
+    for holder in holders:
+        previous = previous_amounts.get(holder["owner"])
+        holder["delta_amount"] = (
+            None if previous is None else holder["amount"] - previous
+        )
+
+    return (
+        {
+            "status": "running",
+            "label": onchain_cfg.label,
+            "mint": onchain_cfg.token_mint,
+            "supply": data["supply"],
+            "decimals": data["decimals"],
+            "holders": holders,
+            "source_account_count": data["source_account_count"],
+            "last_finished": time.time(),
+            "error": None,
+        },
+        next_amounts,
+    )
+
+
 async def monitor_loop(
     cfg: BotConfig,
     strategy: StrategyName,
@@ -603,6 +747,14 @@ async def monitor_loop(
     poll_seconds: float,
 ) -> None:
     manager = ExchangeManager()
+    solana_client = (
+        SolanaTokenClient(cfg.onchain_monitor.rpc_url)
+        if cfg.onchain_monitor.enabled
+        else None
+    )
+    onchain_payload = _build_initial_payload(cfg, poll_seconds)["onchain"]
+    previous_onchain_amounts: dict[str, float] = {}
+    next_onchain_scan = 0.0
     scan_count = 0
     try:
         while True:
@@ -635,6 +787,32 @@ async def monitor_loop(
                     quote_rates = cfg.quote_rates
                     warnings = []
 
+                now = time.monotonic()
+                if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
+                    try:
+                        onchain_payload, previous_onchain_amounts = (
+                            await fetch_onchain_payload(
+                                cfg,
+                                solana_client,
+                                previous_onchain_amounts,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        onchain_payload = {
+                            "status": "error",
+                            "label": cfg.onchain_monitor.label,
+                            "mint": cfg.onchain_monitor.token_mint,
+                            "holders": [],
+                            "last_finished": time.time(),
+                            "error": str(exc),
+                        }
+                    next_onchain_scan = (
+                        now + max(1.0, cfg.onchain_monitor.poll_seconds)
+                    )
+
+                if onchain_payload.get("status") == "error":
+                    warnings = [*warnings, f"On-chain: {onchain_payload.get('error')}"]
+
                 elapsed = time.monotonic() - monotonic_started
                 await state.set_scan_result(
                     cfg=cfg,
@@ -646,6 +824,7 @@ async def monitor_loop(
                     quote_rates=quote_rates,
                     opportunities=opportunities,
                     warnings=warnings,
+                    onchain=onchain_payload,
                 )
             except Exception as exc:  # noqa: BLE001
                 elapsed = time.monotonic() - monotonic_started
@@ -663,6 +842,8 @@ async def monitor_loop(
                 await asyncio.sleep(sleep_for)
     finally:
         await manager.close()
+        if solana_client is not None:
+            await solana_client.close()
 
 
 async def index(_: web.Request) -> web.Response:
