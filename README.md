@@ -5,7 +5,7 @@ This is a dry-run scanner for two common crypto arbitrage families:
 - Spot spread arbitrage across exchanges.
 - Spot versus futures or perpetual basis arbitrage.
 
-The first version intentionally does not place live orders. It estimates executable edge from order book depth, fees, and a target notional size, then prints opportunities. Add live execution only after paper trading, reconciliation, and account-level risk controls are proven.
+The arbitrage scanner does not place live orders. It estimates executable edge from order book depth, fees, and a target notional size, then prints opportunities. The market maker command defaults to dry-run planning and requires explicit live confirmation before placing orders.
 
 ## Quick start
 
@@ -90,6 +90,55 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted ACS bid/ask prices, quote rates, and any live opportunities.
 
+The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
+
+```json
+"market_maker": {
+  "enabled": true,
+  "exchange": "bybit-spot",
+  "symbol": "ACS/USDT",
+  "levels": 10,
+  "price_band_pct": 10.0,
+  "quote_per_level": 1.0,
+  "min_order_quote": 0.1,
+  "min_distance_bps": 0.0,
+  "poll_seconds": 5,
+  "post_only": true,
+  "cancel_existing_orders": false,
+  "client_order_prefix": "crypto-arb-mm"
+}
+```
+
+To preview the exact orders without placing anything:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
+  --config config.acs.json
+```
+
+To place real orders, configure API env vars on the target exchange entry, fund the account, and run with explicit live confirmation:
+
+```bash
+export BYBIT_API_KEY="..."
+export BYBIT_SECRET="..."
+
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
+  --config config.acs.json \
+  --live \
+  --confirm-live-orders
+```
+
+Continuous live replacement cancels open orders on the configured symbol before each new ladder, so only use it in an isolated market-making account:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
+  --config config.acs.json \
+  --loop \
+  --live \
+  --confirm-live-orders \
+  --replace-existing
+```
+
 The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, and balance changes between Solana polling rounds.
 
 ```json
@@ -135,7 +184,7 @@ Before trading, update `fee_bps` to match your account tier and confirm all thre
 
 1. Add account balance checks and inventory targets per exchange.
 2. Add paper trading with order lifecycle simulation.
-3. Add exchange precision and minimum order validation.
+3. Add stronger exchange precision and minimum order validation.
 4. Add transfer and withdrawal availability checks.
 5. Add an execution engine with kill switches, max loss, and per-exchange rate limits.
 6. Store quotes, decisions, and fills in a database for post-trade analysis.

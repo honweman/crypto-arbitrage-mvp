@@ -36,6 +36,10 @@ def _symbols_for_configured_spot_markets(cfg: BotConfig) -> dict[str, set[str]]:
         symbols_by_exchange.setdefault(market.exchange, set()).add(market.symbol)
     for source in cfg.quote_rate_sources:
         symbols_by_exchange.setdefault(source.exchange, set()).add(source.symbol)
+    if cfg.market_maker.enabled and cfg.market_maker.exchange and cfg.market_maker.symbol:
+        symbols_by_exchange.setdefault(cfg.market_maker.exchange, set()).add(
+            cfg.market_maker.symbol
+        )
     return symbols_by_exchange
 
 

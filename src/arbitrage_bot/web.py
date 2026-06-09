@@ -19,6 +19,7 @@ from .main import (
     _symbols_for_configured_spot_markets,
     scan_with_manager,
 )
+from .market_making import build_symmetric_market_maker_plan
 from .models import OrderBookSnapshot, Opportunity
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
@@ -348,6 +349,28 @@ HTML = """<!doctype html>
 
     <section>
       <div class="section-title">
+        <h2>Market Maker Plan</h2>
+        <span id="mm-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th class="num">Level</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Quote</th>
+              <th class="num">Distance</th>
+            </tr>
+          </thead>
+          <tbody id="mm-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">
         <h2>Quote Rates</h2>
       </div>
       <div class="table-wrap">
@@ -462,6 +485,30 @@ HTML = """<!doctype html>
       }
     }
 
+    function renderMarketMaker(marketMaker) {
+      const body = document.getElementById("mm-orders");
+      body.innerHTML = "";
+      if (!marketMaker || !marketMaker.plan || !marketMaker.plan.orders || marketMaker.plan.orders.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">No market maker plan.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const order of marketMaker.plan.orders) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
+          <td class="num">${order.level}</td>
+          <td class="num">${fmt.format(order.price)}</td>
+          <td class="num">${compact.format(order.amount)}</td>
+          <td class="num">${money.format(order.quote_notional)}</td>
+          <td class="num">${order.distance_bps.toFixed(2)} bps</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function shortAddress(address) {
       if (!address || address.length < 12) return address || "--";
       return `${address.slice(0, 6)}...${address.slice(-6)}`;
@@ -526,8 +573,10 @@ HTML = """<!doctype html>
         text("common-quote", data.config?.common_quote_currency || "USD");
         text("warnings", (data.warnings || []).join(" · "));
         text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
+        text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
 
         renderMarkets(data.markets);
+        renderMarketMaker(data.market_maker);
         renderRates(data.quote_rates);
         renderOpportunities(data.opportunities);
         renderHolders(data.onchain);
@@ -613,6 +662,12 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "last_finished": None,
             "error": None,
         },
+        "market_maker": {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "error": None,
+        },
         "warnings": ["Waiting for first scan"],
     }
 
@@ -640,6 +695,7 @@ class MonitorState:
         opportunities: list[Opportunity],
         warnings: list[str],
         onchain: dict[str, Any],
+        market_maker: dict[str, Any],
     ) -> None:
         opportunity_dicts = [item.to_dict() for item in opportunities]
         for item in opportunity_dicts:
@@ -667,6 +723,7 @@ class MonitorState:
                 "opportunities": opportunity_dicts,
                 "recent_opportunities": list(self._recent_opportunities),
                 "onchain": onchain,
+                "market_maker": market_maker,
                 "warnings": warnings,
             }
 
@@ -708,6 +765,46 @@ def _missing_market_warnings(rows: Iterable[dict[str, Any]]) -> list[str]:
         for row in rows
         if row["status"] != "ok"
     ]
+
+
+def build_market_maker_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    maker_cfg = cfg.market_maker
+    if not maker_cfg.enabled:
+        return {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "error": None,
+        }
+
+    book = books.get((maker_cfg.exchange, maker_cfg.symbol))
+    if book is None:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "error": f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
+        }
+
+    try:
+        plan = build_symmetric_market_maker_plan(book, maker_cfg)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "error": str(exc),
+        }
+
+    return {
+        "status": "planned",
+        "mode": "dry_run",
+        "plan": plan.to_dict(),
+        "error": None,
+    }
 
 
 async def fetch_onchain_payload(
@@ -799,6 +896,7 @@ async def monitor_loop(
         else None
     )
     onchain_payload = _build_initial_payload(cfg, poll_seconds)["onchain"]
+    market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
     previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
     scan_count = 0
@@ -827,11 +925,18 @@ async def monitor_loop(
                         common_quote_currency=cfg.common_quote_currency,
                     )
                     warnings = _missing_market_warnings(rows)
+                    market_maker_payload = build_market_maker_payload(cfg, books)
                 else:
                     opportunities = await scan_with_manager(cfg, strategy, manager)
                     rows = []
                     quote_rates = cfg.quote_rates
                     warnings = []
+                    market_maker_payload = {
+                        "status": "disabled",
+                        "mode": "dry_run",
+                        "plan": None,
+                        "error": None,
+                    }
 
                 now = time.monotonic()
                 if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
@@ -858,6 +963,11 @@ async def monitor_loop(
 
                 if onchain_payload.get("status") == "error":
                     warnings = [*warnings, f"On-chain: {onchain_payload.get('error')}"]
+                if market_maker_payload.get("status") == "error":
+                    warnings = [
+                        *warnings,
+                        f"Market maker: {market_maker_payload.get('error')}",
+                    ]
 
                 elapsed = time.monotonic() - monotonic_started
                 await state.set_scan_result(
@@ -871,6 +981,7 @@ async def monitor_loop(
                     opportunities=opportunities,
                     warnings=warnings,
                     onchain=onchain_payload,
+                    market_maker=market_maker_payload,
                 )
             except Exception as exc:  # noqa: BLE001
                 elapsed = time.monotonic() - monotonic_started

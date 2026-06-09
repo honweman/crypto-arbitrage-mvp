@@ -58,6 +58,22 @@ class OnchainMonitorConfig:
 
 
 @dataclass(frozen=True)
+class MarketMakerConfig:
+    enabled: bool = False
+    exchange: str = ""
+    symbol: str = ""
+    levels: int = 10
+    price_band_pct: float = 10.0
+    quote_per_level: float = 1.0
+    min_order_quote: float = 0.0
+    min_distance_bps: float = 0.0
+    poll_seconds: float = 5.0
+    post_only: bool = True
+    cancel_existing_orders: bool = False
+    client_order_prefix: str = "crypto-arb-mm"
+
+
+@dataclass(frozen=True)
 class BotConfig:
     poll_seconds: float
     order_book_depth: int
@@ -69,6 +85,7 @@ class BotConfig:
     quote_rates: dict[str, float]
     quote_rate_sources: list[QuoteRateSource]
     onchain_monitor: OnchainMonitorConfig
+    market_maker: MarketMakerConfig
     spot_symbols: list[str]
     spot_markets: list[SpotMarketConfig]
     cash_and_carry_pairs: list[CashAndCarryPair]
@@ -92,6 +109,7 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
 def load_config(path: str | Path) -> BotConfig:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     onchain_raw = raw.get("onchain_monitor", {})
+    market_maker_raw = raw.get("market_maker", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -136,6 +154,25 @@ def load_config(path: str | Path) -> BotConfig:
                 str(address): str(label)
                 for address, label in onchain_raw.get("address_labels", {}).items()
             },
+        ),
+        market_maker=MarketMakerConfig(
+            enabled=bool(market_maker_raw.get("enabled", False)),
+            exchange=market_maker_raw.get("exchange", ""),
+            symbol=market_maker_raw.get("symbol", ""),
+            levels=int(market_maker_raw.get("levels", 10)),
+            price_band_pct=float(market_maker_raw.get("price_band_pct", 10.0)),
+            quote_per_level=float(market_maker_raw.get("quote_per_level", 1.0)),
+            min_order_quote=float(market_maker_raw.get("min_order_quote", 0.0)),
+            min_distance_bps=float(market_maker_raw.get("min_distance_bps", 0.0)),
+            poll_seconds=float(market_maker_raw.get("poll_seconds", 5.0)),
+            post_only=bool(market_maker_raw.get("post_only", True)),
+            cancel_existing_orders=bool(
+                market_maker_raw.get("cancel_existing_orders", False)
+            ),
+            client_order_prefix=market_maker_raw.get(
+                "client_order_prefix",
+                "crypto-arb-mm",
+            ),
         ),
         spot_symbols=list(raw.get("spot_symbols", [])),
         spot_markets=[

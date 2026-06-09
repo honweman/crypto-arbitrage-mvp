@@ -23,6 +23,12 @@ class ConfigTest(unittest.TestCase):
             ],
             "Coinbase Hot Wallet",
         )
+        self.assertTrue(cfg.market_maker.enabled)
+        self.assertEqual(cfg.market_maker.exchange, "bybit-spot")
+        self.assertEqual(cfg.market_maker.symbol, "ACS/USDT")
+        self.assertEqual(cfg.market_maker.levels, 10)
+        self.assertEqual(cfg.market_maker.price_band_pct, 10.0)
+        self.assertEqual(cfg.market_maker.quote_per_level, 1.0)
 
 
 if __name__ == "__main__":
