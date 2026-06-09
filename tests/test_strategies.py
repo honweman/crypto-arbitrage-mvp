@@ -94,8 +94,8 @@ class StrategyTest(unittest.TestCase):
             SpotMarketConfig(
                 asset="ACS",
                 exchange="coinbase-spot",
-                symbol="ACS/USD",
-                quote_currency="USD",
+                symbol="ACS/USDC",
+                quote_currency="USDC",
             ),
         ]
         books = {
@@ -105,9 +105,9 @@ class StrategyTest(unittest.TestCase):
                 bids=[BookLevel(price=0.19, amount=1_000_000)],
                 asks=[BookLevel(price=0.20, amount=1_000_000)],
             ),
-            ("coinbase-spot", "ACS/USD"): OrderBookSnapshot(
+            ("coinbase-spot", "ACS/USDC"): OrderBookSnapshot(
                 exchange="coinbase-spot",
-                symbol="ACS/USD",
+                symbol="ACS/USDC",
                 bids=[BookLevel(price=0.00018, amount=1_000_000)],
                 asks=[BookLevel(price=0.00019, amount=1_000_000)],
             ),
@@ -120,14 +120,14 @@ class StrategyTest(unittest.TestCase):
             notional_quote=100,
             min_profit_quote=1,
             min_profit_bps=1,
-            quote_rates={"USD": 1.0, "KRW": 0.00075},
+            quote_rates={"USD": 1.0, "USDC": 1.0, "KRW": 0.00075},
             common_quote_currency="USD",
         )
 
         self.assertEqual(len(opportunities), 1)
         self.assertEqual(opportunities[0].legs[0].symbol, "ACS/KRW")
         self.assertEqual(opportunities[0].legs[0].quote_currency, "KRW")
-        self.assertEqual(opportunities[0].legs[1].symbol, "ACS/USD")
+        self.assertEqual(opportunities[0].legs[1].symbol, "ACS/USDC")
         self.assertEqual(opportunities[0].metadata["common_quote_currency"], "USD")
         self.assertGreater(opportunities[0].profit_quote, 1)
 

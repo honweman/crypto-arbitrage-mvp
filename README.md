@@ -52,9 +52,9 @@ That config treats USD as the common reporting currency and compares:
 
 - Bithumb `ACS/KRW`
 - Bybit `ACS/USDT`
-- Coinbase `ACS/USD`
+- Coinbase `ACS/USDC`
 
-KRW is not comparable to USD or USDT directly. The config includes a fallback `KRW` to `USD` rate and a `quote_rate_sources` entry that tries to derive the live KRW conversion from Bithumb `USDT/KRW` order book mid price.
+KRW is not comparable to USD, USDT, or USDC directly. The config includes a fallback `KRW` to `USD` rate and a `quote_rate_sources` entry that tries to derive the live KRW conversion from Bithumb `USDT/KRW` order book mid price. USDT and USDC are treated as 1.0 USD by default; adjust `quote_rates` if you want to model a stablecoin discount or premium.
 
 Before trading, update `fee_bps` to match your account tier and confirm all three exchanges support ACS deposits, withdrawals, and the same ACS network.
 

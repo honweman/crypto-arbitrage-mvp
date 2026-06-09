@@ -9,6 +9,7 @@
   "quote_rates": {
     "USD": 1.0,
     "USDT": 1.0,
+    "USDC": 1.0,
     "KRW": 0.00073
   },
   "quote_rate_sources": [
@@ -37,8 +38,8 @@
     {
       "asset": "ACS",
       "exchange": "coinbase-spot",
-      "symbol": "ACS/USD",
-      "quote_currency": "USD"
+      "symbol": "ACS/USDC",
+      "quote_currency": "USDC"
     }
   ],
   "cash_and_carry_pairs": [],
