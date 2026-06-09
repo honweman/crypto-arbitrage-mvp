@@ -15,6 +15,10 @@ class PortfolioPnl:
     quote_currency: str
     position_base: float
     average_entry_price: float
+    cash_balances: dict[str, float]
+    cash_balances_common: dict[str, float]
+    cash_value: float
+    cash_missing_rates: list[str]
     mark_price: float | None
     mark_source_count: int
     position_value: float | None
@@ -31,6 +35,10 @@ class PortfolioPnl:
             "quote_currency": self.quote_currency,
             "position_base": self.position_base,
             "average_entry_price": self.average_entry_price,
+            "cash_balances": self.cash_balances,
+            "cash_balances_common": self.cash_balances_common,
+            "cash_value": self.cash_value,
+            "cash_missing_rates": self.cash_missing_rates,
             "mark_price": self.mark_price,
             "mark_source_count": self.mark_source_count,
             "position_value": self.position_value,
@@ -59,6 +67,22 @@ def _book_mid_common(
     return (bid + ask) / 2 * quote_rate
 
 
+def _cash_positions_common(
+    cash_balances: dict[str, float],
+    quote_rates: dict[str, float],
+) -> tuple[dict[str, float], float, list[str]]:
+    cash_common = {}
+    missing_rates = []
+    for currency, amount in cash_balances.items():
+        currency_key = currency.upper()
+        rate = quote_rates.get(currency_key)
+        if rate is None:
+            missing_rates.append(currency_key)
+            continue
+        cash_common[currency_key] = amount * rate
+    return cash_common, sum(cash_common.values()), sorted(missing_rates)
+
+
 def build_portfolio_pnl(
     cfg: BotConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
@@ -69,12 +93,20 @@ def build_portfolio_pnl(
         cfg.spot_markets[0].asset if cfg.spot_markets else ""
     )
     if not portfolio.enabled:
+        cash_common, cash_value, cash_missing = _cash_positions_common(
+            portfolio.cash_balances,
+            quote_rates,
+        )
         return PortfolioPnl(
             status="disabled",
             asset=asset,
             quote_currency=cfg.common_quote_currency,
             position_base=portfolio.position_base,
             average_entry_price=portfolio.average_entry_price,
+            cash_balances=portfolio.cash_balances,
+            cash_balances_common=cash_common,
+            cash_value=cash_value,
+            cash_missing_rates=cash_missing,
             mark_price=None,
             mark_source_count=0,
             position_value=None,
@@ -97,6 +129,10 @@ def build_portfolio_pnl(
         ]
         if mid is not None
     ]
+    cash_common, cash_value, cash_missing = _cash_positions_common(
+        portfolio.cash_balances,
+        quote_rates,
+    )
     mark_price = sum(mark_prices) / len(mark_prices) if mark_prices else None
     position_value = (
         portfolio.position_base * mark_price if mark_price is not None else None
@@ -116,6 +152,10 @@ def build_portfolio_pnl(
         quote_currency=cfg.common_quote_currency,
         position_base=portfolio.position_base,
         average_entry_price=portfolio.average_entry_price,
+        cash_balances=portfolio.cash_balances,
+        cash_balances_common=cash_common,
+        cash_value=cash_value,
+        cash_missing_rates=cash_missing,
         mark_price=mark_price,
         mark_source_count=len(mark_prices),
         position_value=position_value,

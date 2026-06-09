@@ -56,6 +56,11 @@
     "asset": "ACS",
     "position_base": 0.0,
     "average_entry_price": 0.0,
+    "cash_balances": {
+      "USDC": 0.0,
+      "USDT": 0.0,
+      "KRW": 0.0
+    },
     "realized_pnl": {
       "market_maker": 0.0,
       "arbitrage": 0.0

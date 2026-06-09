@@ -92,7 +92,7 @@ HTML = """<!doctype html>
 
     .portfolio-bar {
       display: grid;
-      grid-template-columns: repeat(7, minmax(120px, 1fr));
+      grid-template-columns: repeat(8, minmax(118px, 1fr));
       gap: 1px;
       overflow: hidden;
       margin-bottom: 18px;
@@ -102,6 +102,7 @@ HTML = """<!doctype html>
     }
 
     .metric {
+      min-width: 0;
       min-height: 78px;
       padding: 14px;
       background: var(--surface);
@@ -119,6 +120,15 @@ HTML = """<!doctype html>
       font-variant-numeric: tabular-nums;
       font-size: 21px;
       font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .metric .detail {
+      margin-top: 5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
 
@@ -372,6 +382,11 @@ HTML = """<!doctype html>
       <div class="metric">
         <div class="label">Position</div>
         <div id="portfolio-position" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Cash Position</div>
+        <div id="portfolio-cash" class="value">--</div>
+        <div id="portfolio-cash-detail" class="subtle detail">--</div>
       </div>
       <div class="metric">
         <div class="label">Mark Price</div>
@@ -636,9 +651,23 @@ HTML = """<!doctype html>
       el.className = `value ${pnlClass(value)}`;
     }
 
+    function formatCashDetail(portfolio) {
+      const balances = portfolio?.cash_balances || {};
+      const pieces = Object.entries(balances)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([currency, amount]) => `${currency} ${compact.format(amount || 0)}`);
+      const missing = portfolio?.cash_missing_rates || [];
+      if (missing.length > 0) {
+        pieces.push(`missing ${missing.join("/")}`);
+      }
+      return pieces.length === 0 ? "--" : pieces.join(" · ");
+    }
+
     function renderPortfolio(portfolio) {
       if (!portfolio || portfolio.status === "disabled") {
         text("portfolio-position", "--");
+        text("portfolio-cash", "--");
+        text("portfolio-cash-detail", "--");
         text("portfolio-mark", "--");
         text("portfolio-value", "--");
         setPnl("portfolio-total-pnl", null);
@@ -649,6 +678,11 @@ HTML = """<!doctype html>
       }
 
       text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
+      const cashValue = portfolio.cash_value == null ? null : portfolio.cash_value;
+      text("portfolio-cash", cashValue == null ? "--" : `$${money.format(cashValue)}`);
+      const cashDetail = formatCashDetail(portfolio);
+      text("portfolio-cash-detail", cashDetail);
+      document.getElementById("portfolio-cash-detail").title = cashDetail;
       text("portfolio-mark", portfolio.mark_price == null ? "--" : `$${fmt.format(portfolio.mark_price)}`);
       text("portfolio-value", portfolio.position_value == null ? "--" : `$${money.format(portfolio.position_value)}`);
       setPnl("portfolio-total-pnl", portfolio.total_pnl);
@@ -850,6 +884,10 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "quote_currency": cfg.common_quote_currency,
             "position_base": cfg.portfolio.position_base,
             "average_entry_price": cfg.portfolio.average_entry_price,
+            "cash_balances": cfg.portfolio.cash_balances,
+            "cash_balances_common": {},
+            "cash_value": 0.0,
+            "cash_missing_rates": [],
             "mark_price": None,
             "mark_source_count": 0,
             "position_value": None,

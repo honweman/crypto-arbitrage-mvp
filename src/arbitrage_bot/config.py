@@ -85,6 +85,7 @@ class PortfolioConfig:
     asset: str = ""
     position_base: float = 0.0
     average_entry_price: float = 0.0
+    cash_balances: dict[str, float] = field(default_factory=dict)
     realized_pnl: dict[str, float] = field(default_factory=dict)
 
 
@@ -204,6 +205,13 @@ def load_config(path: str | Path) -> BotConfig:
             average_entry_price=float(
                 portfolio_raw.get("average_entry_price", 0.0)
             ),
+            cash_balances={
+                str(currency).upper(): float(value)
+                for currency, value in portfolio_raw.get(
+                    "cash_balances",
+                    {},
+                ).items()
+            },
             realized_pnl={
                 str(source): float(value)
                 for source, value in portfolio_raw.get("realized_pnl", {}).items()

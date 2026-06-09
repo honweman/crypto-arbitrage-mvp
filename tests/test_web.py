@@ -99,6 +99,7 @@ class WebMonitorTest(unittest.TestCase):
                 asset="ACS",
                 position_base=10_000.0,
                 average_entry_price=0.00010,
+                cash_balances={"USDC": 10.0, "USDT": 20.0, "KRW": 10_000.0},
                 realized_pnl={"market_maker": 1.25, "arbitrage": 2.50},
             ),
             spot_markets=[
@@ -119,14 +120,36 @@ class WebMonitorTest(unittest.TestCase):
             )
         }
 
-        payload = build_portfolio_pnl(cfg, books, {"USDT": 1.0})
+        payload = build_portfolio_pnl(
+            cfg,
+            books,
+            {"USDC": 1.0, "USDT": 1.0, "KRW": 0.00075},
+        )
 
         self.assertEqual(payload["status"], "ok")
         self.assertAlmostEqual(payload["mark_price"], 0.00015)
+        self.assertAlmostEqual(payload["cash_balances_common"]["USDC"], 10.0)
+        self.assertAlmostEqual(payload["cash_balances_common"]["USDT"], 20.0)
+        self.assertAlmostEqual(payload["cash_balances_common"]["KRW"], 7.5)
+        self.assertAlmostEqual(payload["cash_value"], 37.5)
         self.assertAlmostEqual(payload["sources"]["price_move"], 0.5)
         self.assertAlmostEqual(payload["sources"]["market_maker"], 1.25)
         self.assertAlmostEqual(payload["sources"]["arbitrage"], 2.5)
         self.assertAlmostEqual(payload["total_pnl"], 4.25)
+
+    def test_build_portfolio_pnl_reports_missing_cash_rates(self) -> None:
+        cfg = make_config(
+            portfolio=PortfolioConfig(
+                enabled=True,
+                asset="ACS",
+                cash_balances={"EUR": 100.0, "USDT": 5.0},
+            )
+        )
+
+        payload = build_portfolio_pnl(cfg, {}, {"USDT": 1.0})
+
+        self.assertEqual(payload["cash_missing_rates"], ["EUR"])
+        self.assertAlmostEqual(payload["cash_value"], 5.0)
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):

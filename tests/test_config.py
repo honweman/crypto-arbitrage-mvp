@@ -32,6 +32,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.market_maker.poll_seconds, 1.0)
         self.assertTrue(cfg.portfolio.enabled)
         self.assertEqual(cfg.portfolio.asset, "ACS")
+        self.assertEqual(cfg.portfolio.cash_balances["USDC"], 0.0)
+        self.assertEqual(cfg.portfolio.cash_balances["USDT"], 0.0)
+        self.assertEqual(cfg.portfolio.cash_balances["KRW"], 0.0)
         self.assertEqual(cfg.portfolio.realized_pnl["market_maker"], 0.0)
         self.assertEqual(cfg.portfolio.realized_pnl["arbitrage"], 0.0)
         self.assertTrue(

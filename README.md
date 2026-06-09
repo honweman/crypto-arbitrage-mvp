@@ -98,6 +98,11 @@ The top row shows configured ACS position and P/L attribution:
   "asset": "ACS",
   "position_base": 0.0,
   "average_entry_price": 0.0,
+  "cash_balances": {
+    "USDC": 0.0,
+    "USDT": 0.0,
+    "KRW": 0.0
+  },
   "realized_pnl": {
     "market_maker": 0.0,
     "arbitrage": 0.0
@@ -105,7 +110,7 @@ The top row shows configured ACS position and P/L attribution:
 }
 ```
 
-`Price Move` is calculated from `position_base * (current_mark_price - average_entry_price)`, where the mark price is the average converted mid price across available ACS spot books. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
+`Cash Position` combines configured USDC, USDT, and KRW balances into the common quote currency using `quote_rates`; the small line below it keeps the per-currency amounts visible. `Price Move` is calculated from `position_base * (current_mark_price - average_entry_price)`, where the mark price is the average converted mid price across available ACS spot books. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
 
 The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. With the ACS config and `--poll-seconds 1`, the page fetches the latest REST order book every second and recalculates the 20 planned bid/ask orders from the fresh mid price. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
 
