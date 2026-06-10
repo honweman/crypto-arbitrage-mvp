@@ -15,7 +15,13 @@ from .slow_executor import cancel_order_ids, run_cycle
 from .trade_log import write_trade_event
 
 
-RUNNING_TASK_STATUSES = {"running", "waiting_for_fill", "blocked_by_risk", "error"}
+RUNNING_TASK_STATUSES = {
+    "running",
+    "waiting_for_fill",
+    "waiting_for_interval",
+    "blocked_by_risk",
+    "error",
+}
 TERMINAL_TASK_STATUSES = {"complete", "stopped_by_price", "below_min_order_quote"}
 
 
@@ -317,6 +323,8 @@ class AutoBuySellTaskService:
             if task.open_order_ids:
                 await self._handle_open_orders(task, runtime_cfg, manager)
                 return
+            if self._must_wait_for_next_slice(task, task_cfg, now):
+                return
 
             payload, _ = await run_cycle(
                 runtime_cfg,
@@ -480,6 +488,25 @@ class AutoBuySellTaskService:
         if task.open_order_ids and cfg.order_ttl_seconds > 0:
             return time.time() + min(interval, max(1.0, cfg.order_ttl_seconds))
         return time.time() + interval
+
+    def _must_wait_for_next_slice(
+        self,
+        task: AutoBuySellTask,
+        cfg: SlowExecutionConfig,
+        now: float,
+    ) -> bool:
+        if not task.order_created_at:
+            return False
+        interval = max(1.0, cfg.interval_seconds)
+        last_order_at = max(float(value) for value in task.order_created_at.values())
+        next_slice_at = last_order_at + interval
+        if next_slice_at <= now:
+            return False
+        task.status = "waiting_for_interval"
+        task.last_status = "waiting_for_interval"
+        task.last_error = None
+        task.next_run_at = next_slice_at
+        return True
 
 
 def _task_status_from_cycle_status(status: str) -> str:

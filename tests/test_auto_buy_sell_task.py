@@ -159,12 +159,14 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
                     "timestamp": 1_000_000,
                 }
             ]
+            service._tasks[0].order_created_at["order-1"] = time.time() - 2.0
             service._tasks[0].next_run_at = 0.0
             second = await service.run_due_tasks(cfg, manager)
             second_task = second["tasks"][0]
 
             manager.open_order_ids = []
             manager.trades = []
+            service._tasks[0].order_created_at["order-2"] = time.time() - 2.0
             service._tasks[0].next_run_at = 0.0
             third = await service.run_due_tasks(cfg, manager)
             third_task = third["tasks"][0]
@@ -212,6 +214,41 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second_task["last_error"])
         self.assertGreaterEqual(second_task["next_run_at"], before_cancel + 9.0)
         self.assertEqual(third["tasks"][0]["placed_count"], 1)
+
+    async def test_filled_order_respects_next_interval_before_replacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(
+                self._slow_cfg(interval_seconds=10.0, order_ttl_seconds=2.0)
+            )
+            manager = FakeTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(
+                    interval_seconds=10.0,
+                    order_ttl_seconds=2.0,
+                ),
+            )
+
+            first = await service.run_due_tasks(cfg, manager)
+            first_order_at = service._tasks[0].order_created_at["order-1"]
+            self.assertEqual(first["tasks"][0]["open_order_ids"], ["order-1"])
+            self.assertEqual(manager.created, 1)
+
+            manager.open_order_ids = []
+            service._tasks[0].next_run_at = 0.0
+            second = await service.run_due_tasks(cfg, manager)
+            second_task = second["tasks"][0]
+
+            service._tasks[0].order_created_at["order-1"] = time.time() - 20.0
+            service._tasks[0].next_run_at = 0.0
+            third = await service.run_due_tasks(cfg, manager)
+
+        self.assertEqual(manager.created, 2)
+        self.assertEqual(second_task["status"], "waiting_for_interval")
+        self.assertEqual(second_task["last_status"], "waiting_for_interval")
+        self.assertGreaterEqual(second_task["next_run_at"], first_order_at + 9.0)
+        self.assertEqual(third["tasks"][0]["open_order_ids"], ["order-2"])
 
     async def test_quote_target_progress_completes_from_filled_quote(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
