@@ -612,6 +612,10 @@ HTML = """<!doctype html>
         <div id="portfolio-auto-pnl" class="value">--</div>
       </div>
       <div class="metric">
+        <div class="label">Other P/L</div>
+        <div id="portfolio-other-pnl" class="value">--</div>
+      </div>
+      <div class="metric">
         <div class="label">Price Move</div>
         <div id="portfolio-price-pnl" class="value">--</div>
       </div>
@@ -1406,6 +1410,7 @@ HTML = """<!doctype html>
         setPnl("portfolio-mm-pnl", null);
         setPnl("portfolio-arb-pnl", null);
         setPnl("portfolio-auto-pnl", null);
+        setPnl("portfolio-other-pnl", null);
         setPnl("portfolio-price-pnl", null);
         document.getElementById("portfolio-total-pnl").title = "";
         return;
@@ -1439,6 +1444,10 @@ HTML = """<!doctype html>
       setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);
       setPnl("portfolio-arb-pnl", portfolio.sources?.arbitrage);
       setPnl("portfolio-auto-pnl", portfolio.sources?.auto_buy_sell);
+      setPnl(
+        "portfolio-other-pnl",
+        (portfolio.sources?.manual || 0) + (portfolio.sources?.unattributed || 0)
+      );
       setPnl("portfolio-price-pnl", portfolio.sources?.price_move);
       document.getElementById("portfolio-total-pnl").title = formatPnlSourceDetail(portfolio);
     }
@@ -2531,7 +2540,14 @@ def _apply_order_activity_pnl(
         str(source): float(value or 0.0)
         for source, value in (payload.get("sources") or {}).items()
     }
-    for source in ("market_maker", "arbitrage", "auto_buy_sell", "price_move"):
+    for source in (
+        "market_maker",
+        "arbitrage",
+        "auto_buy_sell",
+        "manual",
+        "unattributed",
+        "price_move",
+    ):
         sources.setdefault(source, 0.0)
     payload["sources"] = sources
 
@@ -2802,6 +2818,8 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "market_maker": 0.0,
                 "arbitrage": 0.0,
                 "auto_buy_sell": 0.0,
+                "manual": 0.0,
+                "unattributed": 0.0,
                 "price_move": 0.0,
             },
             "observed_at": None,
