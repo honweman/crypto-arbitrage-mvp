@@ -162,6 +162,12 @@ class TradeLogConfig:
 
 
 @dataclass(frozen=True)
+class PnlStoreConfig:
+    enabled: bool = False
+    path: str = "data/fill_pnl.sqlite3"
+
+
+@dataclass(frozen=True)
 class AlertConfig:
     enabled: bool = False
     min_level: str = "warning"
@@ -192,6 +198,7 @@ class BotConfig:
     derivative_exchanges: list[ExchangeConfig]
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
+    pnl_store: PnlStoreConfig = field(default_factory=PnlStoreConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
 
 
@@ -260,6 +267,7 @@ def load_config(path: str | Path) -> BotConfig:
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
     trade_log_raw = raw.get("trade_log", {})
+    pnl_store_raw = raw.get("pnl_store", {})
     alerts_raw = raw.get("alerts", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
@@ -454,6 +462,10 @@ def load_config(path: str | Path) -> BotConfig:
             enabled=bool(trade_log_raw.get("enabled", True)),
             path=str(trade_log_raw.get("path", "data/trade_events.jsonl")),
             max_recent_events=int(trade_log_raw.get("max_recent_events", 50)),
+        ),
+        pnl_store=PnlStoreConfig(
+            enabled=bool(pnl_store_raw.get("enabled", False)),
+            path=str(pnl_store_raw.get("path", "data/fill_pnl.sqlite3")),
         ),
         alerts=AlertConfig(
             enabled=bool(alerts_raw.get("enabled", False)),

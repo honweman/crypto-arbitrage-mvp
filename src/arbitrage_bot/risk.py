@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from time import time
 from typing import Any
 
-from .config import PortfolioConfig, RiskConfig
+from .config import BotConfig, PortfolioConfig, RiskConfig
+from .fill_store import load_daily_pnl_summary
 from .models import Side
 
 
@@ -89,6 +90,20 @@ def portfolio_positions_base(portfolio: PortfolioConfig) -> dict[str, float]:
 
 def portfolio_realized_pnl_quote(portfolio: PortfolioConfig) -> float:
     return sum(portfolio.realized_pnl.values())
+
+
+def current_daily_pnl_quote(cfg: BotConfig) -> float:
+    configured_pnl = portfolio_realized_pnl_quote(cfg.portfolio)
+    if not cfg.pnl_store.enabled:
+        return configured_pnl
+    try:
+        daily = load_daily_pnl_summary(
+            cfg.pnl_store,
+            currency=cfg.common_quote_currency,
+        )
+    except Exception:  # noqa: BLE001
+        return configured_pnl
+    return configured_pnl + float(daily.get("total_realized_pnl") or 0.0)
 
 
 def _base_asset(symbol: str) -> str:

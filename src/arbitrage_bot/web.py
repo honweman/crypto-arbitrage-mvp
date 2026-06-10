@@ -22,6 +22,7 @@ from .config import (
     load_config,
 )
 from .exchanges import ExchangeManager
+from .fill_store import load_daily_pnl_summary, persist_fill_pnl
 from .main import (
     StrategyName,
     _quote_rates_from_sources,
@@ -1197,10 +1198,18 @@ HTML = """<!doctype html>
     }
 
     function renderOrderActivity(orderActivity) {
+      const recentPnl = orderActivity?.pnl_summary?.total_realized_pnl;
+      const dailyPnl = orderActivity?.daily_pnl?.enabled
+        ? orderActivity?.daily_pnl?.total_realized_pnl
+        : null;
+      const storedFillCount = orderActivity?.pnl_store?.stored_fill_count;
+      const pnlText = dailyPnl == null
+        ? `recent P/L ${formatPnlValue(recentPnl)}`
+        : `daily P/L ${formatPnlValue(dailyPnl)} · recent ${formatPnlValue(recentPnl)} · stored ${storedFillCount || 0}`;
       text(
         "orders-meta",
         orderActivity
-          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · P/L ${formatPnlValue(orderActivity.pnl_summary?.total_realized_pnl)} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
+          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · ${pnlText} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
           : ""
       );
       renderOpenOrders(orderActivity);
@@ -1241,11 +1250,12 @@ HTML = """<!doctype html>
       const risk = ops?.risk || {};
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
+      const dailyPnl = ops?.daily_pnl || {};
       const summary = tradeLog.summary || {};
       const riskState = risk.enabled === false ? "off" : risk.trading_enabled === false ? "trading off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
       text(
         "risk-meta",
-        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${risk.max_slippage_bps || 0} bps · events ${summary.event_count || 0} · blocked ${summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
+        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · max/day $${money.format(risk.max_daily_loss_quote || 0)} · day P/L ${formatPnlValue(dailyPnl.total_realized_pnl || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${risk.max_slippage_bps || 0} bps · events ${summary.event_count || 0} · blocked ${summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
       );
 
       const body = document.getElementById("events");
@@ -1750,10 +1760,29 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     ]
     trade_log_payload["summary"] = summarize_trade_entries(recent_entries)
     trade_log_payload["error"] = trade_log_error
+    try:
+        daily_pnl = load_daily_pnl_summary(
+            cfg.pnl_store,
+            currency=cfg.common_quote_currency,
+        )
+        pnl_error = None
+    except Exception as exc:  # noqa: BLE001
+        daily_pnl = {
+            "enabled": cfg.pnl_store.enabled,
+            "path": cfg.pnl_store.path,
+            "day": None,
+            "currency": cfg.common_quote_currency,
+            "trade_count": 0,
+            "total_realized_pnl": 0.0,
+            "sources": {},
+        }
+        pnl_error = str(exc)
+    daily_pnl["error"] = pnl_error
     return {
         "risk": asdict(cfg.risk),
         "alerts": asdict(cfg.alerts),
         "trade_log": trade_log_payload,
+        "daily_pnl": daily_pnl,
     }
 
 
@@ -2385,6 +2414,33 @@ async def fetch_order_activity_payload(
         books=books,
         attribution=order_attribution,
     )
+    try:
+        pnl_store_payload = persist_fill_pnl(
+            cfg.pnl_store,
+            recent_trades,
+            currency=cfg.common_quote_currency,
+        )
+        pnl_store_warnings: list[str] = []
+    except Exception as exc:  # noqa: BLE001
+        pnl_store_payload = {
+            "enabled": cfg.pnl_store.enabled,
+            "path": cfg.pnl_store.path,
+            "stored_fill_count": 0,
+            "daily": {
+                "enabled": cfg.pnl_store.enabled,
+                "path": cfg.pnl_store.path,
+                "day": None,
+                "currency": cfg.common_quote_currency,
+                "trade_count": 0,
+                "total_realized_pnl": 0.0,
+                "total_fees": 0.0,
+                "total_notional": 0.0,
+                "sources": {},
+                "updated_at": None,
+            },
+            "error": str(exc),
+        }
+        pnl_store_warnings = [f"fill P/L store unavailable: {exc}"]
     errors = [
         f"{account['exchange']}: {error}"
         for account in accounts
@@ -2396,6 +2452,7 @@ async def fetch_order_activity_payload(
         for warning in account.get("warnings", [])
     ]
     warnings.extend(attribution_warnings)
+    warnings.extend(pnl_store_warnings)
     checked_accounts = sum(
         1
         for account in accounts
@@ -2408,6 +2465,8 @@ async def fetch_order_activity_payload(
         "closed_orders": closed_orders,
         "recent_trades": recent_trades,
         "pnl_summary": pnl_summary,
+        "pnl_store": pnl_store_payload,
+        "daily_pnl": pnl_store_payload.get("daily"),
         "open_order_count": len(open_orders),
         "closed_order_count": len(closed_orders),
         "recent_trade_count": len(recent_trades),
@@ -2551,7 +2610,9 @@ def _apply_order_activity_pnl(
         sources.setdefault(source, 0.0)
     payload["sources"] = sources
 
-    summary = (order_activity or {}).get("pnl_summary")
+    summary = (order_activity or {}).get("daily_pnl")
+    if not isinstance(summary, dict) or not summary.get("enabled"):
+        summary = (order_activity or {}).get("pnl_summary")
     if not isinstance(summary, dict):
         return payload
 
@@ -2567,8 +2628,11 @@ def _apply_order_activity_pnl(
     payload["sources"] = sources
     payload["total_pnl"] = sum(sources.values())
     payload["fill_pnl_summary"] = summary
-    payload["fill_pnl_window"] = summary.get("window")
-    payload["fill_pnl_observed_at"] = summary.get("observed_at")
+    payload["fill_pnl_window"] = summary.get("window") or "daily"
+    payload["fill_pnl_day"] = summary.get("day")
+    payload["fill_pnl_observed_at"] = summary.get("observed_at") or summary.get(
+        "updated_at"
+    )
     return payload
 
 
@@ -2754,6 +2818,24 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "missing_quote_rates": [],
                 "missing_fee_rates": [],
                 "observed_at": None,
+            },
+            "pnl_store": {
+                "enabled": cfg.pnl_store.enabled,
+                "path": cfg.pnl_store.path,
+                "stored_fill_count": 0,
+                "daily": None,
+            },
+            "daily_pnl": {
+                "enabled": cfg.pnl_store.enabled,
+                "path": cfg.pnl_store.path,
+                "day": None,
+                "currency": cfg.common_quote_currency,
+                "trade_count": 0,
+                "total_realized_pnl": 0.0,
+                "total_fees": 0.0,
+                "total_notional": 0.0,
+                "sources": {},
+                "updated_at": None,
             },
             "open_order_count": 0,
             "closed_order_count": 0,
@@ -3323,6 +3405,24 @@ async def monitor_loop(
                                 "missing_quote_rates": [],
                                 "missing_fee_rates": [],
                                 "observed_at": None,
+                            },
+                            "pnl_store": {
+                                "enabled": cfg.pnl_store.enabled,
+                                "path": cfg.pnl_store.path,
+                                "stored_fill_count": 0,
+                                "daily": None,
+                            },
+                            "daily_pnl": {
+                                "enabled": cfg.pnl_store.enabled,
+                                "path": cfg.pnl_store.path,
+                                "day": None,
+                                "currency": cfg.common_quote_currency,
+                                "trade_count": 0,
+                                "total_realized_pnl": 0.0,
+                                "total_fees": 0.0,
+                                "total_notional": 0.0,
+                                "sources": {},
+                                "updated_at": None,
                             },
                             "open_order_count": 0,
                             "closed_order_count": 0,

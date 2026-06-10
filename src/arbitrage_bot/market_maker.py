@@ -13,9 +13,9 @@ from .market_making import MarketMakerPlan, build_symmetric_market_maker_plan
 from .risk import (
     RiskMarketContext,
     RiskOrder,
+    current_daily_pnl_quote,
     evaluate_order_batch,
     portfolio_positions_base,
-    portfolio_realized_pnl_quote,
 )
 from .trade_log import write_trade_event
 
@@ -164,7 +164,7 @@ async def run_cycle(
         market=market,
         previous_mid_price=previous_mid_price,
         current_positions_base=portfolio_positions_base(cfg.portfolio),
-        daily_pnl_quote=portfolio_realized_pnl_quote(cfg.portfolio),
+        daily_pnl_quote=current_daily_pnl_quote(cfg),
         existing_open_order_count=existing_open_order_count,
         expected_cancel_count=expected_cancel_count,
         last_cancel_at=last_cancel_at,

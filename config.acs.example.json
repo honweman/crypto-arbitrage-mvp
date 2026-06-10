@@ -140,6 +140,10 @@
     "path": "data/trade_events.jsonl",
     "max_recent_events": 50
   },
+  "pnl_store": {
+    "enabled": true,
+    "path": "data/fill_pnl.sqlite3"
+  },
   "alerts": {
     "enabled": false,
     "min_level": "warning",

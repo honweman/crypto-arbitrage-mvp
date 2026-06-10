@@ -43,6 +43,10 @@
       "arbitrage": 0.0
     }
   },
+  "pnl_store": {
+    "enabled": false,
+    "path": "data/fill_pnl.sqlite3"
+  },
   "spot_exchanges": [
     {
       "id": "binance",
