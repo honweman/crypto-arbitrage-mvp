@@ -149,17 +149,19 @@ HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f5f6f2;
+      --bg: #f6f7f9;
       --surface: #ffffff;
-      --surface-2: #eef1ee;
-      --text: #17211b;
-      --muted: #66736b;
-      --line: #d8ded8;
-      --green: #0f7a4f;
-      --red: #b33b2e;
-      --amber: #a66500;
-      --blue: #285f9f;
-      --focus: #101828;
+      --surface-2: #f1f5f9;
+      --surface-3: #fafbfc;
+      --text: #111827;
+      --muted: #64748b;
+      --line: #d7dde5;
+      --green: #047857;
+      --red: #b42318;
+      --amber: #b54708;
+      --blue: #1d4ed8;
+      --focus: #111827;
+      --shadow: 0 1px 2px rgb(15 23 42 / 5%);
     }
 
     * { box-sizing: border-box; }
@@ -172,65 +174,64 @@ HTML = """<!doctype html>
     }
 
     header {
-      display: flex;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
       justify-content: space-between;
-      gap: 18px;
-      padding: 18px 24px;
+      gap: 16px;
+      padding: 14px 24px;
       border-bottom: 1px solid var(--line);
-      background: var(--surface);
+      background: rgb(255 255 255 / 94%);
+      backdrop-filter: blur(10px);
     }
 
     h1 {
       margin: 0;
-      font-size: 20px;
+      font-size: 19px;
       line-height: 1.2;
       font-weight: 700;
     }
 
     main {
-      width: min(1480px, 100%);
+      width: min(1320px, 100%);
       margin: 0 auto;
-      padding: 18px 24px 28px;
+      padding: 16px 24px 28px;
     }
 
-    .statusbar {
+    .statusbar,
+    .portfolio-bar,
+    .strategy-overview {
       display: grid;
-      grid-template-columns: repeat(7, minmax(120px, 1fr));
-      gap: 1px;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--line);
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
     }
 
-    .portfolio-bar {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 1px;
-      overflow: hidden;
-      margin-bottom: 18px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--line);
-    }
-
-    .metric {
+    .metric,
+    .strategy-tile {
       min-width: 0;
-      min-height: 78px;
-      padding: 14px;
+      min-height: 68px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
       background: var(--surface);
+      box-shadow: var(--shadow);
     }
 
-    .metric .label {
-      margin-bottom: 8px;
+    .metric .label,
+    .strategy-tile .label {
+      margin-bottom: 7px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 650;
       text-transform: uppercase;
     }
 
-    .metric .value {
+    .metric .value,
+    .strategy-tile .value {
       font-variant-numeric: tabular-nums;
       font-size: 18px;
       font-weight: 700;
@@ -239,11 +240,16 @@ HTML = """<!doctype html>
       text-overflow: ellipsis;
     }
 
-    .metric .detail {
+    .metric .detail,
+    .strategy-tile .detail {
       margin-top: 5px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .strategy-tile {
+      min-height: 76px;
     }
 
     .subtle {
@@ -280,18 +286,24 @@ HTML = """<!doctype html>
     .view-nav {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 12px;
+      gap: 3px;
+      width: fit-content;
+      margin-top: 10px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
     }
 
     .view-tab {
       display: inline-flex;
       align-items: center;
-      min-height: 32px;
-      padding: 6px 12px;
-      border: 1px solid var(--line);
+      justify-content: center;
+      min-height: 30px;
+      padding: 5px 12px;
+      border: 0;
       border-radius: 6px;
-      background: var(--surface-2);
+      background: transparent;
       color: var(--muted);
       font-size: 13px;
       font-weight: 700;
@@ -299,9 +311,9 @@ HTML = """<!doctype html>
     }
 
     .view-tab.active {
-      border-color: #bfd2ea;
-      background: #e8f0fa;
-      color: var(--blue);
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: var(--shadow);
     }
 
     .program-switch {
@@ -371,7 +383,8 @@ HTML = """<!doctype html>
     }
 
     .portfolio-bar[data-page].active-page,
-    .statusbar[data-page].active-page {
+    .statusbar[data-page].active-page,
+    .strategy-overview[data-page].active-page {
       display: grid !important;
     }
 
@@ -380,7 +393,7 @@ HTML = """<!doctype html>
       align-items: baseline;
       justify-content: space-between;
       gap: 16px;
-      margin: 0 0 8px;
+      margin: 0 0 9px;
     }
 
     h2 {
@@ -394,6 +407,7 @@ HTML = """<!doctype html>
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--surface);
+      box-shadow: var(--shadow);
     }
 
     .stacked-table {
@@ -433,7 +447,7 @@ HTML = """<!doctype html>
     }
 
     th, td {
-      padding: 11px 12px;
+      padding: 10px 12px;
       border-bottom: 1px solid var(--line);
       text-align: left;
       vertical-align: middle;
@@ -443,7 +457,7 @@ HTML = """<!doctype html>
 
     th {
       color: var(--muted);
-      background: #fafbf9;
+      background: var(--surface-3);
       font-size: 12px;
       font-weight: 700;
       text-transform: uppercase;
@@ -541,13 +555,24 @@ HTML = """<!doctype html>
 
     .control-panel {
       display: grid;
-      grid-template-columns: repeat(8, minmax(120px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
       margin-bottom: 10px;
-      padding: 12px;
+      padding: 14px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .form-divider {
+      grid-column: 1 / -1;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
     }
 
     .field {
@@ -568,11 +593,11 @@ HTML = """<!doctype html>
     .field input,
     .field select {
       width: 100%;
-      min-height: 34px;
-      padding: 6px 8px;
+      min-height: 38px;
+      padding: 7px 9px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fbfcfb;
+      background: var(--surface-3);
       color: var(--text);
       font: inherit;
       font-size: 13px;
@@ -582,12 +607,16 @@ HTML = """<!doctype html>
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      min-height: 34px;
+      min-height: 38px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface-3);
       align-self: end;
     }
 
     .account-field {
-      grid-column: span 4;
+      grid-column: 1 / -1;
       align-self: stretch;
     }
 
@@ -596,11 +625,11 @@ HTML = """<!doctype html>
       flex-wrap: wrap;
       gap: 6px;
       align-items: center;
-      min-height: 34px;
+      min-height: 38px;
       padding: 5px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fbfcfb;
+      background: var(--surface-3);
     }
 
     .account-option {
@@ -641,7 +670,7 @@ HTML = """<!doctype html>
     }
 
     .control-button {
-      min-height: 34px;
+      min-height: 38px;
       align-self: end;
       border: 1px solid var(--focus);
       border-radius: 6px;
@@ -677,11 +706,19 @@ HTML = """<!doctype html>
     }
 
     @media (max-width: 980px) {
-      header { align-items: flex-start; flex-direction: column; }
+      header {
+        position: static;
+        grid-template-columns: 1fr;
+        align-items: flex-start;
+        padding: 13px 14px;
+      }
       .header-actions { width: 100%; justify-content: space-between; }
-      main { padding: 14px; }
-      .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .view-nav { width: 100%; }
+      .view-tab { flex: 1; }
+      main { padding: 12px 14px 22px; }
+      .portfolio-bar,
+      .statusbar,
+      .strategy-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .balance-table { min-width: 620px; }
       .orders-table { min-width: 960px; }
       .fills-table { min-width: 1080px; }
@@ -690,13 +727,47 @@ HTML = """<!doctype html>
       .account-field { grid-column: 1 / -1; }
       .opportunity { grid-template-columns: 1fr; }
     }
+
+    @media (max-width: 560px) {
+      h1 { font-size: 18px; }
+      section { margin-top: 16px; }
+      .portfolio-bar,
+      .statusbar { gap: 8px; }
+      .strategy-overview { grid-template-columns: 1fr; gap: 8px; }
+      .metric,
+      .strategy-tile {
+        min-height: 62px;
+        padding: 10px;
+      }
+      .metric .value,
+      .strategy-tile .value { font-size: 16px; }
+      .metric .label,
+      .strategy-tile .label { font-size: 10px; }
+      .portfolio-bar .metric:nth-child(1),
+      .portfolio-bar .metric:nth-child(2),
+      .portfolio-bar .metric:nth-child(3) {
+        grid-column: 1 / -1;
+      }
+      .control-panel { grid-template-columns: 1fr; }
+      .table-wrap {
+        margin-right: -14px;
+        margin-left: -14px;
+        border-right: 0;
+        border-left: 0;
+        border-radius: 0;
+      }
+      th, td {
+        padding: 9px 10px;
+        font-size: 12px;
+      }
+    }
   </style>
 </head>
 <body>
   <header>
     <div>
       <h1>ACS Arbitrage Monitor</h1>
-      <div class="subtle">Bithumb ACS/KRW · Bybit ACS/USDT · Coinbase ACS/USDC · Upbit ACS/USDT</div>
+      <div class="subtle">ACS spot arbitrage · market making · auto buy/sell</div>
       <nav class="view-nav" aria-label="Page views">
         <a class="view-tab active" data-view-tab="monitor" href="#monitor">Monitor</a>
         <a class="view-tab" data-view-tab="control" href="#control">Control & Config</a>
@@ -760,6 +831,29 @@ HTML = """<!doctype html>
       <div class="metric">
         <div class="label">Price Move</div>
         <div id="portfolio-price-pnl" class="value">--</div>
+      </div>
+    </div>
+
+    <div class="strategy-overview" data-page="monitor">
+      <div class="strategy-tile">
+        <div class="label">Market Maker</div>
+        <div id="monitor-mm-summary" class="value">--</div>
+        <div id="monitor-mm-detail" class="subtle detail">--</div>
+      </div>
+      <div class="strategy-tile">
+        <div class="label">Auto Buy/Sell</div>
+        <div id="monitor-auto-summary" class="value">--</div>
+        <div id="monitor-auto-detail" class="subtle detail">--</div>
+      </div>
+      <div class="strategy-tile">
+        <div class="label">Risk</div>
+        <div id="monitor-risk-summary" class="value">--</div>
+        <div id="monitor-risk-detail" class="subtle detail">--</div>
+      </div>
+      <div class="strategy-tile">
+        <div class="label">Orders</div>
+        <div id="monitor-orders-summary" class="value">--</div>
+        <div id="monitor-orders-detail" class="subtle detail">--</div>
       </div>
     </div>
 
@@ -871,6 +965,7 @@ HTML = """<!doctype html>
           <input id="risk-allow-live" type="checkbox">
           Allow Live
         </label>
+        <div class="form-divider">Scope</div>
         <div class="field account-field">
           <label>Accounts</label>
           <div id="risk-accounts" class="account-options"></div>
@@ -879,6 +974,7 @@ HTML = """<!doctype html>
           <label>Strategies</label>
           <div id="risk-strategies" class="account-options"></div>
         </div>
+        <div class="form-divider">Limits</div>
         <div class="field">
           <label for="risk-max-order">Max/Order</label>
           <input id="risk-max-order" type="number" min="0" step="any">
@@ -1063,6 +1159,7 @@ HTML = """<!doctype html>
             <option value="sell">Sell</option>
           </select>
         </div>
+        <div class="form-divider">Target</div>
         <div class="field">
           <label for="slow-total-base">Total Base</label>
           <input id="slow-total-base" type="number" min="0" step="any">
@@ -1071,6 +1168,7 @@ HTML = """<!doctype html>
           <label for="slow-total-quote">Total Quote</label>
           <input id="slow-total-quote" type="number" min="0" step="any">
         </div>
+        <div class="form-divider">Order Size</div>
         <div class="field">
           <label for="slow-slice-min">Min Base/Order</label>
           <input id="slow-slice-min" type="number" min="0" step="any">
@@ -1083,6 +1181,7 @@ HTML = """<!doctype html>
           <input id="slow-randomize" type="checkbox">
           Random
         </label>
+        <div class="form-divider">Timing</div>
         <div class="field">
           <label for="slow-interval">Place Sec</label>
           <input id="slow-interval" type="number" min="1" step="any">
@@ -1158,6 +1257,7 @@ HTML = """<!doctype html>
           <label>Account</label>
           <div id="mm-accounts" class="account-options"></div>
         </div>
+        <div class="form-divider">Ladder</div>
         <div class="field">
           <label for="mm-levels">Levels</label>
           <input id="mm-levels" type="number" min="1" step="1">
@@ -1185,6 +1285,7 @@ HTML = """<!doctype html>
           <label for="mm-min-distance">Min Distance</label>
           <input id="mm-min-distance" type="number" min="0" step="any">
         </div>
+        <div class="form-divider">Execution</div>
         <div class="field">
           <label for="mm-reprice">Reprice Bps</label>
           <input id="mm-reprice" type="number" min="0" step="any">
@@ -1713,6 +1814,49 @@ HTML = """<!doctype html>
       renderConsoleStrategies(tradingConsole);
       renderOpenOrders(orderActivity, "console-open-orders", true);
       renderRecentFills(orderActivity, "console-recent-fills");
+    }
+
+    function renderStrategySummaries(data) {
+      const marketMaker = data.market_maker || {};
+      const mmRuntime = marketMaker.runtime || {};
+      const mmPlan = marketMaker.plan || mmRuntime.last_plan || null;
+      const mmStatus = mmRuntime.status || marketMaker.status || "disabled";
+      const mmMode = mmRuntime.mode || marketMaker.mode || "dry_run";
+      text("monitor-mm-summary", `${mmMode} · ${mmStatus}`);
+      text(
+        "monitor-mm-detail",
+        mmPlan
+          ? `${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · open ${mmRuntime.open_order_count || 0}`
+          : marketMaker.error || mmRuntime.reason || "--"
+      );
+
+      const auto = data.slow_execution || {};
+      const autoTasks = auto.tasks?.tasks || [];
+      const activeTasks = autoTasks.filter((task) => !["complete", "stopped_by_price", "below_min_order_quote"].includes(task.status));
+      const autoStatus = auto.tasks
+        ? `${activeTasks.length}/${autoTasks.length} active`
+        : (auto.status || "disabled");
+      const firstTask = activeTasks[0] || autoTasks[0];
+      const autoDetail = firstTask
+        ? `${String(firstTask.config?.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${firstTask.status || "--"}`
+        : (auto.plan ? `${auto.plan.exchange} ${auto.plan.symbol} · ${String(auto.plan.side || "").toUpperCase()}` : "--");
+      text("monitor-auto-summary", autoStatus);
+      text("monitor-auto-detail", autoDetail);
+
+      const risk = data.operations?.risk || {};
+      const riskSummary = risk.allow_live_trading ? "Live allowed" : "Live blocked";
+      const riskDetail = `order $${money.format(risk.max_order_quote || 0)} · exposure $${money.format(risk.max_exposure_quote || 0)} · open ${risk.max_open_orders || 0}`;
+      text("monitor-risk-summary", riskSummary);
+      text("monitor-risk-detail", riskDetail);
+
+      const activity = data.order_activity || {};
+      const openOrders = activity.open_order_count || 0;
+      const fills = activity.recent_trade_count || 0;
+      const dailyPnl = activity.daily_pnl?.enabled
+        ? activity.daily_pnl?.total_realized_pnl
+        : activity.pnl_summary?.total_realized_pnl;
+      text("monitor-orders-summary", `Open ${openOrders} · Fills ${fills}`);
+      text("monitor-orders-detail", `P/L ${formatPnlValue(dailyPnl)} · ${formatAge(activity.last_finished)}`);
     }
 
     function renderOpportunities(items) {
@@ -2551,6 +2695,7 @@ HTML = """<!doctype html>
         renderOrderActivity(data.order_activity);
         renderTradingConsole(data.trading_console, data.order_activity);
         renderPortfolio(data.portfolio);
+        renderStrategySummaries(data);
         renderMarketMaker(data.market_maker);
         renderSlowExecution(data.slow_execution);
         renderSlowExecutionTasks(data.slow_execution?.tasks);

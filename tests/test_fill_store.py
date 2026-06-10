@@ -37,7 +37,6 @@ class FillStoreTest(unittest.TestCase):
                 "fee": {"cost": 0.0001, "currency": "USDC"},
                 "fee_common": 0.0001,
                 "realized_pnl_common": 0.0499,
-                "timestamp": 1_781_067_979_000,
             }
 
             first = persist_fill_pnl(cfg, [trade], currency="USD")
