@@ -212,7 +212,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
 
 The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
 
-The monitor can also show and configure a dry-run slow execution plan when `slow_execution.enabled` is true. This tool submits one buy or sell limit order at the current midpoint between best bid and best ask. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`.
+The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. This tool submits one buy or sell limit order at the current midpoint between best bid and best ask. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
 
 ```json
 "slow_execution": {
@@ -245,14 +245,14 @@ For `stop_price`, a sell schedule stops when midpoint price is at or below the s
 To preview the next slice without placing anything:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.auto_buy_sell \
   --config config.acs.json
 ```
 
 To simulate the full schedule in dry-run mode:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.auto_buy_sell \
   --config config.acs.json \
   --loop
 ```
@@ -260,14 +260,14 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
 To place real midpoint orders, configure API env vars on the target exchange entry, fund the account, and run with explicit live confirmation:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.auto_buy_sell \
   --config config.acs.json \
   --loop \
   --live \
   --confirm-live-orders
 ```
 
-The slow executor tracks submitted base amount, not confirmed fills. If an order rests unfilled, it still counts toward the submitted schedule. For fill-aware execution, add order and trade polling before using it for larger live sizes.
+The preferred command name is now `arbitrage_bot.auto_buy_sell`; `arbitrage_bot.slow_executor` remains as a backward-compatible alias. Auto Buy/Sell tracks submitted base amount, not confirmed fills. If an order rests unfilled, it still counts toward the submitted schedule. For fill-aware execution, add order and trade polling before using it for larger live sizes.
 
 ## Read-only account preflight
 
@@ -283,7 +283,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.account_check \
   --symbol ACS/USDT
 ```
 
-Without `--exchange`, it checks all configured exchange entries. Without `--symbol`, it uses symbols from `spot_markets`, `market_maker`, and `slow_execution`.
+Without `--exchange`, it checks all configured exchange entries. Without `--symbol`, it uses symbols from `spot_markets`, `market_maker`, and Auto Buy/Sell.
 
 Useful variants:
 
@@ -305,7 +305,7 @@ Treat a `status: "error"` result as a blocker for live testing. A `status: "warn
 
 ## Risk controls, events, and alerts
 
-Live market maker and slow execution orders now pass through a risk gate before any exchange order is submitted. Dry-run mode still prints the plan, but the payload includes a `risk` decision so you can see whether the same action would be allowed in live mode.
+Live market maker and Auto Buy/Sell orders now pass through a risk gate before any exchange order is submitted. Dry-run mode still prints the plan, but the payload includes a `risk` decision so you can see whether the same action would be allowed in live mode.
 
 By default, live trading is blocked until you explicitly set `risk.allow_live_trading` to `true`:
 
@@ -359,7 +359,7 @@ The kill switches are `trading_enabled`, `allow_market_maker`, `allow_slow_execu
 
 Order safety checks include max single-order notional, max cycle notional, max planned orders, projected max open orders, max cancels per cycle, and optional minimum seconds between cancel cycles. Market quality checks include minimum bid/ask depth, max bid/ask spread, max level-to-level order book gap, max adverse slippage, max price jump versus the previous cycle, max plan age, and max order book timestamp age.
 
-Every market maker and slow execution cycle is written to JSONL when `trade_log.enabled` is true:
+Every market maker and Auto Buy/Sell cycle is written to JSONL when `trade_log.enabled` is true:
 
 ```json
 "trade_log": {

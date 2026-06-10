@@ -16,6 +16,7 @@ from arbitrage_bot.config import (
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
 from arbitrage_bot.web import (
+    HTML,
     MonitorState,
     _slow_execution_overrides_from_payload,
     build_market_maker_payload,
@@ -59,6 +60,11 @@ def make_config(
 
 
 class WebMonitorTest(unittest.TestCase):
+    def test_page_uses_auto_buy_sell_label(self) -> None:
+        self.assertIn("Auto Buy/Sell", HTML)
+        self.assertIn("/api/auto-buy-sell", HTML)
+        self.assertNotIn("Slow Execution", HTML)
+
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
             SpotMarketConfig(

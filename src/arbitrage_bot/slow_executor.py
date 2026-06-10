@@ -24,7 +24,7 @@ def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
     for exchange in [*cfg.spot_exchanges, *cfg.derivative_exchanges]:
         if exchange.key == key:
             return exchange
-    raise ValueError(f"slow execution exchange is not configured: {key}")
+    raise ValueError(f"Auto Buy/Sell exchange is not configured: {key}")
 
 
 async def build_plan(
@@ -312,19 +312,23 @@ async def run_loop(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Slow midpoint buy/sell executor with guarded live order placement"
+        description="Auto Buy/Sell midpoint executor with guarded live order placement"
     )
     parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="Keep submitting configured slices until total_base is submitted.",
+        help="Keep submitting configured Auto Buy/Sell slices until total_base is submitted.",
     )
     parser.add_argument(
         "--interval-seconds",
         type=float,
         default=None,
-        help="Override slow_execution.interval_seconds. Minimum effective interval is 1 second.",
+        help=(
+            "Override Auto Buy/Sell interval_seconds "
+            "(config key slow_execution.interval_seconds). "
+            "Minimum effective interval is 1 second."
+        ),
     )
     parser.add_argument(
         "--live",

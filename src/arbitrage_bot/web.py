@@ -643,7 +643,7 @@ HTML = """<!doctype html>
 
     <section>
       <div class="section-title">
-        <h2>Slow Execution</h2>
+        <h2>Auto Buy/Sell</h2>
         <span id="slow-meta" class="subtle"></span>
       </div>
       <form id="slow-form" class="control-panel">
@@ -881,7 +881,7 @@ HTML = """<!doctype html>
         tr.innerHTML = `
           <td title="${escapeHtml(eventId)}">${escapeHtml(eventId.slice(0, 8) || "--")}</td>
           <td>${formatAge(event.logged_at)}</td>
-          <td>${escapeHtml(event.strategy || "--")}</td>
+          <td>${escapeHtml(displayStrategy(event.strategy))}</td>
           <td>${escapeHtml(event.mode || "--")}</td>
           <td>${escapeHtml(event.status || "--")}</td>
           <td>${escapeHtml(event.exchange || "--")}</td>
@@ -1058,6 +1058,12 @@ HTML = """<!doctype html>
       }[char]));
     }
 
+    function displayStrategy(value) {
+      if (value === "slow_execution") return "Auto Buy/Sell";
+      if (value === "market_maker") return "Market Maker";
+      return value || "--";
+    }
+
     function renderHolders(onchain) {
       const body = document.getElementById("holders");
       body.innerHTML = "";
@@ -1206,12 +1212,12 @@ HTML = """<!doctype html>
         stop_price: numericValue("slow-stop-price"),
       };
       try {
-        const res = await fetch("/api/slow-execution", {
+        const res = await fetch("/api/auto-buy-sell", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error("slow execution update failed");
+        if (!res.ok) throw new Error("auto buy/sell update failed");
         slowFormDirty = false;
         await refresh();
       } finally {
@@ -1946,7 +1952,7 @@ async def monitor_loop(
                 if slow_execution_payload.get("status") == "error":
                     warnings = [
                         *warnings,
-                        f"Slow execution: {slow_execution_payload.get('error')}",
+                        f"Auto Buy/Sell: {slow_execution_payload.get('error')}",
                     ]
 
                 elapsed = time.monotonic() - monotonic_started
@@ -2065,6 +2071,7 @@ def create_app(
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)
+    app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_get("/api/health", api_health)
     return app
