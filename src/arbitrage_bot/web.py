@@ -1169,6 +1169,13 @@ HTML = """<!doctype html>
           <input id="mm-quote" type="number" min="0" step="any">
         </div>
         <div class="field">
+          <label for="mm-depth-shape">Depth Shape</label>
+          <select id="mm-depth-shape">
+            <option value="linear">Linear</option>
+            <option value="flat">Flat</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="mm-min-quote">Min Quote</label>
           <input id="mm-min-quote" type="number" min="0" step="any">
         </div>
@@ -2292,6 +2299,7 @@ HTML = """<!doctype html>
       setNumericField("mm-levels", config.levels || 1);
       setNumericField("mm-band", config.price_band_pct || 0);
       setNumericField("mm-quote", config.quote_per_level || 0);
+      document.getElementById("mm-depth-shape").value = config.depth_shape || "linear";
       setNumericField("mm-min-quote", config.min_order_quote || 0);
       setNumericField("mm-min-distance", config.min_distance_bps || 0);
       setNumericField("mm-poll", config.poll_seconds || 1);
@@ -2307,6 +2315,7 @@ HTML = """<!doctype html>
         levels: numericValue("mm-levels"),
         price_band_pct: numericValue("mm-band"),
         quote_per_level: numericValue("mm-quote"),
+        depth_shape: document.getElementById("mm-depth-shape").value,
         min_order_quote: numericValue("mm-min-quote"),
         min_distance_bps: numericValue("mm-min-distance"),
         poll_seconds: numericValue("mm-poll"),
@@ -3956,6 +3965,12 @@ def _market_maker_overrides_from_payload(
         overrides["symbol"] = symbol
     elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
         overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
+
+    if "depth_shape" in payload:
+        depth_shape = str(payload["depth_shape"]).strip().lower()
+        if depth_shape not in {"flat", "linear"}:
+            raise ValueError("depth_shape must be flat or linear")
+        overrides["depth_shape"] = depth_shape
 
     if "levels" in payload:
         overrides["levels"] = _non_negative_int(payload, "levels")

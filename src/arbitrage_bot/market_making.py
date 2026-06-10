@@ -41,6 +41,7 @@ class MarketMakerPlan:
     price_band_pct: float
     levels: int
     quote_per_level: float
+    depth_shape: str
     bid_depth_quote: float = 0.0
     ask_depth_quote: float = 0.0
     max_level_gap_bps: float = 0.0
@@ -60,6 +61,7 @@ class MarketMakerPlan:
             "price_band_pct": self.price_band_pct,
             "levels": self.levels,
             "quote_per_level": self.quote_per_level,
+            "depth_shape": self.depth_shape,
             "bid_depth_quote": self.bid_depth_quote,
             "ask_depth_quote": self.ask_depth_quote,
             "max_level_gap_bps": self.max_level_gap_bps,
@@ -79,6 +81,9 @@ def build_symmetric_market_maker_plan(
         raise ValueError("market maker price_band_pct must be positive")
     if cfg.quote_per_level <= 0:
         raise ValueError("market maker quote_per_level must be positive")
+    depth_shape = cfg.depth_shape.lower()
+    if depth_shape not in {"flat", "linear"}:
+        raise ValueError("market maker depth_shape must be flat or linear")
     if not book.bids or not book.asks:
         raise ValueError("order book must have both bid and ask levels")
 
@@ -91,18 +96,26 @@ def build_symmetric_market_maker_plan(
     existing_spread_bps = (best_ask - best_bid) / mid_price * 10_000
     metrics = order_book_metric_snapshot(book)
     step_pct = cfg.price_band_pct / cfg.levels / 100
+    active_levels = [
+        level
+        for level in range(1, cfg.levels + 1)
+        if step_pct * level * 10_000 >= cfg.min_distance_bps
+    ]
+    quote_by_level = _quote_notional_by_level(
+        active_levels,
+        quote_per_level=cfg.quote_per_level,
+        min_order_quote=cfg.min_order_quote,
+        depth_shape=depth_shape,
+    )
     orders: list[MarketMakerOrder] = []
 
-    for level in range(1, cfg.levels + 1):
+    for level in active_levels:
         distance_pct = step_pct * level
         distance_bps = distance_pct * 10_000
-        if distance_bps < cfg.min_distance_bps:
-            continue
-
+        quote_notional = quote_by_level[level]
         bid_price = mid_price * (1 - distance_pct)
         ask_price = mid_price * (1 + distance_pct)
         for side, price in (("buy", bid_price), ("sell", ask_price)):
-            quote_notional = cfg.quote_per_level
             if quote_notional < cfg.min_order_quote:
                 continue
             orders.append(
@@ -129,6 +142,7 @@ def build_symmetric_market_maker_plan(
         price_band_pct=cfg.price_band_pct,
         levels=cfg.levels,
         quote_per_level=cfg.quote_per_level,
+        depth_shape=depth_shape,
         bid_depth_quote=float(metrics["bid_depth_quote"] or 0.0),
         ask_depth_quote=float(metrics["ask_depth_quote"] or 0.0),
         max_level_gap_bps=float(metrics["max_level_gap_bps"] or 0.0),
@@ -139,3 +153,30 @@ def build_symmetric_market_maker_plan(
         ),
         orders=orders,
     )
+
+
+def _quote_notional_by_level(
+    levels: list[int],
+    *,
+    quote_per_level: float,
+    min_order_quote: float,
+    depth_shape: str,
+) -> dict[int, float]:
+    if not levels:
+        return {}
+    if depth_shape == "flat":
+        return {level: quote_per_level for level in levels}
+
+    weights = {level: float(index) for index, level in enumerate(levels, start=1)}
+    total_weight = sum(weights.values())
+    total_quote = quote_per_level * len(levels)
+    if min_order_quote > 0 and total_quote >= min_order_quote * len(levels):
+        extra_quote = total_quote - min_order_quote * len(levels)
+        return {
+            level: min_order_quote + extra_quote * weight / total_weight
+            for level, weight in weights.items()
+        }
+    return {
+        level: total_quote * weight / total_weight
+        for level, weight in weights.items()
+    }

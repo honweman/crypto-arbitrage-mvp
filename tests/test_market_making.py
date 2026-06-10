@@ -25,6 +25,7 @@ class MarketMakingTest(unittest.TestCase):
             levels=2,
             price_band_pct=10.0,
             quote_per_level=100.0,
+            depth_shape="flat",
         )
 
         plan = build_symmetric_market_maker_plan(book, cfg)
@@ -56,6 +57,7 @@ class MarketMakingTest(unittest.TestCase):
             levels=10,
             price_band_pct=10.0,
             quote_per_level=10.0,
+            depth_shape="flat",
             min_distance_bps=500.0,
         )
 
@@ -64,6 +66,62 @@ class MarketMakingTest(unittest.TestCase):
         self.assertEqual(len(plan.orders), 12)
         self.assertEqual(plan.orders[0].level, 5)
         self.assertAlmostEqual(plan.orders[0].distance_bps, 500.0)
+
+    def test_linear_depth_is_shallower_near_top_of_book(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=90.0, amount=10.0)],
+            asks=[BookLevel(price=110.0, amount=10.0)],
+        )
+        cfg = MarketMakerConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            levels=3,
+            price_band_pct=3.0,
+            quote_per_level=60.0,
+            depth_shape="linear",
+        )
+
+        plan = build_symmetric_market_maker_plan(book, cfg)
+        buy_quotes = [
+            order.quote_notional for order in plan.orders if order.side == "buy"
+        ]
+        sell_quotes = [
+            order.quote_notional for order in plan.orders if order.side == "sell"
+        ]
+
+        self.assertEqual(buy_quotes, [30.0, 60.0, 90.0])
+        self.assertEqual(sell_quotes, [30.0, 60.0, 90.0])
+        self.assertAlmostEqual(sum(buy_quotes), 60.0 * 3)
+
+    def test_linear_depth_respects_min_order_quote_when_possible(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="coinbase-spot",
+            symbol="ACS/USDC",
+            bids=[BookLevel(price=0.00014, amount=100_000)],
+            asks=[BookLevel(price=0.00016, amount=100_000)],
+        )
+        cfg = MarketMakerConfig(
+            enabled=True,
+            exchange="coinbase-spot",
+            symbol="ACS/USDC",
+            levels=2,
+            price_band_pct=1.0,
+            quote_per_level=1.2,
+            depth_shape="linear",
+            min_order_quote=1.0,
+        )
+
+        plan = build_symmetric_market_maker_plan(book, cfg)
+        buy_quotes = [
+            order.quote_notional for order in plan.orders if order.side == "buy"
+        ]
+
+        self.assertAlmostEqual(buy_quotes[0], 1.0 + 0.4 / 3)
+        self.assertAlmostEqual(buy_quotes[1], 1.0 + 0.8 / 3)
+        self.assertTrue(buy_quotes[0] < buy_quotes[1])
 
 
 class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):

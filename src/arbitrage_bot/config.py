@@ -72,6 +72,7 @@ class MarketMakerConfig:
     levels: int = 10
     price_band_pct: float = 10.0
     quote_per_level: float = 1.0
+    depth_shape: str = "linear"
     min_order_quote: float = 0.0
     min_distance_bps: float = 0.0
     poll_seconds: float = 1.0
@@ -346,6 +347,7 @@ def load_config(path: str | Path) -> BotConfig:
             levels=int(market_maker_raw.get("levels", 10)),
             price_band_pct=float(market_maker_raw.get("price_band_pct", 10.0)),
             quote_per_level=float(market_maker_raw.get("quote_per_level", 1.0)),
+            depth_shape=str(market_maker_raw.get("depth_shape", "linear")).lower(),
             min_order_quote=float(market_maker_raw.get("min_order_quote", 0.0)),
             min_distance_bps=float(market_maker_raw.get("min_distance_bps", 0.0)),
             poll_seconds=float(market_maker_raw.get("poll_seconds", 1.0)),

@@ -448,6 +448,7 @@ class WebMonitorTest(unittest.TestCase):
                 "levels": "6",
                 "price_band_pct": "4.5",
                 "quote_per_level": "2",
+                "depth_shape": "linear",
                 "min_order_quote": "0.5",
                 "min_distance_bps": "20",
                 "poll_seconds": "1",
@@ -464,6 +465,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["levels"], 6)
         self.assertEqual(overrides["price_band_pct"], 4.5)
         self.assertEqual(overrides["quote_per_level"], 2.0)
+        self.assertEqual(overrides["depth_shape"], "linear")
         self.assertEqual(overrides["min_order_quote"], 0.5)
         self.assertEqual(overrides["min_distance_bps"], 20.0)
         self.assertEqual(overrides["poll_seconds"], 1.0)
@@ -475,6 +477,14 @@ class WebMonitorTest(unittest.TestCase):
                 {"exchange": "coinbase-spot", "symbol": "ACS/USDT"},
                 allowed_exchanges={"coinbase-spot"},
                 symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
+            )
+
+    def test_market_maker_update_payload_rejects_unknown_depth_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, "depth_shape"):
+            _market_maker_overrides_from_payload(
+                {"exchange": "bybit-spot", "depth_shape": "random"},
+                allowed_exchanges={"bybit-spot"},
+                symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
             )
 
     def test_risk_update_payload_is_sanitized(self) -> None:
@@ -1410,6 +1420,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 "live_enabled": True,
                 "levels": 4,
                 "quote_per_level": 2.0,
+                "depth_shape": "flat",
             },
             cfg=cfg,
         )
@@ -1417,6 +1428,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(runtime_cfg.market_maker.live_enabled)
         self.assertEqual(runtime_cfg.market_maker.levels, 4)
+        self.assertEqual(runtime_cfg.market_maker.depth_shape, "flat")
         self.assertEqual(update["config"]["quote_per_level"], 2.0)
         strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
         self.assertTrue(strategies["market_maker"]["live"])

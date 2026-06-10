@@ -156,6 +156,8 @@ To add another spot asset later, add its markets to `spot_markets`, add one posi
 
 The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. With the ACS config and `--poll-seconds 1`, the page fetches the latest REST order book every second and recalculates the 20 planned bid/ask orders from the fresh mid price. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
 
+`depth_shape: "linear"` makes the first level closest to the top of book the smallest, then increases quote size on each farther level. `quote_per_level` is the average quote amount per active level, so the per-side total remains approximately `levels * quote_per_level`; `depth_shape: "flat"` restores the old uniform sizing. `min_order_quote` is treated as a per-level floor when the total quote budget is large enough, which helps avoid creating inner orders below exchange minimum notional.
+
 `quote_per_level` and `min_order_quote` are always expressed in the selected exchange pair's quote currency: USDT for Bybit/Upbit `ACS/USDT`, USDC for Coinbase `ACS/USDC`, and KRW for Bithumb `ACS/KRW`. Risk checks convert those quote amounts into `common_quote_currency` using `quote_rates` before applying `max_order_quote`, `max_cycle_quote`, and exposure limits. If a quote rate is missing, live MM is blocked.
 
 Exchange support is intentionally conservative. Bybit, Coinbase, and Upbit support post-only limit orders through ccxt. Bithumb does not expose post-only support through ccxt, so Bithumb MM with `post_only: true` is blocked before order placement; only set `post_only: false` and `risk.require_post_only: false` for Bithumb if you explicitly accept taker-fill risk. Bithumb also does not support client order ids through ccxt, so its MM orders can only be tracked in memory until the process restarts.
@@ -170,6 +172,7 @@ Always run the account preflight before live MM. Public ccxt metadata can expose
   "levels": 10,
   "price_band_pct": 10.0,
   "quote_per_level": 1.0,
+  "depth_shape": "linear",
   "min_order_quote": 0.1,
   "min_distance_bps": 0.0,
   "poll_seconds": 1,
