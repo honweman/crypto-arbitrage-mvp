@@ -269,6 +269,33 @@ HTML = """<!doctype html>
       gap: 12px;
     }
 
+    .view-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .view-tab {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 6px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .view-tab.active {
+      border-color: #bfd2ea;
+      background: #e8f0fa;
+      color: var(--blue);
+    }
+
     .program-switch {
       display: inline-flex;
       align-items: center;
@@ -325,6 +352,19 @@ HTML = """<!doctype html>
 
     section {
       margin-top: 18px;
+    }
+
+    [data-page] {
+      display: none !important;
+    }
+
+    [data-page].active-page {
+      display: block !important;
+    }
+
+    .portfolio-bar[data-page].active-page,
+    .statusbar[data-page].active-page {
+      display: grid !important;
     }
 
     .section-title {
@@ -647,6 +687,10 @@ HTML = """<!doctype html>
     <div>
       <h1>ACS Arbitrage Monitor</h1>
       <div class="subtle">Bithumb ACS/KRW · Bybit ACS/USDT · Coinbase ACS/USDC · Upbit ACS/USDT</div>
+      <nav class="view-nav" aria-label="Page views">
+        <a class="view-tab active" data-view-tab="monitor" href="#monitor">Monitor</a>
+        <a class="view-tab" data-view-tab="control" href="#control">Control & Config</a>
+      </nav>
     </div>
     <div class="header-actions">
       <label class="program-switch" title="Pause or resume scans">
@@ -659,7 +703,7 @@ HTML = """<!doctype html>
   </header>
 
   <main>
-    <div class="portfolio-bar">
+    <div class="portfolio-bar" data-page="monitor">
       <div class="metric">
         <div class="label">Position</div>
         <div id="portfolio-position" class="value">--</div>
@@ -709,7 +753,7 @@ HTML = """<!doctype html>
       </div>
     </div>
 
-    <div class="statusbar">
+    <div class="statusbar" data-page="monitor">
       <div class="metric">
         <div class="label">Scans</div>
         <div id="scan-count" class="value">0</div>
@@ -740,7 +784,7 @@ HTML = """<!doctype html>
       </div>
     </div>
 
-    <section>
+    <section data-page="control">
       <div class="section-title">
         <h2>Live Trading Console</h2>
         <span id="console-meta" class="subtle"></span>
@@ -807,7 +851,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="control">
       <div class="section-title">
         <h2>Risk Controls</h2>
         <span id="risk-control-meta" class="subtle"></span>
@@ -853,7 +897,7 @@ HTML = """<!doctype html>
       </form>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Account Balances</h2>
         <span id="account-balances-meta" class="subtle"></span>
@@ -875,7 +919,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Orders & Fills</h2>
         <span id="orders-meta" class="subtle"></span>
@@ -894,7 +938,6 @@ HTML = """<!doctype html>
               <th class="num">Remaining</th>
               <th class="num">Cost</th>
               <th>Updated</th>
-              <th>Action</th>
             </tr>
           </thead>
           <tbody id="open-orders"></tbody>
@@ -922,7 +965,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Risk & Events</h2>
         <span id="risk-meta" class="subtle"></span>
@@ -952,7 +995,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Markets</h2>
         <span id="warnings" class="subtle"></span>
@@ -977,7 +1020,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Live Opportunities</h2>
         <span id="common-quote" class="subtle">USD</span>
@@ -985,7 +1028,7 @@ HTML = """<!doctype html>
       <div id="opportunities" class="feed"></div>
     </section>
 
-    <section>
+    <section data-page="control">
       <div class="section-title">
         <h2>Auto Buy/Sell</h2>
         <span id="slow-meta" class="subtle"></span>
@@ -1079,7 +1122,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="control">
       <div class="section-title">
         <h2>Market Maker Plan</h2>
         <span id="mm-meta" class="subtle"></span>
@@ -1101,7 +1144,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Quote Rates</h2>
       </div>
@@ -1118,7 +1161,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section>
+    <section data-page="monitor">
       <div class="section-title">
         <h2>Solana Top Holders</h2>
         <span id="onchain-meta" class="subtle"></span>
@@ -1147,6 +1190,27 @@ HTML = """<!doctype html>
     const money = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     const compact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
     const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+    const PAGE_IDS = new Set(["monitor", "control"]);
+
+    function pageFromLocation() {
+      const hashPage = window.location.hash.replace("#", "");
+      return PAGE_IDS.has(hashPage) ? hashPage : "monitor";
+    }
+
+    function setActivePage(page) {
+      const activePage = PAGE_IDS.has(page) ? page : "monitor";
+      document.querySelectorAll("[data-page]").forEach((el) => {
+        el.classList.toggle("active-page", el.dataset.page === activePage);
+      });
+      document.querySelectorAll("[data-view-tab]").forEach((tab) => {
+        const active = tab.dataset.viewTab === activePage;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-current", active ? "page" : "false");
+      });
+      if (window.location.hash !== `#${activePage}`) {
+        history.replaceState(null, "", `#${activePage}`);
+      }
+    }
 
     function text(id, value) {
       document.getElementById(id).textContent = value;
@@ -1349,19 +1413,20 @@ HTML = """<!doctype html>
       }
     }
 
-    function renderOpenOrders(orderActivity, bodyId = "open-orders") {
+    function renderOpenOrders(orderActivity, bodyId = "open-orders", showActions = false) {
       const body = document.getElementById(bodyId);
       body.innerHTML = "";
       const orders = orderActivity?.open_orders || [];
       if (orders.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="11">No open orders.</td>`;
+        tr.innerHTML = `<td colspan="${showActions ? 11 : 10}">No open orders.</td>`;
         body.appendChild(tr);
         return;
       }
 
       for (const order of orders) {
         const tr = document.createElement("tr");
+        const actionCell = showActions ? `<td class="order-action"></td>` : "";
         tr.innerHTML = `
           <td>${escapeHtml(order.label || order.exchange)}</td>
           <td>${escapeHtml(order.symbol || "--")}</td>
@@ -1373,17 +1438,19 @@ HTML = """<!doctype html>
           <td class="num">${formatBalanceAmount(order.remaining)}</td>
           <td class="num">${formatBalanceAmount(order.cost)}</td>
           <td>${formatTimestamp(order.timestamp)}</td>
-          <td class="order-action"></td>
+          ${actionCell}
         `;
-        const action = tr.querySelector(".order-action");
-        const button = document.createElement("button");
-        button.className = "danger-button";
-        button.type = "button";
-        button.textContent = "Cancel";
-        button.disabled = !order.id;
-        button.title = order.id || "";
-        button.addEventListener("click", () => cancelOrder(order, button));
-        action.appendChild(button);
+        if (showActions) {
+          const action = tr.querySelector(".order-action");
+          const button = document.createElement("button");
+          button.className = "danger-button";
+          button.type = "button";
+          button.textContent = "Cancel";
+          button.disabled = !order.id;
+          button.title = order.id || "";
+          button.addEventListener("click", () => cancelOrder(order, button));
+          action.appendChild(button);
+        }
         body.appendChild(tr);
       }
     }
@@ -1559,7 +1626,7 @@ HTML = """<!doctype html>
       allButton.onclick = () => cancelBulkOrders({ scope: "all" }, allButton);
       renderConsoleAccountActions(tradingConsole);
       renderConsoleStrategies(tradingConsole);
-      renderOpenOrders(orderActivity, "console-open-orders");
+      renderOpenOrders(orderActivity, "console-open-orders", true);
       renderRecentFills(orderActivity, "console-recent-fills");
     }
 
@@ -2250,6 +2317,11 @@ HTML = """<!doctype html>
         status.className = "pill error";
       }
     }
+
+    setActivePage(pageFromLocation());
+    window.addEventListener("hashchange", () => {
+      setActivePage(pageFromLocation());
+    });
 
     refresh();
     document.getElementById("program-toggle").addEventListener("change", (event) => {
