@@ -13,6 +13,11 @@ from typing import Any
 from aiohttp import web
 
 from .account_check import _auth_env_status, _balance_currencies, _summarize_balance
+from .auto_buy_sell_task import (
+    AutoBuySellTaskService,
+    default_task_store_path,
+    validate_task_config,
+)
 from .config import (
     AssetPosition,
     BotConfig,
@@ -959,7 +964,28 @@ HTML = """<!doctype html>
           <input id="slow-stop-price" type="number" min="0" step="any">
         </div>
         <button id="slow-apply" class="control-button" type="submit">Apply</button>
+        <button id="slow-create-task" class="control-button" type="button">Create Task</button>
       </form>
+      <div class="table-wrap stacked-table">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Status</th>
+              <th>Account</th>
+              <th>Side</th>
+              <th class="num">Filled</th>
+              <th class="num">Remaining</th>
+              <th class="num">Progress</th>
+              <th class="num">Open</th>
+              <th>Last</th>
+              <th>Next</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="slow-tasks"></tbody>
+        </table>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1596,6 +1622,61 @@ HTML = """<!doctype html>
       body.appendChild(tr);
     }
 
+    function formatDue(ts) {
+      if (!ts) return "--";
+      const seconds = ts - Date.now() / 1000;
+      return seconds <= 0 ? "due" : `${seconds.toFixed(0)}s`;
+    }
+
+    function renderSlowExecutionTasks(taskPayload) {
+      const body = document.getElementById("slow-tasks");
+      body.innerHTML = "";
+      const tasks = taskPayload?.tasks || [];
+      if (tasks.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="11">No Auto Buy/Sell tasks.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const task of tasks) {
+        const config = task.config || {};
+        const status = task.status || "--";
+        const statusClass = status === "complete" ? "risk-ok" : status === "paused" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
+        const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
+          <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
+          <td>${escapeHtml(config.exchange || "--")}</td>
+          <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
+          <td class="num">${progressLabel} ${compact.format(task.filled_base || 0)} / ${compact.format(config.total_base || 0)}</td>
+          <td class="num">${compact.format(task.remaining_base || 0)}</td>
+          <td class="num">${(task.progress_pct || 0).toFixed(2)}%</td>
+          <td class="num">${task.open_order_count || 0}</td>
+          <td>${formatAge(task.last_cycle_at)}</td>
+          <td>${formatDue(task.next_run_at)}</td>
+          <td class="strategy-action"></td>
+        `;
+        const action = tr.querySelector(".strategy-action");
+        if (status !== "complete" && status !== "stopped_by_price" && status !== "below_min_order_quote") {
+          const button = document.createElement("button");
+          button.className = status === "paused" ? "control-button" : "danger-button";
+          button.type = "button";
+          button.textContent = status === "paused" ? "Resume" : "Pause";
+          button.addEventListener("click", () => controlAutoBuySellTask(
+            task.id,
+            status === "paused" ? "resume" : "pause",
+            button
+          ));
+          action.appendChild(button);
+        } else {
+          action.textContent = "--";
+        }
+        body.appendChild(tr);
+      }
+    }
+
     function pnlClass(value) {
       if (value == null || Math.abs(value) < 1e-12) return "pnl-flat";
       return value > 0 ? "pnl-positive" : "pnl-negative";
@@ -1983,13 +2064,8 @@ HTML = """<!doctype html>
       setNumericField("slow-stop-price", config.stop_price || 0);
     }
 
-    async function applySlowExecutionConfig(event) {
-      event.preventDefault();
-      if (slowFormBusy) return;
-      slowFormBusy = true;
-      const button = document.getElementById("slow-apply");
-      button.disabled = true;
-      const payload = {
+    function slowExecutionPayloadFromForm() {
+      return {
         enabled: document.getElementById("slow-enabled").checked,
         exchange: selectedSlowAccount(),
         side: document.getElementById("slow-side").value,
@@ -2001,6 +2077,15 @@ HTML = """<!doctype html>
         order_ttl_seconds: numericValue("slow-ttl"),
         stop_price: numericValue("slow-stop-price"),
       };
+    }
+
+    async function applySlowExecutionConfig(event) {
+      event.preventDefault();
+      if (slowFormBusy) return;
+      slowFormBusy = true;
+      const button = document.getElementById("slow-apply");
+      button.disabled = true;
+      const payload = slowExecutionPayloadFromForm();
       try {
         const res = await fetch("/api/auto-buy-sell", {
           method: "POST",
@@ -2013,6 +2098,41 @@ HTML = """<!doctype html>
       } finally {
         button.disabled = false;
         slowFormBusy = false;
+      }
+    }
+
+    async function createAutoBuySellTask() {
+      if (slowFormBusy) return;
+      slowFormBusy = true;
+      const button = document.getElementById("slow-create-task");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/auto-buy-sell/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(slowExecutionPayloadFromForm()),
+        });
+        if (!res.ok) throw new Error("create task failed");
+        slowFormDirty = false;
+        await refresh();
+      } finally {
+        button.disabled = false;
+        slowFormBusy = false;
+      }
+    }
+
+    async function controlAutoBuySellTask(taskId, action, button) {
+      button.disabled = true;
+      try {
+        const res = await fetch(`/api/auto-buy-sell/tasks/${encodeURIComponent(taskId)}/control`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        if (!res.ok) throw new Error("task control failed");
+        await refresh();
+      } finally {
+        button.disabled = false;
       }
     }
 
@@ -2049,6 +2169,7 @@ HTML = """<!doctype html>
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
         renderSlowExecution(data.slow_execution);
+        renderSlowExecutionTasks(data.slow_execution?.tasks);
         renderRates(data.quote_rates);
         renderOpportunities(data.opportunities);
         renderHolders(data.onchain);
@@ -2071,6 +2192,7 @@ HTML = """<!doctype html>
       slowFormDirty = true;
     });
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
+    document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     setInterval(refresh, 1000);
   </script>
 </body>
@@ -2193,6 +2315,7 @@ def build_trading_console_payload(
     *,
     strategy_paused: dict[str, bool] | None = None,
     order_activity: dict[str, Any] | None = None,
+    auto_buy_sell_tasks: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     strategy_paused = strategy_paused or {}
@@ -2248,6 +2371,23 @@ def build_trading_console_payload(
             "account_enabled": account_enabled,
         }
 
+    auto_tasks = [
+        task
+        for task in (auto_buy_sell_tasks or {}).get("tasks", [])
+        if task.get("status")
+        not in {"complete", "stopped_by_price", "below_min_order_quote"}
+    ]
+    first_auto_task = auto_tasks[0] if auto_tasks else {}
+    first_auto_config = (
+        first_auto_task.get("config")
+        if isinstance(first_auto_task.get("config"), dict)
+        else {}
+    )
+    slow_exchange = str(first_auto_config.get("exchange") or exec_cfg.exchange)
+    slow_symbol = str(first_auto_config.get("symbol") or exec_cfg.symbol)
+    if len(auto_tasks) > 1:
+        slow_symbol = f"{len(auto_tasks)} tasks"
+
     strategies = [
         strategy_row(
             strategy_id="market_maker",
@@ -2261,9 +2401,9 @@ def build_trading_console_payload(
         strategy_row(
             strategy_id="slow_execution",
             label="Auto Buy/Sell",
-            configured=exec_cfg.enabled,
-            exchange=exec_cfg.exchange,
-            symbol=exec_cfg.symbol,
+            configured=exec_cfg.enabled or bool(auto_tasks),
+            exchange=slow_exchange,
+            symbol=slow_symbol,
             strategy_allowed=cfg.risk.allow_slow_execution
             and _risk_strategy_enabled(cfg, "slow_execution"),
         ),
@@ -3563,6 +3703,14 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "plan": None,
             "config": slow_execution_config_to_dict(cfg.slow_execution),
             "accounts": slow_execution_accounts(cfg.spot_exchanges),
+            "tasks": {
+                "status": "ok",
+                "path": default_task_store_path(cfg),
+                "tasks": [],
+                "task_count": 0,
+                "active_count": 0,
+                "updated_at": time.time(),
+            },
             "error": None,
         },
         "portfolio": {
@@ -3623,6 +3771,7 @@ class MonitorState:
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
         self._payload = _build_initial_payload(cfg, poll_seconds)
+        self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
 
     def _runtime_config_unlocked(self, cfg: BotConfig) -> BotConfig:
@@ -3686,6 +3835,7 @@ class MonitorState:
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
                 order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
             return json.loads(
                 json.dumps(
@@ -3717,6 +3867,7 @@ class MonitorState:
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
                 order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
             return json.loads(json.dumps(self._payload["trading_console"]))
 
@@ -3749,6 +3900,16 @@ class MonitorState:
         async with self._lock:
             self._payload["order_activity"] = order_activity
 
+    async def set_auto_buy_sell_tasks(self, tasks: dict[str, Any]) -> None:
+        async with self._lock:
+            self._auto_buy_sell_tasks = tasks
+            if "slow_execution" in self._payload:
+                self._payload["slow_execution"]["tasks"] = tasks
+
+    async def auto_buy_sell_tasks(self) -> dict[str, Any]:
+        async with self._lock:
+            return json.loads(json.dumps(self._auto_buy_sell_tasks))
+
     async def set_scan_result(
         self,
         *,
@@ -3775,6 +3936,7 @@ class MonitorState:
 
         status = "running" if not warnings else "degraded"
         async with self._lock:
+            slow_execution["tasks"] = self._auto_buy_sell_tasks
             self._payload = {
                 "status": status,
                 "config": {
@@ -4274,6 +4436,7 @@ async def monitor_loop(
                     runtime_slow_execution,
                     strategy_paused=strategy_pauses,
                     order_activity=order_activity_payload,
+                    auto_buy_sell_tasks=await state.auto_buy_sell_tasks(),
                 )
 
                 if runtime_cfg.onchain_monitor.enabled and now >= next_onchain_scan:
@@ -4359,6 +4522,29 @@ async def monitor_loop(
             await solana_client.close()
 
 
+async def auto_buy_sell_task_loop(
+    cfg: BotConfig,
+    state: MonitorState,
+    tasks: AutoBuySellTaskService,
+) -> None:
+    manager = ExchangeManager()
+    try:
+        await state.set_auto_buy_sell_tasks(await tasks.snapshot())
+        while True:
+            runtime_cfg = await state.runtime_config(cfg)
+            strategy_pauses = await state.strategy_pauses()
+            payload = await tasks.run_due_tasks(
+                runtime_cfg,
+                manager,
+                strategy_paused=strategy_pauses.get("slow_execution", False),
+                program_running=await state.is_running(),
+            )
+            await state.set_auto_buy_sell_tasks(payload)
+            await asyncio.sleep(1.0)
+    finally:
+        await manager.close()
+
+
 async def index(_: web.Request) -> web.Response:
     return web.Response(text=HTML, content_type="text/html")
 
@@ -4403,6 +4589,67 @@ async def api_slow_execution(request: web.Request) -> web.Response:
             "ok": True,
             "config": slow_execution_config_to_dict(current_config),
             "accounts": slow_execution_accounts(cfg.spot_exchanges),
+        }
+    )
+
+
+async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
+    try:
+        payload = await request.json()
+        accounts = slow_execution_accounts(cfg.spot_exchanges)
+        allowed_exchanges = {account["key"] for account in accounts}
+        overrides = _slow_execution_overrides_from_payload(
+            payload,
+            allowed_exchanges=allowed_exchanges,
+        )
+        base_config = await state.slow_execution_config(cfg.slow_execution)
+        task_config = replace(base_config, **overrides, enabled=True)
+        validate_task_config(task_config)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    await state.set_slow_execution_overrides(
+        {
+            **overrides,
+            "enabled": True,
+        }
+    )
+    task = await tasks.create_task(task_config)
+    snapshot = await tasks.snapshot()
+    await state.set_auto_buy_sell_tasks(snapshot)
+    return web.json_response(
+        {
+            "ok": True,
+            "task": task,
+            "tasks": snapshot,
+            "config": slow_execution_config_to_dict(task_config),
+        }
+    )
+
+
+async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
+    task_id = request.match_info.get("task_id", "")
+    try:
+        payload = await request.json()
+        action = str(payload.get("action", "")).strip().lower()
+        if action not in {"pause", "resume"}:
+            raise ValueError("action must be pause or resume")
+        task = await tasks.set_paused(task_id, action == "pause")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    snapshot = await tasks.snapshot()
+    await state.set_auto_buy_sell_tasks(snapshot)
+    return web.json_response(
+        {
+            "ok": True,
+            "task": task,
+            "tasks": snapshot,
         }
     )
 
@@ -4546,18 +4793,27 @@ def create_app(
     interval = cfg.poll_seconds if poll_seconds is None else poll_seconds
     app = web.Application()
     state = MonitorState(cfg, interval)
+    auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
     app["monitor_state"] = state
     app["config"] = cfg
+    app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
 
     async def monitor_context(app_: web.Application) -> Any:
-        task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
-        app_["monitor_task"] = task
+        monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
+        auto_task = asyncio.create_task(
+            auto_buy_sell_task_loop(cfg, state, auto_buy_sell_tasks)
+        )
+        app_["monitor_task"] = monitor_task
+        app_["auto_buy_sell_task"] = auto_task
         try:
             yield
         finally:
-            task.cancel()
+            monitor_task.cancel()
+            auto_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
+                await monitor_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await auto_task
 
     app.cleanup_ctx.append(monitor_context)
     app.router.add_get("/", index)
@@ -4566,6 +4822,11 @@ def create_app(
     app.router.add_post("/api/risk", api_risk)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
+    app.router.add_post("/api/auto-buy-sell/tasks", api_create_auto_buy_sell_task)
+    app.router.add_post(
+        "/api/auto-buy-sell/tasks/{task_id}/control",
+        api_control_auto_buy_sell_task,
+    )
     app.router.add_post("/api/orders/cancel", api_cancel_order)
     app.router.add_post("/api/orders/cancel-bulk", api_cancel_bulk_orders)
     app.router.add_post("/api/strategies/control", api_strategy_control)

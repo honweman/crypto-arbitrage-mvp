@@ -78,6 +78,9 @@ class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn("Auto Buy/Sell", HTML)
         self.assertIn("/api/auto-buy-sell", HTML)
+        self.assertIn("/api/auto-buy-sell/tasks", HTML)
+        self.assertIn('id="slow-create-task"', HTML)
+        self.assertIn('id="slow-tasks"', HTML)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_page_includes_account_balances(self) -> None:
@@ -149,6 +152,33 @@ class WebMonitorTest(unittest.TestCase):
         self.assertFalse(strategies["slow_execution"]["live"])
         self.assertEqual(accounts["coinbase-spot"]["open_order_count"], 2)
         self.assertEqual(payload["recent_trade_count"], 5)
+
+    def test_trading_console_payload_uses_auto_buy_sell_tasks(self) -> None:
+        cfg = make_config(
+            slow_execution=SlowExecutionConfig(enabled=False),
+            spot_exchanges=[ExchangeConfig(id="coinbase", label="coinbase-spot")],
+            risk=RiskConfig(allow_live_trading=True),
+        )
+
+        payload = build_trading_console_payload(
+            cfg,
+            auto_buy_sell_tasks={
+                "tasks": [
+                    {
+                        "status": "running",
+                        "config": {
+                            "exchange": "coinbase-spot",
+                            "symbol": "ACS/USDC",
+                        },
+                    }
+                ]
+            },
+        )
+
+        strategies = {row["id"]: row for row in payload["strategies"]}
+        self.assertTrue(strategies["slow_execution"]["configured"])
+        self.assertEqual(strategies["slow_execution"]["exchange"], "coinbase-spot")
+        self.assertEqual(strategies["slow_execution"]["symbol"], "ACS/USDC")
 
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
