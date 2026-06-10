@@ -197,7 +197,9 @@
       "id": "coinbase",
       "label": "coinbase-spot",
       "market_type": "spot",
-      "fee_bps": 60.0
+      "fee_bps": 60.0,
+      "api_key_env": "COINBASE_API_KEY",
+      "secret_env": "COINBASE_SECRET"
     },
     {
       "id": "upbit",

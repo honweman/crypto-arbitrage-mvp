@@ -6,10 +6,30 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.config import ExchangeConfig, load_config
-from arbitrage_bot.exchanges import _proxy_options_from_env
+from arbitrage_bot.exchanges import _credential_from_env, _proxy_options_from_env
 
 
 class ExchangeProxyConfigTest(unittest.TestCase):
+    def test_credential_env_unescapes_newlines(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "COINBASE_SECRET": (
+                    "-----BEGIN EC PRIVATE KEY-----\\n"
+                    "secret-body\\n"
+                    "-----END EC PRIVATE KEY-----\\n"
+                )
+            },
+        ):
+            self.assertEqual(
+                _credential_from_env("COINBASE_SECRET"),
+                (
+                    "-----BEGIN EC PRIVATE KEY-----\n"
+                    "secret-body\n"
+                    "-----END EC PRIVATE KEY-----\n"
+                ),
+            )
+
     def test_proxy_options_are_read_from_env(self) -> None:
         cfg = ExchangeConfig(
             id="bybit",

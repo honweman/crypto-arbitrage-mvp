@@ -303,6 +303,15 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.account_check \
 
 Treat a `status: "error"` result as a blocker for live testing. A `status: "warning"` often means the command could read public market data but live trading is still intentionally disabled, an API env var is missing, or the account is disabled by risk config.
 
+For Coinbase Advanced, create a CDP Secret API Key with View and Trade permissions only, select the ECDSA signature algorithm, and IP-allowlist the server outbound IP. The Coinbase secret is usually an EC private key; it can be stored in the env file on one line with escaped newlines:
+
+```bash
+COINBASE_API_KEY=organizations/{org_id}/apiKeys/{key_id}
+COINBASE_SECRET=-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n
+```
+
+The exchange client converts those escaped `\n` sequences back to real newlines before authenticating.
+
 ## Risk controls, events, and alerts
 
 Live market maker and Auto Buy/Sell orders now pass through a risk gate before any exchange order is submitted. Dry-run mode still prints the plan, but the payload includes a `risk` decision so you can see whether the same action would be allowed in live mode.

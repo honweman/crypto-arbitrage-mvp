@@ -12,4 +12,5 @@ dependencies = [
 crypto-arb = "arbitrage_bot.main:main"
 crypto-arb-web = "arbitrage_bot.web:main"
 crypto-market-maker = "arbitrage_bot.market_maker:main"
+crypto-auto-buy-sell = "arbitrage_bot.auto_buy_sell:main"
 crypto-slow-executor = "arbitrage_bot.slow_executor:main"

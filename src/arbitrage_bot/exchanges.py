@@ -57,6 +57,15 @@ def _proxy_options_from_env(cfg: ExchangeConfig) -> dict[str, str]:
     }
 
 
+def _credential_from_env(env_name: str | None) -> str | None:
+    if not env_name:
+        return None
+    value = os.environ.get(env_name)
+    if not value:
+        return None
+    return value.replace("\\n", "\n")
+
+
 class ExchangeManager:
     def __init__(self) -> None:
         self._clients: dict[str, Any] = {}
@@ -73,12 +82,15 @@ class ExchangeManager:
         if cfg.market_type != "spot":
             options["options"].setdefault("defaultType", cfg.market_type)
 
-        if cfg.api_key_env and os.environ.get(cfg.api_key_env):
-            options["apiKey"] = os.environ[cfg.api_key_env]
-        if cfg.secret_env and os.environ.get(cfg.secret_env):
-            options["secret"] = os.environ[cfg.secret_env]
-        if cfg.password_env and os.environ.get(cfg.password_env):
-            options["password"] = os.environ[cfg.password_env]
+        api_key = _credential_from_env(cfg.api_key_env)
+        secret = _credential_from_env(cfg.secret_env)
+        password = _credential_from_env(cfg.password_env)
+        if api_key:
+            options["apiKey"] = api_key
+        if secret:
+            options["secret"] = secret
+        if password:
+            options["password"] = password
 
         return exchange_cls(options)
 
