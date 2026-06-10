@@ -4,7 +4,13 @@ import unittest
 
 from arbitrage_bot.config import RiskConfig, TradeLogConfig
 from arbitrage_bot.risk import RiskOrder, evaluate_order_batch
-from arbitrage_bot.trade_log import read_recent_trade_events, write_trade_event
+from arbitrage_bot.trade_log import (
+    normalize_trade_event,
+    read_recent_trade_entries,
+    read_recent_trade_events,
+    summarize_trade_entries,
+    write_trade_event,
+)
 
 
 class RiskTest(unittest.TestCase):
@@ -54,6 +60,40 @@ class RiskTest(unittest.TestCase):
 
 
 class TradeLogTest(unittest.TestCase):
+    def test_normalizes_trade_event_for_display(self) -> None:
+        entry = normalize_trade_event(
+            {
+                "type": "slow_execution",
+                "mode": "live",
+                "status": "blocked_by_risk",
+                "logged_at": 123.0,
+                "plan": {
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "order": {
+                        "side": "sell",
+                    },
+                },
+                "risk": {
+                    "approved": False,
+                    "level": "blocked",
+                    "reasons": ["risk.allow_live_trading is false"],
+                    "order_count": 1,
+                    "total_quote_notional": 0.15,
+                },
+            }
+        )
+
+        self.assertEqual(entry.strategy, "slow_execution")
+        self.assertEqual(entry.exchange, "bybit-spot")
+        self.assertEqual(entry.symbol, "ACS/USDT")
+        self.assertEqual(entry.side, "sell")
+        self.assertEqual(entry.risk_level, "blocked")
+        self.assertFalse(entry.risk_approved)
+        self.assertEqual(entry.reason, "risk.allow_live_trading is false")
+        self.assertEqual(entry.total_quote_notional, 0.15)
+        self.assertEqual(len(entry.event_id), 16)
+
     def test_write_and_read_recent_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = TradeLogConfig(
@@ -69,6 +109,45 @@ class TradeLogTest(unittest.TestCase):
 
         self.assertEqual([event["type"] for event in events], ["three", "two"])
         self.assertTrue(all("logged_at" in event for event in events))
+
+    def test_reads_normalized_entries_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = TradeLogConfig(
+                enabled=True,
+                path=str(Path(tmp) / "events.jsonl"),
+                max_recent_events=10,
+            )
+
+            write_trade_event(
+                cfg,
+                {
+                    "type": "market_maker",
+                    "status": "placed",
+                    "execution": {"placed_count": 2},
+                    "risk": {
+                        "level": "ok",
+                        "approved": True,
+                        "order_count": 2,
+                        "total_quote_notional": 2.0,
+                    },
+                },
+            )
+            write_trade_event(
+                cfg,
+                {
+                    "type": "slow_execution",
+                    "status": "blocked_by_risk",
+                    "risk": {"level": "blocked", "approved": False},
+                },
+            )
+            entries = read_recent_trade_entries(cfg)
+            summary = summarize_trade_entries(entries)
+
+        self.assertEqual(summary["event_count"], 2)
+        self.assertEqual(summary["placed_event_count"], 1)
+        self.assertEqual(summary["blocked_event_count"], 1)
+        self.assertEqual(summary["placed_order_count"], 2)
+        self.assertEqual(summary["total_quote_notional"], 2.0)
 
 
 if __name__ == "__main__":

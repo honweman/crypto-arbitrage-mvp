@@ -248,6 +248,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("alerts", payload)
         self.assertFalse(payload["risk"]["allow_live_trading"])
         self.assertEqual(payload["trade_log"]["recent_events"], [])
+        self.assertEqual(payload["trade_log"]["recent_entries"], [])
+        self.assertEqual(payload["trade_log"]["summary"]["event_count"], 0)
 
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(

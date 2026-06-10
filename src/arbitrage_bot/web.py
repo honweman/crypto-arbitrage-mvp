@@ -32,7 +32,7 @@ from .pnl import build_portfolio_pnl
 from .slow_execution import build_slow_execution_plan
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
-from .trade_log import read_recent_trade_events
+from .trade_log import read_recent_trade_entries, summarize_trade_entries
 
 
 HTML = """<!doctype html>
@@ -587,13 +587,17 @@ HTML = """<!doctype html>
         <table>
           <thead>
             <tr>
+              <th>ID</th>
               <th>Time</th>
-              <th>Type</th>
+              <th>Strategy</th>
               <th>Mode</th>
               <th>Status</th>
               <th>Exchange</th>
               <th>Symbol</th>
+              <th>Side</th>
               <th class="num">Orders</th>
+              <th class="num">Placed</th>
+              <th class="num">Canceled</th>
               <th class="num">Notional</th>
               <th>Risk</th>
               <th>Reason</th>
@@ -852,38 +856,42 @@ HTML = """<!doctype html>
       const risk = ops?.risk || {};
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
+      const summary = tradeLog.summary || {};
       const riskState = risk.enabled === false ? "off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
       text(
         "risk-meta",
-        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · alerts ${alerts.enabled ? "on" : "off"}`
+        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · events ${summary.event_count || 0} · blocked ${summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
       );
 
       const body = document.getElementById("events");
       body.innerHTML = "";
-      const events = tradeLog.recent_events || [];
+      const events = tradeLog.recent_entries || [];
       if (events.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="10">No trade events yet.</td>`;
+        tr.innerHTML = `<td colspan="14">No trade events yet.</td>`;
         body.appendChild(tr);
         return;
       }
 
       for (const event of events.slice(0, 20)) {
-        const plan = event.plan || {};
-        const riskInfo = event.risk || {};
-        const riskClass = riskInfo.level === "blocked" ? "risk-blocked" : riskInfo.level === "off" ? "risk-off" : "risk-ok";
-        const reason = (riskInfo.reasons || [])[0] || (riskInfo.warnings || [])[0] || "--";
+        const riskClass = event.risk_level === "blocked" ? "risk-blocked" : event.risk_level === "off" ? "risk-off" : "risk-ok";
+        const reason = event.reason || "--";
+        const eventId = event.event_id || "";
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${formatAge(event.logged_at || plan.observed_at)}</td>
-          <td>${escapeHtml(event.type || "--")}</td>
+          <td title="${escapeHtml(eventId)}">${escapeHtml(eventId.slice(0, 8) || "--")}</td>
+          <td>${formatAge(event.logged_at)}</td>
+          <td>${escapeHtml(event.strategy || "--")}</td>
           <td>${escapeHtml(event.mode || "--")}</td>
           <td>${escapeHtml(event.status || "--")}</td>
-          <td>${escapeHtml(plan.exchange || "--")}</td>
-          <td>${escapeHtml(plan.symbol || "--")}</td>
-          <td class="num">${riskInfo.order_count ?? "--"}</td>
-          <td class="num">${riskInfo.total_quote_notional == null ? "--" : "$" + money.format(riskInfo.total_quote_notional)}</td>
-          <td class="${riskClass}">${escapeHtml(riskInfo.level || "--")}</td>
+          <td>${escapeHtml(event.exchange || "--")}</td>
+          <td>${escapeHtml(event.symbol || "--")}</td>
+          <td class="${event.side === "buy" ? "side-buy" : event.side === "sell" ? "side-sell" : ""}">${escapeHtml(event.side ? event.side.toUpperCase() : "--")}</td>
+          <td class="num">${event.order_count ?? "--"}</td>
+          <td class="num">${event.placed_count ?? "--"}</td>
+          <td class="num">${event.canceled_count ?? "--"}</td>
+          <td class="num">${event.total_quote_notional == null ? "--" : "$" + money.format(event.total_quote_notional)}</td>
+          <td class="${riskClass}">${escapeHtml(event.risk_level || "--")}</td>
           <td title="${escapeHtml(reason)}">${escapeHtml(reason)}</td>
         `;
         body.appendChild(tr);
@@ -1311,13 +1319,19 @@ def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
 
 def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     try:
-        recent_events = read_recent_trade_events(cfg.trade_log)
+        recent_entries = read_recent_trade_entries(cfg.trade_log)
         trade_log_error = None
     except OSError as exc:
-        recent_events = []
+        recent_entries = []
         trade_log_error = str(exc)
     trade_log_payload = asdict(cfg.trade_log)
-    trade_log_payload["recent_events"] = recent_events
+    trade_log_payload["recent_entries"] = [
+        entry.to_dict() for entry in recent_entries
+    ]
+    trade_log_payload["recent_events"] = [
+        entry.raw for entry in recent_entries
+    ]
+    trade_log_payload["summary"] = summarize_trade_entries(recent_entries)
     trade_log_payload["error"] = trade_log_error
     return {
         "risk": asdict(cfg.risk),

@@ -305,7 +305,24 @@ Every market maker and slow execution cycle is written to JSONL when `trade_log.
 }
 ```
 
-The monitor shows the current risk settings and recent events in the `Risk & Events` table. Keep `data/` and local config files out of Git. The `alerts` block is reserved for notification routing:
+The monitor shows the current risk settings and normalized trade log rows in the `Risk & Events` table. You can also inspect the same log from the command line:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.trade_log \
+  --config config.acs.json \
+  --limit 20
+```
+
+For machine-readable output:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.trade_log \
+  --config config.acs.json \
+  --limit 20 \
+  --json
+```
+
+Keep `data/` and local config files out of Git. The `alerts` block is reserved for notification routing:
 
 ```json
 "alerts": {
