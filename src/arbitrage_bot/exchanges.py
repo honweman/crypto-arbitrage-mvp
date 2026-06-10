@@ -5,6 +5,7 @@ import importlib
 import os
 import sys
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from .config import ExchangeConfig
@@ -24,6 +25,67 @@ WEBSOCKET_PROXY_ENV_OPTIONS = (
     ("wss_proxy_env", "wssProxy"),
     ("ws_socks_proxy_env", "wsSocksProxy"),
 )
+
+
+@dataclass(frozen=True)
+class LimitOrderFeatures:
+    post_only: bool = True
+    client_order_id: bool = True
+    recover_by_client_order_id: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "post_only": self.post_only,
+            "client_order_id": self.client_order_id,
+            "recover_by_client_order_id": self.recover_by_client_order_id,
+        }
+
+
+LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
+    "bithumb": LimitOrderFeatures(
+        post_only=False,
+        client_order_id=False,
+        recover_by_client_order_id=False,
+    ),
+    "bybit": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
+    "coinbase": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
+    "upbit": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
+}
+
+
+def limit_order_features(cfg: ExchangeConfig) -> LimitOrderFeatures:
+    return LIMIT_ORDER_FEATURE_OVERRIDES.get(cfg.id, LimitOrderFeatures())
+
+
+def limit_order_capability_errors(
+    cfg: ExchangeConfig,
+    *,
+    post_only: bool,
+    client_order_id: str | None = None,
+) -> list[str]:
+    features = limit_order_features(cfg)
+    errors = []
+    if post_only and not features.post_only:
+        errors.append(
+            f"{cfg.key} limit orders do not support post-only through ccxt; "
+            "set market_maker.post_only=false and risk.require_post_only=false "
+            "only if you accept taker-fill risk"
+        )
+    if client_order_id and not features.client_order_id:
+        errors.append(f"{cfg.key} does not support client order ids")
+    return errors
 
 
 def _single_proxy_option(
@@ -198,6 +260,13 @@ class ExchangeManager:
         post_only: bool = True,
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
+        capability_errors = limit_order_capability_errors(
+            cfg,
+            post_only=post_only,
+        )
+        if capability_errors:
+            raise ValueError("; ".join(capability_errors))
+
         prepared = await self.prepare_limit_order(
             cfg,
             symbol=symbol,
@@ -213,7 +282,7 @@ class ExchangeManager:
         params: dict[str, Any] = {}
         if post_only:
             params["postOnly"] = True
-        if client_order_id:
+        if client_order_id and limit_order_features(cfg).client_order_id:
             params["clientOrderId"] = client_order_id
         return await client.create_order(
             symbol,

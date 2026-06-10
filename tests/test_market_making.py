@@ -5,7 +5,7 @@ from typing import Optional
 
 from arbitrage_bot.config import BotConfig, ExchangeConfig, MarketMakerConfig, RiskConfig
 from arbitrage_bot.config import TradeLogConfig
-from arbitrage_bot.market_maker import run_cycle, run_loop
+from arbitrage_bot.market_maker import market_maker_quote_conversion, run_cycle, run_loop
 from arbitrage_bot.market_making import build_symmetric_market_maker_plan
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 
@@ -244,6 +244,141 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["execution"]["placed_count"], 20)
         self.assertEqual(len(payload["execution"]["placed_order_ids"]), 20)
 
+    async def test_bithumb_post_only_is_blocked_before_placing(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bithumb-spot",
+                    symbol="ACS/KRW",
+                    bids=[BookLevel(price=0.20, amount=100_000)],
+                    asks=[BookLevel(price=0.21, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_order(
+                self,
+                *_: object,
+                amount: float,
+                price: float,
+                side: str,
+                **__: object,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": "bithumb-spot",
+                    "symbol": "ACS/KRW",
+                    "side": side,
+                    "status": "ok",
+                    "requested_amount": amount,
+                    "requested_price": price,
+                    "amount": amount,
+                    "price": price,
+                    "cost": amount * price,
+                    "limits": {},
+                    "precision": {},
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("post-only unsupported cycle must not place orders")
+
+        payload = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    exchange="bithumb-spot",
+                    symbol="ACS/KRW",
+                    levels=1,
+                    quote_per_level=5_000.0,
+                    post_only=True,
+                ),
+                spot_exchanges=[ExchangeConfig(id="bithumb", label="bithumb-spot")],
+                quote_rates={"USD": 1.0, "KRW": 0.00073},
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_order_quote=10.0,
+                    max_cycle_quote=30.0,
+                    require_post_only=False,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_risk")
+        self.assertEqual(payload["order_validation"]["status"], "error")
+        self.assertTrue(
+            any("post-only" in error for error in payload["order_validation"]["errors"])
+        )
+        self.assertNotIn("execution", payload)
+
+    async def test_krw_market_maker_risk_uses_common_quote(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bithumb-spot",
+                    symbol="ACS/KRW",
+                    bids=[BookLevel(price=0.20, amount=100_000)],
+                    asks=[BookLevel(price=0.21, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+        payload = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    exchange="bithumb-spot",
+                    symbol="ACS/KRW",
+                    levels=1,
+                    quote_per_level=5_000.0,
+                    post_only=False,
+                ),
+                spot_exchanges=[ExchangeConfig(id="bithumb", label="bithumb-spot")],
+                quote_rates={"USD": 1.0, "KRW": 0.00073},
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_order_quote=5.0,
+                    max_cycle_quote=20.0,
+                    require_post_only=False,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            live=False,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["quote_conversion"]["quote_currency"], "KRW")
+        self.assertAlmostEqual(payload["risk"]["total_quote_notional"], 7.3)
+        self.assertEqual(payload["risk"]["currency"], "USD")
+
+    def test_quote_conversion_reports_missing_rate(self) -> None:
+        cfg = self._cfg(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bithumb-spot",
+                symbol="ACS/KRW",
+            ),
+            quote_rates={"USD": 1.0},
+        )
+
+        payload = market_maker_quote_conversion(cfg, "ACS/KRW")
+
+        self.assertFalse(payload["available"])
+        self.assertIsNone(payload["quote_to_common_rate"])
+
     async def test_run_loop_clamps_interval_to_one_second(self) -> None:
         class StopLoop(Exception):
             pass
@@ -287,7 +422,14 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
     async def _fake_run_cycle(self, *_: object, **__: object) -> dict[str, object]:
         return {"type": "market_maker", "status": "planned"}
 
-    def _cfg(self, *, risk: Optional[RiskConfig] = None) -> BotConfig:
+    def _cfg(
+        self,
+        *,
+        market_maker: Optional[MarketMakerConfig] = None,
+        spot_exchanges: Optional[list[ExchangeConfig]] = None,
+        quote_rates: Optional[dict[str, float]] = None,
+        risk: Optional[RiskConfig] = None,
+    ) -> BotConfig:
         from arbitrage_bot.config import (
             OnchainMonitorConfig,
             PortfolioConfig,
@@ -302,10 +444,10 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
             min_profit_bps=1.0,
             min_basis_bps=15.0,
             common_quote_currency="USD",
-            quote_rates={"USD": 1.0},
+            quote_rates=quote_rates or {"USD": 1.0, "USDT": 1.0, "USDC": 1.0},
             quote_rate_sources=[],
             onchain_monitor=OnchainMonitorConfig(),
-            market_maker=MarketMakerConfig(
+            market_maker=market_maker or MarketMakerConfig(
                 enabled=True,
                 exchange="bybit-spot",
                 symbol="ACS/USDT",
@@ -317,7 +459,8 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
             spot_symbols=[],
             spot_markets=[],
             cash_and_carry_pairs=[],
-            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            spot_exchanges=spot_exchanges
+            or [ExchangeConfig(id="bybit", label="bybit-spot")],
             derivative_exchanges=[],
             risk=risk or RiskConfig(),
             trade_log=TradeLogConfig(enabled=False),

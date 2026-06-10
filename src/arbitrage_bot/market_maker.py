@@ -8,7 +8,11 @@ import time
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, load_config
-from .exchanges import ExchangeManager
+from .exchanges import (
+    ExchangeManager,
+    limit_order_capability_errors,
+    limit_order_features,
+)
 from .market_making import MarketMakerPlan, build_symmetric_market_maker_plan
 from .order_validation import summarize_order_validations
 from .risk import (
@@ -26,6 +30,50 @@ def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
         if exchange.key == key:
             return exchange
     raise ValueError(f"market maker exchange is not configured: {key}")
+
+
+def quote_currency(symbol: str) -> str:
+    return symbol.split("/", 1)[1].upper() if "/" in symbol else ""
+
+
+def quote_to_common_rate(cfg: BotConfig, symbol: str) -> float | None:
+    quote = quote_currency(symbol)
+    if not quote:
+        return None
+    if quote == cfg.common_quote_currency.upper():
+        return 1.0
+    if quote in cfg.quote_rates:
+        return float(cfg.quote_rates[quote])
+    return None
+
+
+def market_maker_quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]:
+    quote = quote_currency(symbol)
+    rate = quote_to_common_rate(cfg, symbol)
+    return {
+        "quote_currency": quote,
+        "common_quote_currency": cfg.common_quote_currency,
+        "quote_to_common_rate": rate,
+        "available": rate is not None,
+    }
+
+
+def _scaled_market_context(
+    plan: MarketMakerPlan,
+    *,
+    quote_rate: float,
+) -> RiskMarketContext:
+    return RiskMarketContext(
+        exchange=plan.exchange,
+        symbol=plan.symbol,
+        best_bid=plan.best_bid * quote_rate,
+        best_ask=plan.best_ask * quote_rate,
+        mid_price=plan.mid_price * quote_rate,
+        bid_depth_quote=plan.bid_depth_quote * quote_rate,
+        ask_depth_quote=plan.ask_depth_quote * quote_rate,
+        max_level_gap_bps=plan.max_level_gap_bps,
+        order_book_timestamp_ms=plan.order_book_timestamp_ms,
+    )
 
 
 async def build_plan(
@@ -164,7 +212,30 @@ async def validate_plan_orders(
                     "warnings": [],
                 }
             )
-    return summarize_order_validations(rows)
+    summary = summarize_order_validations(rows)
+    capability_errors = limit_order_capability_errors(
+        exchange_cfg,
+        post_only=cfg.market_maker.post_only,
+    )
+    capability_warnings = []
+    features = limit_order_features(exchange_cfg)
+    if cfg.market_maker.client_order_prefix and not features.client_order_id:
+        capability_warnings.append(
+            f"{exchange_cfg.key} does not support client order ids; "
+            "MM orders can only be tracked in memory until restart"
+        )
+    if capability_errors:
+        summary["status"] = "error"
+        summary["errors"] = [*summary.get("errors", []), *capability_errors]
+        summary["error_count"] = len(summary["errors"])
+    if capability_warnings:
+        summary["warnings"] = [
+            *summary.get("warnings", []),
+            *capability_warnings,
+        ]
+        summary["warning_count"] = len(summary["warnings"])
+    summary["exchange_features"] = features.to_dict()
+    return summary
 
 
 def _block_for_validation(
@@ -204,6 +275,10 @@ async def run_cycle(
         "status": "planned",
         "plan": plan.to_dict(),
     }
+    conversion = market_maker_quote_conversion(cfg, plan.symbol)
+    payload["quote_conversion"] = conversion
+    quote_rate = conversion.get("quote_to_common_rate")
+    quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
     risk_orders = [
         RiskOrder(
             strategy="market_maker",
@@ -211,8 +286,8 @@ async def run_cycle(
             symbol=plan.symbol,
             side=order.side,
             amount=order.amount,
-            price=order.price,
-            quote_notional=order.quote_notional,
+            price=order.price * quote_rate_for_risk,
+            quote_notional=order.quote_notional * quote_rate_for_risk,
             distance_bps=order.distance_bps,
         )
         for order in plan.orders
@@ -244,17 +319,7 @@ async def run_cycle(
         if should_cancel_existing and existing_open_order_count is not None
         else len(replace_order_ids)
     )
-    market = RiskMarketContext(
-        exchange=plan.exchange,
-        symbol=plan.symbol,
-        best_bid=plan.best_bid,
-        best_ask=plan.best_ask,
-        mid_price=plan.mid_price,
-        bid_depth_quote=plan.bid_depth_quote,
-        ask_depth_quote=plan.ask_depth_quote,
-        max_level_gap_bps=plan.max_level_gap_bps,
-        order_book_timestamp_ms=plan.order_book_timestamp_ms,
-    )
+    market = _scaled_market_context(plan, quote_rate=quote_rate_for_risk)
     risk = evaluate_order_batch(
         cfg.risk,
         risk_orders,
@@ -273,9 +338,21 @@ async def run_cycle(
         post_only=cfg.market_maker.post_only,
     )
     payload["risk"] = risk.to_dict()
+    payload["risk"]["currency"] = cfg.common_quote_currency
+    payload["risk"]["quote_conversion"] = conversion
+    if quote_rate is None:
+        payload["risk"]["approved"] = False
+        payload["risk"]["level"] = "blocked"
+        payload["risk"]["reasons"] = [
+            *list(payload["risk"].get("reasons", [])),
+            (
+                f"missing quote rate for {conversion['quote_currency']} -> "
+                f"{cfg.common_quote_currency}"
+            ),
+        ]
 
     if live:
-        if not risk.approved:
+        if not payload["risk"]["approved"]:
             payload["status"] = "blocked_by_risk"
             return payload
         validation = await validate_plan_orders(cfg, manager, plan)

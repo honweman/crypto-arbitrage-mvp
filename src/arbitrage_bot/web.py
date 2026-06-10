@@ -35,7 +35,7 @@ from .config import (
     SpotMarketConfig,
     load_config,
 )
-from .exchanges import ExchangeManager
+from .exchanges import ExchangeManager, limit_order_features
 from .fill_store import load_daily_pnl_summary, persist_fill_pnl
 from .main import (
     StrategyName,
@@ -46,6 +46,7 @@ from .main import (
 from .market_making import build_symmetric_market_maker_plan
 from .market_maker import (
     cancel_order_ids as cancel_market_maker_order_ids,
+    market_maker_quote_conversion,
     run_cycle as run_market_maker_cycle,
 )
 from .models import OrderBookSnapshot, Opportunity
@@ -1788,14 +1789,17 @@ HTML = """<!doctype html>
         return;
       }
 
+      const common = marketMaker.quote_conversion?.common_quote_currency || "USD";
+      const rate = marketMaker.quote_conversion?.quote_to_common_rate;
       for (const order of marketMaker.plan.orders) {
+        const commonQuote = rate == null ? "--" : `${common} ${money.format(order.quote_notional * rate)}`;
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
           <td class="num">${order.level}</td>
           <td class="num">${fmt.format(order.price)}</td>
           <td class="num">${compact.format(order.amount)}</td>
-          <td class="num">${money.format(order.quote_notional)}</td>
+          <td class="num" title="${commonQuote}">${formatSymbolQuantity(order.quote_notional, marketMaker.plan.symbol, "quote")}</td>
           <td class="num">${order.distance_bps.toFixed(2)} bps</td>
         `;
         body.appendChild(tr);
@@ -2507,7 +2511,11 @@ HTML = """<!doctype html>
         const mmRuntime = data.market_maker?.runtime || {};
         const mmPlan = data.market_maker?.plan;
         const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
-        text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmRuntimeText}`);
+        const mmQuote = data.market_maker?.quote_conversion;
+        const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
+        const mmFeatures = data.market_maker?.exchange_features || {};
+        const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
+        text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
         const slowPlan = data.slow_execution?.plan;
         const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
         text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
@@ -4573,16 +4581,37 @@ def build_market_maker_payload(
     books: dict[tuple[str, str], OrderBookSnapshot],
 ) -> dict[str, Any]:
     maker_cfg = cfg.market_maker
+    accounts = slow_execution_accounts(
+        cfg.spot_exchanges,
+        _spot_symbols_by_exchange(cfg),
+    )
+    config_payload = market_maker_config_to_dict(maker_cfg)
+    conversion = (
+        market_maker_quote_conversion(cfg, maker_cfg.symbol)
+        if maker_cfg.symbol
+        else {
+            "quote_currency": "",
+            "common_quote_currency": cfg.common_quote_currency,
+            "quote_to_common_rate": None,
+            "available": False,
+        }
+    )
+    exchange_cfg = next(
+        (exchange for exchange in cfg.spot_exchanges if exchange.key == maker_cfg.exchange),
+        None,
+    )
+    exchange_features = (
+        limit_order_features(exchange_cfg).to_dict() if exchange_cfg else {}
+    )
     if not maker_cfg.enabled:
         return {
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
-            "config": market_maker_config_to_dict(maker_cfg),
-            "accounts": slow_execution_accounts(
-                cfg.spot_exchanges,
-                _spot_symbols_by_exchange(cfg),
-            ),
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "exchange_features": exchange_features,
             "runtime": {},
             "error": None,
         }
@@ -4593,11 +4622,10 @@ def build_market_maker_payload(
             "status": "error",
             "mode": "dry_run",
             "plan": None,
-            "config": market_maker_config_to_dict(maker_cfg),
-            "accounts": slow_execution_accounts(
-                cfg.spot_exchanges,
-                _spot_symbols_by_exchange(cfg),
-            ),
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "exchange_features": exchange_features,
             "runtime": {},
             "error": f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
         }
@@ -4609,11 +4637,10 @@ def build_market_maker_payload(
             "status": "error",
             "mode": "dry_run",
             "plan": None,
-            "config": market_maker_config_to_dict(maker_cfg),
-            "accounts": slow_execution_accounts(
-                cfg.spot_exchanges,
-                _spot_symbols_by_exchange(cfg),
-            ),
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "exchange_features": exchange_features,
             "runtime": {},
             "error": str(exc),
         }
@@ -4622,11 +4649,10 @@ def build_market_maker_payload(
         "status": "planned",
         "mode": "dry_run",
         "plan": plan.to_dict(),
-        "config": market_maker_config_to_dict(maker_cfg),
-        "accounts": slow_execution_accounts(
-            cfg.spot_exchanges,
-            _spot_symbols_by_exchange(cfg),
-        ),
+        "config": config_payload,
+        "accounts": accounts,
+        "quote_conversion": conversion,
+        "exchange_features": exchange_features,
         "runtime": {},
         "error": None,
     }
@@ -5394,6 +5420,8 @@ async def market_maker_task_loop(
 ) -> None:
     manager = ExchangeManager()
     open_order_ids: list[str] = []
+    open_order_exchange = ""
+    open_order_symbol = ""
     placed_count = 0
     canceled_count = 0
     cycle_count = 0
@@ -5403,6 +5431,8 @@ async def market_maker_task_loop(
         "status": "starting",
         "mode": "dry_run",
         "open_order_ids": [],
+        "open_order_exchange": "",
+        "open_order_symbol": "",
         "open_order_count": 0,
         "placed_count": 0,
         "canceled_count": 0,
@@ -5425,6 +5455,34 @@ async def market_maker_task_loop(
                 program_running=program_running,
             )
             try:
+                current_tracking_key = (maker_cfg.exchange, maker_cfg.symbol)
+                previous_tracking_key = (open_order_exchange, open_order_symbol)
+                if (
+                    open_order_ids
+                    and previous_tracking_key != ("", "")
+                    and previous_tracking_key != current_tracking_key
+                ):
+                    cancel_cfg = replace(
+                        runtime_cfg,
+                        market_maker=replace(
+                            runtime_cfg.market_maker,
+                            exchange=open_order_exchange,
+                            symbol=open_order_symbol,
+                        ),
+                    )
+                    cancel_payload = await cancel_market_maker_order_ids(
+                        cancel_cfg,
+                        manager,
+                        open_order_ids,
+                    )
+                    canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+                    if cancel_payload.get("canceled_count"):
+                        last_cancel_at = time.time()
+                    write_trade_event(cancel_cfg.trade_log, cancel_payload)
+                    open_order_ids = []
+                    open_order_exchange = ""
+                    open_order_symbol = ""
+
                 if live_allowed or open_order_ids:
                     open_order_ids = await _tracked_market_maker_order_ids(
                         runtime_cfg,
@@ -5446,12 +5504,16 @@ async def market_maker_task_loop(
                             last_cancel_at = time.time()
                         write_trade_event(runtime_cfg.trade_log, cancel_payload)
                         open_order_ids = []
+                        open_order_exchange = ""
+                        open_order_symbol = ""
                     runtime = {
                         "status": status,
                         "mode": "paused" if status == "paused" else "dry_run",
                         "reason": reason,
                         "config": market_maker_config_to_dict(maker_cfg),
                         "open_order_ids": open_order_ids,
+                        "open_order_exchange": open_order_exchange,
+                        "open_order_symbol": open_order_symbol,
                         "open_order_count": len(open_order_ids),
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,
@@ -5498,12 +5560,17 @@ async def market_maker_task_loop(
                         for order_id in execution.get("placed_order_ids", [])
                         if order_id
                     ] or open_order_ids
+                    if open_order_ids:
+                        open_order_exchange = maker_cfg.exchange
+                        open_order_symbol = maker_cfg.symbol
                     runtime = {
                         "status": payload.get("status", "unknown"),
                         "mode": "live",
                         "reason": None,
                         "config": market_maker_config_to_dict(maker_cfg),
                         "open_order_ids": open_order_ids,
+                        "open_order_exchange": open_order_exchange,
+                        "open_order_symbol": open_order_symbol,
                         "open_order_count": len(open_order_ids),
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,

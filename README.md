@@ -156,6 +156,12 @@ To add another spot asset later, add its markets to `spot_markets`, add one posi
 
 The web monitor also shows a dry-run market maker ladder when `market_maker.enabled` is true. With the ACS config and `--poll-seconds 1`, the page fetches the latest REST order book every second and recalculates the 20 planned bid/ask orders from the fresh mid price. The ACS example config targets Bybit `ACS/USDT` with 10 bid levels and 10 ask levels, spread symmetrically within a 10% one-sided price band around the mid price. For example, a 10-level ladder with `price_band_pct: 10.0` places levels roughly 1%, 2%, ..., 10% away from the mid price on each side. If you want a 10% total width, use `price_band_pct: 5.0`.
 
+`quote_per_level` and `min_order_quote` are always expressed in the selected exchange pair's quote currency: USDT for Bybit/Upbit `ACS/USDT`, USDC for Coinbase `ACS/USDC`, and KRW for Bithumb `ACS/KRW`. Risk checks convert those quote amounts into `common_quote_currency` using `quote_rates` before applying `max_order_quote`, `max_cycle_quote`, and exposure limits. If a quote rate is missing, live MM is blocked.
+
+Exchange support is intentionally conservative. Bybit, Coinbase, and Upbit support post-only limit orders through ccxt. Bithumb does not expose post-only support through ccxt, so Bithumb MM with `post_only: true` is blocked before order placement; only set `post_only: false` and `risk.require_post_only: false` for Bithumb if you explicitly accept taker-fill risk. Bithumb also does not support client order ids through ccxt, so its MM orders can only be tracked in memory until the process restarts.
+
+Always run the account preflight before live MM. Public ccxt metadata can expose exchange minimums, but they can change. In a recent ACS public check, Bybit `ACS/USDT` required about 5 USDT minimum order cost, while Bithumb `ACS/KRW` reported a 500 KRW minimum cost. If you raise `quote_per_level`, also raise `risk.max_cycle_quote` enough for `levels * 2 * quote_per_level` after common-currency conversion.
+
 ```json
 "market_maker": {
   "enabled": true,
@@ -194,6 +200,11 @@ To place real orders, configure API env vars on the target exchange entry, fund 
 ```bash
 export BYBIT_API_KEY="..."
 export BYBIT_SECRET="..."
+# or:
+export BITHUMB_API_KEY="..."
+export BITHUMB_SECRET="..."
+export UPBIT_API_KEY="..."
+export UPBIT_SECRET="..."
 
 PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
   --config config.acs.json \

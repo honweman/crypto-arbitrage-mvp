@@ -204,7 +204,9 @@
       "id": "bithumb",
       "label": "bithumb-spot",
       "market_type": "spot",
-      "fee_bps": 25.0
+      "fee_bps": 25.0,
+      "api_key_env": "BITHUMB_API_KEY",
+      "secret_env": "BITHUMB_SECRET"
     },
     {
       "id": "bybit",
@@ -229,7 +231,9 @@
       "id": "upbit",
       "label": "upbit-spot",
       "market_type": "spot",
-      "fee_bps": 25.0
+      "fee_bps": 25.0,
+      "api_key_env": "UPBIT_API_KEY",
+      "secret_env": "UPBIT_SECRET"
     }
   ],
   "derivative_exchanges": []

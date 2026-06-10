@@ -33,6 +33,7 @@ class MarketMakerOrder:
 class MarketMakerPlan:
     exchange: str
     symbol: str
+    quote_currency: str
     best_bid: float
     best_ask: float
     mid_price: float
@@ -51,6 +52,7 @@ class MarketMakerPlan:
         return {
             "exchange": self.exchange,
             "symbol": self.symbol,
+            "quote_currency": self.quote_currency,
             "best_bid": self.best_bid,
             "best_ask": self.best_ask,
             "mid_price": self.mid_price,
@@ -117,6 +119,9 @@ def build_symmetric_market_maker_plan(
     return MarketMakerPlan(
         exchange=cfg.exchange,
         symbol=cfg.symbol,
+        quote_currency=cfg.symbol.split("/", 1)[1].upper()
+        if "/" in cfg.symbol
+        else "",
         best_bid=best_bid,
         best_ask=best_ask,
         mid_price=mid_price,

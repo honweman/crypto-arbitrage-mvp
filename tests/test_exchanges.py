@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.config import ExchangeConfig, load_config
-from arbitrage_bot.exchanges import _credential_from_env, _proxy_options_from_env
+from arbitrage_bot.exchanges import (
+    _credential_from_env,
+    _proxy_options_from_env,
+    limit_order_capability_errors,
+    limit_order_features,
+)
 
 
 class ExchangeProxyConfigTest(unittest.TestCase):
@@ -100,6 +105,26 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(exchange.secret_env, "BYBIT_ACCOUNT_A_SECRET")
         self.assertEqual(exchange.https_proxy_env, "BYBIT_ACCOUNT_A_PROXY")
         self.assertEqual(exchange.ws_proxy_env, "BYBIT_ACCOUNT_A_WS_PROXY")
+
+    def test_bithumb_limit_order_features_block_post_only(self) -> None:
+        cfg = ExchangeConfig(id="bithumb", label="bithumb-spot")
+
+        features = limit_order_features(cfg)
+        errors = limit_order_capability_errors(cfg, post_only=True)
+
+        self.assertFalse(features.post_only)
+        self.assertFalse(features.client_order_id)
+        self.assertTrue(any("post-only" in error for error in errors))
+
+    def test_bybit_limit_order_features_allow_post_only(self) -> None:
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot")
+
+        features = limit_order_features(cfg)
+        errors = limit_order_capability_errors(cfg, post_only=True)
+
+        self.assertTrue(features.post_only)
+        self.assertTrue(features.client_order_id)
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":
