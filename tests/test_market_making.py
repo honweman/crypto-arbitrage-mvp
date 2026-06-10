@@ -1,9 +1,11 @@
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from typing import Optional
 
-from arbitrage_bot.config import MarketMakerConfig
-from arbitrage_bot.market_maker import run_loop
+from arbitrage_bot.config import BotConfig, ExchangeConfig, MarketMakerConfig, RiskConfig
+from arbitrage_bot.config import TradeLogConfig
+from arbitrage_bot.market_maker import run_cycle, run_loop
 from arbitrage_bot.market_making import build_symmetric_market_maker_plan
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 
@@ -62,6 +64,39 @@ class MarketMakingTest(unittest.TestCase):
 
 
 class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_live_cycle_is_blocked_when_risk_disallows_live(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def create_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("risk-blocked live cycle must not place orders")
+
+        payload = await run_cycle(
+            self._cfg(
+                risk=RiskConfig(
+                    allow_live_trading=False,
+                    max_cycle_quote=100.0,
+                )
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_risk")
+        self.assertFalse(payload["risk"]["approved"])
+        self.assertNotIn("execution", payload)
+
     async def test_run_loop_clamps_interval_to_one_second(self) -> None:
         class StopLoop(Exception):
             pass
@@ -105,9 +140,8 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
     async def _fake_run_cycle(self, *_: object, **__: object) -> dict[str, object]:
         return {"type": "market_maker", "status": "planned"}
 
-    def _cfg(self) -> object:
+    def _cfg(self, *, risk: Optional[RiskConfig] = None) -> BotConfig:
         from arbitrage_bot.config import (
-            BotConfig,
             OnchainMonitorConfig,
             PortfolioConfig,
             SlowExecutionConfig,
@@ -129,14 +163,17 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
                 exchange="bybit-spot",
                 symbol="ACS/USDT",
                 poll_seconds=0.1,
+                quote_per_level=1.0,
             ),
             slow_execution=SlowExecutionConfig(),
             portfolio=PortfolioConfig(),
             spot_symbols=[],
             spot_markets=[],
             cash_and_carry_pairs=[],
-            spot_exchanges=[],
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
             derivative_exchanges=[],
+            risk=risk or RiskConfig(),
+            trade_log=TradeLogConfig(enabled=False),
         )
 
 

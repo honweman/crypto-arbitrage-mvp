@@ -11,6 +11,7 @@ from arbitrage_bot.config import (
     PortfolioConfig,
     SlowExecutionConfig,
     SpotMarketConfig,
+    TradeLogConfig,
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
@@ -19,6 +20,7 @@ from arbitrage_bot.web import (
     _slow_execution_overrides_from_payload,
     build_market_maker_payload,
     build_market_rows,
+    build_operations_payload,
     build_slow_execution_payload,
     slow_execution_accounts,
 )
@@ -31,6 +33,7 @@ def make_config(
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
     spot_exchanges: list[ExchangeConfig] | None = None,
+    trade_log: TradeLogConfig | None = None,
 ) -> BotConfig:
     return BotConfig(
         poll_seconds=1.0,
@@ -51,6 +54,7 @@ def make_config(
         cash_and_carry_pairs=[],
         spot_exchanges=spot_exchanges or [],
         derivative_exchanges=[],
+        trade_log=trade_log or TradeLogConfig(enabled=False),
     )
 
 
@@ -235,6 +239,15 @@ class WebMonitorTest(unittest.TestCase):
                 {"exchange": "coinbase-spot"},
                 allowed_exchanges={"bybit-spot"},
             )
+
+    def test_operations_payload_includes_risk_and_recent_events(self) -> None:
+        payload = build_operations_payload(make_config())
+
+        self.assertIn("risk", payload)
+        self.assertIn("trade_log", payload)
+        self.assertIn("alerts", payload)
+        self.assertFalse(payload["risk"]["allow_live_trading"])
+        self.assertEqual(payload["trade_log"]["recent_events"], [])
 
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(

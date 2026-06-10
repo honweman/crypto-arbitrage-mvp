@@ -269,6 +269,54 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
 
 The slow executor tracks submitted base amount, not confirmed fills. If an order rests unfilled, it still counts toward the submitted schedule. For fill-aware execution, add order and trade polling before using it for larger live sizes.
 
+## Risk controls, events, and alerts
+
+Live market maker and slow execution orders now pass through a risk gate before any exchange order is submitted. Dry-run mode still prints the plan, but the payload includes a `risk` decision so you can see whether the same action would be allowed in live mode.
+
+By default, live trading is blocked until you explicitly set `risk.allow_live_trading` to `true`:
+
+```json
+"risk": {
+  "enabled": true,
+  "allow_live_trading": false,
+  "allow_market_maker": true,
+  "allow_slow_execution": true,
+  "require_post_only": true,
+  "max_order_quote": 5.0,
+  "max_cycle_quote": 25.0,
+  "max_orders_per_cycle": 30,
+  "max_existing_spread_bps": 2500.0,
+  "max_price_distance_bps": 1500.0,
+  "max_plan_age_seconds": 5.0,
+  "allowed_exchanges": [],
+  "blocked_exchanges": [],
+  "allowed_symbols": [],
+  "blocked_symbols": []
+}
+```
+
+Every market maker and slow execution cycle is written to JSONL when `trade_log.enabled` is true:
+
+```json
+"trade_log": {
+  "enabled": true,
+  "path": "data/trade_events.jsonl",
+  "max_recent_events": 50
+}
+```
+
+The monitor shows the current risk settings and recent events in the `Risk & Events` table. Keep `data/` and local config files out of Git. The `alerts` block is reserved for notification routing:
+
+```json
+"alerts": {
+  "enabled": false,
+  "min_level": "warning",
+  "webhook_url_env": null,
+  "telegram_bot_token_env": null,
+  "telegram_chat_id_env": null
+}
+```
+
 ## Cloud deployment and per-account IPs
 
 For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.

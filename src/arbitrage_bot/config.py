@@ -119,6 +119,41 @@ class PortfolioConfig:
 
 
 @dataclass(frozen=True)
+class RiskConfig:
+    enabled: bool = True
+    allow_live_trading: bool = False
+    allow_market_maker: bool = True
+    allow_slow_execution: bool = True
+    require_post_only: bool = True
+    max_order_quote: float = 5.0
+    max_cycle_quote: float = 25.0
+    max_orders_per_cycle: int = 30
+    max_existing_spread_bps: float = 2500.0
+    max_price_distance_bps: float = 1500.0
+    max_plan_age_seconds: float = 5.0
+    allowed_exchanges: list[str] = field(default_factory=list)
+    blocked_exchanges: list[str] = field(default_factory=list)
+    allowed_symbols: list[str] = field(default_factory=list)
+    blocked_symbols: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TradeLogConfig:
+    enabled: bool = True
+    path: str = "data/trade_events.jsonl"
+    max_recent_events: int = 50
+
+
+@dataclass(frozen=True)
+class AlertConfig:
+    enabled: bool = False
+    min_level: str = "warning"
+    webhook_url_env: str | None = None
+    telegram_bot_token_env: str | None = None
+    telegram_chat_id_env: str | None = None
+
+
+@dataclass(frozen=True)
 class BotConfig:
     poll_seconds: float
     order_book_depth: int
@@ -138,6 +173,9 @@ class BotConfig:
     cash_and_carry_pairs: list[CashAndCarryPair]
     spot_exchanges: list[ExchangeConfig]
     derivative_exchanges: list[ExchangeConfig]
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
+    alerts: AlertConfig = field(default_factory=AlertConfig)
 
 
 def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
@@ -185,12 +223,19 @@ def _portfolio_positions_from_dict(raw: dict[str, Any]) -> list[AssetPosition]:
     ]
 
 
+def _string_list(raw: Any) -> list[str]:
+    return [str(item) for item in raw or []]
+
+
 def load_config(path: str | Path) -> BotConfig:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     onchain_raw = raw.get("onchain_monitor", {})
     market_maker_raw = raw.get("market_maker", {})
     slow_execution_raw = raw.get("slow_execution", {})
     portfolio_raw = raw.get("portfolio", {})
+    risk_raw = raw.get("risk", {})
+    trade_log_raw = raw.get("trade_log", {})
+    alerts_raw = raw.get("alerts", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -328,4 +373,37 @@ def load_config(path: str | Path) -> BotConfig:
         derivative_exchanges=[
             _exchange_from_dict(item) for item in raw.get("derivative_exchanges", [])
         ],
+        risk=RiskConfig(
+            enabled=bool(risk_raw.get("enabled", True)),
+            allow_live_trading=bool(risk_raw.get("allow_live_trading", False)),
+            allow_market_maker=bool(risk_raw.get("allow_market_maker", True)),
+            allow_slow_execution=bool(risk_raw.get("allow_slow_execution", True)),
+            require_post_only=bool(risk_raw.get("require_post_only", True)),
+            max_order_quote=float(risk_raw.get("max_order_quote", 5.0)),
+            max_cycle_quote=float(risk_raw.get("max_cycle_quote", 25.0)),
+            max_orders_per_cycle=int(risk_raw.get("max_orders_per_cycle", 30)),
+            max_existing_spread_bps=float(
+                risk_raw.get("max_existing_spread_bps", 2500.0)
+            ),
+            max_price_distance_bps=float(
+                risk_raw.get("max_price_distance_bps", 1500.0)
+            ),
+            max_plan_age_seconds=float(risk_raw.get("max_plan_age_seconds", 5.0)),
+            allowed_exchanges=_string_list(risk_raw.get("allowed_exchanges", [])),
+            blocked_exchanges=_string_list(risk_raw.get("blocked_exchanges", [])),
+            allowed_symbols=_string_list(risk_raw.get("allowed_symbols", [])),
+            blocked_symbols=_string_list(risk_raw.get("blocked_symbols", [])),
+        ),
+        trade_log=TradeLogConfig(
+            enabled=bool(trade_log_raw.get("enabled", True)),
+            path=str(trade_log_raw.get("path", "data/trade_events.jsonl")),
+            max_recent_events=int(trade_log_raw.get("max_recent_events", 50)),
+        ),
+        alerts=AlertConfig(
+            enabled=bool(alerts_raw.get("enabled", False)),
+            min_level=str(alerts_raw.get("min_level", "warning")),
+            webhook_url_env=alerts_raw.get("webhook_url_env"),
+            telegram_bot_token_env=alerts_raw.get("telegram_bot_token_env"),
+            telegram_chat_id_env=alerts_raw.get("telegram_chat_id_env"),
+        ),
     )

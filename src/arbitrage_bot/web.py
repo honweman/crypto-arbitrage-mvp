@@ -32,6 +32,7 @@ from .pnl import build_portfolio_pnl
 from .slow_execution import build_slow_execution_plan
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
+from .trade_log import read_recent_trade_events
 
 
 HTML = """<!doctype html>
@@ -290,6 +291,10 @@ HTML = """<!doctype html>
     .pnl-positive { color: var(--green); }
     .pnl-negative { color: var(--red); }
     .pnl-flat { color: var(--muted); }
+
+    .risk-ok { color: var(--green); font-weight: 700; }
+    .risk-blocked { color: var(--red); font-weight: 700; }
+    .risk-off { color: var(--muted); font-weight: 700; }
 
     .holder-label {
       display: inline-flex;
@@ -575,6 +580,32 @@ HTML = """<!doctype html>
 
     <section>
       <div class="section-title">
+        <h2>Risk & Events</h2>
+        <span id="risk-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Mode</th>
+              <th>Status</th>
+              <th>Exchange</th>
+              <th>Symbol</th>
+              <th class="num">Orders</th>
+              <th class="num">Notional</th>
+              <th>Risk</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="events"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">
         <h2>Markets</h2>
         <span id="warnings" class="subtle"></span>
       </div>
@@ -814,6 +845,48 @@ HTML = """<!doctype html>
           <div class="legs">${legs}</div>
         `;
         root.appendChild(el);
+      }
+    }
+
+    function renderOperations(ops) {
+      const risk = ops?.risk || {};
+      const alerts = ops?.alerts || {};
+      const tradeLog = ops?.trade_log || {};
+      const riskState = risk.enabled === false ? "off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
+      text(
+        "risk-meta",
+        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · alerts ${alerts.enabled ? "on" : "off"}`
+      );
+
+      const body = document.getElementById("events");
+      body.innerHTML = "";
+      const events = tradeLog.recent_events || [];
+      if (events.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="10">No trade events yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const event of events.slice(0, 20)) {
+        const plan = event.plan || {};
+        const riskInfo = event.risk || {};
+        const riskClass = riskInfo.level === "blocked" ? "risk-blocked" : riskInfo.level === "off" ? "risk-off" : "risk-ok";
+        const reason = (riskInfo.reasons || [])[0] || (riskInfo.warnings || [])[0] || "--";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${formatAge(event.logged_at || plan.observed_at)}</td>
+          <td>${escapeHtml(event.type || "--")}</td>
+          <td>${escapeHtml(event.mode || "--")}</td>
+          <td>${escapeHtml(event.status || "--")}</td>
+          <td>${escapeHtml(plan.exchange || "--")}</td>
+          <td>${escapeHtml(plan.symbol || "--")}</td>
+          <td class="num">${riskInfo.order_count ?? "--"}</td>
+          <td class="num">${riskInfo.total_quote_notional == null ? "--" : "$" + money.format(riskInfo.total_quote_notional)}</td>
+          <td class="${riskClass}">${escapeHtml(riskInfo.level || "--")}</td>
+          <td title="${escapeHtml(reason)}">${escapeHtml(reason)}</td>
+        `;
+        body.appendChild(tr);
       }
     }
 
@@ -1162,6 +1235,7 @@ HTML = """<!doctype html>
         text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
         text("slow-meta", data.slow_execution?.plan ? `${data.slow_execution.mode || "dry_run"} · ${data.slow_execution.plan.exchange} ${data.slow_execution.plan.symbol} · ${data.slow_execution.plan.side.toUpperCase()} · mid ${fmt.format(data.slow_execution.plan.mid_price)}` : (data.slow_execution?.status || "disabled"));
 
+        renderOperations(data.operations);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderMarkets(data.markets);
         renderPortfolio(data.portfolio);
@@ -1233,6 +1307,23 @@ def build_market_rows(
 
 def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
     return asdict(cfg)
+
+
+def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
+    try:
+        recent_events = read_recent_trade_events(cfg.trade_log)
+        trade_log_error = None
+    except OSError as exc:
+        recent_events = []
+        trade_log_error = str(exc)
+    trade_log_payload = asdict(cfg.trade_log)
+    trade_log_payload["recent_events"] = recent_events
+    trade_log_payload["error"] = trade_log_error
+    return {
+        "risk": asdict(cfg.risk),
+        "alerts": asdict(cfg.alerts),
+        "trade_log": trade_log_payload,
+    }
 
 
 def slow_execution_accounts(exchanges: Iterable[ExchangeConfig]) -> list[dict[str, str]]:
@@ -1381,6 +1472,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "running": True,
             "updated_at": time.time(),
         },
+        "operations": build_operations_payload(cfg),
         "warnings": ["Waiting for first scan"],
     }
 
@@ -1495,6 +1587,7 @@ class MonitorState:
                     "running": self._program_running,
                     "updated_at": self._program_updated_at,
                 },
+                "operations": build_operations_payload(cfg),
                 "warnings": warnings,
             }
 
@@ -1530,6 +1623,7 @@ class MonitorState:
                         "running": self._program_running,
                         "updated_at": self._program_updated_at,
                     },
+                    "operations": build_operations_payload(cfg),
                 }
             )
 

@@ -49,6 +49,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.portfolio.cash_balances["KRW"], 0.0)
         self.assertEqual(cfg.portfolio.realized_pnl["market_maker"], 0.0)
         self.assertEqual(cfg.portfolio.realized_pnl["arbitrage"], 0.0)
+        self.assertTrue(cfg.risk.enabled)
+        self.assertFalse(cfg.risk.allow_live_trading)
+        self.assertTrue(cfg.risk.allow_market_maker)
+        self.assertTrue(cfg.risk.allow_slow_execution)
+        self.assertEqual(cfg.risk.max_order_quote, 5.0)
+        self.assertEqual(cfg.risk.max_cycle_quote, 25.0)
+        self.assertTrue(cfg.trade_log.enabled)
+        self.assertEqual(cfg.trade_log.path, "data/trade_events.jsonl")
+        self.assertFalse(cfg.alerts.enabled)
         self.assertTrue(
             any(
                 market.exchange == "upbit-spot"

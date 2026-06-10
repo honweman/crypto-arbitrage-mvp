@@ -9,7 +9,9 @@ from typing import Any
 
 from .config import BotConfig, ExchangeConfig, load_config
 from .exchanges import ExchangeManager
+from .risk import RiskOrder, evaluate_order_batch
 from .slow_execution import SlowExecutionPlan, build_slow_execution_plan
+from .trade_log import write_trade_event
 
 
 def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
@@ -126,9 +128,7 @@ async def run_cycle(
     replace_existing: bool,
 ) -> tuple[dict[str, Any], float]:
     plan = await build_plan(cfg, manager, submitted_base=submitted_base)
-    next_submitted_base = (
-        plan.order.submitted_base_after if plan.order is not None else submitted_base
-    )
+    next_submitted_base = submitted_base
     payload: dict[str, Any] = {
         "type": "slow_execution",
         "mode": "live" if live else "dry_run",
@@ -136,8 +136,35 @@ async def run_cycle(
         "plan": plan.to_dict(),
         "tracks_submitted_base": True,
     }
+    risk_orders = []
+    if plan.order is not None:
+        risk_orders.append(
+            RiskOrder(
+                strategy="slow_execution",
+                exchange=plan.exchange,
+                symbol=plan.symbol,
+                side=plan.order.side,
+                amount=plan.order.amount,
+                price=plan.order.price,
+                quote_notional=plan.order.quote_notional,
+                distance_bps=0.0,
+            )
+        )
+    risk = evaluate_order_batch(
+        cfg.risk,
+        risk_orders,
+        strategy="slow_execution",
+        live=live,
+        existing_spread_bps=plan.existing_spread_bps,
+        plan_observed_at=plan.observed_at,
+        post_only=cfg.slow_execution.post_only,
+    )
+    payload["risk"] = risk.to_dict()
 
     if live and plan.order is not None:
+        if not risk.approved:
+            payload["status"] = "blocked_by_risk"
+            return payload, next_submitted_base
         payload["execution"] = await place_plan(
             cfg,
             manager,
@@ -145,6 +172,9 @@ async def run_cycle(
             replace_existing=replace_existing,
         )
         payload["status"] = "placed"
+        next_submitted_base = plan.order.submitted_base_after
+    elif plan.order is not None:
+        next_submitted_base = plan.order.submitted_base_after
 
     return payload, next_submitted_base
 
@@ -176,6 +206,7 @@ async def run_loop(
                 replace_existing=replace_existing,
             )
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+            write_trade_event(cfg.trade_log, payload)
             sys.stdout.flush()
 
             ttl = cfg.slow_execution.order_ttl_seconds
@@ -193,6 +224,7 @@ async def run_loop(
                     placed_order_ids,
                 )
                 print(json.dumps(cancel_payload, ensure_ascii=True, sort_keys=True))
+                write_trade_event(cfg.trade_log, cancel_payload)
                 sys.stdout.flush()
 
             if not loop or payload["status"] in {

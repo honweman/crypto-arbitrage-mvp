@@ -10,6 +10,8 @@ from typing import Any
 from .config import BotConfig, ExchangeConfig, load_config
 from .exchanges import ExchangeManager
 from .market_making import MarketMakerPlan, build_symmetric_market_maker_plan
+from .risk import RiskOrder, evaluate_order_batch
+from .trade_log import write_trade_event
 
 
 def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
@@ -97,8 +99,34 @@ async def run_cycle(
         "status": "planned",
         "plan": plan.to_dict(),
     }
+    risk_orders = [
+        RiskOrder(
+            strategy="market_maker",
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            side=order.side,
+            amount=order.amount,
+            price=order.price,
+            quote_notional=order.quote_notional,
+            distance_bps=order.distance_bps,
+        )
+        for order in plan.orders
+    ]
+    risk = evaluate_order_batch(
+        cfg.risk,
+        risk_orders,
+        strategy="market_maker",
+        live=live,
+        existing_spread_bps=plan.existing_spread_bps,
+        plan_observed_at=plan.observed_at,
+        post_only=cfg.market_maker.post_only,
+    )
+    payload["risk"] = risk.to_dict()
 
     if live:
+        if not risk.approved:
+            payload["status"] = "blocked_by_risk"
+            return payload
         payload["execution"] = await place_plan(
             cfg,
             manager,
@@ -135,6 +163,7 @@ async def run_loop(
                 replace_existing=replace_existing,
             )
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+            write_trade_event(cfg.trade_log, payload)
             sys.stdout.flush()
 
             if not loop:
