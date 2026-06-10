@@ -114,9 +114,9 @@ The top row shows configured positions, cash balances, and P/L attribution:
 }
 ```
 
-`Account Balances` reads live private balances from exchanges with configured API env vars every 10 seconds, aggregates target currencies across accounts, and shows per-account free/used/total balances in the monitor table. When at least one account balance is available, the top `Position` and `Cash Position` cards sync from those live account totals: configured spot base assets such as ACS are treated as positions, while quote and cash currencies such as USD, USDC, USDT, and KRW are treated as cash. If no private account balance is available, the cards fall back to the configured `portfolio` values. `Price Move` is calculated only when an `average_entry_price` is configured; otherwise it stays at zero until cost basis is available. The mark price for each asset is the average converted mid price across available spot books for that asset. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
+`Account Balances` reads live private balances from exchanges with configured API env vars every 10 seconds, aggregates target currencies across accounts, and shows per-account free/used/total balances in the monitor table. When at least one account balance is available, the top `Position` and `Cash Position` cards sync from those live account totals: configured spot base assets such as ACS are treated as positions, while quote and cash currencies such as USD, USDC, USDT, and KRW are treated as cash. If no private account balance is available, the cards fall back to the configured `portfolio` values. `Price Move` is calculated only when an `average_entry_price` is configured; otherwise it stays at zero until cost basis is available. The mark price for each asset is the average converted mid price across available spot books for that asset. `MM P/L`, `Arb P/L`, and `Auto P/L` start with configured `realized_pnl` values and then add recent fill P/L when a fill can be matched back to an order ID in the trade log. Fills without a known order source are shown as `Unattributed`.
 
-`Orders & Fills` reads private open orders, recently closed orders, and recent fills for configured symbols every 5 seconds when the account API env vars are available. Each open order row includes a `Cancel` action that sends a guarded cancel request for that exact exchange, symbol, and order ID, then writes a `manual_order_cancel` event to the trade log and refreshes the order state.
+`Orders & Fills` reads private open orders, recently closed orders, and recent fills for configured symbols every 5 seconds when the account API env vars are available. Recent fills include source attribution, converted notional, fees, and estimated realized P/L. Buy fills only count fees as realized P/L; sell fills use the configured `average_entry_price` for that asset when it is available. Each open order row includes a `Cancel` action that sends a guarded cancel request for that exact exchange, symbol, and order ID, then writes a `manual_order_cancel` event to the trade log and refreshes the order state.
 
 To add another spot asset later, add its markets to `spot_markets`, add one position entry under `portfolio.positions`, and add any new quote-currency conversion to `quote_rates` or `quote_rate_sources`:
 
@@ -498,9 +498,8 @@ Before trading, update `fee_bps` to match your account tier and confirm all thre
 
 ## Next steps before live trading
 
-1. Add fill polling so inventory and realized P/L update from real executions.
-2. Add paper trading with order lifecycle simulation.
-3. Add stronger exchange precision and minimum order validation.
-4. Add transfer and withdrawal availability checks.
-5. Add an execution engine with kill switches, max loss, and per-exchange rate limits.
-6. Store quotes, decisions, and fills in a database for post-trade analysis.
+1. Add paper trading with order lifecycle simulation.
+2. Add stronger exchange precision and minimum order validation.
+3. Add transfer and withdrawal availability checks.
+4. Store quotes, decisions, and fills in a database for post-trade analysis.
+5. Add audited daily realized P/L snapshots for stricter max-loss enforcement.

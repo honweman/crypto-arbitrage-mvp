@@ -17,16 +17,19 @@ from arbitrage_bot.config import (
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
+from arbitrage_bot.trade_log import normalize_trade_event
 from arbitrage_bot.web import (
     HTML,
     MonitorState,
     _slow_execution_overrides_from_payload,
+    build_order_attribution_map,
     build_market_maker_payload,
     build_market_rows,
     build_operations_payload,
     build_slow_execution_payload,
     build_synced_portfolio_pnl,
     cancel_order_payload,
+    enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
     fetch_order_activity_payload,
     slow_execution_accounts,
@@ -468,6 +471,140 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["balance_source"], "configured")
         self.assertAlmostEqual(payload["position_base"], 100.0)
         self.assertAlmostEqual(payload["cash_value"], 3.0)
+
+    def test_trade_pnl_uses_order_attribution_and_cost_basis(self) -> None:
+        cfg = make_config(
+            portfolio=PortfolioConfig(
+                enabled=True,
+                positions=[
+                    AssetPosition(
+                        asset="ACS",
+                        position_base=1_000.0,
+                        average_entry_price=0.00010,
+                    )
+                ],
+            ),
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+        )
+        entry = normalize_trade_event(
+            {
+                "logged_at": 123.0,
+                "type": "market_maker",
+                "strategy": "market_maker",
+                "mode": "live",
+                "status": "placed",
+                "plan": {
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                    "order": {"side": "sell"},
+                },
+                "execution": {
+                    "placed_count": 1,
+                    "canceled_count": 0,
+                    "placed_order_ids": ["order-mm-1"],
+                },
+                "risk": {
+                    "approved": True,
+                    "level": "ok",
+                    "order_count": 1,
+                    "total_quote_notional": 0.15,
+                },
+            }
+        )
+        attribution = build_order_attribution_map([entry])
+
+        enriched, summary = enrich_recent_trades_with_pnl(
+            cfg,
+            [
+                {
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                    "side": "sell",
+                    "order_id": "order-mm-1",
+                    "price": 0.00015,
+                    "amount": 1_000.0,
+                    "cost": 0.15,
+                    "fee": {"cost": 0.0001, "currency": "USDC"},
+                }
+            ],
+            quote_rates={"USDC": 1.0},
+            books={},
+            attribution=attribution,
+        )
+
+        self.assertEqual(enriched[0]["source"], "market_maker")
+        self.assertEqual(summary["attributed_trade_count"], 1)
+        self.assertAlmostEqual(
+            summary["sources"]["market_maker"]["realized_pnl"],
+            0.0499,
+        )
+        self.assertAlmostEqual(
+            summary["sources"]["market_maker"]["fees_common"],
+            0.0001,
+        )
+
+    def test_synced_portfolio_adds_attributed_fill_pnl(self) -> None:
+        cfg = make_config(
+            portfolio=PortfolioConfig(
+                enabled=True,
+                positions=[
+                    AssetPosition(
+                        asset="ACS",
+                        position_base=10_000.0,
+                        average_entry_price=0.00010,
+                    )
+                ],
+                realized_pnl={"market_maker": 1.0, "arbitrage": 2.0},
+            ),
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                )
+            ],
+        )
+        books = {
+            ("bybit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            )
+        }
+        order_activity = {
+            "pnl_summary": {
+                "window": "recent_fills",
+                "observed_at": 123.0,
+                "sources": {
+                    "market_maker": {"realized_pnl": 0.25},
+                    "auto_buy_sell": {"realized_pnl": -0.01},
+                },
+            }
+        }
+
+        payload = build_synced_portfolio_pnl(
+            cfg,
+            books,
+            {"USDT": 1.0},
+            {"checked_account_count": 0, "totals": []},
+            order_activity,
+        )
+
+        self.assertAlmostEqual(payload["sources"]["market_maker"], 1.25)
+        self.assertAlmostEqual(payload["sources"]["arbitrage"], 2.0)
+        self.assertAlmostEqual(payload["sources"]["auto_buy_sell"], -0.01)
+        self.assertAlmostEqual(payload["sources"]["price_move"], 0.5)
+        self.assertAlmostEqual(payload["total_pnl"], 3.74)
+        self.assertEqual(payload["fill_pnl_window"], "recent_fills")
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):

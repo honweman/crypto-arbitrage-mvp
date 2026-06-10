@@ -44,6 +44,13 @@ from .trade_log import (
 ACCOUNT_BALANCE_POLL_SECONDS = 10.0
 ORDER_ACTIVITY_POLL_SECONDS = 5.0
 ORDER_ACTIVITY_LIMIT = 20
+PNL_SOURCE_LABELS = {
+    "market_maker": "Market Maker",
+    "arbitrage": "Arbitrage",
+    "auto_buy_sell": "Auto Buy/Sell",
+    "manual": "Manual",
+    "unattributed": "Unattributed",
+}
 
 
 HTML = """<!doctype html>
@@ -281,7 +288,7 @@ HTML = """<!doctype html>
     }
 
     .fills-table {
-      min-width: 980px;
+      min-width: 1140px;
     }
 
     .balance-table th,
@@ -540,7 +547,7 @@ HTML = """<!doctype html>
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .balance-table { min-width: 620px; }
       .orders-table { min-width: 960px; }
-      .fills-table { min-width: 920px; }
+      .fills-table { min-width: 1080px; }
       .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .account-field { grid-column: 1 / -1; }
       .opportunity { grid-template-columns: 1fr; }
@@ -599,6 +606,10 @@ HTML = """<!doctype html>
       <div class="metric">
         <div class="label">Arb P/L</div>
         <div id="portfolio-arb-pnl" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Auto P/L</div>
+        <div id="portfolio-auto-pnl" class="value">--</div>
       </div>
       <div class="metric">
         <div class="label">Price Move</div>
@@ -691,9 +702,11 @@ HTML = """<!doctype html>
               <th>Account</th>
               <th>Symbol</th>
               <th>Side</th>
+              <th>Source</th>
               <th class="num">Price</th>
               <th class="num">Amount</th>
               <th class="num">Cost</th>
+              <th class="num">P/L</th>
               <th>Fee</th>
               <th>Order</th>
               <th>Time</th>
@@ -1064,6 +1077,19 @@ HTML = """<!doctype html>
       return side === "buy" ? "side-buy" : side === "sell" ? "side-sell" : "";
     }
 
+    function displaySource(value) {
+      if (value === "market_maker") return "Market Maker";
+      if (value === "arbitrage") return "Arbitrage";
+      if (value === "auto_buy_sell" || value === "slow_execution") return "Auto Buy/Sell";
+      if (value === "manual") return "Manual";
+      if (value === "unattributed") return "Unattributed";
+      return value || "--";
+    }
+
+    function formatPnlValue(value) {
+      return value == null ? "--" : `$${money.format(value)}`;
+    }
+
     let cancelOrderBusy = new Set();
 
     async function cancelOrder(order, button) {
@@ -1142,7 +1168,7 @@ HTML = """<!doctype html>
       const fills = orderActivity?.recent_trades || [];
       if (fills.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="9">No recent fills.</td>`;
+        tr.innerHTML = `<td colspan="11">No recent fills.</td>`;
         body.appendChild(tr);
         return;
       }
@@ -1153,9 +1179,11 @@ HTML = """<!doctype html>
           <td>${escapeHtml(fill.label || fill.exchange)}</td>
           <td>${escapeHtml(fill.symbol || "--")}</td>
           <td class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
+          <td>${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
           <td class="num">${fill.price == null ? "--" : fmt.format(fill.price)}</td>
           <td class="num">${formatBalanceAmount(fill.amount)}</td>
           <td class="num">${formatBalanceAmount(fill.cost)}</td>
+          <td class="num ${pnlClass(fill.realized_pnl_common)}">${formatPnlValue(fill.realized_pnl_common)}</td>
           <td>${escapeHtml(formatFee(fill.fee))}</td>
           <td title="${escapeHtml(fill.order_id || "")}">${escapeHtml(shortId(fill.order_id))}</td>
           <td>${formatTimestamp(fill.timestamp)}</td>
@@ -1168,7 +1196,7 @@ HTML = """<!doctype html>
       text(
         "orders-meta",
         orderActivity
-          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
+          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · P/L ${formatPnlValue(orderActivity.pnl_summary?.total_realized_pnl)} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
           : ""
       );
       renderOpenOrders(orderActivity);
@@ -1315,6 +1343,21 @@ HTML = """<!doctype html>
       el.className = `value ${pnlClass(value)}`;
     }
 
+    function formatPnlSourceDetail(portfolio) {
+      const labels = {
+        market_maker: "MM",
+        arbitrage: "Arb",
+        auto_buy_sell: "Auto",
+        manual: "Manual",
+        unattributed: "Unattributed",
+        price_move: "Price",
+      };
+      return Object.entries(portfolio?.sources || {})
+        .filter(([, value]) => value != null && Math.abs(value) >= 1e-12)
+        .map(([key, value]) => `${labels[key] || key}: ${formatPnlValue(value)}`)
+        .join(" | ");
+    }
+
     function formatCashDetail(portfolio) {
       const balances = portfolio?.cash_balances || {};
       const preferredOrder = { USDC: 0, USDT: 1, USD: 2, KRW: 3 };
@@ -1362,7 +1405,9 @@ HTML = """<!doctype html>
         setPnl("portfolio-total-pnl", null);
         setPnl("portfolio-mm-pnl", null);
         setPnl("portfolio-arb-pnl", null);
+        setPnl("portfolio-auto-pnl", null);
         setPnl("portfolio-price-pnl", null);
+        document.getElementById("portfolio-total-pnl").title = "";
         return;
       }
 
@@ -1393,7 +1438,9 @@ HTML = """<!doctype html>
       setPnl("portfolio-total-pnl", portfolio.total_pnl);
       setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);
       setPnl("portfolio-arb-pnl", portfolio.sources?.arbitrage);
+      setPnl("portfolio-auto-pnl", portfolio.sources?.auto_buy_sell);
       setPnl("portfolio-price-pnl", portfolio.sources?.price_move);
+      document.getElementById("portfolio-total-pnl").title = formatPnlSourceDetail(portfolio);
     }
 
     function shortAddress(address) {
@@ -2019,13 +2066,273 @@ def _sort_activity_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _symbol_base_quote(symbol: str) -> tuple[str, str]:
+    base, _, quote = symbol.partition("/")
+    quote = quote.partition(":")[0]
+    return base.upper(), quote.upper()
+
+
+def _source_for_strategy(strategy: str, event_type: str = "") -> str:
+    key = (strategy or event_type or "").lower()
+    if key == "market_maker":
+        return "market_maker"
+    if key in {"slow_execution", "auto_buy_sell", "slow_execution_cancel"}:
+        return "auto_buy_sell"
+    if key in {"arbitrage", "spot_spread", "spot-spread", "cash_and_carry"}:
+        return "arbitrage"
+    if key.startswith("manual"):
+        return "manual"
+    return "unattributed"
+
+
+def _pnl_source_row(source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "label": PNL_SOURCE_LABELS.get(source, source),
+        "trade_count": 0,
+        "notional_common": 0.0,
+        "fees_common": 0.0,
+        "realized_pnl": 0.0,
+    }
+
+
+def _attribution_keys(
+    exchange: str,
+    symbol: str,
+    order_id: str,
+) -> list[str]:
+    if not order_id:
+        return []
+    keys = []
+    if exchange and symbol:
+        keys.append(f"{exchange}|{symbol}|{order_id}")
+    keys.append(order_id)
+    return keys
+
+
+def build_order_attribution_map(entries: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    attribution: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        source = _source_for_strategy(
+            getattr(entry, "strategy", ""),
+            getattr(entry, "event_type", ""),
+        )
+        row = {
+            "source": source,
+            "source_label": PNL_SOURCE_LABELS.get(source, source),
+            "strategy": getattr(entry, "strategy", ""),
+            "event_type": getattr(entry, "event_type", ""),
+            "event_id": getattr(entry, "event_id", ""),
+            "mode": getattr(entry, "mode", ""),
+            "logged_at": getattr(entry, "logged_at", None),
+        }
+        exchange = getattr(entry, "exchange", "")
+        symbol = getattr(entry, "symbol", "")
+        for order_id in getattr(entry, "placed_order_ids", []) or []:
+            for key in _attribution_keys(exchange, symbol, str(order_id)):
+                attribution.setdefault(key, row)
+    return attribution
+
+
+def _trade_attribution(
+    trade: dict[str, Any],
+    attribution: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    for key in _attribution_keys(
+        str(trade.get("exchange") or ""),
+        str(trade.get("symbol") or ""),
+        str(trade.get("order_id") or ""),
+    ):
+        if key in attribution:
+            return attribution[key]
+    return None
+
+
+def _mark_prices_by_asset(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+    quote_rates: dict[str, float],
+) -> dict[str, float]:
+    marks: dict[str, list[float]] = {}
+    for market in cfg.spot_markets:
+        book = books.get((market.exchange, market.symbol))
+        rate = quote_rates.get(market.quote_currency)
+        if book is None or rate is None or not book.bids or not book.asks:
+            continue
+        bid = book.bids[0].price
+        ask = book.asks[0].price
+        if bid <= 0 or ask <= 0 or bid >= ask:
+            continue
+        marks.setdefault(market.asset.upper(), []).append((bid + ask) / 2 * rate)
+    return {
+        asset: sum(values) / len(values)
+        for asset, values in marks.items()
+        if values
+    }
+
+
+def _fee_common_value(
+    fee: dict[str, Any] | None,
+    *,
+    quote_rates: dict[str, float],
+    mark_prices: dict[str, float],
+) -> tuple[float | None, str | None]:
+    if not fee:
+        return 0.0, None
+    cost = _number_or_none(fee.get("cost"))
+    if cost is None:
+        return 0.0, None
+    currency = str(fee.get("currency") or "").upper()
+    if not currency:
+        return cost, None
+    rate = quote_rates.get(currency)
+    if rate is not None:
+        return cost * rate, None
+    mark = mark_prices.get(currency)
+    if mark is not None:
+        return cost * mark, None
+    return None, currency
+
+
+def enrich_recent_trades_with_pnl(
+    cfg: BotConfig,
+    trades: Iterable[dict[str, Any]],
+    *,
+    quote_rates: dict[str, float],
+    books: dict[tuple[str, str], OrderBookSnapshot],
+    attribution: dict[str, dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    attribution = attribution or {}
+    average_prices = _configured_average_entry_prices(cfg)
+    mark_prices = _mark_prices_by_asset(cfg, books, quote_rates)
+    source_rows = {
+        source: _pnl_source_row(source)
+        for source in PNL_SOURCE_LABELS
+    }
+    missing_cost_basis: set[str] = set()
+    missing_quote_rates: set[str] = set()
+    missing_fee_rates: set[str] = set()
+    enriched: list[dict[str, Any]] = []
+
+    for trade in trades:
+        row = dict(trade)
+        match = _trade_attribution(row, attribution)
+        source = match["source"] if match is not None else "unattributed"
+        base, quote = _symbol_base_quote(str(row.get("symbol") or ""))
+        side = str(row.get("side") or "").lower()
+        price = _number_or_none(row.get("price"))
+        amount = _number_or_none(row.get("amount"))
+        cost = _number_or_none(row.get("cost"))
+        if cost is None and price is not None and amount is not None:
+            cost = price * amount
+            row["cost"] = cost
+
+        quote_rate = quote_rates.get(quote) if quote else None
+        if quote and quote_rate is None:
+            missing_quote_rates.add(quote)
+        notional_common = (
+            cost * quote_rate
+            if cost is not None and quote_rate is not None
+            else None
+        )
+        fee_common, missing_fee_currency = _fee_common_value(
+            row.get("fee"),
+            quote_rates=quote_rates,
+            mark_prices=mark_prices,
+        )
+        if missing_fee_currency:
+            missing_fee_rates.add(missing_fee_currency)
+
+        realized_pnl: float | None = None
+        fee_for_pnl = fee_common or 0.0
+        if (
+            side == "sell"
+            and price is not None
+            and amount is not None
+            and quote_rate is not None
+        ):
+            average_entry = average_prices.get(base, 0.0)
+            if average_entry > 0:
+                realized_pnl = (
+                    price * quote_rate - average_entry
+                ) * amount - fee_for_pnl
+            else:
+                missing_cost_basis.add(base or row.get("symbol") or "")
+                realized_pnl = -fee_for_pnl
+        elif fee_common is not None:
+            realized_pnl = -fee_common
+
+        source_row = source_rows.setdefault(source, _pnl_source_row(source))
+        source_row["trade_count"] += 1
+        if notional_common is not None:
+            source_row["notional_common"] += notional_common
+        if fee_common is not None:
+            source_row["fees_common"] += fee_common
+        if realized_pnl is not None:
+            source_row["realized_pnl"] += realized_pnl
+
+        row.update(
+            {
+                "source": source,
+                "source_label": PNL_SOURCE_LABELS.get(source, source),
+                "attribution": match,
+                "base_currency": base,
+                "quote_currency": quote,
+                "notional_common": notional_common,
+                "fee_common": fee_common,
+                "realized_pnl_common": realized_pnl,
+            }
+        )
+        enriched.append(row)
+
+    active_sources = {
+        source: row
+        for source, row in source_rows.items()
+        if row["trade_count"] > 0 or abs(row["realized_pnl"]) >= 1e-12
+    }
+    total_realized = sum(row["realized_pnl"] for row in active_sources.values())
+    total_fees = sum(row["fees_common"] for row in active_sources.values())
+    total_notional = sum(row["notional_common"] for row in active_sources.values())
+    summary = {
+        "currency": cfg.common_quote_currency,
+        "window": "recent_fills",
+        "trade_count": len(enriched),
+        "attributed_trade_count": sum(
+            1 for row in enriched if row["source"] != "unattributed"
+        ),
+        "unattributed_trade_count": sum(
+            1 for row in enriched if row["source"] == "unattributed"
+        ),
+        "total_realized_pnl": total_realized,
+        "total_fees": total_fees,
+        "total_notional": total_notional,
+        "sources": active_sources,
+        "missing_cost_basis": sorted(item for item in missing_cost_basis if item),
+        "missing_quote_rates": sorted(missing_quote_rates),
+        "missing_fee_rates": sorted(missing_fee_rates),
+        "observed_at": time.time(),
+    }
+    return enriched, summary
+
+
 async def fetch_order_activity_payload(
     cfg: BotConfig,
     manager: ExchangeManager,
     exec_cfg: SlowExecutionConfig | None = None,
     *,
     limit: int = ORDER_ACTIVITY_LIMIT,
+    quote_rates: dict[str, float] | None = None,
+    books: dict[tuple[str, str], OrderBookSnapshot] | None = None,
 ) -> dict[str, Any]:
+    quote_rates = cfg.quote_rates if quote_rates is None else quote_rates
+    books = {} if books is None else books
+    try:
+        recent_log_entries = read_recent_trade_entries(cfg.trade_log)
+        attribution_warnings: list[str] = []
+    except OSError as exc:
+        recent_log_entries = []
+        attribution_warnings = [f"trade log attribution unavailable: {exc}"]
+    order_attribution = build_order_attribution_map(recent_log_entries)
     symbols_by_exchange = _exchange_balance_symbols(cfg, exec_cfg)
     exchanges = _all_account_exchanges(cfg)
     accounts = await asyncio.gather(
@@ -2048,6 +2355,27 @@ async def fetch_order_activity_payload(
     recent_trades = _sort_activity_rows(
         trade for account in accounts for trade in account["recent_trades"]
     )[:limit]
+    open_orders = [
+        {
+            **order,
+            "attribution": _trade_attribution(
+                {
+                    "exchange": order["exchange"],
+                    "symbol": order["symbol"],
+                    "order_id": order["id"],
+                },
+                order_attribution,
+            ),
+        }
+        for order in open_orders
+    ]
+    recent_trades, pnl_summary = enrich_recent_trades_with_pnl(
+        cfg,
+        recent_trades,
+        quote_rates=quote_rates,
+        books=books,
+        attribution=order_attribution,
+    )
     errors = [
         f"{account['exchange']}: {error}"
         for account in accounts
@@ -2058,6 +2386,7 @@ async def fetch_order_activity_payload(
         for account in accounts
         for warning in account.get("warnings", [])
     ]
+    warnings.extend(attribution_warnings)
     checked_accounts = sum(
         1
         for account in accounts
@@ -2069,6 +2398,7 @@ async def fetch_order_activity_payload(
         "open_orders": open_orders,
         "closed_orders": closed_orders,
         "recent_trades": recent_trades,
+        "pnl_summary": pnl_summary,
         "open_order_count": len(open_orders),
         "closed_order_count": len(closed_orders),
         "recent_trade_count": len(recent_trades),
@@ -2193,16 +2523,50 @@ def _account_balance_totals_by_currency(
     return totals
 
 
+def _apply_order_activity_pnl(
+    payload: dict[str, Any],
+    order_activity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    sources = {
+        str(source): float(value or 0.0)
+        for source, value in (payload.get("sources") or {}).items()
+    }
+    for source in ("market_maker", "arbitrage", "auto_buy_sell", "price_move"):
+        sources.setdefault(source, 0.0)
+    payload["sources"] = sources
+
+    summary = (order_activity or {}).get("pnl_summary")
+    if not isinstance(summary, dict):
+        return payload
+
+    for source, row in (summary.get("sources") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        realized_pnl = _number_or_none(row.get("realized_pnl"))
+        if realized_pnl is None:
+            continue
+        source_key = str(source)
+        sources[source_key] = sources.get(source_key, 0.0) + realized_pnl
+
+    payload["sources"] = sources
+    payload["total_pnl"] = sum(sources.values())
+    payload["fill_pnl_summary"] = summary
+    payload["fill_pnl_window"] = summary.get("window")
+    payload["fill_pnl_observed_at"] = summary.get("observed_at")
+    return payload
+
+
 def build_synced_portfolio_pnl(
     cfg: BotConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
     quote_rates: dict[str, float],
     account_balances: dict[str, Any],
+    order_activity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if int(account_balances.get("checked_account_count", 0) or 0) <= 0:
         payload = build_portfolio_pnl(cfg, books, quote_rates)
         payload["balance_source"] = "configured"
-        return payload
+        return _apply_order_activity_pnl(payload, order_activity)
 
     totals_by_currency = _account_balance_totals_by_currency(account_balances)
     position_assets = _configured_position_assets(cfg)
@@ -2234,7 +2598,7 @@ def build_synced_portfolio_pnl(
     payload["balance_source"] = "live_accounts"
     payload["balance_status"] = account_balances.get("status")
     payload["balance_observed_at"] = account_balances.get("last_finished")
-    return payload
+    return _apply_order_activity_pnl(payload, order_activity)
 
 
 async def fetch_account_balances_payload(
@@ -2360,6 +2724,21 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "open_orders": [],
             "closed_orders": [],
             "recent_trades": [],
+            "pnl_summary": {
+                "currency": cfg.common_quote_currency,
+                "window": "recent_fills",
+                "trade_count": 0,
+                "attributed_trade_count": 0,
+                "unattributed_trade_count": 0,
+                "total_realized_pnl": 0.0,
+                "total_fees": 0.0,
+                "total_notional": 0.0,
+                "sources": {},
+                "missing_cost_basis": [],
+                "missing_quote_rates": [],
+                "missing_fee_rates": [],
+                "observed_at": None,
+            },
             "open_order_count": 0,
             "closed_order_count": 0,
             "recent_trade_count": 0,
@@ -2422,6 +2801,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "sources": {
                 "market_maker": 0.0,
                 "arbitrage": 0.0,
+                "auto_buy_sell": 0.0,
                 "price_move": 0.0,
             },
             "observed_at": None,
@@ -2901,6 +3281,8 @@ async def monitor_loop(
                             cfg,
                             manager,
                             runtime_slow_execution,
+                            quote_rates=quote_rates,
+                            books=portfolio_books,
                         )
                     except Exception as exc:  # noqa: BLE001
                         order_activity_payload = {
@@ -2909,6 +3291,21 @@ async def monitor_loop(
                             "open_orders": [],
                             "closed_orders": [],
                             "recent_trades": [],
+                            "pnl_summary": {
+                                "currency": cfg.common_quote_currency,
+                                "window": "recent_fills",
+                                "trade_count": 0,
+                                "attributed_trade_count": 0,
+                                "unattributed_trade_count": 0,
+                                "total_realized_pnl": 0.0,
+                                "total_fees": 0.0,
+                                "total_notional": 0.0,
+                                "sources": {},
+                                "missing_cost_basis": [],
+                                "missing_quote_rates": [],
+                                "missing_fee_rates": [],
+                                "observed_at": None,
+                            },
                             "open_order_count": 0,
                             "closed_order_count": 0,
                             "recent_trade_count": 0,
@@ -2926,6 +3323,7 @@ async def monitor_loop(
                         portfolio_books,
                         quote_rates,
                         account_balances_payload,
+                        order_activity_payload,
                     )
 
                 if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
