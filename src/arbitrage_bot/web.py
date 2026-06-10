@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
+import hashlib
+import hmac
+import html
+import ipaddress
 import json
+import os
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -13,6 +19,7 @@ from typing import Any
 from aiohttp import web
 
 from .account_check import _auth_env_status, _balance_currencies, _summarize_balance
+from .alerts import AlertService
 from .auto_buy_sell_task import (
     AutoBuySellTaskService,
     default_task_store_path,
@@ -38,6 +45,7 @@ from .main import (
 from .market_making import build_symmetric_market_maker_plan
 from .models import OrderBookSnapshot, Opportunity
 from .pnl import build_portfolio_pnl
+from .risk import current_daily_pnl_quote
 from .slow_execution import build_slow_execution_plan
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
@@ -59,6 +67,69 @@ PNL_SOURCE_LABELS = {
     "manual": "Manual",
     "unattributed": "Unattributed",
 }
+SESSION_COOKIE = "crypto_arb_session"
+SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
+
+
+LOGIN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Arbitrage Login</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f5f6f2;
+      color: #17211b;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    form {
+      width: min(360px, calc(100% - 32px));
+      display: grid;
+      gap: 12px;
+      padding: 22px;
+      border: 1px solid #d8ded8;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    label { color: #66736b; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    input {
+      width: 100%;
+      min-height: 40px;
+      padding: 8px 10px;
+      border: 1px solid #d8ded8;
+      border-radius: 6px;
+      font: inherit;
+      box-sizing: border-box;
+    }
+    button {
+      min-height: 40px;
+      border: 1px solid #101828;
+      border-radius: 6px;
+      background: #101828;
+      color: #ffffff;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .error { min-height: 18px; color: #b33b2e; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>Crypto Arbitrage</h1>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">Sign In</button>
+    <div class="error">__ERROR__</div>
+  </form>
+</body>
+</html>
+"""
 
 
 HTML = """<!doctype html>
@@ -4183,6 +4254,77 @@ async def fetch_onchain_payload(
     )
 
 
+def _parse_daily_report_time(value: str) -> tuple[int, int]:
+    hour_text, _, minute_text = value.partition(":")
+    try:
+        hour = int(hour_text)
+        minute = int(minute_text or "0")
+    except ValueError:
+        return (23, 59)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return (23, 59)
+    return (hour, minute)
+
+
+def _daily_report_due(
+    cfg: BotConfig,
+    *,
+    last_report_day: str | None,
+    now: float | None = None,
+) -> tuple[bool, str]:
+    now = time.time() if now is None else now
+    local = time.localtime(now)
+    day = time.strftime("%Y-%m-%d", local)
+    hour, minute = _parse_daily_report_time(cfg.alerts.daily_report_time)
+    due = (
+        cfg.alerts.daily_report_enabled
+        and day != last_report_day
+        and (local.tm_hour, local.tm_min) >= (hour, minute)
+    )
+    return due, day
+
+
+def build_daily_report_message(
+    cfg: BotConfig,
+    *,
+    scan_count: int,
+    order_activity: dict[str, Any],
+    account_balances: dict[str, Any],
+    trading_console: dict[str, Any],
+    auto_buy_sell_tasks: dict[str, Any],
+    warnings: list[str],
+) -> str:
+    daily = order_activity.get("daily_pnl") or {}
+    sources = daily.get("sources") or {}
+    source_lines = []
+    for source, row in sorted(sources.items()):
+        if isinstance(row, dict):
+            source_lines.append(
+                f"- {source}: P/L {row.get('realized_pnl', 0.0):.8f}, "
+                f"trades {row.get('trade_count', 0)}"
+            )
+    if not source_lines:
+        source_lines.append("- no realized fills")
+
+    return "\n".join(
+        [
+            f"Daily trading report ({time.strftime('%Y-%m-%d')})",
+            f"Status scans: {scan_count}",
+            f"Daily P/L: {daily.get('total_realized_pnl', 0.0):.8f} {cfg.common_quote_currency}",
+            f"Daily trades: {daily.get('trade_count', 0)}",
+            f"Open orders: {order_activity.get('open_order_count', 0)}",
+            f"Recent fills: {order_activity.get('recent_trade_count', 0)}",
+            f"Accounts checked: {account_balances.get('checked_account_count', 0)}/{account_balances.get('total_account_count', 0)}",
+            f"Live trading: {trading_console.get('live_trading', False)}",
+            f"Auto Buy/Sell tasks: {auto_buy_sell_tasks.get('active_count', 0)} active / {auto_buy_sell_tasks.get('task_count', 0)} total",
+            f"Warnings: {len(warnings)}",
+            "",
+            "P/L by source:",
+            *source_lines,
+        ]
+    )
+
+
 async def monitor_loop(
     cfg: BotConfig,
     strategy: StrategyName,
@@ -4210,10 +4352,13 @@ async def monitor_loop(
         "slow_execution"
     ]
     portfolio_payload = _build_initial_payload(cfg, poll_seconds)["portfolio"]
+    alert_service = AlertService(cfg.alerts)
     previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
     next_balance_scan = 0.0
     next_order_activity_scan = 0.0
+    consecutive_problem_cycles = 0
+    last_daily_report_day: str | None = None
     scan_count = 0
     try:
         while True:
@@ -4479,6 +4624,38 @@ async def monitor_loop(
                         *warnings,
                         f"Auto Buy/Sell: {slow_execution_payload.get('error')}",
                     ]
+                daily_loss_stop = False
+                if runtime_cfg.risk.max_daily_loss_quote > 0:
+                    daily_pnl_quote = current_daily_pnl_quote(runtime_cfg)
+                    if daily_pnl_quote <= -runtime_cfg.risk.max_daily_loss_quote:
+                        daily_loss_stop = True
+                        warnings = [
+                            *warnings,
+                            (
+                                f"Daily loss {daily_pnl_quote:.8f} exceeds "
+                                f"max_daily_loss_quote {runtime_cfg.risk.max_daily_loss_quote:.8f}"
+                            ),
+                        ]
+
+                consecutive_problem_cycles = (
+                    consecutive_problem_cycles + 1 if warnings else 0
+                )
+                auto_stop_triggered = (
+                    runtime_cfg.alerts.auto_stop_enabled
+                    and (
+                        daily_loss_stop
+                        or consecutive_problem_cycles
+                        >= max(1, runtime_cfg.alerts.auto_stop_consecutive_errors)
+                    )
+                )
+                if auto_stop_triggered:
+                    warnings = [
+                        *warnings,
+                        (
+                            "Auto-stop triggered after "
+                            f"{consecutive_problem_cycles} problem cycle(s)"
+                        ),
+                    ]
 
                 elapsed = time.monotonic() - monotonic_started
                 if not await state.is_running():
@@ -4502,8 +4679,61 @@ async def monitor_loop(
                     trading_console=trading_console_payload,
                     portfolio=portfolio_payload,
                 )
+                if warnings:
+                    await alert_service.send(
+                        level="critical" if auto_stop_triggered else "warning",
+                        title="Crypto arbitrage monitor warning",
+                        message="\n".join(warnings[:6]),
+                        key="monitor:warnings:" + "|".join(warnings[:3]),
+                        payload={
+                            "status": "auto_stopped" if auto_stop_triggered else "degraded",
+                            "scan_count": scan_count,
+                            "warnings": warnings,
+                        },
+                    )
+                due, report_day = _daily_report_due(
+                    runtime_cfg,
+                    last_report_day=last_daily_report_day,
+                )
+                if due:
+                    auto_tasks = await state.auto_buy_sell_tasks()
+                    await alert_service.send(
+                        level="info",
+                        title="Daily trading report",
+                        message=build_daily_report_message(
+                            runtime_cfg,
+                            scan_count=scan_count,
+                            order_activity=order_activity_payload,
+                            account_balances=account_balances_payload,
+                            trading_console=trading_console_payload,
+                            auto_buy_sell_tasks=auto_tasks,
+                            warnings=warnings,
+                        ),
+                        key=f"daily-report:{report_day}",
+                        payload={
+                            "daily_pnl": order_activity_payload.get("daily_pnl"),
+                            "account_balances": account_balances_payload,
+                            "auto_buy_sell_tasks": auto_tasks,
+                        },
+                        force=True,
+                    )
+                    last_daily_report_day = report_day
+                if auto_stop_triggered:
+                    await state.set_running(False)
+                    await alert_service.send(
+                        level="critical",
+                        title="Crypto arbitrage auto-stopped",
+                        message="\n".join(warnings[:8]),
+                        key="monitor:auto-stop",
+                        payload={
+                            "scan_count": scan_count,
+                            "warnings": warnings,
+                        },
+                        force=True,
+                    )
             except Exception as exc:  # noqa: BLE001
                 elapsed = time.monotonic() - monotonic_started
+                consecutive_problem_cycles += 1
                 await state.set_error(
                     cfg=runtime_cfg,
                     poll_seconds=poll_seconds,
@@ -4512,6 +4742,33 @@ async def monitor_loop(
                     elapsed_ms=int(elapsed * 1000),
                     error=str(exc),
                 )
+                await alert_service.send(
+                    level="error",
+                    title="Crypto arbitrage monitor error",
+                    message=f"{exc.__class__.__name__}: {exc}",
+                    key=f"monitor:error:{exc.__class__.__name__}:{exc}",
+                    payload={
+                        "scan_count": scan_count,
+                        "error": str(exc),
+                    },
+                )
+                if (
+                    runtime_cfg.alerts.auto_stop_enabled
+                    and consecutive_problem_cycles
+                    >= max(1, runtime_cfg.alerts.auto_stop_consecutive_errors)
+                ):
+                    await state.set_running(False)
+                    await alert_service.send(
+                        level="critical",
+                        title="Crypto arbitrage auto-stopped",
+                        message=(
+                            f"Stopped after {consecutive_problem_cycles} "
+                            f"consecutive error cycle(s): {exc}"
+                        ),
+                        key="monitor:auto-stop",
+                        payload={"scan_count": scan_count, "error": str(exc)},
+                        force=True,
+                    )
 
             sleep_for = max(0.0, poll_seconds - (time.monotonic() - monotonic_started))
             if sleep_for > 0:
@@ -4543,6 +4800,182 @@ async def auto_buy_sell_task_loop(
             await asyncio.sleep(1.0)
     finally:
         await manager.close()
+
+
+def _env_optional(name: str | None) -> str | None:
+    if not name:
+        return None
+    value = os.environ.get(name)
+    return value if value else None
+
+
+def _web_password(cfg: BotConfig) -> str | None:
+    return _env_optional(cfg.web_security.password_env)
+
+
+def _cookie_secret(cfg: BotConfig) -> str:
+    return (
+        _env_optional(cfg.web_security.cookie_secret_env)
+        or _web_password(cfg)
+        or "crypto-arbitrage-dev"
+    )
+
+
+def _request_is_https(request: web.Request, cfg: BotConfig) -> bool:
+    if request.secure:
+        return True
+    if not cfg.web_security.trust_proxy_headers:
+        return False
+    return request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+
+def _client_ip(request: web.Request, cfg: BotConfig) -> str:
+    if cfg.web_security.trust_proxy_headers:
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            return forwarded_for.split(",", 1)[0].strip()
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip.strip()
+    return request.remote or ""
+
+
+def _is_local_ip(value: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return parsed.is_loopback
+
+
+def _allowed_ip_specs(cfg: BotConfig) -> list[str]:
+    value = _env_optional(cfg.web_security.allowed_ips_env)
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _ip_allowed(ip_value: str, allowed_specs: list[str]) -> bool:
+    if not allowed_specs:
+        return True
+    try:
+        parsed_ip = ipaddress.ip_address(ip_value)
+    except ValueError:
+        return False
+    for spec in allowed_specs:
+        try:
+            if "/" in spec:
+                if parsed_ip in ipaddress.ip_network(spec, strict=False):
+                    return True
+            elif parsed_ip == ipaddress.ip_address(spec):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _sign_session(cfg: BotConfig, timestamp: int) -> str:
+    secret = _cookie_secret(cfg).encode("utf-8")
+    payload = str(timestamp).encode("utf-8")
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+
+def _make_session_token(cfg: BotConfig) -> str:
+    timestamp = int(time.time())
+    raw = f"{timestamp}:{_sign_session(cfg, timestamp)}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _session_valid(cfg: BotConfig, token: str | None) -> bool:
+    if not token:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        timestamp_text, signature = raw.split(":", 1)
+        timestamp = int(timestamp_text)
+    except (ValueError, TypeError):
+        return False
+    if time.time() - timestamp > SESSION_MAX_AGE_SECONDS:
+        return False
+    return hmac.compare_digest(signature, _sign_session(cfg, timestamp))
+
+
+def _login_html(error: str = "") -> str:
+    return LOGIN_HTML.replace("__ERROR__", html.escape(error))
+
+
+async def login_get(request: web.Request) -> web.Response:
+    return web.Response(
+        text=_login_html(),
+        content_type="text/html",
+    )
+
+
+async def login_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    password = _web_password(cfg)
+    if not password:
+        raise web.HTTPFound("/")
+    form = await request.post()
+    supplied = str(form.get("password", ""))
+    if not hmac.compare_digest(supplied, password):
+        return web.Response(
+            text=_login_html("Invalid password"),
+            content_type="text/html",
+            status=401,
+        )
+    response = web.HTTPFound("/")
+    response.set_cookie(
+        SESSION_COOKIE,
+        _make_session_token(cfg),
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=cfg.web_security.cookie_secure and _request_is_https(request, cfg),
+        samesite="Strict",
+    )
+    raise response
+
+
+async def logout(request: web.Request) -> web.Response:
+    response = web.HTTPFound("/login")
+    response.del_cookie(SESSION_COOKIE)
+    raise response
+
+
+def build_security_middleware(cfg: BotConfig) -> web.middleware:
+    @web.middleware
+    async def security_middleware(
+        request: web.Request,
+        handler: Any,
+    ) -> web.StreamResponse:
+        remote = request.remote or ""
+        client_ip = _client_ip(request, cfg)
+        allowed_specs = _allowed_ip_specs(cfg)
+        proxy_ip_present = bool(
+            request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
+        )
+        if (
+            allowed_specs
+            and not (_is_local_ip(remote) and not proxy_ip_present)
+            and not _ip_allowed(client_ip, allowed_specs)
+        ):
+            return web.Response(text="Forbidden", status=403)
+
+        if request.path in {"/login", "/logout"}:
+            return await handler(request)
+
+        password = _web_password(cfg)
+        if not password:
+            return await handler(request)
+        if request.path == "/api/health" and _is_local_ip(remote):
+            return await handler(request)
+        if not _session_valid(cfg, request.cookies.get(SESSION_COOKIE)):
+            if request.path.startswith("/api/"):
+                return web.json_response({"error": "authentication required"}, status=401)
+            raise web.HTTPFound("/login")
+        return await handler(request)
+
+    return security_middleware
 
 
 async def index(_: web.Request) -> web.Response:
@@ -4791,7 +5224,7 @@ def create_app(
     poll_seconds: float | None,
 ) -> web.Application:
     interval = cfg.poll_seconds if poll_seconds is None else poll_seconds
-    app = web.Application()
+    app = web.Application(middlewares=[build_security_middleware(cfg)])
     state = MonitorState(cfg, interval)
     auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
     app["monitor_state"] = state
@@ -4816,6 +5249,9 @@ def create_app(
                 await auto_task
 
     app.cleanup_ctx.append(monitor_context)
+    app.router.add_get("/login", login_get)
+    app.router.add_post("/login", login_post)
+    app.router.add_get("/logout", logout)
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)

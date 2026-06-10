@@ -174,6 +174,26 @@ class AlertConfig:
     webhook_url_env: str | None = None
     telegram_bot_token_env: str | None = None
     telegram_chat_id_env: str | None = None
+    email_from_env: str | None = None
+    email_to_env: str | None = None
+    smtp_host_env: str | None = None
+    smtp_port_env: str | None = None
+    smtp_username_env: str | None = None
+    smtp_password_env: str | None = None
+    smtp_tls: bool = True
+    auto_stop_enabled: bool = False
+    auto_stop_consecutive_errors: int = 3
+    daily_report_enabled: bool = False
+    daily_report_time: str = "23:59"
+
+
+@dataclass(frozen=True)
+class WebSecurityConfig:
+    password_env: str | None = "CRYPTO_ARB_WEB_PASSWORD"
+    cookie_secret_env: str | None = "CRYPTO_ARB_WEB_COOKIE_SECRET"
+    allowed_ips_env: str | None = "CRYPTO_ARB_WEB_ALLOWED_IPS"
+    trust_proxy_headers: bool = True
+    cookie_secure: bool = True
 
 
 @dataclass(frozen=True)
@@ -200,6 +220,7 @@ class BotConfig:
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
     pnl_store: PnlStoreConfig = field(default_factory=PnlStoreConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    web_security: WebSecurityConfig = field(default_factory=WebSecurityConfig)
 
 
 def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
@@ -269,6 +290,7 @@ def load_config(path: str | Path) -> BotConfig:
     trade_log_raw = raw.get("trade_log", {})
     pnl_store_raw = raw.get("pnl_store", {})
     alerts_raw = raw.get("alerts", {})
+    web_security_raw = raw.get("web_security", {})
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -473,5 +495,36 @@ def load_config(path: str | Path) -> BotConfig:
             webhook_url_env=alerts_raw.get("webhook_url_env"),
             telegram_bot_token_env=alerts_raw.get("telegram_bot_token_env"),
             telegram_chat_id_env=alerts_raw.get("telegram_chat_id_env"),
+            email_from_env=alerts_raw.get("email_from_env"),
+            email_to_env=alerts_raw.get("email_to_env"),
+            smtp_host_env=alerts_raw.get("smtp_host_env"),
+            smtp_port_env=alerts_raw.get("smtp_port_env"),
+            smtp_username_env=alerts_raw.get("smtp_username_env"),
+            smtp_password_env=alerts_raw.get("smtp_password_env"),
+            smtp_tls=bool(alerts_raw.get("smtp_tls", True)),
+            auto_stop_enabled=bool(alerts_raw.get("auto_stop_enabled", False)),
+            auto_stop_consecutive_errors=int(
+                alerts_raw.get("auto_stop_consecutive_errors", 3)
+            ),
+            daily_report_enabled=bool(alerts_raw.get("daily_report_enabled", False)),
+            daily_report_time=str(alerts_raw.get("daily_report_time", "23:59")),
+        ),
+        web_security=WebSecurityConfig(
+            password_env=web_security_raw.get(
+                "password_env",
+                "CRYPTO_ARB_WEB_PASSWORD",
+            ),
+            cookie_secret_env=web_security_raw.get(
+                "cookie_secret_env",
+                "CRYPTO_ARB_WEB_COOKIE_SECRET",
+            ),
+            allowed_ips_env=web_security_raw.get(
+                "allowed_ips_env",
+                "CRYPTO_ARB_WEB_ALLOWED_IPS",
+            ),
+            trust_proxy_headers=bool(
+                web_security_raw.get("trust_proxy_headers", True)
+            ),
+            cookie_secure=bool(web_security_raw.get("cookie_secure", True)),
         ),
     )

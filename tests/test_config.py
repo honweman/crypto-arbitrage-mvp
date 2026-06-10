@@ -74,6 +74,14 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(cfg.pnl_store.enabled)
         self.assertEqual(cfg.pnl_store.path, "data/fill_pnl.sqlite3")
         self.assertFalse(cfg.alerts.enabled)
+        self.assertFalse(cfg.alerts.auto_stop_enabled)
+        self.assertFalse(cfg.alerts.daily_report_enabled)
+        self.assertEqual(cfg.alerts.daily_report_time, "23:59")
+        self.assertEqual(cfg.web_security.password_env, "CRYPTO_ARB_WEB_PASSWORD")
+        self.assertEqual(
+            cfg.web_security.allowed_ips_env,
+            "CRYPTO_ARB_WEB_ALLOWED_IPS",
+        )
         self.assertTrue(
             any(
                 market.exchange == "upbit-spot"

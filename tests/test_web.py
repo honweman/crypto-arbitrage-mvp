@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from arbitrage_bot.config import (
+    AlertConfig,
     AssetPosition,
     BotConfig,
     ExchangeConfig,
@@ -24,6 +25,11 @@ from arbitrage_bot.web import (
     MonitorState,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
+    _daily_report_due,
+    _ip_allowed,
+    _make_session_token,
+    _session_valid,
+    build_daily_report_message,
     build_order_attribution_map,
     build_market_maker_payload,
     build_market_rows,
@@ -49,6 +55,7 @@ def make_config(
     spot_exchanges: list[ExchangeConfig] | None = None,
     risk: RiskConfig | None = None,
     trade_log: TradeLogConfig | None = None,
+    alerts: AlertConfig | None = None,
 ) -> BotConfig:
     return BotConfig(
         poll_seconds=1.0,
@@ -71,6 +78,7 @@ def make_config(
         derivative_exchanges=[],
         risk=risk or RiskConfig(),
         trade_log=trade_log or TradeLogConfig(enabled=False),
+        alerts=alerts or AlertConfig(),
     )
 
 
@@ -411,6 +419,62 @@ class WebMonitorTest(unittest.TestCase):
                 allowed_accounts={"bybit-spot"},
                 allowed_strategies={"market_maker"},
             )
+
+    def test_security_helpers_validate_session_and_ip(self) -> None:
+        cfg = make_config()
+        token = _make_session_token(cfg)
+
+        self.assertTrue(_session_valid(cfg, token))
+        self.assertFalse(_session_valid(cfg, token + "bad"))
+        self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.97"]))
+        self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.0/24"]))
+        self.assertFalse(_ip_allowed("66.96.213.1", ["66.96.212.0/24"]))
+
+    def test_daily_report_due_and_message(self) -> None:
+        cfg = make_config(
+            alerts=AlertConfig(
+                daily_report_enabled=True,
+                daily_report_time="00:00",
+            )
+        )
+
+        due, day = _daily_report_due(
+            cfg,
+            last_report_day=None,
+            now=1_704_153_599,
+        )
+        not_due, _ = _daily_report_due(
+            cfg,
+            last_report_day=day,
+            now=1_704_153_600,
+        )
+        message = build_daily_report_message(
+            cfg,
+            scan_count=12,
+            order_activity={
+                "daily_pnl": {
+                    "total_realized_pnl": 1.25,
+                    "trade_count": 2,
+                    "sources": {
+                        "auto_buy_sell": {
+                            "realized_pnl": 1.25,
+                            "trade_count": 2,
+                        }
+                    },
+                },
+                "open_order_count": 1,
+                "recent_trade_count": 2,
+            },
+            account_balances={"checked_account_count": 1, "total_account_count": 2},
+            trading_console={"live_trading": False},
+            auto_buy_sell_tasks={"active_count": 1, "task_count": 1},
+            warnings=["warning"],
+        )
+
+        self.assertTrue(due)
+        self.assertFalse(not_due)
+        self.assertIn("Daily P/L: 1.25000000 USD", message)
+        self.assertIn("Auto Buy/Sell tasks: 1 active / 1 total", message)
 
     def test_operations_payload_includes_risk_and_recent_events(self) -> None:
         payload = build_operations_payload(make_config())

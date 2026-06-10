@@ -452,6 +452,47 @@ export BYBIT_MM_A_HTTPS_PROXY="http://user:password@proxy-a.example.com:8080"
 
 Supported proxy env fields are `http_proxy_env`, `https_proxy_env`, and `socks_proxy_env` for REST calls, plus `ws_proxy_env`, `wss_proxy_env`, and `ws_socks_proxy_env` for future WebSocket clients. Configure only one REST proxy env and one WebSocket proxy env per exchange entry. SOCKS proxies require the optional `aiohttp_socks` package used by CCXT.
 
+## Web security and operations
+
+The web monitor can be protected with a password and an IP allowlist without storing secrets in Git:
+
+```json
+"web_security": {
+  "password_env": "CRYPTO_ARB_WEB_PASSWORD",
+  "cookie_secret_env": "CRYPTO_ARB_WEB_COOKIE_SECRET",
+  "allowed_ips_env": "CRYPTO_ARB_WEB_ALLOWED_IPS",
+  "trust_proxy_headers": true,
+  "cookie_secure": true
+}
+```
+
+Set `CRYPTO_ARB_WEB_PASSWORD` and `CRYPTO_ARB_WEB_ALLOWED_IPS` in the server environment file. `CRYPTO_ARB_WEB_ALLOWED_IPS` accepts comma-separated IPs or CIDR ranges. When nginx terminates HTTPS, bind the Python app to `127.0.0.1` and pass `X-Real-IP` / `X-Forwarded-Proto` headers.
+
+Alerts support generic webhook, Telegram, and SMTP email:
+
+```json
+"alerts": {
+  "enabled": true,
+  "min_level": "warning",
+  "webhook_url_env": "CRYPTO_ARB_WEBHOOK_URL",
+  "telegram_bot_token_env": "CRYPTO_ARB_TELEGRAM_BOT_TOKEN",
+  "telegram_chat_id_env": "CRYPTO_ARB_TELEGRAM_CHAT_ID",
+  "email_from_env": "CRYPTO_ARB_EMAIL_FROM",
+  "email_to_env": "CRYPTO_ARB_EMAIL_TO",
+  "smtp_host_env": "CRYPTO_ARB_SMTP_HOST",
+  "smtp_port_env": "CRYPTO_ARB_SMTP_PORT",
+  "smtp_username_env": "CRYPTO_ARB_SMTP_USERNAME",
+  "smtp_password_env": "CRYPTO_ARB_SMTP_PASSWORD",
+  "smtp_tls": true,
+  "auto_stop_enabled": true,
+  "auto_stop_consecutive_errors": 3,
+  "daily_report_enabled": true,
+  "daily_report_time": "23:59"
+}
+```
+
+Auto-stop pauses the program after repeated degraded/error cycles, or immediately when the daily P/L breaches `risk.max_daily_loss_quote`. Daily reports are sent through the configured alert channels once per local day.
+
 Do not commit API keys, proxy URLs, or IP allowlist secrets. Put those values in local shell env vars, Docker/Kubernetes secrets, or the cloud secret manager for each account runner.
 
 The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, and balance changes between Solana polling rounds.

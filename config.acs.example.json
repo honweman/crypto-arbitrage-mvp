@@ -149,7 +149,25 @@
     "min_level": "warning",
     "webhook_url_env": null,
     "telegram_bot_token_env": null,
-    "telegram_chat_id_env": null
+    "telegram_chat_id_env": null,
+    "email_from_env": null,
+    "email_to_env": null,
+    "smtp_host_env": null,
+    "smtp_port_env": null,
+    "smtp_username_env": null,
+    "smtp_password_env": null,
+    "smtp_tls": true,
+    "auto_stop_enabled": false,
+    "auto_stop_consecutive_errors": 3,
+    "daily_report_enabled": false,
+    "daily_report_time": "23:59"
+  },
+  "web_security": {
+    "password_env": "CRYPTO_ARB_WEB_PASSWORD",
+    "cookie_secret_env": "CRYPTO_ARB_WEB_COOKIE_SECRET",
+    "allowed_ips_env": "CRYPTO_ARB_WEB_ALLOWED_IPS",
+    "trust_proxy_headers": true,
+    "cookie_secure": true
   },
   "spot_symbols": [],
   "spot_markets": [
