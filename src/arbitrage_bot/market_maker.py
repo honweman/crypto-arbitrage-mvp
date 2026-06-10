@@ -122,7 +122,19 @@ def _plan_reprice_bps(
 async def build_plan(
     cfg: BotConfig,
     manager: ExchangeManager,
+    *,
+    order_book: OrderBookSnapshot | None = None,
 ) -> MarketMakerPlan:
+    book = await load_plan_order_book(cfg, manager, order_book=order_book)
+    return build_symmetric_market_maker_plan(book, cfg.market_maker)
+
+
+async def load_plan_order_book(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    *,
+    order_book: OrderBookSnapshot | None = None,
+) -> OrderBookSnapshot:
     maker_cfg = cfg.market_maker
     if not maker_cfg.enabled:
         raise ValueError("market_maker.enabled is false")
@@ -130,6 +142,16 @@ async def build_plan(
         raise ValueError("market_maker.exchange is required")
     if not maker_cfg.symbol:
         raise ValueError("market_maker.symbol is required")
+
+    if order_book is not None:
+        if (
+            order_book.exchange != maker_cfg.exchange
+            or order_book.symbol != maker_cfg.symbol
+        ):
+            raise ValueError(
+                "cached order book does not match market maker exchange/symbol"
+            )
+        return order_book
 
     exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
     book = await manager.fetch_order_book(
@@ -141,7 +163,20 @@ async def build_plan(
         raise ValueError(
             f"no order book for {maker_cfg.exchange} {maker_cfg.symbol}"
         )
-    return build_symmetric_market_maker_plan(book, maker_cfg)
+    return book
+
+
+def order_book_market_data(book: OrderBookSnapshot) -> dict[str, Any]:
+    return {
+        "source": book.source,
+        "exchange": book.exchange,
+        "symbol": book.symbol,
+        "timestamp_ms": book.timestamp_ms,
+        "received_at": book.received_at,
+        "age_seconds": max(0.0, time.time() - book.received_at),
+        "bid_levels": len(book.bids),
+        "ask_levels": len(book.asks),
+    }
 
 
 async def place_plan(
@@ -411,13 +446,16 @@ async def run_cycle(
     previous_plan: dict[str, Any] | None = None,
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
+    order_book: OrderBookSnapshot | None = None,
 ) -> dict[str, Any]:
-    plan = await build_plan(cfg, manager)
+    book = await load_plan_order_book(cfg, manager, order_book=order_book)
+    plan = build_symmetric_market_maker_plan(book, cfg.market_maker)
     payload: dict[str, Any] = {
         "type": "market_maker",
         "mode": "live" if live else "dry_run",
         "status": "planned",
         "plan": plan.to_dict(),
+        "market_data": order_book_market_data(book),
     }
     conversion = market_maker_quote_conversion(cfg, plan.symbol)
     payload["quote_conversion"] = conversion

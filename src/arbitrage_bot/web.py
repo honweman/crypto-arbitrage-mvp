@@ -47,9 +47,11 @@ from .market_making import build_symmetric_market_maker_plan
 from .market_maker import (
     cancel_order_ids as cancel_market_maker_order_ids,
     market_maker_quote_conversion,
+    order_book_market_data,
     run_cycle as run_market_maker_cycle,
 )
 from .models import OrderBookSnapshot, Opportunity
+from .orderbook_cache import OrderBookCache
 from .pnl import build_portfolio_pnl
 from .risk import current_daily_pnl_quote
 from .slow_execution import build_slow_execution_plan
@@ -2526,11 +2528,16 @@ HTML = """<!doctype html>
         const mmRuntime = data.market_maker?.runtime || {};
         const mmPlan = data.market_maker?.plan;
         const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
+        const mmMarketData = mmRuntime.market_data || data.market_maker?.market_data || {};
+        const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
+        const mmMarketDataText = mmMarketData.source
+          ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(2)}s`}${mmWsText}`
+          : mmWsText;
         const mmQuote = data.market_maker?.quote_conversion;
         const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
         const mmFeatures = data.market_maker?.exchange_features || {};
         const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
-        text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
+        text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
         const slowPlan = data.slow_execution?.plan;
         const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
         text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
@@ -4634,6 +4641,7 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
+            "market_data": None,
             "runtime": {},
             "error": None,
         }
@@ -4648,6 +4656,7 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
+            "market_data": None,
             "runtime": {},
             "error": f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
         }
@@ -4663,6 +4672,7 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
+            "market_data": order_book_market_data(book),
             "runtime": {},
             "error": str(exc),
         }
@@ -4675,6 +4685,7 @@ def build_market_maker_payload(
         "accounts": accounts,
         "quote_conversion": conversion,
         "exchange_features": exchange_features,
+        "market_data": order_book_market_data(book),
         "runtime": {},
         "error": None,
     }
@@ -5436,11 +5447,55 @@ def _market_maker_gate_status(
     return True, "live", "live"
 
 
+def _market_maker_cache_max_age_seconds(cfg: BotConfig) -> float:
+    poll_age = max(1.0, cfg.market_maker.poll_seconds * 2)
+    risk_age = cfg.risk.max_order_book_age_seconds
+    if risk_age > 0:
+        return min(risk_age, poll_age)
+    return poll_age
+
+
+async def _cached_market_maker_order_book(
+    cfg: BotConfig,
+    cache: OrderBookCache,
+) -> tuple[OrderBookSnapshot | None, dict[str, Any]]:
+    maker_cfg = cfg.market_maker
+    if not maker_cfg.exchange or not maker_cfg.symbol:
+        return None, {}
+    max_age_seconds = _market_maker_cache_max_age_seconds(cfg)
+    try:
+        exchange_cfg = _find_exchange_by_key(cfg, maker_cfg.exchange)
+        depth = max(cfg.order_book_depth, maker_cfg.levels)
+        await cache.ensure_watch(exchange_cfg, maker_cfg.symbol, depth)
+        snapshot = cache.get(
+            maker_cfg.exchange,
+            maker_cfg.symbol,
+            max_age_seconds=max_age_seconds,
+        )
+        status = cache.status(
+            maker_cfg.exchange,
+            maker_cfg.symbol,
+            max_age_seconds=max_age_seconds,
+        )
+        status["using_cached"] = snapshot is not None
+        return snapshot, status
+    except Exception as exc:  # noqa: BLE001
+        return None, {
+            "exchange": maker_cfg.exchange,
+            "symbol": maker_cfg.symbol,
+            "source": None,
+            "fresh": False,
+            "using_cached": False,
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+
+
 async def market_maker_task_loop(
     cfg: BotConfig,
     state: MonitorState,
 ) -> None:
     manager = ExchangeManager()
+    orderbook_cache = OrderBookCache(manager)
     open_order_ids: list[str] = []
     open_order_exchange = ""
     open_order_symbol = ""
@@ -5461,6 +5516,7 @@ async def market_maker_task_loop(
         "canceled_count": 0,
         "cycle_count": 0,
         "last_error": None,
+        "market_data": None,
         "updated_at": time.time(),
     }
     try:
@@ -5545,11 +5601,18 @@ async def market_maker_task_loop(
                         "cycle_count": cycle_count,
                         "last_error": None,
                         "last_execution": cancel_payload,
+                        "market_data": None,
                         "updated_at": time.time(),
                     }
                     await state.set_market_maker_runtime(runtime)
                 else:
                     cycle_count += 1
+                    order_book, market_data_status = (
+                        await _cached_market_maker_order_book(
+                            runtime_cfg,
+                            orderbook_cache,
+                        )
+                    )
                     payload = await run_market_maker_cycle(
                         runtime_cfg,
                         manager,
@@ -5559,7 +5622,19 @@ async def market_maker_task_loop(
                         previous_plan=previous_plan,
                         previous_mid_price=previous_mid_price,
                         last_cancel_at=last_cancel_at,
+                        order_book=order_book,
                     )
+                    market_data = (
+                        payload.get("market_data")
+                        if isinstance(payload.get("market_data"), dict)
+                        else {}
+                    )
+                    if market_data_status:
+                        market_data = {
+                            **market_data,
+                            "cache": market_data_status,
+                        }
+                    payload["market_data"] = market_data
                     payload["runtime_strategy"] = "market_maker"
                     write_trade_event(runtime_cfg.trade_log, payload)
                     plan_payload = (
@@ -5606,6 +5681,7 @@ async def market_maker_task_loop(
                         "last_risk": payload.get("risk"),
                         "last_execution": execution,
                         "last_error": None,
+                        "market_data": payload.get("market_data"),
                         "updated_at": time.time(),
                     }
                     await state.set_market_maker_runtime(runtime)
@@ -5623,6 +5699,7 @@ async def market_maker_task_loop(
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
     finally:
+        await orderbook_cache.close()
         await manager.close()
 
 

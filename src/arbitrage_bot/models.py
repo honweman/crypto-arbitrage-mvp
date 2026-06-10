@@ -21,6 +21,8 @@ class OrderBookSnapshot:
     bids: list[BookLevel]
     asks: list[BookLevel]
     timestamp_ms: int | None = None
+    source: str = "rest"
+    received_at: float = field(default_factory=time)
 
 
 @dataclass(frozen=True)

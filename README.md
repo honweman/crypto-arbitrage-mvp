@@ -162,6 +162,8 @@ The web monitor also shows a dry-run market maker ladder when `market_maker.enab
 
 When the exchange adapter supports it, MM uses batch order APIs for ladder placement and cancellation. Bybit spot is enabled for batch create/cancel; unsupported exchanges automatically stay on the guarded single-order path.
 
+The web background MM loop also has an optional order book cache. If the active exchange client advertises `watchOrderBook`, the loop maintains a fresh WebSocket book and builds the next ladder from that cached snapshot; otherwise it safely falls back to the existing REST fetch path. The monitor shows the current MM market data source, age, and whether WebSocket watching is unsupported. This keeps today's setup compatible while leaving a clean upgrade path for native exchange WebSocket clients or `ccxt.pro`.
+
 `quote_per_level` and `min_order_quote` are always expressed in the selected exchange pair's quote currency: USDT for Bybit/Upbit `ACS/USDT`, USDC for Coinbase `ACS/USDC`, and KRW for Bithumb `ACS/KRW`. Risk checks convert those quote amounts into `common_quote_currency` using `quote_rates` before applying `max_order_quote`, `max_cycle_quote`, and exposure limits. If a quote rate is missing, live MM is blocked.
 
 Exchange support is intentionally conservative. Bybit, Coinbase, and Upbit support post-only limit orders through ccxt. Bithumb does not expose post-only support through ccxt, so Bithumb MM with `post_only: true` is blocked before order placement; only set `post_only: false` and `risk.require_post_only: false` for Bithumb if you explicitly accept taker-fill risk. Bithumb also does not support client order ids through ccxt, so its MM orders can only be tracked in memory until the process restarts.
@@ -231,7 +233,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
   --replace-existing
 ```
 
-The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
+The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle. The web background MM loop can use a WebSocket order book cache when the installed exchange client supports it; if not, it uses REST and reports `WS unsupported` in the MM status text.
 
 The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. This tool submits one buy or sell marketable limit order at the current execution-side top of book: buys use the best ask and sells use the best bid. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
 

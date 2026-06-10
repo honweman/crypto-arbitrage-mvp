@@ -130,6 +130,29 @@ class MarketMakingTest(unittest.TestCase):
 
 
 class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cycle_uses_supplied_order_book_without_rest_fetch(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(self, *_: object, **__: object) -> None:
+                raise AssertionError("cached order book should avoid REST fetch")
+
+        payload = await run_cycle(
+            self._cfg(),
+            FakeManager(),  # type: ignore[arg-type]
+            live=False,
+            replace_existing=False,
+            order_book=OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+                source="websocket",
+            ),
+        )
+
+        self.assertEqual(payload["status"], "planned")
+        self.assertEqual(payload["market_data"]["source"], "websocket")
+        self.assertAlmostEqual(payload["plan"]["mid_price"], 0.00015)
+
     async def test_live_cycle_is_blocked_when_risk_disallows_live(self) -> None:
         class FakeManager:
             async def fetch_order_book(

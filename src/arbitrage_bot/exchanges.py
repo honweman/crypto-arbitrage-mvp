@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import os
 import sys
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -212,6 +213,38 @@ class ExchangeManager:
             bids=normalize_levels(raw.get("bids", [])),
             asks=normalize_levels(raw.get("asks", [])),
             timestamp_ms=raw.get("timestamp"),
+            source="rest",
+            received_at=time.time(),
+        )
+
+    def watch_order_book_supported(self, cfg: ExchangeConfig) -> bool:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        return (
+            capabilities.get("watchOrderBook") is True
+            and getattr(client, "watch_order_book", None) is not None
+        )
+
+    async def watch_order_book(
+        self,
+        cfg: ExchangeConfig,
+        symbol: str,
+        depth: int,
+    ) -> OrderBookSnapshot | None:
+        if not self.watch_order_book_supported(cfg):
+            raise NotImplementedError(
+                f"{cfg.key} websocket order book is not supported by this ccxt client"
+            )
+        client = self.client(cfg)
+        raw = await client.watch_order_book(symbol, limit=depth)
+        return OrderBookSnapshot(
+            exchange=cfg.key,
+            symbol=symbol,
+            bids=normalize_levels(raw.get("bids", [])),
+            asks=normalize_levels(raw.get("asks", [])),
+            timestamp_ms=raw.get("timestamp"),
+            source="websocket",
+            received_at=time.time(),
         )
 
     async def fetch_order_books(
