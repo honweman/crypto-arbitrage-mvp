@@ -22,6 +22,7 @@ from arbitrage_bot.trade_log import normalize_trade_event
 from arbitrage_bot.web import (
     HTML,
     MonitorState,
+    _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
     build_order_attribution_map,
     build_market_maker_payload,
@@ -95,6 +96,15 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("/api/strategies/control", HTML)
         self.assertIn('id="console-open-orders"', HTML)
         self.assertIn('id="console-recent-fills"', HTML)
+
+    def test_page_includes_risk_controls(self) -> None:
+        self.assertIn("Risk Controls", HTML)
+        self.assertIn("/api/risk", HTML)
+        self.assertIn('id="risk-allow-live"', HTML)
+        self.assertIn('id="risk-accounts"', HTML)
+        self.assertIn('id="risk-strategies"', HTML)
+        self.assertIn('id="risk-max-order"', HTML)
+        self.assertIn('id="risk-max-exposure"', HTML)
 
     def test_trading_console_payload_reports_live_and_paused_strategies(self) -> None:
         cfg = make_config(
@@ -319,6 +329,57 @@ class WebMonitorTest(unittest.TestCase):
             _slow_execution_overrides_from_payload(
                 {"exchange": "coinbase-spot"},
                 allowed_exchanges={"bybit-spot"},
+            )
+
+    def test_risk_update_payload_is_sanitized(self) -> None:
+        overrides = _risk_overrides_from_payload(
+            {
+                "allow_live_trading": True,
+                "account_enabled": {"coinbase-spot": True, "bybit-spot": False},
+                "strategy_enabled": {"market_maker": True, "slow_execution": False},
+                "max_order_quote": "5.5",
+                "max_exposure_quote": "250",
+                "max_daily_loss_quote": "10",
+                "max_open_orders": "12",
+                "max_cancels_per_cycle": "4",
+                "min_seconds_between_cancels": "1.5",
+            },
+            allowed_accounts={"coinbase-spot", "bybit-spot"},
+            allowed_strategies={"market_maker", "slow_execution"},
+        )
+
+        self.assertTrue(overrides["allow_live_trading"])
+        self.assertFalse(overrides["account_enabled"]["bybit-spot"])
+        self.assertFalse(overrides["strategy_enabled"]["slow_execution"])
+        self.assertEqual(overrides["max_order_quote"], 5.5)
+        self.assertEqual(overrides["max_exposure_quote"], 250.0)
+        self.assertEqual(overrides["max_daily_loss_quote"], 10.0)
+        self.assertEqual(overrides["max_open_orders"], 12)
+        self.assertEqual(overrides["max_cancels_per_cycle"], 4)
+        self.assertEqual(overrides["min_seconds_between_cancels"], 1.5)
+
+    def test_risk_update_payload_rejects_unknown_account(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown exchange account"):
+            _risk_overrides_from_payload(
+                {"account_enabled": {"coinbase-spot": True}},
+                allowed_accounts={"bybit-spot"},
+                allowed_strategies={"market_maker"},
+            )
+
+    def test_risk_update_payload_rejects_unknown_strategy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown strategy"):
+            _risk_overrides_from_payload(
+                {"strategy_enabled": {"unknown": True}},
+                allowed_accounts={"bybit-spot"},
+                allowed_strategies={"market_maker"},
+            )
+
+    def test_risk_update_payload_rejects_fractional_integer_field(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_open_orders must be an integer"):
+            _risk_overrides_from_payload(
+                {"max_open_orders": "1.5"},
+                allowed_accounts={"bybit-spot"},
+                allowed_strategies={"market_maker"},
             )
 
     def test_operations_payload_includes_risk_and_recent_events(self) -> None:
@@ -1092,6 +1153,40 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         strategies = {row["id"]: row for row in console["strategies"]}
         self.assertTrue(strategies["market_maker"]["paused"])
         self.assertEqual(strategies["market_maker"]["mode"], "paused")
+
+    async def test_risk_update_updates_runtime_config_and_console(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            risk=RiskConfig(allow_live_trading=False, max_order_quote=5.0),
+        )
+        state = MonitorState(cfg, 1.0)
+
+        update = await state.set_risk_overrides(
+            {
+                "allow_live_trading": True,
+                "max_order_quote": 1.25,
+                "account_enabled": {"bybit-spot": False},
+                "strategy_enabled": {"market_maker": False},
+            },
+            cfg=cfg,
+        )
+        runtime_risk = await state.risk_config(cfg.risk)
+        payload = await state.get()
+
+        self.assertTrue(runtime_risk.allow_live_trading)
+        self.assertEqual(runtime_risk.max_order_quote, 1.25)
+        self.assertFalse(runtime_risk.account_enabled["bybit-spot"])
+        self.assertFalse(runtime_risk.strategy_enabled["market_maker"])
+        strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
+        accounts = {row["key"]: row for row in update["trading_console"]["accounts"]}
+        self.assertFalse(strategies["market_maker"]["live"])
+        self.assertFalse(accounts["bybit-spot"]["enabled"])
+        self.assertEqual(payload["operations"]["risk"]["max_order_quote"], 1.25)
 
 if __name__ == "__main__":
     unittest.main()

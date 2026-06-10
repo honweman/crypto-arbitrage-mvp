@@ -17,6 +17,7 @@ from .config import (
     AssetPosition,
     BotConfig,
     ExchangeConfig,
+    RiskConfig,
     SlowExecutionConfig,
     SpotMarketConfig,
     load_config,
@@ -728,6 +729,52 @@ HTML = """<!doctype html>
           <tbody id="console-recent-fills"></tbody>
         </table>
       </div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <h2>Risk Controls</h2>
+        <span id="risk-control-meta" class="subtle"></span>
+      </div>
+      <form id="risk-form" class="control-panel">
+        <label class="check-field">
+          <input id="risk-allow-live" type="checkbox">
+          Allow Live
+        </label>
+        <div class="field account-field">
+          <label>Accounts</label>
+          <div id="risk-accounts" class="account-options"></div>
+        </div>
+        <div class="field account-field">
+          <label>Strategies</label>
+          <div id="risk-strategies" class="account-options"></div>
+        </div>
+        <div class="field">
+          <label for="risk-max-order">Max/Order</label>
+          <input id="risk-max-order" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-exposure">Max Exposure</label>
+          <input id="risk-max-exposure" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-daily-loss">Daily Loss</label>
+          <input id="risk-max-daily-loss" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-open-orders">Max Open</label>
+          <input id="risk-max-open-orders" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="risk-max-cancels">Max Cancels</label>
+          <input id="risk-max-cancels" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="risk-cancel-cooldown">Cancel Sec</label>
+          <input id="risk-cancel-cooldown" type="number" min="0" step="any">
+        </div>
+        <button id="risk-apply" class="control-button" type="submit">Apply</button>
+      </form>
     </section>
 
     <section>
@@ -1717,6 +1764,8 @@ HTML = """<!doctype html>
     }
 
     let programToggleBusy = false;
+    let riskFormDirty = false;
+    let riskFormBusy = false;
     let slowFormDirty = false;
     let slowFormBusy = false;
 
@@ -1750,6 +1799,125 @@ HTML = """<!doctype html>
 
     function setNumericField(id, value) {
       document.getElementById(id).value = value == null ? "" : String(value);
+    }
+
+    function renderRiskToggleOptions(containerId, inputName, items, enabledMap, emptyText) {
+      const body = document.getElementById(containerId);
+      const list = Array.isArray(items) ? items : [];
+      const signature = JSON.stringify({
+        items: list.map((item) => [item.key || item.id, item.label, item.title]),
+        enabledMap,
+      });
+      if (body.dataset.signature === signature) return;
+      body.dataset.signature = signature;
+      body.innerHTML = "";
+      if (list.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "subtle";
+        empty.textContent = emptyText;
+        body.appendChild(empty);
+        return;
+      }
+
+      for (const item of list) {
+        const key = item.key || item.id;
+        const label = document.createElement("label");
+        label.className = "account-option";
+        label.title = item.title || key;
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.name = inputName;
+        checkbox.value = key;
+        checkbox.checked = enabledMap?.[key] !== false;
+        const textNode = document.createElement("span");
+        textNode.textContent = item.label || key;
+        label.appendChild(checkbox);
+        label.appendChild(textNode);
+        body.appendChild(label);
+      }
+    }
+
+    function checkboxMap(inputName) {
+      const values = {};
+      document.querySelectorAll(`input[name="${inputName}"]`).forEach((input) => {
+        values[input.value] = input.checked;
+      });
+      return values;
+    }
+
+    function renderRiskControls(ops, tradingConsole) {
+      if (riskFormDirty || riskFormBusy) return;
+      const risk = ops?.risk || {};
+      document.getElementById("risk-allow-live").checked = Boolean(risk.allow_live_trading);
+      setNumericField("risk-max-order", risk.max_order_quote || 0);
+      setNumericField("risk-max-exposure", risk.max_exposure_quote || 0);
+      setNumericField("risk-max-daily-loss", risk.max_daily_loss_quote || 0);
+      setNumericField("risk-max-open-orders", risk.max_open_orders || 0);
+      setNumericField("risk-max-cancels", risk.max_cancels_per_cycle || 0);
+      setNumericField("risk-cancel-cooldown", risk.min_seconds_between_cancels || 0);
+
+      const accounts = (tradingConsole?.accounts || []).map((account) => ({
+        key: account.key,
+        label: account.label || account.key,
+        title: `${account.id || account.key} · ${account.market_type || "spot"}`,
+      }));
+      const strategies = (tradingConsole?.strategies || []).map((strategy) => ({
+        key: strategy.id,
+        label: strategy.label || displayStrategy(strategy.id),
+        title: strategy.symbol ? `${strategy.exchange || "all"} · ${strategy.symbol}` : strategy.id,
+      }));
+      renderRiskToggleOptions(
+        "risk-accounts",
+        "risk-account",
+        accounts,
+        risk.account_enabled || {},
+        "No accounts"
+      );
+      renderRiskToggleOptions(
+        "risk-strategies",
+        "risk-strategy",
+        strategies,
+        risk.strategy_enabled || {},
+        "No strategies"
+      );
+
+      const liveState = risk.allow_live_trading ? "live allowed" : "live blocked";
+      text(
+        "risk-control-meta",
+        `${liveState} · max/order $${money.format(risk.max_order_quote || 0)} · exposure $${money.format(risk.max_exposure_quote || 0)}`
+      );
+    }
+
+    async function applyRiskConfig(event) {
+      event.preventDefault();
+      if (riskFormBusy) return;
+      riskFormBusy = true;
+      const button = document.getElementById("risk-apply");
+      button.disabled = true;
+      const payload = {
+        allow_live_trading: document.getElementById("risk-allow-live").checked,
+        account_enabled: checkboxMap("risk-account"),
+        strategy_enabled: checkboxMap("risk-strategy"),
+        max_order_quote: numericValue("risk-max-order"),
+        max_exposure_quote: numericValue("risk-max-exposure"),
+        max_daily_loss_quote: numericValue("risk-max-daily-loss"),
+        max_open_orders: numericValue("risk-max-open-orders"),
+        max_cancels_per_cycle: numericValue("risk-max-cancels"),
+        min_seconds_between_cancels: numericValue("risk-cancel-cooldown"),
+      };
+      try {
+        const res = await fetch("/api/risk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error("risk update failed");
+        riskFormDirty = false;
+        await refresh();
+      } finally {
+        button.disabled = false;
+        riskFormBusy = false;
+      }
     }
 
     function selectedSlowAccount() {
@@ -1872,6 +2040,7 @@ HTML = """<!doctype html>
         text("slow-meta", data.slow_execution?.plan ? `${data.slow_execution.mode || "dry_run"} · ${data.slow_execution.plan.exchange} ${data.slow_execution.plan.symbol} · ${data.slow_execution.plan.side.toUpperCase()} · mid ${fmt.format(data.slow_execution.plan.mid_price)}` : (data.slow_execution?.status || "disabled"));
 
         renderOperations(data.operations);
+        renderRiskControls(data.operations, data.trading_console);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderMarkets(data.markets);
         renderAccountBalances(data.account_balances);
@@ -1894,6 +2063,10 @@ HTML = """<!doctype html>
     document.getElementById("program-toggle").addEventListener("change", (event) => {
       setProgramRunning(event.target.checked);
     });
+    document.getElementById("risk-form").addEventListener("input", () => {
+      riskFormDirty = true;
+    });
+    document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
     document.getElementById("slow-form").addEventListener("input", () => {
       slowFormDirty = true;
     });
@@ -1945,6 +2118,10 @@ def build_market_rows(
 
 
 def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def risk_config_to_dict(cfg: RiskConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
@@ -3194,6 +3371,100 @@ def _slow_execution_overrides_from_payload(
     return overrides
 
 
+def _non_negative_float(payload: dict[str, Any], field: str) -> float:
+    try:
+        value = float(payload[field])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if value < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return value
+
+
+def _non_negative_int(payload: dict[str, Any], field: str) -> int:
+    value = _non_negative_float(payload, field)
+    if not value.is_integer():
+        raise ValueError(f"{field} must be an integer")
+    return int(value)
+
+
+def _bool_map_from_payload(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    allowed_keys: set[str],
+    label: str,
+) -> dict[str, bool] | None:
+    if field not in payload:
+        return None
+    raw = payload[field]
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field} must be an object")
+    clean: dict[str, bool] = {}
+    for key, value in raw.items():
+        clean_key = str(key).strip()
+        if clean_key not in allowed_keys:
+            raise ValueError(f"unknown {label}: {clean_key}")
+        if not isinstance(value, bool):
+            raise ValueError(f"{field}.{clean_key} must be a boolean")
+        clean[clean_key] = value
+    return clean
+
+
+def _risk_overrides_from_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_accounts: set[str],
+    allowed_strategies: set[str],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+
+    overrides: dict[str, Any] = {}
+    if "allow_live_trading" in payload:
+        if not isinstance(payload["allow_live_trading"], bool):
+            raise ValueError("allow_live_trading must be a boolean")
+        overrides["allow_live_trading"] = payload["allow_live_trading"]
+
+    account_enabled = _bool_map_from_payload(
+        payload,
+        "account_enabled",
+        allowed_keys=allowed_accounts,
+        label="exchange account",
+    )
+    if account_enabled is not None:
+        overrides["account_enabled"] = account_enabled
+
+    strategy_enabled = _bool_map_from_payload(
+        payload,
+        "strategy_enabled",
+        allowed_keys=allowed_strategies,
+        label="strategy",
+    )
+    if strategy_enabled is not None:
+        overrides["strategy_enabled"] = strategy_enabled
+
+    float_fields = {
+        "max_order_quote",
+        "max_exposure_quote",
+        "max_daily_loss_quote",
+        "min_seconds_between_cancels",
+    }
+    for field in float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    int_fields = {
+        "max_open_orders",
+        "max_cancels_per_cycle",
+    }
+    for field in int_fields:
+        if field in payload:
+            overrides[field] = _non_negative_int(payload, field)
+
+    return overrides
+
+
 def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any]:
     return {
         "status": "starting",
@@ -3346,12 +3617,23 @@ class MonitorState:
         self._lock = asyncio.Lock()
         self._program_running = True
         self._program_updated_at = time.time()
+        self._risk_overrides: dict[str, Any] = {}
         self._slow_execution_overrides: dict[str, Any] = {}
         self._strategy_paused: dict[str, bool] = {
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
         self._payload = _build_initial_payload(cfg, poll_seconds)
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
+
+    def _runtime_config_unlocked(self, cfg: BotConfig) -> BotConfig:
+        return replace(
+            cfg,
+            risk=replace(cfg.risk, **self._risk_overrides),
+            slow_execution=replace(
+                cfg.slow_execution,
+                **self._slow_execution_overrides,
+            ),
+        )
 
     async def get(self) -> dict[str, Any]:
         async with self._lock:
@@ -3368,6 +3650,17 @@ class MonitorState:
         async with self._lock:
             return replace(base_config, **self._slow_execution_overrides)
 
+    async def risk_config(
+        self,
+        base_config: RiskConfig,
+    ) -> RiskConfig:
+        async with self._lock:
+            return replace(base_config, **self._risk_overrides)
+
+    async def runtime_config(self, cfg: BotConfig) -> BotConfig:
+        async with self._lock:
+            return self._runtime_config_unlocked(cfg)
+
     async def set_slow_execution_overrides(
         self,
         overrides: dict[str, Any],
@@ -3378,6 +3671,31 @@ class MonitorState:
                 current_config = self._payload["slow_execution"].get("config", {})
                 current_config.update(overrides)
                 self._payload["slow_execution"]["config"] = current_config
+
+    async def set_risk_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._risk_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+            )
+            return json.loads(
+                json.dumps(
+                    {
+                        "risk": risk_config_to_dict(runtime_cfg.risk),
+                        "trading_console": self._payload["trading_console"],
+                        "operations": self._payload["operations"],
+                    }
+                )
+            )
 
     async def strategy_pauses(self) -> dict[str, bool]:
         async with self._lock:
@@ -3394,8 +3712,9 @@ class MonitorState:
             raise ValueError(f"unknown strategy: {strategy_id}")
         async with self._lock:
             self._strategy_paused[strategy_id] = paused
+            runtime_cfg = self._runtime_config_unlocked(cfg)
             self._payload["trading_console"] = build_trading_console_payload(
-                cfg,
+                runtime_cfg,
                 strategy_paused=self._strategy_paused,
                 order_activity=self._payload.get("order_activity", {}),
             )
@@ -3744,14 +4063,16 @@ async def monitor_loop(
             monotonic_started = time.monotonic()
             started_at = time.time()
             scan_count += 1
+            runtime_cfg = cfg
             try:
-                runtime_slow_execution = await state.slow_execution_config(
-                    cfg.slow_execution
-                )
+                runtime_cfg = await state.runtime_config(cfg)
+                runtime_slow_execution = runtime_cfg.slow_execution
                 strategy_pauses = await state.strategy_pauses()
                 portfolio_books: dict[tuple[str, str], OrderBookSnapshot] = {}
-                if strategy in {"all", "spot-spread"} and cfg.spot_markets:
-                    symbols_by_exchange = _symbols_for_configured_spot_markets(cfg)
+                if strategy in {"all", "spot-spread"} and runtime_cfg.spot_markets:
+                    symbols_by_exchange = _symbols_for_configured_spot_markets(
+                        runtime_cfg
+                    )
                     if (
                         runtime_slow_execution.enabled
                         and runtime_slow_execution.exchange
@@ -3762,25 +4083,29 @@ async def monitor_loop(
                             set(),
                         ).add(runtime_slow_execution.symbol)
                     books = await manager.fetch_order_books(
-                        cfg.spot_exchanges,
+                        runtime_cfg.spot_exchanges,
                         symbols_by_exchange,
-                        cfg.order_book_depth,
+                        runtime_cfg.order_book_depth,
                     )
                     portfolio_books = books
-                    quote_rates = _quote_rates_from_sources(cfg, books)
-                    rows = build_market_rows(cfg.spot_markets, books, quote_rates)
+                    quote_rates = _quote_rates_from_sources(runtime_cfg, books)
+                    rows = build_market_rows(
+                        runtime_cfg.spot_markets,
+                        books,
+                        quote_rates,
+                    )
                     if strategy_pauses.get("spot_spread", False):
                         opportunities = []
                     else:
                         opportunities = find_converted_spot_spread_opportunities(
                             books=books,
-                            exchanges=cfg.spot_exchanges,
-                            markets=cfg.spot_markets,
-                            notional_quote=cfg.notional_quote,
-                            min_profit_quote=cfg.min_profit_quote,
-                            min_profit_bps=cfg.min_profit_bps,
+                            exchanges=runtime_cfg.spot_exchanges,
+                            markets=runtime_cfg.spot_markets,
+                            notional_quote=runtime_cfg.notional_quote,
+                            min_profit_quote=runtime_cfg.min_profit_quote,
+                            min_profit_bps=runtime_cfg.min_profit_bps,
                             quote_rates=quote_rates,
-                            common_quote_currency=cfg.common_quote_currency,
+                            common_quote_currency=runtime_cfg.common_quote_currency,
                         )
                     warnings = _missing_market_warnings(rows)
                     if strategy_pauses.get("market_maker", False):
@@ -3791,7 +4116,10 @@ async def monitor_loop(
                             "error": None,
                         }
                     else:
-                        market_maker_payload = build_market_maker_payload(cfg, books)
+                        market_maker_payload = build_market_maker_payload(
+                            runtime_cfg,
+                            books,
+                        )
                     if strategy_pauses.get("slow_execution", False):
                         slow_execution_payload = {
                             "status": "paused",
@@ -3800,20 +4128,30 @@ async def monitor_loop(
                             "config": slow_execution_config_to_dict(
                                 runtime_slow_execution
                             ),
-                            "accounts": slow_execution_accounts(cfg.spot_exchanges),
+                            "accounts": slow_execution_accounts(
+                                runtime_cfg.spot_exchanges
+                            ),
                             "error": None,
                         }
                     else:
                         slow_execution_payload = build_slow_execution_payload(
-                            cfg,
+                            runtime_cfg,
                             books,
                             runtime_slow_execution,
                         )
-                    portfolio_payload = build_portfolio_pnl(cfg, books, quote_rates)
+                    portfolio_payload = build_portfolio_pnl(
+                        runtime_cfg,
+                        books,
+                        quote_rates,
+                    )
                 else:
-                    opportunities = await scan_with_manager(cfg, strategy, manager)
+                    opportunities = await scan_with_manager(
+                        runtime_cfg,
+                        strategy,
+                        manager,
+                    )
                     rows = []
-                    quote_rates = cfg.quote_rates
+                    quote_rates = runtime_cfg.quote_rates
                     warnings = []
                     market_maker_payload = {
                         "status": "disabled",
@@ -3828,18 +4166,21 @@ async def monitor_loop(
                         "config": slow_execution_config_to_dict(
                             runtime_slow_execution
                         ),
-                        "accounts": slow_execution_accounts(cfg.spot_exchanges),
+                        "accounts": slow_execution_accounts(
+                            runtime_cfg.spot_exchanges
+                        ),
                         "error": None,
                     }
-                    portfolio_payload = _build_initial_payload(cfg, poll_seconds)[
-                        "portfolio"
-                    ]
+                    portfolio_payload = _build_initial_payload(
+                        runtime_cfg,
+                        poll_seconds,
+                    )["portfolio"]
 
                 now = time.monotonic()
                 if now >= next_balance_scan:
                     try:
                         account_balances_payload = await fetch_account_balances_payload(
-                            cfg,
+                            runtime_cfg,
                             manager,
                             runtime_slow_execution,
                         )
@@ -3849,7 +4190,9 @@ async def monitor_loop(
                             "accounts": [],
                             "totals": [],
                             "checked_account_count": 0,
-                            "total_account_count": len(_all_account_exchanges(cfg)),
+                            "total_account_count": len(
+                                _all_account_exchanges(runtime_cfg)
+                            ),
                             "last_finished": time.time(),
                             "errors": [str(exc)],
                         }
@@ -3858,7 +4201,7 @@ async def monitor_loop(
                 if now >= next_order_activity_scan:
                     try:
                         order_activity_payload = await fetch_order_activity_payload(
-                            cfg,
+                            runtime_cfg,
                             manager,
                             runtime_slow_execution,
                             quote_rates=quote_rates,
@@ -3872,7 +4215,7 @@ async def monitor_loop(
                             "closed_orders": [],
                             "recent_trades": [],
                             "pnl_summary": {
-                                "currency": cfg.common_quote_currency,
+                                "currency": runtime_cfg.common_quote_currency,
                                 "window": "recent_fills",
                                 "trade_count": 0,
                                 "attributed_trade_count": 0,
@@ -3887,16 +4230,16 @@ async def monitor_loop(
                                 "observed_at": None,
                             },
                             "pnl_store": {
-                                "enabled": cfg.pnl_store.enabled,
-                                "path": cfg.pnl_store.path,
+                                "enabled": runtime_cfg.pnl_store.enabled,
+                                "path": runtime_cfg.pnl_store.path,
                                 "stored_fill_count": 0,
                                 "daily": None,
                             },
                             "daily_pnl": {
-                                "enabled": cfg.pnl_store.enabled,
-                                "path": cfg.pnl_store.path,
+                                "enabled": runtime_cfg.pnl_store.enabled,
+                                "path": runtime_cfg.pnl_store.path,
                                 "day": None,
-                                "currency": cfg.common_quote_currency,
+                                "currency": runtime_cfg.common_quote_currency,
                                 "trade_count": 0,
                                 "total_realized_pnl": 0.0,
                                 "total_fees": 0.0,
@@ -3908,7 +4251,9 @@ async def monitor_loop(
                             "closed_order_count": 0,
                             "recent_trade_count": 0,
                             "checked_account_count": 0,
-                            "total_account_count": len(_all_account_exchanges(cfg)),
+                            "total_account_count": len(
+                                _all_account_exchanges(runtime_cfg)
+                            ),
                             "last_finished": time.time(),
                             "errors": [str(exc)],
                             "warnings": [],
@@ -3917,7 +4262,7 @@ async def monitor_loop(
 
                 if portfolio_books:
                     portfolio_payload = build_synced_portfolio_pnl(
-                        cfg,
+                        runtime_cfg,
                         portfolio_books,
                         quote_rates,
                         account_balances_payload,
@@ -3925,17 +4270,17 @@ async def monitor_loop(
                     )
 
                 trading_console_payload = build_trading_console_payload(
-                    cfg,
+                    runtime_cfg,
                     runtime_slow_execution,
                     strategy_paused=strategy_pauses,
                     order_activity=order_activity_payload,
                 )
 
-                if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
+                if runtime_cfg.onchain_monitor.enabled and now >= next_onchain_scan:
                     try:
                         onchain_payload, previous_onchain_amounts = (
                             await fetch_onchain_payload(
-                                cfg,
+                                runtime_cfg,
                                 solana_client,
                                 previous_onchain_amounts,
                             )
@@ -3943,14 +4288,14 @@ async def monitor_loop(
                     except Exception as exc:  # noqa: BLE001
                         onchain_payload = {
                             "status": "error",
-                            "label": cfg.onchain_monitor.label,
-                            "mint": cfg.onchain_monitor.token_mint,
+                            "label": runtime_cfg.onchain_monitor.label,
+                            "mint": runtime_cfg.onchain_monitor.token_mint,
                             "holders": [],
                             "last_finished": time.time(),
                             "error": str(exc),
                         }
                     next_onchain_scan = (
-                        now + max(1.0, cfg.onchain_monitor.poll_seconds)
+                        now + max(1.0, runtime_cfg.onchain_monitor.poll_seconds)
                     )
 
                 if onchain_payload.get("status") == "error":
@@ -3977,7 +4322,7 @@ async def monitor_loop(
                     await state.set_paused()
                     continue
                 await state.set_scan_result(
-                    cfg=cfg,
+                    cfg=runtime_cfg,
                     poll_seconds=poll_seconds,
                     scan_count=scan_count,
                     started_at=started_at,
@@ -3997,7 +4342,7 @@ async def monitor_loop(
             except Exception as exc:  # noqa: BLE001
                 elapsed = time.monotonic() - monotonic_started
                 await state.set_error(
-                    cfg=cfg,
+                    cfg=runtime_cfg,
                     poll_seconds=poll_seconds,
                     scan_count=scan_count,
                     started_at=started_at,
@@ -4062,6 +4407,24 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     )
 
 
+async def api_risk(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        allowed_accounts = {exchange.key for exchange in _all_account_exchanges(cfg)}
+        overrides = _risk_overrides_from_payload(
+            payload,
+            allowed_accounts=allowed_accounts,
+            allowed_strategies=STRATEGY_IDS,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    update = await state.set_risk_overrides(overrides, cfg=cfg)
+    return web.json_response({"ok": True, **update})
+
+
 async def api_cancel_order(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
@@ -4074,15 +4437,16 @@ async def api_cancel_order(request: web.Request) -> web.Response:
 
     manager = ExchangeManager()
     try:
-        runtime_slow_execution = await state.slow_execution_config(cfg.slow_execution)
+        runtime_cfg = await state.runtime_config(cfg)
+        runtime_slow_execution = runtime_cfg.slow_execution
         result = await cancel_order_payload(
-            cfg,
+            runtime_cfg,
             manager,
             payload,
             runtime_slow_execution,
         )
         order_activity = await fetch_order_activity_payload(
-            cfg,
+            runtime_cfg,
             manager,
             runtime_slow_execution,
         )
@@ -4113,15 +4477,16 @@ async def api_cancel_bulk_orders(request: web.Request) -> web.Response:
 
     manager = ExchangeManager()
     try:
-        runtime_slow_execution = await state.slow_execution_config(cfg.slow_execution)
+        runtime_cfg = await state.runtime_config(cfg)
+        runtime_slow_execution = runtime_cfg.slow_execution
         result = await cancel_bulk_orders_payload(
-            cfg,
+            runtime_cfg,
             manager,
             payload,
             runtime_slow_execution,
         )
         order_activity = await fetch_order_activity_payload(
-            cfg,
+            runtime_cfg,
             manager,
             runtime_slow_execution,
         )
@@ -4198,6 +4563,7 @@ def create_app(
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)
+    app.router.add_post("/api/risk", api_risk)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_post("/api/orders/cancel", api_cancel_order)
