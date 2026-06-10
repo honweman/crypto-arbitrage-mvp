@@ -373,6 +373,7 @@ class AutoBuySellTaskService:
         if ttl <= 0:
             task.status = "waiting_for_fill"
             task.last_status = "waiting_for_fill"
+            task.last_error = None
             task.next_run_at = now + max(1.0, task_cfg.interval_seconds)
             return
         expired = [
@@ -383,6 +384,7 @@ class AutoBuySellTaskService:
         if not expired:
             task.status = "waiting_for_fill"
             task.last_status = "waiting_for_fill"
+            task.last_error = None
             task.next_run_at = self._next_check_time(task)
             return
 
@@ -399,7 +401,8 @@ class AutoBuySellTaskService:
         }
         task.last_status = "canceled_stale_orders"
         task.status = "running"
-        task.next_run_at = now
+        task.last_error = None
+        task.next_run_at = now + max(1.0, task_cfg.interval_seconds)
         write_trade_event(cfg.trade_log, cancel_payload)
         await self._refresh_task_activity(task, cfg, manager)
 

@@ -424,6 +424,7 @@ class WebMonitorTest(unittest.TestCase):
                 "max_open_orders": "12",
                 "max_cancels_per_cycle": "4",
                 "min_seconds_between_cancels": "1.5",
+                "max_order_book_age_seconds": "60",
             },
             allowed_accounts={"coinbase-spot", "bybit-spot"},
             allowed_strategies={"market_maker", "slow_execution"},
@@ -438,6 +439,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["max_open_orders"], 12)
         self.assertEqual(overrides["max_cancels_per_cycle"], 4)
         self.assertEqual(overrides["min_seconds_between_cancels"], 1.5)
+        self.assertEqual(overrides["max_order_book_age_seconds"], 60.0)
 
     def test_risk_update_payload_rejects_unknown_account(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown exchange account"):

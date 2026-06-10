@@ -893,6 +893,10 @@ HTML = """<!doctype html>
           <label for="risk-cancel-cooldown">Cancel Sec</label>
           <input id="risk-cancel-cooldown" type="number" min="0" step="any">
         </div>
+        <div class="field">
+          <label for="risk-max-book-age">Book Age Sec</label>
+          <input id="risk-max-book-age" type="number" min="0" step="any">
+        </div>
         <button id="risk-apply" class="control-button" type="submit">Apply</button>
       </form>
     </section>
@@ -2102,6 +2106,7 @@ HTML = """<!doctype html>
       setNumericField("risk-max-open-orders", risk.max_open_orders || 0);
       setNumericField("risk-max-cancels", risk.max_cancels_per_cycle || 0);
       setNumericField("risk-cancel-cooldown", risk.min_seconds_between_cancels || 0);
+      setNumericField("risk-max-book-age", risk.max_order_book_age_seconds || 0);
 
       const accounts = (tradingConsole?.accounts || []).map((account) => ({
         key: account.key,
@@ -2131,7 +2136,7 @@ HTML = """<!doctype html>
       const liveState = risk.allow_live_trading ? "live allowed" : "live blocked";
       text(
         "risk-control-meta",
-        `${liveState} · max/order $${money.format(risk.max_order_quote || 0)} · exposure $${money.format(risk.max_exposure_quote || 0)}`
+        `${liveState} · max/order $${money.format(risk.max_order_quote || 0)} · exposure $${money.format(risk.max_exposure_quote || 0)} · book age ${risk.max_order_book_age_seconds || 0}s`
       );
     }
 
@@ -2151,6 +2156,7 @@ HTML = """<!doctype html>
         max_open_orders: numericValue("risk-max-open-orders"),
         max_cancels_per_cycle: numericValue("risk-max-cancels"),
         min_seconds_between_cancels: numericValue("risk-cancel-cooldown"),
+        max_order_book_age_seconds: numericValue("risk-max-book-age"),
       };
       try {
         const res = await fetch("/api/risk", {
@@ -3808,6 +3814,7 @@ def _risk_overrides_from_payload(
         "max_exposure_quote",
         "max_daily_loss_quote",
         "min_seconds_between_cancels",
+        "max_order_book_age_seconds",
     }
     for field in float_fields:
         if field in payload:

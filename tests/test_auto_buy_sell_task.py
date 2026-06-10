@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,7 @@ from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 class FakeTaskManager:
     def __init__(self) -> None:
         self.created = 0
+        self.canceled = 0
         self.open_order_ids: list[str] = []
         self.closed_orders: list[dict[str, object]] = []
         self.trades: list[dict[str, object]] = []
@@ -105,6 +107,18 @@ class FakeTaskManager:
         self.open_order_ids.append(order_id)
         return {"id": order_id}
 
+    async def cancel_order(
+        self,
+        *_: object,
+        order_id: str,
+        **__: object,
+    ) -> dict[str, object]:
+        self.canceled += 1
+        self.open_order_ids = [
+            item for item in self.open_order_ids if item != order_id
+        ]
+        return {"id": order_id, "status": "canceled"}
+
 
 class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_task_store_round_trips_and_pause_resume(self) -> None:
@@ -162,6 +176,43 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_task["open_order_ids"], ["order-2"])
         self.assertEqual(third_task["filled_base"], 2.0)
 
+    async def test_stale_order_cancel_respects_next_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(
+                self._slow_cfg(interval_seconds=10.0, order_ttl_seconds=0.01)
+            )
+            manager = FakeTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(
+                    interval_seconds=10.0,
+                    order_ttl_seconds=0.01,
+                ),
+            )
+
+            first = await service.run_due_tasks(cfg, manager)
+            self.assertEqual(first["tasks"][0]["open_order_ids"], ["order-1"])
+            self.assertEqual(manager.created, 1)
+
+            service._tasks[0].order_created_at["order-1"] = 0.0
+            service._tasks[0].last_error = "previous error"
+            service._tasks[0].next_run_at = 0.0
+            before_cancel = time.time()
+            second = await service.run_due_tasks(cfg, manager)
+            second_task = second["tasks"][0]
+
+            service._tasks[0].next_run_at = time.time() + 100.0
+            third = await service.run_due_tasks(cfg, manager)
+
+        self.assertEqual(manager.canceled, 1)
+        self.assertEqual(manager.created, 1)
+        self.assertEqual(second_task["status"], "running")
+        self.assertEqual(second_task["last_status"], "canceled_stale_orders")
+        self.assertIsNone(second_task["last_error"])
+        self.assertGreaterEqual(second_task["next_run_at"], before_cancel + 9.0)
+        self.assertEqual(third["tasks"][0]["placed_count"], 1)
+
     async def test_quote_target_progress_completes_from_filled_quote(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
@@ -210,6 +261,8 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         total_quote: float = 0.0,
         slice_base: float = 0.0,
         slice_base_min: float = 5.0,
+        interval_seconds: float = 1.0,
+        order_ttl_seconds: float = 0.0,
     ) -> SlowExecutionConfig:
         return SlowExecutionConfig(
             enabled=True,
@@ -221,12 +274,18 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             slice_base=slice_base,
             slice_base_min=slice_base_min,
             slice_base_max=5.0,
-            interval_seconds=1.0,
-            order_ttl_seconds=0.0,
+            interval_seconds=interval_seconds,
+            order_ttl_seconds=order_ttl_seconds,
             min_order_quote=0.0,
         )
 
-    def _cfg(self, tmp: str, *, risk: Optional[RiskConfig] = None) -> BotConfig:
+    def _cfg(
+        self,
+        tmp: str,
+        *,
+        risk: Optional[RiskConfig] = None,
+        slow_execution: Optional[SlowExecutionConfig] = None,
+    ) -> BotConfig:
         return BotConfig(
             poll_seconds=1.0,
             order_book_depth=20,
@@ -239,7 +298,7 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             quote_rate_sources=[],
             onchain_monitor=OnchainMonitorConfig(),
             market_maker=MarketMakerConfig(),
-            slow_execution=self._slow_cfg(),
+            slow_execution=slow_execution or self._slow_cfg(),
             portfolio=PortfolioConfig(),
             spot_symbols=[],
             spot_markets=[],
