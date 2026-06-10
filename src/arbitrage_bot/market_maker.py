@@ -10,7 +10,13 @@ from typing import Any
 from .config import BotConfig, ExchangeConfig, load_config
 from .exchanges import ExchangeManager
 from .market_making import MarketMakerPlan, build_symmetric_market_maker_plan
-from .risk import RiskOrder, evaluate_order_batch
+from .risk import (
+    RiskMarketContext,
+    RiskOrder,
+    evaluate_order_batch,
+    portfolio_positions_base,
+    portfolio_realized_pnl_quote,
+)
 from .trade_log import write_trade_event
 
 
@@ -91,6 +97,8 @@ async def run_cycle(
     *,
     live: bool,
     replace_existing: bool,
+    previous_mid_price: float | None = None,
+    last_cancel_at: float | None = None,
 ) -> dict[str, Any]:
     plan = await build_plan(cfg, manager)
     payload: dict[str, Any] = {
@@ -112,6 +120,40 @@ async def run_cycle(
         )
         for order in plan.orders
     ]
+    exchange_cfg = _find_exchange(cfg, cfg.market_maker.exchange)
+    existing_open_order_count: int | None = None
+    open_order_error: str | None = None
+    should_cancel_existing = replace_existing or cfg.market_maker.cancel_existing_orders
+    if live and (
+        cfg.risk.max_open_orders > 0
+        or cfg.risk.max_cancels_per_cycle > 0
+        or cfg.risk.min_seconds_between_cancels > 0
+    ):
+        try:
+            existing_open_order_count = len(
+                await manager.fetch_open_orders(
+                    exchange_cfg,
+                    symbol=cfg.market_maker.symbol,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            open_order_error = str(exc)
+    expected_cancel_count = (
+        existing_open_order_count
+        if should_cancel_existing and existing_open_order_count is not None
+        else 0
+    )
+    market = RiskMarketContext(
+        exchange=plan.exchange,
+        symbol=plan.symbol,
+        best_bid=plan.best_bid,
+        best_ask=plan.best_ask,
+        mid_price=plan.mid_price,
+        bid_depth_quote=plan.bid_depth_quote,
+        ask_depth_quote=plan.ask_depth_quote,
+        max_level_gap_bps=plan.max_level_gap_bps,
+        order_book_timestamp_ms=plan.order_book_timestamp_ms,
+    )
     risk = evaluate_order_batch(
         cfg.risk,
         risk_orders,
@@ -119,6 +161,14 @@ async def run_cycle(
         live=live,
         existing_spread_bps=plan.existing_spread_bps,
         plan_observed_at=plan.observed_at,
+        market=market,
+        previous_mid_price=previous_mid_price,
+        current_positions_base=portfolio_positions_base(cfg.portfolio),
+        daily_pnl_quote=portfolio_realized_pnl_quote(cfg.portfolio),
+        existing_open_order_count=existing_open_order_count,
+        expected_cancel_count=expected_cancel_count,
+        last_cancel_at=last_cancel_at,
+        open_order_error=open_order_error,
         post_only=cfg.market_maker.post_only,
     )
     payload["risk"] = risk.to_dict()
@@ -153,6 +203,8 @@ async def run_loop(
     )
     interval = max(1.0, interval)
     manager = ExchangeManager()
+    previous_mid_price: float | None = None
+    last_cancel_at: float | None = None
     try:
         while True:
             started = time.monotonic()
@@ -161,10 +213,23 @@ async def run_loop(
                 manager,
                 live=live,
                 replace_existing=replace_existing,
+                previous_mid_price=previous_mid_price,
+                last_cancel_at=last_cancel_at,
             )
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
             write_trade_event(cfg.trade_log, payload)
             sys.stdout.flush()
+            plan_payload = payload.get("plan", {})
+            if isinstance(plan_payload, dict):
+                mid_price = plan_payload.get("mid_price")
+                if isinstance(mid_price, (int, float)):
+                    previous_mid_price = float(mid_price)
+            execution = payload.get("execution", {})
+            if (
+                isinstance(execution, dict)
+                and int(execution.get("canceled_count", 0) or 0) > 0
+            ):
+                last_cancel_at = time.time()
 
             if not loop:
                 return

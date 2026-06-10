@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .config import SlowExecutionConfig
 from .models import OrderBookSnapshot, Side
+from .orderbook_metrics import order_book_metric_snapshot
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,10 @@ class SlowExecutionPlan:
     order: SlowExecutionOrder | None
     status: str
     observed_at: float
+    bid_depth_quote: float = 0.0
+    ask_depth_quote: float = 0.0
+    max_level_gap_bps: float = 0.0
+    order_book_timestamp_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +81,10 @@ class SlowExecutionPlan:
             "order": None if self.order is None else self.order.to_dict(),
             "status": self.status,
             "observed_at": self.observed_at,
+            "bid_depth_quote": self.bid_depth_quote,
+            "ask_depth_quote": self.ask_depth_quote,
+            "max_level_gap_bps": self.max_level_gap_bps,
+            "order_book_timestamp_ms": self.order_book_timestamp_ms,
         }
 
 
@@ -163,6 +172,17 @@ def build_slow_execution_plan(
 
     mid_price = (best_bid + best_ask) / 2
     existing_spread_bps = (best_ask - best_bid) / mid_price * 10_000
+    metrics = order_book_metric_snapshot(book)
+    metric_kwargs = {
+        "bid_depth_quote": float(metrics["bid_depth_quote"] or 0.0),
+        "ask_depth_quote": float(metrics["ask_depth_quote"] or 0.0),
+        "max_level_gap_bps": float(metrics["max_level_gap_bps"] or 0.0),
+        "order_book_timestamp_ms": (
+            int(metrics["order_book_timestamp_ms"])
+            if metrics["order_book_timestamp_ms"] is not None
+            else None
+        ),
+    }
     selected_slice_base = _configured_slice_base(
         cfg,
         mid_price,
@@ -194,6 +214,7 @@ def build_slow_execution_plan(
             order=None,
             status="complete",
             observed_at=time(),
+            **metric_kwargs,
         )
 
     if _is_stopped_by_price(side, mid_price, cfg.stop_price):
@@ -219,6 +240,7 @@ def build_slow_execution_plan(
             order=None,
             status="stopped_by_price",
             observed_at=time(),
+            **metric_kwargs,
         )
 
     order_base = min(remaining_base, selected_slice_base)
@@ -246,6 +268,7 @@ def build_slow_execution_plan(
             order=None,
             status="below_min_order_quote",
             observed_at=time(),
+            **metric_kwargs,
         )
 
     order = SlowExecutionOrder(
@@ -278,4 +301,5 @@ def build_slow_execution_plan(
         order=order,
         status="planned",
         observed_at=time(),
+        **metric_kwargs,
     )

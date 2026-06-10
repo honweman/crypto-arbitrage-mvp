@@ -221,6 +221,15 @@ class ExchangeManager:
             canceled.append(await client.cancel_order(order["id"], symbol))
         return canceled
 
+    async def fetch_open_orders(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+    ) -> list[dict[str, Any]]:
+        client = self.client(cfg)
+        return await client.fetch_open_orders(symbol)
+
     async def cancel_order(
         self,
         cfg: ExchangeConfig,

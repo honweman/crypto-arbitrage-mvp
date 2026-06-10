@@ -857,10 +857,10 @@ HTML = """<!doctype html>
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
       const summary = tradeLog.summary || {};
-      const riskState = risk.enabled === false ? "off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
+      const riskState = risk.enabled === false ? "off" : risk.trading_enabled === false ? "trading off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
       text(
         "risk-meta",
-        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · events ${summary.event_count || 0} · blocked ${summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
+        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${risk.max_slippage_bps || 0} bps · events ${summary.event_count || 0} · blocked ${summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
       );
 
       const body = document.getElementById("events");

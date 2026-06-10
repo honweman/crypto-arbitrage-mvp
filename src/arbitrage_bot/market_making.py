@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import MarketMakerConfig
 from .models import OrderBookSnapshot, Side
+from .orderbook_metrics import order_book_metric_snapshot
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,10 @@ class MarketMakerPlan:
     price_band_pct: float
     levels: int
     quote_per_level: float
+    bid_depth_quote: float = 0.0
+    ask_depth_quote: float = 0.0
+    max_level_gap_bps: float = 0.0
+    order_book_timestamp_ms: int | None = None
     orders: list[MarketMakerOrder] = field(default_factory=list)
     observed_at: float = field(default_factory=time)
 
@@ -53,6 +58,10 @@ class MarketMakerPlan:
             "price_band_pct": self.price_band_pct,
             "levels": self.levels,
             "quote_per_level": self.quote_per_level,
+            "bid_depth_quote": self.bid_depth_quote,
+            "ask_depth_quote": self.ask_depth_quote,
+            "max_level_gap_bps": self.max_level_gap_bps,
+            "order_book_timestamp_ms": self.order_book_timestamp_ms,
             "orders": [order.to_dict() for order in self.orders],
             "observed_at": self.observed_at,
         }
@@ -78,6 +87,7 @@ def build_symmetric_market_maker_plan(
 
     mid_price = (best_bid + best_ask) / 2
     existing_spread_bps = (best_ask - best_bid) / mid_price * 10_000
+    metrics = order_book_metric_snapshot(book)
     step_pct = cfg.price_band_pct / cfg.levels / 100
     orders: list[MarketMakerOrder] = []
 
@@ -114,5 +124,13 @@ def build_symmetric_market_maker_plan(
         price_band_pct=cfg.price_band_pct,
         levels=cfg.levels,
         quote_per_level=cfg.quote_per_level,
+        bid_depth_quote=float(metrics["bid_depth_quote"] or 0.0),
+        ask_depth_quote=float(metrics["ask_depth_quote"] or 0.0),
+        max_level_gap_bps=float(metrics["max_level_gap_bps"] or 0.0),
+        order_book_timestamp_ms=(
+            int(metrics["order_book_timestamp_ms"])
+            if metrics["order_book_timestamp_ms"] is not None
+            else None
+        ),
         orders=orders,
     )

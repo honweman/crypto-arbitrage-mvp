@@ -278,22 +278,52 @@ By default, live trading is blocked until you explicitly set `risk.allow_live_tr
 ```json
 "risk": {
   "enabled": true,
+  "trading_enabled": true,
   "allow_live_trading": false,
   "allow_market_maker": true,
   "allow_slow_execution": true,
+  "strategy_enabled": {
+    "market_maker": true,
+    "slow_execution": true
+  },
+  "account_enabled": {
+    "bybit-spot": true
+  },
   "require_post_only": true,
   "max_order_quote": 5.0,
   "max_cycle_quote": 25.0,
+  "max_position_base": 0.0,
+  "max_position_base_by_asset": {
+    "ACS": 0.0
+  },
+  "max_exposure_quote": 0.0,
+  "max_exposure_quote_by_asset": {
+    "ACS": 0.0
+  },
+  "max_daily_loss_quote": 0.0,
   "max_orders_per_cycle": 30,
+  "max_open_orders": 50,
+  "max_cancels_per_cycle": 50,
+  "min_seconds_between_cancels": 0.0,
   "max_existing_spread_bps": 2500.0,
   "max_price_distance_bps": 1500.0,
+  "max_slippage_bps": 50.0,
+  "min_order_book_depth_quote": 0.0,
+  "max_order_book_gap_bps": 2000.0,
+  "max_price_jump_bps": 1000.0,
   "max_plan_age_seconds": 5.0,
+  "max_order_book_age_seconds": 10.0,
+  "require_order_book_timestamp": false,
   "allowed_exchanges": [],
   "blocked_exchanges": [],
   "allowed_symbols": [],
   "blocked_symbols": []
 }
 ```
+
+The kill switches are `trading_enabled`, `allow_market_maker`, `allow_slow_execution`, `strategy_enabled`, and `account_enabled`. Position and exposure limits use `portfolio.positions` as the current base inventory and the current order book midpoint as the mark price. A `0.0` limit disables that specific check. Daily loss checks use the sum of `portfolio.realized_pnl` as the current-day realized P/L input.
+
+Order safety checks include max single-order notional, max cycle notional, max planned orders, projected max open orders, max cancels per cycle, and optional minimum seconds between cancel cycles. Market quality checks include minimum bid/ask depth, max bid/ask spread, max level-to-level order book gap, max adverse slippage, max price jump versus the previous cycle, max plan age, and max order book timestamp age.
 
 Every market maker and slow execution cycle is written to JSONL when `trade_log.enabled` is true:
 

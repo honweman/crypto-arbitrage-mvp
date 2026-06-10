@@ -121,16 +121,33 @@ class PortfolioConfig:
 @dataclass(frozen=True)
 class RiskConfig:
     enabled: bool = True
+    trading_enabled: bool = True
     allow_live_trading: bool = False
     allow_market_maker: bool = True
     allow_slow_execution: bool = True
+    strategy_enabled: dict[str, bool] = field(default_factory=dict)
+    account_enabled: dict[str, bool] = field(default_factory=dict)
     require_post_only: bool = True
     max_order_quote: float = 5.0
     max_cycle_quote: float = 25.0
+    max_position_base: float = 0.0
+    max_position_base_by_asset: dict[str, float] = field(default_factory=dict)
+    max_exposure_quote: float = 0.0
+    max_exposure_quote_by_asset: dict[str, float] = field(default_factory=dict)
+    max_daily_loss_quote: float = 0.0
     max_orders_per_cycle: int = 30
+    max_open_orders: int = 50
+    max_cancels_per_cycle: int = 50
+    min_seconds_between_cancels: float = 0.0
     max_existing_spread_bps: float = 2500.0
     max_price_distance_bps: float = 1500.0
+    max_slippage_bps: float = 50.0
+    min_order_book_depth_quote: float = 0.0
+    max_order_book_gap_bps: float = 2000.0
+    max_price_jump_bps: float = 1000.0
     max_plan_age_seconds: float = 5.0
+    max_order_book_age_seconds: float = 10.0
+    require_order_book_timestamp: bool = False
     allowed_exchanges: list[str] = field(default_factory=list)
     blocked_exchanges: list[str] = field(default_factory=list)
     allowed_symbols: list[str] = field(default_factory=list)
@@ -225,6 +242,14 @@ def _portfolio_positions_from_dict(raw: dict[str, Any]) -> list[AssetPosition]:
 
 def _string_list(raw: Any) -> list[str]:
     return [str(item) for item in raw or []]
+
+
+def _bool_dict(raw: Any) -> dict[str, bool]:
+    return {str(key): bool(value) for key, value in (raw or {}).items()}
+
+
+def _float_dict(raw: Any) -> dict[str, float]:
+    return {str(key).upper(): float(value) for key, value in (raw or {}).items()}
 
 
 def load_config(path: str | Path) -> BotConfig:
@@ -375,20 +400,51 @@ def load_config(path: str | Path) -> BotConfig:
         ],
         risk=RiskConfig(
             enabled=bool(risk_raw.get("enabled", True)),
+            trading_enabled=bool(risk_raw.get("trading_enabled", True)),
             allow_live_trading=bool(risk_raw.get("allow_live_trading", False)),
             allow_market_maker=bool(risk_raw.get("allow_market_maker", True)),
             allow_slow_execution=bool(risk_raw.get("allow_slow_execution", True)),
+            strategy_enabled=_bool_dict(risk_raw.get("strategy_enabled", {})),
+            account_enabled=_bool_dict(risk_raw.get("account_enabled", {})),
             require_post_only=bool(risk_raw.get("require_post_only", True)),
             max_order_quote=float(risk_raw.get("max_order_quote", 5.0)),
             max_cycle_quote=float(risk_raw.get("max_cycle_quote", 25.0)),
+            max_position_base=float(risk_raw.get("max_position_base", 0.0)),
+            max_position_base_by_asset=_float_dict(
+                risk_raw.get("max_position_base_by_asset", {})
+            ),
+            max_exposure_quote=float(risk_raw.get("max_exposure_quote", 0.0)),
+            max_exposure_quote_by_asset=_float_dict(
+                risk_raw.get("max_exposure_quote_by_asset", {})
+            ),
+            max_daily_loss_quote=float(risk_raw.get("max_daily_loss_quote", 0.0)),
             max_orders_per_cycle=int(risk_raw.get("max_orders_per_cycle", 30)),
+            max_open_orders=int(risk_raw.get("max_open_orders", 50)),
+            max_cancels_per_cycle=int(risk_raw.get("max_cancels_per_cycle", 50)),
+            min_seconds_between_cancels=float(
+                risk_raw.get("min_seconds_between_cancels", 0.0)
+            ),
             max_existing_spread_bps=float(
                 risk_raw.get("max_existing_spread_bps", 2500.0)
             ),
             max_price_distance_bps=float(
                 risk_raw.get("max_price_distance_bps", 1500.0)
             ),
+            max_slippage_bps=float(risk_raw.get("max_slippage_bps", 50.0)),
+            min_order_book_depth_quote=float(
+                risk_raw.get("min_order_book_depth_quote", 0.0)
+            ),
+            max_order_book_gap_bps=float(
+                risk_raw.get("max_order_book_gap_bps", 2000.0)
+            ),
+            max_price_jump_bps=float(risk_raw.get("max_price_jump_bps", 1000.0)),
             max_plan_age_seconds=float(risk_raw.get("max_plan_age_seconds", 5.0)),
+            max_order_book_age_seconds=float(
+                risk_raw.get("max_order_book_age_seconds", 10.0)
+            ),
+            require_order_book_timestamp=bool(
+                risk_raw.get("require_order_book_timestamp", False)
+            ),
             allowed_exchanges=_string_list(risk_raw.get("allowed_exchanges", [])),
             blocked_exchanges=_string_list(risk_raw.get("blocked_exchanges", [])),
             allowed_symbols=_string_list(risk_raw.get("allowed_symbols", [])),

@@ -38,6 +38,9 @@ class MarketMakingTest(unittest.TestCase):
         self.assertAlmostEqual(plan.orders[1].price, 105.0)
         self.assertAlmostEqual(plan.orders[2].price, 90.0)
         self.assertAlmostEqual(plan.orders[3].price, 110.0)
+        self.assertAlmostEqual(plan.bid_depth_quote, 900.0)
+        self.assertAlmostEqual(plan.ask_depth_quote, 1100.0)
+        self.assertEqual(plan.max_level_gap_bps, 0.0)
 
     def test_min_distance_filters_inner_levels(self) -> None:
         book = OrderBookSnapshot(
