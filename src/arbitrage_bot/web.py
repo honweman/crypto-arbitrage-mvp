@@ -2143,11 +2143,15 @@ HTML = """<!doctype html>
       return document.querySelector('input[name="slow-account"]:checked')?.value || "";
     }
 
+    function selectedSlowSymbol() {
+      return document.querySelector('input[name="slow-account"]:checked')?.dataset.symbol || "";
+    }
+
     function renderSlowExecutionAccounts(accounts, selectedExchange) {
       const body = document.getElementById("slow-accounts");
       const list = Array.isArray(accounts) ? accounts : [];
       const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type]),
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
         selectedExchange,
       });
       if (body.dataset.signature === signature) return;
@@ -2164,11 +2168,13 @@ HTML = """<!doctype html>
       for (const account of list) {
         const label = document.createElement("label");
         label.className = "account-option";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"}`;
+        const symbol = account.symbol || (account.symbols || [])[0] || "";
+        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.name = "slow-account";
         checkbox.value = account.key;
+        checkbox.dataset.symbol = symbol;
         checkbox.checked = account.key === selectedExchange;
         checkbox.addEventListener("change", (event) => {
           if (event.target.checked) {
@@ -2181,7 +2187,7 @@ HTML = """<!doctype html>
           slowFormDirty = true;
         });
         const textNode = document.createElement("span");
-        textNode.textContent = account.label || account.key;
+        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
         label.appendChild(checkbox);
         label.appendChild(textNode);
         body.appendChild(label);
@@ -2206,6 +2212,7 @@ HTML = """<!doctype html>
       return {
         enabled: document.getElementById("slow-enabled").checked,
         exchange: selectedSlowAccount(),
+        symbol: selectedSlowSymbol(),
         side: document.getElementById("slow-side").value,
         total_base: numericValue("slow-total-base"),
         slice_base_min: numericValue("slow-slice-min"),
@@ -2230,9 +2237,12 @@ HTML = """<!doctype html>
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error("auto buy/sell update failed");
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "auto buy/sell update failed");
         slowFormDirty = false;
         await refresh();
+      } catch (error) {
+        text("slow-meta", `update failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
         slowFormBusy = false;
@@ -2250,9 +2260,12 @@ HTML = """<!doctype html>
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(slowExecutionPayloadFromForm()),
         });
-        if (!res.ok) throw new Error("create task failed");
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "create task failed");
         slowFormDirty = false;
         await refresh();
+      } catch (error) {
+        text("slow-meta", `create failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
         slowFormBusy = false;
@@ -2432,16 +2445,32 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     }
 
 
-def slow_execution_accounts(exchanges: Iterable[ExchangeConfig]) -> list[dict[str, str]]:
-    return [
-        {
-            "key": exchange.key,
-            "label": exchange.key,
-            "id": exchange.id,
-            "market_type": exchange.market_type,
-        }
-        for exchange in exchanges
-    ]
+def _spot_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for market in cfg.spot_markets:
+        symbols.setdefault(market.exchange, set()).add(market.symbol)
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def slow_execution_accounts(
+    exchanges: Iterable[ExchangeConfig],
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    symbols_by_exchange = symbols_by_exchange or {}
+    rows = []
+    for exchange in exchanges:
+        symbols = symbols_by_exchange.get(exchange.key, [])
+        rows.append(
+            {
+                "key": exchange.key,
+                "label": exchange.key,
+                "id": exchange.id,
+                "market_type": exchange.market_type,
+                "symbol": symbols[0] if symbols else "",
+                "symbols": symbols,
+            }
+        )
+    return rows
 
 
 def _risk_strategy_enabled(cfg: BotConfig, strategy_id: str) -> bool:
@@ -3604,8 +3633,10 @@ async def fetch_account_balances_payload(
 def _slow_execution_overrides_from_payload(
     payload: dict[str, Any],
     allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
+    symbols_by_exchange = symbols_by_exchange or {}
     if "enabled" in payload:
         if not isinstance(payload["enabled"], bool):
             raise ValueError("enabled must be a boolean")
@@ -3618,6 +3649,18 @@ def _slow_execution_overrides_from_payload(
         if allowed_exchanges is not None and exchange not in allowed_exchanges:
             raise ValueError(f"unknown exchange account: {exchange}")
         overrides["exchange"] = exchange
+
+    if "symbol" in payload:
+        symbol = str(payload["symbol"]).strip()
+        if not symbol:
+            raise ValueError("symbol is required")
+        selected_exchange = overrides.get("exchange")
+        if selected_exchange and symbols_by_exchange.get(selected_exchange):
+            if symbol not in symbols_by_exchange[selected_exchange]:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        overrides["symbol"] = symbol
+    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
+        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
 
     if "side" in payload:
         side = str(payload["side"]).lower()
@@ -3845,7 +3888,10 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "mode": "dry_run",
             "plan": None,
             "config": slow_execution_config_to_dict(cfg.slow_execution),
-            "accounts": slow_execution_accounts(cfg.spot_exchanges),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _spot_symbols_by_exchange(cfg),
+            ),
             "tasks": {
                 "status": "ok",
                 "path": default_task_store_path(cfg),
@@ -4206,7 +4252,7 @@ def build_slow_execution_payload(
 ) -> dict[str, Any]:
     exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     config_payload = slow_execution_config_to_dict(exec_cfg)
-    accounts = slow_execution_accounts(cfg.spot_exchanges)
+    accounts = slow_execution_accounts(cfg.spot_exchanges, _spot_symbols_by_exchange(cfg))
     if not exec_cfg.enabled:
         return {
             "status": "disabled",
@@ -4508,7 +4554,8 @@ async def monitor_loop(
                                 runtime_slow_execution
                             ),
                             "accounts": slow_execution_accounts(
-                                runtime_cfg.spot_exchanges
+                                runtime_cfg.spot_exchanges,
+                                _spot_symbols_by_exchange(runtime_cfg),
                             ),
                             "error": None,
                         }
@@ -4546,7 +4593,8 @@ async def monitor_loop(
                             runtime_slow_execution
                         ),
                         "accounts": slow_execution_accounts(
-                            runtime_cfg.spot_exchanges
+                            runtime_cfg.spot_exchanges,
+                            _spot_symbols_by_exchange(runtime_cfg),
                         ),
                         "error": None,
                     }
@@ -5078,11 +5126,13 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     try:
         payload = await request.json()
-        accounts = slow_execution_accounts(cfg.spot_exchanges)
+        symbols_by_exchange = _spot_symbols_by_exchange(cfg)
+        accounts = slow_execution_accounts(cfg.spot_exchanges, symbols_by_exchange)
         allowed_exchanges = {account["key"] for account in accounts}
         overrides = _slow_execution_overrides_from_payload(
             payload,
             allowed_exchanges=allowed_exchanges,
+            symbols_by_exchange=symbols_by_exchange,
         )
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
@@ -5093,7 +5143,10 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         {
             "ok": True,
             "config": slow_execution_config_to_dict(current_config),
-            "accounts": slow_execution_accounts(cfg.spot_exchanges),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _spot_symbols_by_exchange(cfg),
+            ),
         }
     )
 
@@ -5104,11 +5157,13 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     try:
         payload = await request.json()
-        accounts = slow_execution_accounts(cfg.spot_exchanges)
+        symbols_by_exchange = _spot_symbols_by_exchange(cfg)
+        accounts = slow_execution_accounts(cfg.spot_exchanges, symbols_by_exchange)
         allowed_exchanges = {account["key"] for account in accounts}
         overrides = _slow_execution_overrides_from_payload(
             payload,
             allowed_exchanges=allowed_exchanges,
+            symbols_by_exchange=symbols_by_exchange,
         )
         base_config = await state.slow_execution_config(cfg.slow_execution)
         task_config = replace(base_config, **overrides, enabled=True)

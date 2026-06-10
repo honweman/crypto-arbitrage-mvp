@@ -308,6 +308,20 @@ class WebMonitorTest(unittest.TestCase):
                 ExchangeConfig(id="bybit", label="bybit-spot"),
                 ExchangeConfig(id="coinbase", label="coinbase-spot"),
             ],
+            spot_markets=[
+                SpotMarketConfig(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    asset="ACS",
+                    quote_currency="USDT",
+                ),
+                SpotMarketConfig(
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    asset="ACS",
+                    quote_currency="USDC",
+                ),
+            ],
         )
 
         payload = build_slow_execution_payload(cfg, {})
@@ -320,12 +334,16 @@ class WebMonitorTest(unittest.TestCase):
                     "label": "bybit-spot",
                     "id": "bybit",
                     "market_type": "spot",
+                    "symbol": "ACS/USDT",
+                    "symbols": ["ACS/USDT"],
                 },
                 {
                     "key": "coinbase-spot",
                     "label": "coinbase-spot",
                     "id": "coinbase",
                     "market_type": "spot",
+                    "symbol": "ACS/USDC",
+                    "symbols": ["ACS/USDC"],
                 },
             ],
         )
@@ -335,6 +353,8 @@ class WebMonitorTest(unittest.TestCase):
 
         self.assertEqual(accounts[0]["key"], "bybit:spot")
         self.assertEqual(accounts[0]["label"], "bybit:spot")
+        self.assertEqual(accounts[0]["symbol"], "")
+        self.assertEqual(accounts[0]["symbols"], [])
 
     def test_slow_execution_update_payload_is_sanitized(self) -> None:
         overrides = _slow_execution_overrides_from_payload(
@@ -351,10 +371,12 @@ class WebMonitorTest(unittest.TestCase):
                 "stop_price": "0.01",
             },
             allowed_exchanges={"bybit-spot"},
+            symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
         )
 
         self.assertTrue(overrides["enabled"])
         self.assertEqual(overrides["exchange"], "bybit-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDT")
         self.assertEqual(overrides["side"], "buy")
         self.assertEqual(overrides["slice_base"], 0.0)
         self.assertEqual(overrides["slice_quote"], 0.0)
@@ -367,6 +389,24 @@ class WebMonitorTest(unittest.TestCase):
             _slow_execution_overrides_from_payload(
                 {"exchange": "coinbase-spot"},
                 allowed_exchanges={"bybit-spot"},
+            )
+
+    def test_slow_execution_update_payload_maps_account_symbol(self) -> None:
+        overrides = _slow_execution_overrides_from_payload(
+            {"exchange": "coinbase-spot"},
+            allowed_exchanges={"coinbase-spot"},
+            symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
+        )
+
+        self.assertEqual(overrides["exchange"], "coinbase-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDC")
+
+    def test_slow_execution_update_payload_rejects_wrong_account_symbol(self) -> None:
+        with self.assertRaisesRegex(ValueError, "symbol is not configured"):
+            _slow_execution_overrides_from_payload(
+                {"exchange": "coinbase-spot", "symbol": "ACS/USDT"},
+                allowed_exchanges={"coinbase-spot"},
+                symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
             )
 
     def test_risk_update_payload_is_sanitized(self) -> None:
