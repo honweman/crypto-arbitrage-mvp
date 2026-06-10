@@ -66,6 +66,7 @@ class OnchainMonitorConfig:
 @dataclass(frozen=True)
 class MarketMakerConfig:
     enabled: bool = False
+    live_enabled: bool = False
     exchange: str = ""
     symbol: str = ""
     levels: int = 10
@@ -339,6 +340,7 @@ def load_config(path: str | Path) -> BotConfig:
         ),
         market_maker=MarketMakerConfig(
             enabled=bool(market_maker_raw.get("enabled", False)),
+            live_enabled=bool(market_maker_raw.get("live_enabled", False)),
             exchange=market_maker_raw.get("exchange", ""),
             symbol=market_maker_raw.get("symbol", ""),
             levels=int(market_maker_raw.get("levels", 10)),

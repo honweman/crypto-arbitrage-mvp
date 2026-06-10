@@ -59,11 +59,17 @@ async def place_plan(
     plan: MarketMakerPlan,
     *,
     replace_existing: bool,
+    replace_order_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     maker_cfg = cfg.market_maker
     exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
     canceled: list[dict[str, Any]] = []
-    if replace_existing or maker_cfg.cancel_existing_orders:
+    cancel_errors: list[dict[str, str]] = []
+    if replace_order_ids:
+        cancel_payload = await cancel_order_ids(cfg, manager, replace_order_ids)
+        canceled = cancel_payload["canceled"]
+        cancel_errors = cancel_payload["errors"]
+    elif replace_existing or maker_cfg.cancel_existing_orders:
         canceled = await manager.cancel_open_orders(exchange_cfg, symbol=maker_cfg.symbol)
 
     placed = []
@@ -87,8 +93,38 @@ async def place_plan(
 
     return {
         "canceled_count": len(canceled),
+        "cancel_errors": cancel_errors,
         "placed_count": len(placed),
         "placed_order_ids": [item.get("id") for item in placed if isinstance(item, dict)],
+    }
+
+
+async def cancel_order_ids(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    order_ids: list[str],
+) -> dict[str, Any]:
+    maker_cfg = cfg.market_maker
+    exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
+    canceled = []
+    errors = []
+    for order_id in order_ids:
+        try:
+            canceled.append(
+                await manager.cancel_order(
+                    exchange_cfg,
+                    symbol=maker_cfg.symbol,
+                    order_id=order_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"order_id": order_id, "error": str(exc)})
+    return {
+        "type": "market_maker_cancel",
+        "order_ids": order_ids,
+        "canceled": canceled,
+        "canceled_count": len(canceled),
+        "errors": errors,
     }
 
 
@@ -157,6 +193,7 @@ async def run_cycle(
     *,
     live: bool,
     replace_existing: bool,
+    replace_order_ids: list[str] | None = None,
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
 ) -> dict[str, Any]:
@@ -183,7 +220,11 @@ async def run_cycle(
     exchange_cfg = _find_exchange(cfg, cfg.market_maker.exchange)
     existing_open_order_count: int | None = None
     open_order_error: str | None = None
-    should_cancel_existing = replace_existing or cfg.market_maker.cancel_existing_orders
+    replace_order_ids = [order_id for order_id in (replace_order_ids or []) if order_id]
+    should_cancel_existing = (
+        replace_existing or cfg.market_maker.cancel_existing_orders
+    )
+    should_cancel_tracked = bool(replace_order_ids)
     if live and (
         cfg.risk.max_open_orders > 0
         or cfg.risk.max_cancels_per_cycle > 0
@@ -201,7 +242,7 @@ async def run_cycle(
     expected_cancel_count = (
         existing_open_order_count
         if should_cancel_existing and existing_open_order_count is not None
-        else 0
+        else len(replace_order_ids)
     )
     market = RiskMarketContext(
         exchange=plan.exchange,
@@ -246,6 +287,7 @@ async def run_cycle(
             manager,
             plan,
             replace_existing=replace_existing,
+            replace_order_ids=replace_order_ids if should_cancel_tracked else None,
         )
         payload["status"] = "placed"
 

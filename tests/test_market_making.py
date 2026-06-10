@@ -163,6 +163,87 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("execution", payload)
 
+    async def test_live_cycle_replaces_only_tracked_order_ids(self) -> None:
+        class FakeManager:
+            def __init__(self) -> None:
+                self.canceled: list[str] = []
+                self.created = 0
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [{"id": "old-mm-1"}, {"id": "manual-1"}]
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, object]:
+                self.canceled.append(order_id)
+                return {"id": order_id, "status": "canceled"}
+
+            async def prepare_limit_order(
+                self,
+                *_: object,
+                amount: float,
+                price: float,
+                side: str,
+                **__: object,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "side": side,
+                    "status": "ok",
+                    "requested_amount": amount,
+                    "requested_price": price,
+                    "amount": amount,
+                    "price": price,
+                    "cost": amount * price,
+                    "limits": {},
+                    "precision": {},
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_limit_order(self, *_: object, **__: object) -> dict[str, str]:
+                self.created += 1
+                return {"id": f"new-mm-{self.created}"}
+
+        manager = FakeManager()
+        payload = await run_cycle(
+            self._cfg(
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_cycle_quote=100.0,
+                    max_open_orders=50,
+                    max_cancels_per_cycle=10,
+                    require_post_only=False,
+                )
+            ),
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=["old-mm-1"],
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertEqual(manager.canceled, ["old-mm-1"])
+        self.assertEqual(payload["execution"]["canceled_count"], 1)
+        self.assertEqual(payload["execution"]["placed_count"], 20)
+        self.assertEqual(len(payload["execution"]["placed_order_ids"]), 20)
+
     async def test_run_loop_clamps_interval_to_one_second(self) -> None:
         class StopLoop(Exception):
             pass

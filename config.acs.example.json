@@ -39,6 +39,7 @@
   },
   "market_maker": {
     "enabled": true,
+    "live_enabled": false,
     "exchange": "bybit-spot",
     "symbol": "ACS/USDT",
     "levels": 10,

@@ -29,6 +29,7 @@ from .config import (
     AssetPosition,
     BotConfig,
     ExchangeConfig,
+    MarketMakerConfig,
     RiskConfig,
     SlowExecutionConfig,
     SpotMarketConfig,
@@ -43,6 +44,10 @@ from .main import (
     scan_with_manager,
 )
 from .market_making import build_symmetric_market_maker_plan
+from .market_maker import (
+    cancel_order_ids as cancel_market_maker_order_ids,
+    run_cycle as run_market_maker_cycle,
+)
 from .models import OrderBookSnapshot, Opportunity
 from .pnl import build_portfolio_pnl
 from .risk import current_daily_pnl_quote
@@ -546,6 +551,7 @@ HTML = """<!doctype html>
       display: grid;
       gap: 5px;
       min-width: 0;
+      align-self: end;
     }
 
     .field label,
@@ -578,7 +584,8 @@ HTML = """<!doctype html>
     }
 
     .account-field {
-      grid-column: span 2;
+      grid-column: span 4;
+      align-self: stretch;
     }
 
     .account-options {
@@ -1132,9 +1139,52 @@ HTML = """<!doctype html>
 
     <section data-page="control">
       <div class="section-title">
-        <h2>Market Maker Plan</h2>
+        <h2>Market Maker</h2>
         <span id="mm-meta" class="subtle"></span>
       </div>
+      <form id="mm-form" class="control-panel">
+        <label class="check-field">
+          <input id="mm-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="mm-live-enabled" type="checkbox">
+          Live MM
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="mm-accounts" class="account-options"></div>
+        </div>
+        <div class="field">
+          <label for="mm-levels">Levels</label>
+          <input id="mm-levels" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="mm-band">Band %</label>
+          <input id="mm-band" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-quote">Quote/Level</label>
+          <input id="mm-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-min-quote">Min Quote</label>
+          <input id="mm-min-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-min-distance">Min Distance</label>
+          <input id="mm-min-distance" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-poll">Refresh Sec</label>
+          <input id="mm-poll" type="number" min="1" step="any">
+        </div>
+        <label class="check-field">
+          <input id="mm-post-only" type="checkbox">
+          Post Only
+        </label>
+        <button id="mm-apply" class="control-button" type="submit">Apply</button>
+      </form>
       <div class="table-wrap">
         <table>
           <thead>
@@ -2017,6 +2067,8 @@ HTML = """<!doctype html>
     let programToggleBusy = false;
     let riskFormDirty = false;
     let riskFormBusy = false;
+    let mmFormDirty = false;
+    let mmFormBusy = false;
     let slowFormDirty = false;
     let slowFormBusy = false;
 
@@ -2170,6 +2222,115 @@ HTML = """<!doctype html>
       } finally {
         button.disabled = false;
         riskFormBusy = false;
+      }
+    }
+
+    function selectedMarketMakerAccount() {
+      return document.querySelector('input[name="mm-account"]:checked')?.value || "";
+    }
+
+    function selectedMarketMakerSymbol() {
+      return document.querySelector('input[name="mm-account"]:checked')?.dataset.symbol || "";
+    }
+
+    function renderMarketMakerAccounts(accounts, selectedExchange) {
+      const body = document.getElementById("mm-accounts");
+      const list = Array.isArray(accounts) ? accounts : [];
+      const signature = JSON.stringify({
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
+        selectedExchange,
+      });
+      if (body.dataset.signature === signature) return;
+      body.dataset.signature = signature;
+      body.innerHTML = "";
+      if (list.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "subtle";
+        empty.textContent = "No accounts";
+        body.appendChild(empty);
+        return;
+      }
+
+      for (const account of list) {
+        const label = document.createElement("label");
+        label.className = "account-option";
+        const symbol = account.symbol || (account.symbols || [])[0] || "";
+        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.name = "mm-account";
+        checkbox.value = account.key;
+        checkbox.dataset.symbol = symbol;
+        checkbox.checked = account.key === selectedExchange;
+        checkbox.addEventListener("change", (event) => {
+          if (event.target.checked) {
+            document.querySelectorAll('input[name="mm-account"]').forEach((item) => {
+              if (item !== event.target) item.checked = false;
+            });
+          } else if (!selectedMarketMakerAccount()) {
+            event.target.checked = true;
+          }
+          mmFormDirty = true;
+        });
+        const textNode = document.createElement("span");
+        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
+        label.appendChild(checkbox);
+        label.appendChild(textNode);
+        body.appendChild(label);
+      }
+    }
+
+    function renderMarketMakerConfig(config, accounts) {
+      if (!config || mmFormDirty || mmFormBusy) return;
+      document.getElementById("mm-enabled").checked = Boolean(config.enabled);
+      document.getElementById("mm-live-enabled").checked = Boolean(config.live_enabled);
+      renderMarketMakerAccounts(config.accounts || accounts, config.exchange || "");
+      setNumericField("mm-levels", config.levels || 1);
+      setNumericField("mm-band", config.price_band_pct || 0);
+      setNumericField("mm-quote", config.quote_per_level || 0);
+      setNumericField("mm-min-quote", config.min_order_quote || 0);
+      setNumericField("mm-min-distance", config.min_distance_bps || 0);
+      setNumericField("mm-poll", config.poll_seconds || 1);
+      document.getElementById("mm-post-only").checked = Boolean(config.post_only);
+    }
+
+    function marketMakerPayloadFromForm() {
+      return {
+        enabled: document.getElementById("mm-enabled").checked,
+        live_enabled: document.getElementById("mm-live-enabled").checked,
+        exchange: selectedMarketMakerAccount(),
+        symbol: selectedMarketMakerSymbol(),
+        levels: numericValue("mm-levels"),
+        price_band_pct: numericValue("mm-band"),
+        quote_per_level: numericValue("mm-quote"),
+        min_order_quote: numericValue("mm-min-quote"),
+        min_distance_bps: numericValue("mm-min-distance"),
+        poll_seconds: numericValue("mm-poll"),
+        post_only: document.getElementById("mm-post-only").checked,
+      };
+    }
+
+    async function applyMarketMakerConfig(event) {
+      event.preventDefault();
+      if (mmFormBusy) return;
+      mmFormBusy = true;
+      const button = document.getElementById("mm-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/market-maker", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(marketMakerPayloadFromForm()),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "market maker update failed");
+        mmFormDirty = false;
+        await refresh();
+      } catch (error) {
+        text("mm-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        mmFormBusy = false;
       }
     }
 
@@ -2343,13 +2504,17 @@ HTML = """<!doctype html>
         text("common-quote", data.config?.common_quote_currency || "USD");
         text("warnings", (data.warnings || []).join(" · "));
         text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
-        text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
+        const mmRuntime = data.market_maker?.runtime || {};
+        const mmPlan = data.market_maker?.plan;
+        const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
+        text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmRuntimeText}`);
         const slowPlan = data.slow_execution?.plan;
         const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
         text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
 
         renderOperations(data.operations);
         renderRiskControls(data.operations, data.trading_console);
+        renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderMarkets(data.markets);
         renderAccountBalances(data.account_balances);
@@ -2382,6 +2547,10 @@ HTML = """<!doctype html>
       riskFormDirty = true;
     });
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
+    document.getElementById("mm-form").addEventListener("input", () => {
+      mmFormDirty = true;
+    });
+    document.getElementById("mm-form").addEventListener("submit", applyMarketMakerConfig);
     document.getElementById("slow-form").addEventListener("input", () => {
       slowFormDirty = true;
     });
@@ -2434,6 +2603,10 @@ def build_market_rows(
 
 
 def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def market_maker_config_to_dict(cfg: MarketMakerConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
@@ -2557,6 +2730,7 @@ def build_trading_console_payload(
         exchange: str,
         symbol: str,
         strategy_allowed: bool,
+        live_ready: bool = True,
         mode: str = "dry_run",
     ) -> dict[str, Any]:
         paused = bool(strategy_paused.get(strategy_id, False))
@@ -2565,6 +2739,7 @@ def build_trading_console_payload(
             live_base
             and configured
             and strategy_allowed
+            and live_ready
             and account_enabled
             and not paused
         )
@@ -2579,6 +2754,7 @@ def build_trading_console_payload(
             "mode": "paused" if paused else ("live" if live else mode),
             "strategy_allowed": strategy_allowed,
             "account_enabled": account_enabled,
+            "live_ready": live_ready,
         }
 
     auto_tasks = [
@@ -2607,6 +2783,7 @@ def build_trading_console_payload(
             symbol=cfg.market_maker.symbol,
             strategy_allowed=cfg.risk.allow_market_maker
             and _risk_strategy_enabled(cfg, "market_maker"),
+            live_ready=cfg.market_maker.live_enabled,
         ),
         strategy_row(
             strategy_id="slow_execution",
@@ -3736,6 +3913,69 @@ def _slow_execution_overrides_from_payload(
     return overrides
 
 
+def _market_maker_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    overrides: dict[str, Any] = {}
+    symbols_by_exchange = symbols_by_exchange or {}
+
+    for field in {"enabled", "live_enabled", "post_only", "cancel_existing_orders"}:
+        if field in payload:
+            if not isinstance(payload[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+            overrides[field] = payload[field]
+
+    if "exchange" in payload:
+        exchange = str(payload["exchange"]).strip()
+        if not exchange:
+            raise ValueError("exchange is required")
+        if allowed_exchanges is not None and exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        overrides["exchange"] = exchange
+
+    if "symbol" in payload:
+        symbol = str(payload["symbol"]).strip()
+        if not symbol:
+            raise ValueError("symbol is required")
+        selected_exchange = overrides.get("exchange")
+        if selected_exchange and symbols_by_exchange.get(selected_exchange):
+            if symbol not in symbols_by_exchange[selected_exchange]:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        overrides["symbol"] = symbol
+    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
+        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
+
+    if "levels" in payload:
+        overrides["levels"] = _non_negative_int(payload, "levels")
+        if overrides["levels"] <= 0:
+            raise ValueError("levels must be positive")
+
+    positive_float_fields = {
+        "price_band_pct",
+        "quote_per_level",
+        "poll_seconds",
+    }
+    for field in positive_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+            if overrides[field] <= 0:
+                raise ValueError(f"{field} must be positive")
+
+    non_negative_float_fields = {
+        "min_order_quote",
+        "min_distance_bps",
+    }
+    for field in non_negative_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    return overrides
+
+
 def _non_negative_float(payload: dict[str, Any], field: str) -> float:
     try:
         value = float(payload[field])
@@ -3921,6 +4161,12 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
+            "config": market_maker_config_to_dict(cfg.market_maker),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _spot_symbols_by_exchange(cfg),
+            ),
+            "runtime": {},
             "error": None,
         },
         "slow_execution": {
@@ -3995,11 +4241,15 @@ class MonitorState:
         self._program_running = True
         self._program_updated_at = time.time()
         self._risk_overrides: dict[str, Any] = {}
+        self._market_maker_overrides: dict[str, Any] = {}
         self._slow_execution_overrides: dict[str, Any] = {}
         self._strategy_paused: dict[str, bool] = {
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
         self._payload = _build_initial_payload(cfg, poll_seconds)
+        self._market_maker_runtime: dict[str, Any] = self._payload["market_maker"][
+            "runtime"
+        ]
         self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
 
@@ -4007,6 +4257,10 @@ class MonitorState:
         return replace(
             cfg,
             risk=replace(cfg.risk, **self._risk_overrides),
+            market_maker=replace(
+                cfg.market_maker,
+                **self._market_maker_overrides,
+            ),
             slow_execution=replace(
                 cfg.slow_execution,
                 **self._slow_execution_overrides,
@@ -4027,6 +4281,49 @@ class MonitorState:
     ) -> SlowExecutionConfig:
         async with self._lock:
             return replace(base_config, **self._slow_execution_overrides)
+
+    async def market_maker_config(
+        self,
+        base_config: MarketMakerConfig,
+    ) -> MarketMakerConfig:
+        async with self._lock:
+            return replace(base_config, **self._market_maker_overrides)
+
+    async def set_market_maker_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._market_maker_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "market_maker" in self._payload:
+                current_config = self._payload["market_maker"].get("config", {})
+                current_config.update(overrides)
+                self._payload["market_maker"]["config"] = current_config
+                self._payload["market_maker"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _spot_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": market_maker_config_to_dict(
+                            runtime_cfg.market_maker
+                        ),
+                        "market_maker": self._payload.get("market_maker", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
 
     async def risk_config(
         self,
@@ -4129,6 +4426,23 @@ class MonitorState:
         async with self._lock:
             self._payload["order_activity"] = order_activity
 
+    async def set_market_maker_runtime(self, runtime: dict[str, Any]) -> None:
+        async with self._lock:
+            self._market_maker_runtime = runtime
+            if "market_maker" in self._payload:
+                self._payload["market_maker"]["runtime"] = runtime
+                if isinstance(runtime.get("last_plan"), dict):
+                    self._payload["market_maker"]["plan"] = runtime["last_plan"]
+                if runtime.get("mode"):
+                    self._payload["market_maker"]["mode"] = runtime["mode"]
+                if runtime.get("status"):
+                    self._payload["market_maker"]["status"] = runtime["status"]
+                self._payload["market_maker"]["error"] = runtime.get("last_error")
+
+    async def market_maker_runtime(self) -> dict[str, Any]:
+        async with self._lock:
+            return json.loads(json.dumps(self._market_maker_runtime))
+
     async def set_auto_buy_sell_tasks(self, tasks: dict[str, Any]) -> None:
         async with self._lock:
             self._auto_buy_sell_tasks = tasks
@@ -4166,6 +4480,15 @@ class MonitorState:
         status = "running" if not warnings else "degraded"
         async with self._lock:
             slow_execution["tasks"] = self._auto_buy_sell_tasks
+            market_maker["runtime"] = self._market_maker_runtime
+            if isinstance(self._market_maker_runtime.get("last_plan"), dict):
+                market_maker["plan"] = self._market_maker_runtime["last_plan"]
+            if self._market_maker_runtime.get("mode"):
+                market_maker["mode"] = self._market_maker_runtime["mode"]
+            if self._market_maker_runtime.get("status"):
+                market_maker["status"] = self._market_maker_runtime["status"]
+            if self._market_maker_runtime.get("last_error"):
+                market_maker["error"] = self._market_maker_runtime["last_error"]
             self._payload = {
                 "status": status,
                 "config": {
@@ -4255,6 +4578,12 @@ def build_market_maker_payload(
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
+            "config": market_maker_config_to_dict(maker_cfg),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _spot_symbols_by_exchange(cfg),
+            ),
+            "runtime": {},
             "error": None,
         }
 
@@ -4264,6 +4593,12 @@ def build_market_maker_payload(
             "status": "error",
             "mode": "dry_run",
             "plan": None,
+            "config": market_maker_config_to_dict(maker_cfg),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _spot_symbols_by_exchange(cfg),
+            ),
+            "runtime": {},
             "error": f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
         }
 
@@ -4274,6 +4609,12 @@ def build_market_maker_payload(
             "status": "error",
             "mode": "dry_run",
             "plan": None,
+            "config": market_maker_config_to_dict(maker_cfg),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _spot_symbols_by_exchange(cfg),
+            ),
+            "runtime": {},
             "error": str(exc),
         }
 
@@ -4281,6 +4622,12 @@ def build_market_maker_payload(
         "status": "planned",
         "mode": "dry_run",
         "plan": plan.to_dict(),
+        "config": market_maker_config_to_dict(maker_cfg),
+        "accounts": slow_execution_accounts(
+            cfg.spot_exchanges,
+            _spot_symbols_by_exchange(cfg),
+        ),
+        "runtime": {},
         "error": None,
     }
 
@@ -4962,6 +5309,229 @@ async def auto_buy_sell_task_loop(
         await manager.close()
 
 
+def _raw_order_id(raw: dict[str, Any]) -> str:
+    return str(raw.get("id") or raw.get("order") or "")
+
+
+def _raw_client_order_id(raw: dict[str, Any]) -> str:
+    info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+    candidates = (
+        raw.get("clientOrderId"),
+        raw.get("client_order_id"),
+        raw.get("clientOid"),
+        info.get("clientOrderId"),
+        info.get("client_order_id"),
+        info.get("client_oid"),
+    )
+    for value in candidates:
+        if value:
+            return str(value)
+    return ""
+
+
+async def _tracked_market_maker_order_ids(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    current_ids: list[str],
+) -> list[str]:
+    maker_cfg = cfg.market_maker
+    tracked = {order_id for order_id in current_ids if order_id}
+    prefix = maker_cfg.client_order_prefix
+    if not maker_cfg.exchange or not maker_cfg.symbol or not prefix:
+        return sorted(tracked)
+    exchange = next(
+        (item for item in cfg.spot_exchanges if item.key == maker_cfg.exchange),
+        None,
+    )
+    if exchange is None:
+        return sorted(tracked)
+    try:
+        open_orders = await manager.fetch_open_orders(exchange, symbol=maker_cfg.symbol)
+    except Exception:
+        return sorted(tracked)
+    for order in open_orders:
+        if not isinstance(order, dict):
+            continue
+        client_order_id = _raw_client_order_id(order)
+        order_id = _raw_order_id(order)
+        if order_id and client_order_id.startswith(prefix):
+            tracked.add(order_id)
+    return sorted(tracked)
+
+
+def _market_maker_gate_status(
+    cfg: BotConfig,
+    *,
+    strategy_paused: bool,
+    program_running: bool,
+) -> tuple[bool, str, str]:
+    maker_cfg = cfg.market_maker
+    if not maker_cfg.enabled:
+        return False, "disabled", "market_maker.enabled is false"
+    if not maker_cfg.live_enabled:
+        return False, "dry_run", "market_maker.live_enabled is false"
+    if not program_running:
+        return False, "program_paused", "program is paused"
+    if strategy_paused:
+        return False, "paused", "market_maker strategy is paused"
+    if not cfg.risk.enabled or not cfg.risk.trading_enabled:
+        return False, "blocked_by_risk", "risk trading is disabled"
+    if not cfg.risk.allow_live_trading:
+        return False, "blocked_by_risk", "risk.allow_live_trading is false"
+    if not cfg.risk.allow_market_maker or not _risk_strategy_enabled(
+        cfg,
+        "market_maker",
+    ):
+        return False, "blocked_by_risk", "market_maker strategy is disabled"
+    if maker_cfg.exchange and not _risk_account_enabled(cfg, maker_cfg.exchange):
+        return False, "blocked_by_risk", f"{maker_cfg.exchange} account is disabled"
+    return True, "live", "live"
+
+
+async def market_maker_task_loop(
+    cfg: BotConfig,
+    state: MonitorState,
+) -> None:
+    manager = ExchangeManager()
+    open_order_ids: list[str] = []
+    placed_count = 0
+    canceled_count = 0
+    cycle_count = 0
+    last_cancel_at: float | None = None
+    previous_mid_price: float | None = None
+    runtime: dict[str, Any] = {
+        "status": "starting",
+        "mode": "dry_run",
+        "open_order_ids": [],
+        "open_order_count": 0,
+        "placed_count": 0,
+        "canceled_count": 0,
+        "cycle_count": 0,
+        "last_error": None,
+        "updated_at": time.time(),
+    }
+    try:
+        await state.set_market_maker_runtime(runtime)
+        while True:
+            runtime_cfg = await state.runtime_config(cfg)
+            maker_cfg = runtime_cfg.market_maker
+            interval = max(1.0, maker_cfg.poll_seconds)
+            started = time.monotonic()
+            strategy_pauses = await state.strategy_pauses()
+            program_running = await state.is_running()
+            live_allowed, status, reason = _market_maker_gate_status(
+                runtime_cfg,
+                strategy_paused=strategy_pauses.get("market_maker", False),
+                program_running=program_running,
+            )
+            try:
+                if live_allowed or open_order_ids:
+                    open_order_ids = await _tracked_market_maker_order_ids(
+                        runtime_cfg,
+                        manager,
+                        open_order_ids,
+                    )
+                if not live_allowed:
+                    cancel_payload = None
+                    if open_order_ids:
+                        cancel_payload = await cancel_market_maker_order_ids(
+                            runtime_cfg,
+                            manager,
+                            open_order_ids,
+                        )
+                        canceled_count += int(
+                            cancel_payload.get("canceled_count", 0) or 0
+                        )
+                        if cancel_payload.get("canceled_count"):
+                            last_cancel_at = time.time()
+                        write_trade_event(runtime_cfg.trade_log, cancel_payload)
+                        open_order_ids = []
+                    runtime = {
+                        "status": status,
+                        "mode": "paused" if status == "paused" else "dry_run",
+                        "reason": reason,
+                        "config": market_maker_config_to_dict(maker_cfg),
+                        "open_order_ids": open_order_ids,
+                        "open_order_count": len(open_order_ids),
+                        "placed_count": placed_count,
+                        "canceled_count": canceled_count,
+                        "cycle_count": cycle_count,
+                        "last_error": None,
+                        "last_execution": cancel_payload,
+                        "updated_at": time.time(),
+                    }
+                    await state.set_market_maker_runtime(runtime)
+                else:
+                    cycle_count += 1
+                    payload = await run_market_maker_cycle(
+                        runtime_cfg,
+                        manager,
+                        live=True,
+                        replace_existing=False,
+                        replace_order_ids=open_order_ids,
+                        previous_mid_price=previous_mid_price,
+                        last_cancel_at=last_cancel_at,
+                    )
+                    payload["runtime_strategy"] = "market_maker"
+                    write_trade_event(runtime_cfg.trade_log, payload)
+                    plan_payload = (
+                        payload.get("plan")
+                        if isinstance(payload.get("plan"), dict)
+                        else None
+                    )
+                    if plan_payload and isinstance(
+                        plan_payload.get("mid_price"),
+                        (int, float),
+                    ):
+                        previous_mid_price = float(plan_payload["mid_price"])
+                    execution = (
+                        payload.get("execution")
+                        if isinstance(payload.get("execution"), dict)
+                        else {}
+                    )
+                    placed_count += int(execution.get("placed_count", 0) or 0)
+                    canceled_count += int(execution.get("canceled_count", 0) or 0)
+                    if int(execution.get("canceled_count", 0) or 0) > 0:
+                        last_cancel_at = time.time()
+                    open_order_ids = [
+                        str(order_id)
+                        for order_id in execution.get("placed_order_ids", [])
+                        if order_id
+                    ] or open_order_ids
+                    runtime = {
+                        "status": payload.get("status", "unknown"),
+                        "mode": "live",
+                        "reason": None,
+                        "config": market_maker_config_to_dict(maker_cfg),
+                        "open_order_ids": open_order_ids,
+                        "open_order_count": len(open_order_ids),
+                        "placed_count": placed_count,
+                        "canceled_count": canceled_count,
+                        "cycle_count": cycle_count,
+                        "last_plan": payload.get("plan"),
+                        "last_risk": payload.get("risk"),
+                        "last_execution": execution,
+                        "last_error": None,
+                        "updated_at": time.time(),
+                    }
+                    await state.set_market_maker_runtime(runtime)
+            except Exception as exc:  # noqa: BLE001
+                runtime = {
+                    **runtime,
+                    "status": "error",
+                    "mode": "live" if live_allowed else "dry_run",
+                    "last_error": f"{exc.__class__.__name__}: {exc}",
+                    "updated_at": time.time(),
+                }
+                await state.set_market_maker_runtime(runtime)
+
+            sleep_for = max(0.0, interval - (time.monotonic() - started))
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+    finally:
+        await manager.close()
+
+
 def _env_optional(name: str | None) -> str | None:
     if not name:
         return None
@@ -5191,6 +5761,31 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     )
 
 
+async def api_market_maker(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        symbols_by_exchange = _spot_symbols_by_exchange(cfg)
+        overrides = _market_maker_overrides_from_payload(
+            payload,
+            allowed_exchanges={exchange.key for exchange in cfg.spot_exchanges},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    update = await state.set_market_maker_overrides(overrides, cfg=cfg)
+    current_config = await state.market_maker_config(cfg.market_maker)
+    return web.json_response(
+        {
+            "ok": True,
+            "config": market_maker_config_to_dict(current_config),
+            **update,
+        }
+    )
+
+
 async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
@@ -5400,18 +5995,23 @@ def create_app(
 
     async def monitor_context(app_: web.Application) -> Any:
         monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
+        mm_task = asyncio.create_task(market_maker_task_loop(cfg, state))
         auto_task = asyncio.create_task(
             auto_buy_sell_task_loop(cfg, state, auto_buy_sell_tasks)
         )
         app_["monitor_task"] = monitor_task
+        app_["market_maker_task"] = mm_task
         app_["auto_buy_sell_task"] = auto_task
         try:
             yield
         finally:
             monitor_task.cancel()
+            mm_task.cancel()
             auto_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await monitor_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await mm_task
             with contextlib.suppress(asyncio.CancelledError):
                 await auto_task
 
@@ -5423,6 +6023,7 @@ def create_app(
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)
     app.router.add_post("/api/risk", api_risk)
+    app.router.add_post("/api/market-maker", api_market_maker)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_post("/api/auto-buy-sell/tasks", api_create_auto_buy_sell_task)

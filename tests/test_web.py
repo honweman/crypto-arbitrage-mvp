@@ -23,6 +23,7 @@ from arbitrage_bot.trade_log import normalize_trade_event
 from arbitrage_bot.web import (
     HTML,
     MonitorState,
+    _market_maker_overrides_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
     _daily_report_due,
@@ -108,6 +109,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="console-open-orders"', HTML)
         self.assertIn('id="console-recent-fills"', HTML)
 
+    def test_page_includes_market_maker_controls(self) -> None:
+        self.assertIn("Market Maker", HTML)
+        self.assertIn("/api/market-maker", HTML)
+        self.assertIn('id="mm-form"', HTML)
+        self.assertIn('id="mm-live-enabled"', HTML)
+        self.assertIn('id="mm-accounts"', HTML)
+
     def test_page_includes_risk_controls(self) -> None:
         self.assertIn("Risk Controls", HTML)
         self.assertIn("/api/risk", HTML)
@@ -121,6 +129,7 @@ class WebMonitorTest(unittest.TestCase):
         cfg = make_config(
             market_maker=MarketMakerConfig(
                 enabled=True,
+                live_enabled=True,
                 exchange="bybit-spot",
                 symbol="ACS/USDT",
             ),
@@ -160,6 +169,24 @@ class WebMonitorTest(unittest.TestCase):
         self.assertFalse(strategies["slow_execution"]["live"])
         self.assertEqual(accounts["coinbase-spot"]["open_order_count"], 2)
         self.assertEqual(payload["recent_trade_count"], 5)
+
+    def test_market_maker_requires_explicit_live_enabled_for_live_console(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                live_enabled=False,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            risk=RiskConfig(allow_live_trading=True, allow_market_maker=True),
+        )
+
+        payload = build_trading_console_payload(cfg)
+
+        strategies = {row["id"]: row for row in payload["strategies"]}
+        self.assertFalse(strategies["market_maker"]["live"])
+        self.assertFalse(strategies["market_maker"]["live_ready"])
 
     def test_trading_console_payload_uses_auto_buy_sell_tasks(self) -> None:
         cfg = make_config(
@@ -407,6 +434,44 @@ class WebMonitorTest(unittest.TestCase):
     def test_slow_execution_update_payload_rejects_wrong_account_symbol(self) -> None:
         with self.assertRaisesRegex(ValueError, "symbol is not configured"):
             _slow_execution_overrides_from_payload(
+                {"exchange": "coinbase-spot", "symbol": "ACS/USDT"},
+                allowed_exchanges={"coinbase-spot"},
+                symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
+            )
+
+    def test_market_maker_update_payload_is_sanitized(self) -> None:
+        overrides = _market_maker_overrides_from_payload(
+            {
+                "enabled": True,
+                "live_enabled": False,
+                "exchange": "bybit-spot",
+                "levels": "6",
+                "price_band_pct": "4.5",
+                "quote_per_level": "2",
+                "min_order_quote": "0.5",
+                "min_distance_bps": "20",
+                "poll_seconds": "1",
+                "post_only": True,
+            },
+            allowed_exchanges={"bybit-spot"},
+            symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
+        )
+
+        self.assertTrue(overrides["enabled"])
+        self.assertFalse(overrides["live_enabled"])
+        self.assertEqual(overrides["exchange"], "bybit-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDT")
+        self.assertEqual(overrides["levels"], 6)
+        self.assertEqual(overrides["price_band_pct"], 4.5)
+        self.assertEqual(overrides["quote_per_level"], 2.0)
+        self.assertEqual(overrides["min_order_quote"], 0.5)
+        self.assertEqual(overrides["min_distance_bps"], 20.0)
+        self.assertEqual(overrides["poll_seconds"], 1.0)
+        self.assertTrue(overrides["post_only"])
+
+    def test_market_maker_update_payload_rejects_wrong_symbol(self) -> None:
+        with self.assertRaisesRegex(ValueError, "symbol is not configured"):
+            _market_maker_overrides_from_payload(
                 {"exchange": "coinbase-spot", "symbol": "ACS/USDT"},
                 allowed_exchanges={"coinbase-spot"},
                 symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
@@ -1326,6 +1391,35 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(strategies["market_maker"]["live"])
         self.assertFalse(accounts["bybit-spot"]["enabled"])
         self.assertEqual(payload["operations"]["risk"]["max_order_quote"], 1.25)
+
+    async def test_market_maker_update_updates_runtime_config_and_console(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                live_enabled=False,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            risk=RiskConfig(allow_live_trading=True, allow_market_maker=True),
+        )
+        state = MonitorState(cfg, 1.0)
+
+        update = await state.set_market_maker_overrides(
+            {
+                "live_enabled": True,
+                "levels": 4,
+                "quote_per_level": 2.0,
+            },
+            cfg=cfg,
+        )
+        runtime_cfg = await state.runtime_config(cfg)
+
+        self.assertTrue(runtime_cfg.market_maker.live_enabled)
+        self.assertEqual(runtime_cfg.market_maker.levels, 4)
+        self.assertEqual(update["config"]["quote_per_level"], 2.0)
+        strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
+        self.assertTrue(strategies["market_maker"]["live"])
 
 if __name__ == "__main__":
     unittest.main()
