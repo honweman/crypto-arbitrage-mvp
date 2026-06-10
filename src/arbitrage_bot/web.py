@@ -608,28 +608,6 @@ HTML = """<!doctype html>
 
     <section>
       <div class="section-title">
-        <h2>Market Maker Plan</h2>
-        <span id="mm-meta" class="subtle"></span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Side</th>
-              <th class="num">Level</th>
-              <th class="num">Price</th>
-              <th class="num">Amount</th>
-              <th class="num">Quote</th>
-              <th class="num">Distance</th>
-            </tr>
-          </thead>
-          <tbody id="mm-orders"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section>
-      <div class="section-title">
         <h2>Slow Execution</h2>
         <span id="slow-meta" class="subtle"></span>
       </div>
@@ -697,6 +675,28 @@ HTML = """<!doctype html>
             </tr>
           </thead>
           <tbody id="slow-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <h2>Market Maker Plan</h2>
+        <span id="mm-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th class="num">Level</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Quote</th>
+              <th class="num">Distance</th>
+            </tr>
+          </thead>
+          <tbody id="mm-orders"></tbody>
         </table>
       </div>
     </section>
