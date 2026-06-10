@@ -167,13 +167,53 @@ async def place_plan(
     placed = []
     timestamp_ms = int(time.time() * 1000)
     prepared_orders = prepared_orders or []
-    prepared_creator = getattr(manager, "create_prepared_limit_order", None)
-    for index, order in enumerate(plan.orders, start=1):
-        client_order_id = (
+    client_order_ids = [
+        (
             f"{maker_cfg.client_order_prefix}-{timestamp_ms}-{index}"
             if maker_cfg.client_order_prefix
             else None
         )
+        for index in range(1, len(plan.orders) + 1)
+    ]
+    batch_creator = getattr(manager, "create_prepared_limit_orders", None)
+    if (
+        batch_creator is not None
+        and len(plan.orders) > 1
+        and len(prepared_orders) == len(plan.orders)
+    ):
+        try:
+            placed = await batch_creator(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+                sides=[order.side for order in plan.orders],
+                prepared_orders=prepared_orders,
+                post_only=maker_cfg.post_only,
+                client_order_ids=client_order_ids,
+            )
+            return {
+                "canceled_count": len(canceled),
+                "cancel_errors": cancel_errors,
+                "placed_count": len(placed),
+                "placed_order_ids": [
+                    item.get("id") for item in placed if isinstance(item, dict)
+                ],
+                "used_batch_create": True,
+            }
+        except NotImplementedError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "canceled_count": len(canceled),
+                "cancel_errors": cancel_errors,
+                "placed_count": 0,
+                "placed_order_ids": [],
+                "create_errors": [{"scope": "batch", "error": str(exc)}],
+                "used_batch_create": True,
+            }
+
+    prepared_creator = getattr(manager, "create_prepared_limit_order", None)
+    for index, order in enumerate(plan.orders, start=1):
+        client_order_id = client_order_ids[index - 1]
         prepared = (
             prepared_orders[index - 1]
             if index <= len(prepared_orders)
@@ -205,6 +245,7 @@ async def place_plan(
         "cancel_errors": cancel_errors,
         "placed_count": len(placed),
         "placed_order_ids": [item.get("id") for item in placed if isinstance(item, dict)],
+        "used_batch_create": False,
     }
 
 
@@ -217,6 +258,25 @@ async def cancel_order_ids(
     exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
     canceled = []
     errors = []
+    batch_canceler = getattr(manager, "cancel_orders", None)
+    if batch_canceler is not None and len(order_ids) > 1:
+        try:
+            canceled = await batch_canceler(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+                order_ids=order_ids,
+            )
+            return {
+                "type": "market_maker_cancel",
+                "order_ids": order_ids,
+                "canceled": canceled,
+                "canceled_count": len(canceled),
+                "errors": [],
+                "used_batch_cancel": True,
+            }
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"order_id": "batch", "error": str(exc)})
+
     for order_id in order_ids:
         try:
             canceled.append(
@@ -234,6 +294,7 @@ async def cancel_order_ids(
         "canceled": canceled,
         "canceled_count": len(canceled),
         "errors": errors,
+        "used_batch_cancel": False,
     }
 
 
@@ -462,7 +523,7 @@ async def run_cycle(
         payload["order_validation"] = validation
         if validation["status"] != "ok":
             return _block_for_validation(payload, validation)
-        payload["execution"] = await place_plan(
+        execution = await place_plan(
             cfg,
             manager,
             plan,
@@ -470,7 +531,8 @@ async def run_cycle(
             replace_order_ids=replace_order_ids if should_cancel_tracked else None,
             prepared_orders=validation.get("orders"),
         )
-        payload["status"] = "placed"
+        payload["execution"] = execution
+        payload["status"] = "execution_error" if execution.get("create_errors") else "placed"
 
     return payload
 

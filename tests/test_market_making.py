@@ -5,7 +5,12 @@ from typing import Optional
 
 from arbitrage_bot.config import BotConfig, ExchangeConfig, MarketMakerConfig, RiskConfig
 from arbitrage_bot.config import TradeLogConfig
-from arbitrage_bot.market_maker import market_maker_quote_conversion, run_cycle, run_loop
+from arbitrage_bot.market_maker import (
+    cancel_order_ids,
+    market_maker_quote_conversion,
+    run_cycle,
+    run_loop,
+)
 from arbitrage_bot.market_making import build_symmetric_market_maker_plan
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 
@@ -396,6 +401,94 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.single_prepare_count, 0)
         self.assertEqual(manager.prepared_create_count, 4)
 
+    async def test_live_cycle_uses_batch_create_when_available(self) -> None:
+        class FakeManager:
+            def __init__(self) -> None:
+                self.batch_create_count = 0
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": float(order["amount"]) * float(order["price"]),
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def create_prepared_limit_orders(
+                self,
+                *_: object,
+                prepared_orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, str]]:
+                self.batch_create_count += 1
+                return [
+                    {"id": f"batch-mm-{index}"}
+                    for index, _ in enumerate(prepared_orders, 1)
+                ]
+
+            async def create_prepared_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("batch path should avoid single order placement")
+
+        manager = FakeManager()
+        payload = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    levels=2,
+                    quote_per_level=1.0,
+                    depth_shape="flat",
+                ),
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_cycle_quote=100.0,
+                    max_open_orders=50,
+                    require_post_only=False,
+                ),
+            ),
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertEqual(manager.batch_create_count, 1)
+        self.assertTrue(payload["execution"]["used_batch_create"])
+        self.assertEqual(payload["execution"]["placed_count"], 4)
+
     async def test_live_cycle_skips_reprice_when_plan_change_is_small(self) -> None:
         class FakeManager:
             async def fetch_order_book(
@@ -563,6 +656,37 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(payload["reprice_bps"], 2.0)
         self.assertEqual(payload["execution"]["canceled_count"], 1)
         self.assertEqual(manager.prepared_create_count, 4)
+
+    async def test_cancel_order_ids_uses_batch_cancel_when_available(self) -> None:
+        class FakeManager:
+            def __init__(self) -> None:
+                self.batch_cancel_count = 0
+
+            async def cancel_orders(
+                self,
+                *_: object,
+                order_ids: list[str],
+                **__: object,
+            ) -> list[dict[str, str]]:
+                self.batch_cancel_count += 1
+                return [
+                    {"id": order_id, "status": "canceled"}
+                    for order_id in order_ids
+                ]
+
+            async def cancel_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("batch cancel should avoid single cancel")
+
+        manager = FakeManager()
+        payload = await cancel_order_ids(
+            self._cfg(),
+            manager,  # type: ignore[arg-type]
+            ["a", "b", "c"],
+        )
+
+        self.assertTrue(payload["used_batch_cancel"])
+        self.assertEqual(payload["canceled_count"], 3)
+        self.assertEqual(manager.batch_cancel_count, 1)
 
     async def test_bithumb_post_only_is_blocked_before_placing(self) -> None:
         class FakeManager:

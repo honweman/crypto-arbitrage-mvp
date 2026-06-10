@@ -125,6 +125,8 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
         self.assertTrue(features.post_only)
         self.assertTrue(features.client_order_id)
+        self.assertTrue(features.batch_create)
+        self.assertTrue(features.batch_cancel)
         self.assertEqual(errors, [])
 
 
@@ -170,6 +172,71 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.load_markets_count, 1)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["status"], "ok")
+
+    async def test_create_prepared_limit_orders_uses_batch_client(self) -> None:
+        class FakeClient:
+            has = {"createOrders": True}
+
+            def __init__(self) -> None:
+                self.orders = []
+
+            async def create_orders(self, orders: list[dict[str, object]]) -> list[dict[str, str]]:
+                self.orders = orders
+                return [{"id": f"order-{index}"} for index, _ in enumerate(orders, 1)]
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        result = await manager.create_prepared_limit_orders(
+            cfg,
+            symbol="ACS/USDT",
+            sides=["buy", "sell"],
+            prepared_orders=[
+                {"amount": 10.0, "price": 0.00014, "errors": []},
+                {"amount": 11.0, "price": 0.00015, "errors": []},
+            ],
+            post_only=True,
+            client_order_ids=["cid-1", "cid-2"],
+        )
+
+        self.assertEqual([item["id"] for item in result], ["order-1", "order-2"])
+        self.assertEqual(len(client.orders), 2)
+        self.assertEqual(client.orders[0]["params"]["postOnly"], True)
+        self.assertEqual(client.orders[0]["params"]["clientOrderId"], "cid-1")
+
+    async def test_cancel_orders_uses_batch_client(self) -> None:
+        class FakeClient:
+            has = {"cancelOrders": True}
+
+            def __init__(self) -> None:
+                self.ids = []
+                self.symbol = ""
+
+            async def cancel_orders(
+                self,
+                ids: list[str],
+                symbol: str,
+            ) -> list[dict[str, str]]:
+                self.ids = ids
+                self.symbol = symbol
+                return [{"id": order_id, "status": "canceled"} for order_id in ids]
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        result = await manager.cancel_orders(
+            cfg,
+            symbol="ACS/USDT",
+            order_ids=["a", "b"],
+        )
+
+        self.assertEqual(client.ids, ["a", "b"])
+        self.assertEqual(client.symbol, "ACS/USDT")
+        self.assertEqual(len(result), 2)
 
 
 if __name__ == "__main__":

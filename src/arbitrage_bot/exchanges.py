@@ -32,12 +32,16 @@ class LimitOrderFeatures:
     post_only: bool = True
     client_order_id: bool = True
     recover_by_client_order_id: bool = True
+    batch_create: bool = False
+    batch_cancel: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "post_only": self.post_only,
             "client_order_id": self.client_order_id,
             "recover_by_client_order_id": self.recover_by_client_order_id,
+            "batch_create": self.batch_create,
+            "batch_cancel": self.batch_cancel,
         }
 
 
@@ -51,11 +55,14 @@ LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
         post_only=True,
         client_order_id=True,
         recover_by_client_order_id=True,
+        batch_create=True,
+        batch_cancel=True,
     ),
     "coinbase": LimitOrderFeatures(
         post_only=True,
         client_order_id=True,
         recover_by_client_order_id=True,
+        batch_cancel=True,
     ),
     "upbit": LimitOrderFeatures(
         post_only=True,
@@ -342,6 +349,61 @@ class ExchangeManager:
             params,
         )
 
+    async def create_prepared_limit_orders(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        sides: list[Side],
+        prepared_orders: list[dict[str, Any]],
+        post_only: bool = True,
+        client_order_ids: list[str | None] | None = None,
+    ) -> list[dict[str, Any]]:
+        capability_errors = limit_order_capability_errors(
+            cfg,
+            post_only=post_only,
+        )
+        if capability_errors:
+            raise ValueError("; ".join(capability_errors))
+        features = limit_order_features(cfg)
+        if not features.batch_create:
+            raise NotImplementedError(f"{cfg.key} batch order create is not enabled")
+        if len(sides) != len(prepared_orders):
+            raise ValueError("sides and prepared_orders length mismatch")
+
+        client = self.client(cfg)
+        create_many = getattr(client, "create_orders", None)
+        if create_many is None or client.has.get("createOrders") is not True:
+            raise NotImplementedError(f"{cfg.key} batch order create is not supported")
+
+        order_requests = []
+        client_order_ids = client_order_ids or [None] * len(prepared_orders)
+        for side, prepared, client_order_id in zip(
+            sides,
+            prepared_orders,
+            client_order_ids,
+        ):
+            if prepared.get("errors"):
+                raise ValueError("; ".join(str(error) for error in prepared["errors"]))
+            params: dict[str, Any] = {}
+            if post_only:
+                params["postOnly"] = True
+            if client_order_id and features.client_order_id:
+                params["clientOrderId"] = client_order_id
+            order_requests.append(
+                {
+                    "symbol": symbol,
+                    "type": "limit",
+                    "side": side,
+                    "amount": float(prepared["amount"]),
+                    "price": float(prepared["price"]),
+                    "params": params,
+                }
+            )
+
+        result = await create_many(order_requests)
+        return result if isinstance(result, list) else [result]
+
     async def prepare_limit_order(
         self,
         cfg: ExchangeConfig,
@@ -481,3 +543,22 @@ class ExchangeManager:
     ) -> dict[str, Any]:
         client = self.client(cfg)
         return await client.cancel_order(order_id, symbol)
+
+    async def cancel_orders(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        order_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        if not order_ids:
+            return []
+        features = limit_order_features(cfg)
+        if not features.batch_cancel:
+            raise NotImplementedError(f"{cfg.key} batch order cancel is not enabled")
+        client = self.client(cfg)
+        cancel_many = getattr(client, "cancel_orders", None)
+        if cancel_many is None or client.has.get("cancelOrders") is not True:
+            raise NotImplementedError(f"{cfg.key} batch order cancel is not supported")
+        result = await cancel_many(order_ids, symbol)
+        return result if isinstance(result, list) else [result]

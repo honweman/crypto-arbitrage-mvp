@@ -160,6 +160,8 @@ The web monitor also shows a dry-run market maker ladder when `market_maker.enab
 
 `reprice_threshold_bps` reduces unnecessary cancel/replace churn. When live MM already has tracked orders and the new target ladder moved less than this threshold, the engine keeps the current orders instead of canceling and placing a new ladder. Set it to `0.0` for the old always-replace behavior; values around `1-5` bps are usually a better starting point for thin spot markets.
 
+When the exchange adapter supports it, MM uses batch order APIs for ladder placement and cancellation. Bybit spot is enabled for batch create/cancel; unsupported exchanges automatically stay on the guarded single-order path.
+
 `quote_per_level` and `min_order_quote` are always expressed in the selected exchange pair's quote currency: USDT for Bybit/Upbit `ACS/USDT`, USDC for Coinbase `ACS/USDC`, and KRW for Bithumb `ACS/KRW`. Risk checks convert those quote amounts into `common_quote_currency` using `quote_rates` before applying `max_order_quote`, `max_cycle_quote`, and exposure limits. If a quote rate is missing, live MM is blocked.
 
 Exchange support is intentionally conservative. Bybit, Coinbase, and Upbit support post-only limit orders through ccxt. Bithumb does not expose post-only support through ccxt, so Bithumb MM with `post_only: true` is blocked before order placement; only set `post_only: false` and `risk.require_post_only: false` for Bithumb if you explicitly accept taker-fill risk. Bithumb also does not support client order ids through ccxt, so its MM orders can only be tracked in memory until the process restarts.
