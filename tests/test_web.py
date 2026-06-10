@@ -11,6 +11,7 @@ from arbitrage_bot.config import (
     MarketMakerConfig,
     OnchainMonitorConfig,
     PortfolioConfig,
+    RiskConfig,
     SlowExecutionConfig,
     SpotMarketConfig,
     TradeLogConfig,
@@ -28,6 +29,8 @@ from arbitrage_bot.web import (
     build_operations_payload,
     build_slow_execution_payload,
     build_synced_portfolio_pnl,
+    build_trading_console_payload,
+    cancel_bulk_orders_payload,
     cancel_order_payload,
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
@@ -43,6 +46,7 @@ def make_config(
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
     spot_exchanges: list[ExchangeConfig] | None = None,
+    risk: RiskConfig | None = None,
     trade_log: TradeLogConfig | None = None,
 ) -> BotConfig:
     return BotConfig(
@@ -64,6 +68,7 @@ def make_config(
         cash_and_carry_pairs=[],
         spot_exchanges=spot_exchanges or [],
         derivative_exchanges=[],
+        risk=risk or RiskConfig(),
         trade_log=trade_log or TradeLogConfig(enabled=False),
     )
 
@@ -83,6 +88,57 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("/api/orders/cancel", HTML)
         self.assertIn('id="open-orders"', HTML)
         self.assertIn('id="recent-fills"', HTML)
+
+    def test_page_includes_live_trading_console(self) -> None:
+        self.assertIn("Live Trading Console", HTML)
+        self.assertIn("/api/orders/cancel-bulk", HTML)
+        self.assertIn("/api/strategies/control", HTML)
+        self.assertIn('id="console-open-orders"', HTML)
+        self.assertIn('id="console-recent-fills"', HTML)
+
+    def test_trading_console_payload_reports_live_and_paused_strategies(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            slow_execution=SlowExecutionConfig(
+                enabled=True,
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+            ),
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+            risk=RiskConfig(
+                allow_live_trading=True,
+                allow_market_maker=True,
+                allow_slow_execution=True,
+            ),
+        )
+
+        payload = build_trading_console_payload(
+            cfg,
+            strategy_paused={"slow_execution": True},
+            order_activity={
+                "open_orders": [
+                    {"exchange": "bybit-spot"},
+                    {"exchange": "coinbase-spot"},
+                    {"exchange": "coinbase-spot"},
+                ],
+                "recent_trade_count": 5,
+            },
+        )
+
+        strategies = {row["id"]: row for row in payload["strategies"]}
+        accounts = {row["key"]: row for row in payload["accounts"]}
+        self.assertTrue(strategies["market_maker"]["live"])
+        self.assertTrue(strategies["slow_execution"]["paused"])
+        self.assertFalse(strategies["slow_execution"]["live"])
+        self.assertEqual(accounts["coinbase-spot"]["open_order_count"], 2)
+        self.assertEqual(payload["recent_trade_count"], 5)
 
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
@@ -768,6 +824,126 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.calls, [("coinbase-spot", "ACS/USDC", "order-open-1")])
         self.assertEqual(payload["event"]["type"], "manual_order_cancel")
 
+    async def test_cancel_bulk_orders_payload_cancels_single_account(self) -> None:
+        class FakeBulkCancelManager:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str]] = []
+
+            async def fetch_open_orders(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+            ) -> list[dict[str, object]]:
+                if exchange.key == "coinbase-spot":
+                    return [
+                        {
+                            "id": "coinbase-order-1",
+                            "symbol": symbol,
+                            "side": "buy",
+                            "status": "open",
+                            "price": 0.00014,
+                            "amount": 1000.0,
+                            "cost": 0.14,
+                        }
+                    ]
+                return [
+                    {
+                        "id": "bybit-order-1",
+                        "symbol": symbol,
+                        "side": "sell",
+                        "status": "open",
+                        "price": 0.00015,
+                        "amount": 1000.0,
+                        "cost": 0.15,
+                    }
+                ]
+
+            async def fetch_closed_orders(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+                limit: int = 20,
+            ) -> list[dict[str, object]]:
+                return []
+
+            async def fetch_my_trades(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+                limit: int = 20,
+            ) -> list[dict[str, object]]:
+                return []
+
+            async def cancel_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+                order_id: str,
+            ) -> dict[str, object]:
+                self.calls.append((exchange.key, symbol, order_id))
+                return {"id": order_id, "symbol": symbol, "status": "canceled"}
+
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                ),
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                ),
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    api_key_env="BYBIT_API_KEY",
+                    secret_env="BYBIT_SECRET",
+                ),
+            ],
+        )
+        manager = FakeBulkCancelManager()
+
+        with patch.dict(
+            os.environ,
+            {
+                "COINBASE_API_KEY": "key",
+                "COINBASE_SECRET": "secret",
+                "BYBIT_API_KEY": "key",
+                "BYBIT_SECRET": "secret",
+            },
+            clear=True,
+        ):
+            payload = await cancel_bulk_orders_payload(
+                cfg,
+                manager,
+                {"scope": "account", "exchange": "coinbase-spot"},
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["requested_count"], 1)
+        self.assertEqual(payload["canceled_count"], 1)
+        self.assertEqual(
+            manager.calls,
+            [("coinbase-spot", "ACS/USDC", "coinbase-order-1")],
+        )
+        self.assertEqual(payload["event"]["type"], "manual_bulk_cancel")
+
     async def test_cancel_order_payload_rejects_unconfigured_symbol(self) -> None:
         cfg = make_config(
             spot_markets=[
@@ -899,6 +1075,23 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await state.is_running())
         self.assertEqual(resumed["status"], "starting")
         self.assertTrue(resumed["program"]["running"])
+
+    async def test_strategy_pause_updates_trading_console(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(enabled=True, exchange="bybit-spot"),
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+        )
+        state = MonitorState(cfg, 1.0)
+
+        console = await state.set_strategy_paused(
+            "market_maker",
+            True,
+            cfg=cfg,
+        )
+
+        strategies = {row["id"]: row for row in console["strategies"]}
+        self.assertTrue(strategies["market_maker"]["paused"])
+        self.assertEqual(strategies["market_maker"]["mode"], "paused")
 
 if __name__ == "__main__":
     unittest.main()

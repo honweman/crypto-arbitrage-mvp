@@ -45,6 +45,7 @@ from .trade_log import (
 ACCOUNT_BALANCE_POLL_SECONDS = 10.0
 ORDER_ACTIVITY_POLL_SECONDS = 5.0
 ORDER_ACTIVITY_LIMIT = 20
+STRATEGY_IDS = {"market_maker", "slow_execution", "spot_spread"}
 PNL_SOURCE_LABELS = {
     "market_maker": "Market Maker",
     "arbitrage": "Arbitrage",
@@ -290,6 +291,14 @@ HTML = """<!doctype html>
 
     .fills-table {
       min-width: 1140px;
+    }
+
+    .console-table {
+      min-width: 760px;
+    }
+
+    .console-actions {
+      grid-template-columns: 150px minmax(220px, 1fr);
     }
 
     .balance-table th,
@@ -550,6 +559,7 @@ HTML = """<!doctype html>
       .orders-table { min-width: 960px; }
       .fills-table { min-width: 1080px; }
       .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .console-actions { grid-template-columns: 1fr; }
       .account-field { grid-column: 1 / -1; }
       .opportunity { grid-template-columns: 1fr; }
     }
@@ -652,6 +662,73 @@ HTML = """<!doctype html>
         <div id="onchain-status" class="value">--</div>
       </div>
     </div>
+
+    <section>
+      <div class="section-title">
+        <h2>Live Trading Console</h2>
+        <span id="console-meta" class="subtle"></span>
+      </div>
+      <div class="control-panel console-actions">
+        <button id="console-cancel-all" class="danger-button" type="button">Cancel All</button>
+        <div id="console-account-actions" class="account-options"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="console-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Status</th>
+              <th>Live</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Mode</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="console-strategies"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Status</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Filled</th>
+              <th class="num">Remaining</th>
+              <th class="num">Cost</th>
+              <th>Updated</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="console-open-orders"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="fills-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Source</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Cost</th>
+              <th class="num">P/L</th>
+              <th>Fee</th>
+              <th>Order</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="console-recent-fills"></tbody>
+        </table>
+      </div>
+    </section>
 
     <section>
       <div class="section-title">
@@ -1128,8 +1205,8 @@ HTML = """<!doctype html>
       }
     }
 
-    function renderOpenOrders(orderActivity) {
-      const body = document.getElementById("open-orders");
+    function renderOpenOrders(orderActivity, bodyId = "open-orders") {
+      const body = document.getElementById(bodyId);
       body.innerHTML = "";
       const orders = orderActivity?.open_orders || [];
       if (orders.length === 0) {
@@ -1167,8 +1244,8 @@ HTML = """<!doctype html>
       }
     }
 
-    function renderRecentFills(orderActivity) {
-      const body = document.getElementById("recent-fills");
+    function renderRecentFills(orderActivity, bodyId = "recent-fills") {
+      const body = document.getElementById(bodyId);
       body.innerHTML = "";
       const fills = orderActivity?.recent_trades || [];
       if (fills.length === 0) {
@@ -1214,6 +1291,132 @@ HTML = """<!doctype html>
       );
       renderOpenOrders(orderActivity);
       renderRecentFills(orderActivity);
+    }
+
+    let consoleActionBusy = false;
+
+    async function cancelBulkOrders(payload, button) {
+      if (consoleActionBusy) return;
+      consoleActionBusy = true;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = "Canceling";
+      try {
+        const res = await fetch("/api/orders/cancel-bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "cancel failed");
+        if (result.order_activity) renderOrderActivity(result.order_activity);
+        await refresh();
+      } catch (error) {
+        text("console-meta", `cancel failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+        consoleActionBusy = false;
+      }
+    }
+
+    async function setStrategyPaused(strategyId, paused, button) {
+      if (consoleActionBusy) return;
+      consoleActionBusy = true;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = paused ? "Pausing" : "Resuming";
+      try {
+        const res = await fetch("/api/strategies/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy: strategyId, paused }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "strategy control failed");
+        await refresh();
+      } catch (error) {
+        text("console-meta", `strategy failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+        consoleActionBusy = false;
+      }
+    }
+
+    function renderConsoleAccountActions(tradingConsole) {
+      const body = document.getElementById("console-account-actions");
+      body.innerHTML = "";
+      const accounts = tradingConsole?.accounts || [];
+      if (accounts.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "subtle";
+        empty.textContent = "No accounts";
+        body.appendChild(empty);
+        return;
+      }
+      for (const account of accounts) {
+        const button = document.createElement("button");
+        button.className = "danger-button";
+        button.type = "button";
+        button.textContent = `Cancel ${account.label || account.key}`;
+        button.disabled = (account.open_order_count || 0) <= 0;
+        button.addEventListener("click", () => cancelBulkOrders({
+          scope: "account",
+          exchange: account.key,
+        }, button));
+        body.appendChild(button);
+      }
+    }
+
+    function renderConsoleStrategies(tradingConsole) {
+      const body = document.getElementById("console-strategies");
+      body.innerHTML = "";
+      const strategies = tradingConsole?.strategies || [];
+      if (strategies.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">No strategy status.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const strategy of strategies) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(strategy.label || strategy.id)}</td>
+          <td class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled")}</td>
+          <td class="${strategy.live ? "ok" : "missing"}">${strategy.live ? "YES" : "NO"}</td>
+          <td>${escapeHtml(strategy.exchange || "--")}</td>
+          <td>${escapeHtml(strategy.symbol || "--")}</td>
+          <td>${escapeHtml(strategy.mode || "--")}</td>
+          <td class="strategy-action"></td>
+        `;
+        const action = tr.querySelector(".strategy-action");
+        const button = document.createElement("button");
+        button.className = strategy.paused ? "control-button" : "danger-button";
+        button.type = "button";
+        button.textContent = strategy.paused ? "Resume" : "Pause";
+        button.addEventListener("click", () => setStrategyPaused(strategy.id, !strategy.paused, button));
+        action.appendChild(button);
+        body.appendChild(tr);
+      }
+    }
+
+    function renderTradingConsole(tradingConsole, orderActivity) {
+      const openOrders = orderActivity?.open_order_count || 0;
+      const recentFills = orderActivity?.recent_trade_count || 0;
+      text(
+        "console-meta",
+        tradingConsole
+          ? `${tradingConsole.live_trading ? "live allowed" : "live off"} · open ${openOrders} · fills ${recentFills} · ${formatAge(orderActivity?.last_finished)}`
+          : ""
+      );
+      const allButton = document.getElementById("console-cancel-all");
+      allButton.disabled = openOrders <= 0;
+      allButton.onclick = () => cancelBulkOrders({ scope: "all" }, allButton);
+      renderConsoleAccountActions(tradingConsole);
+      renderConsoleStrategies(tradingConsole);
+      renderOpenOrders(orderActivity, "console-open-orders");
+      renderRecentFills(orderActivity, "console-recent-fills");
     }
 
     function renderOpportunities(items) {
@@ -1673,6 +1876,7 @@ HTML = """<!doctype html>
         renderMarkets(data.markets);
         renderAccountBalances(data.account_balances);
         renderOrderActivity(data.order_activity);
+        renderTradingConsole(data.trading_console, data.order_activity);
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
         renderSlowExecution(data.slow_execution);
@@ -1796,6 +2000,114 @@ def slow_execution_accounts(exchanges: Iterable[ExchangeConfig]) -> list[dict[st
         }
         for exchange in exchanges
     ]
+
+
+def _risk_strategy_enabled(cfg: BotConfig, strategy_id: str) -> bool:
+    return cfg.risk.strategy_enabled.get(strategy_id, True)
+
+
+def _risk_account_enabled(cfg: BotConfig, exchange_key: str) -> bool:
+    return cfg.risk.account_enabled.get(exchange_key, True)
+
+
+def build_trading_console_payload(
+    cfg: BotConfig,
+    exec_cfg: SlowExecutionConfig | None = None,
+    *,
+    strategy_paused: dict[str, bool] | None = None,
+    order_activity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
+    strategy_paused = strategy_paused or {}
+    open_orders = (order_activity or {}).get("open_orders", [])
+    open_counts: dict[str, int] = {}
+    for order in open_orders:
+        exchange = str(order.get("exchange") or "")
+        if exchange:
+            open_counts[exchange] = open_counts.get(exchange, 0) + 1
+
+    live_base = cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+    accounts = [
+        {
+            "key": exchange.key,
+            "label": exchange.label or exchange.key,
+            "id": exchange.id,
+            "market_type": exchange.market_type,
+            "enabled": _risk_account_enabled(cfg, exchange.key),
+            "open_order_count": open_counts.get(exchange.key, 0),
+        }
+        for exchange in _all_account_exchanges(cfg)
+    ]
+
+    def strategy_row(
+        *,
+        strategy_id: str,
+        label: str,
+        configured: bool,
+        exchange: str,
+        symbol: str,
+        strategy_allowed: bool,
+        mode: str = "dry_run",
+    ) -> dict[str, Any]:
+        paused = bool(strategy_paused.get(strategy_id, False))
+        account_enabled = not exchange or _risk_account_enabled(cfg, exchange)
+        live = (
+            live_base
+            and configured
+            and strategy_allowed
+            and account_enabled
+            and not paused
+        )
+        return {
+            "id": strategy_id,
+            "label": label,
+            "configured": configured,
+            "exchange": exchange,
+            "symbol": symbol,
+            "paused": paused,
+            "live": live,
+            "mode": "paused" if paused else ("live" if live else mode),
+            "strategy_allowed": strategy_allowed,
+            "account_enabled": account_enabled,
+        }
+
+    strategies = [
+        strategy_row(
+            strategy_id="market_maker",
+            label="Market Maker",
+            configured=cfg.market_maker.enabled,
+            exchange=cfg.market_maker.exchange,
+            symbol=cfg.market_maker.symbol,
+            strategy_allowed=cfg.risk.allow_market_maker
+            and _risk_strategy_enabled(cfg, "market_maker"),
+        ),
+        strategy_row(
+            strategy_id="slow_execution",
+            label="Auto Buy/Sell",
+            configured=exec_cfg.enabled,
+            exchange=exec_cfg.exchange,
+            symbol=exec_cfg.symbol,
+            strategy_allowed=cfg.risk.allow_slow_execution
+            and _risk_strategy_enabled(cfg, "slow_execution"),
+        ),
+        strategy_row(
+            strategy_id="spot_spread",
+            label="Spot Arbitrage",
+            configured=bool(cfg.spot_markets),
+            exchange="",
+            symbol=",".join(sorted({market.asset for market in cfg.spot_markets})),
+            strategy_allowed=_risk_strategy_enabled(cfg, "spot_spread"),
+            mode="scan",
+        ),
+    ]
+    return {
+        "live_trading": live_base,
+        "strategies": strategies,
+        "accounts": accounts,
+        "open_order_count": len(open_orders),
+        "recent_trade_count": (order_activity or {}).get("recent_trade_count", 0),
+        "updated_at": time.time(),
+    }
 
 
 def _exchange_balance_symbols(
@@ -2560,6 +2872,119 @@ async def cancel_order_payload(
     }
 
 
+async def cancel_bulk_orders_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    payload: dict[str, Any],
+    exec_cfg: SlowExecutionConfig | None = None,
+) -> dict[str, Any]:
+    scope = str(payload.get("scope", "all")).strip().lower()
+    exchange_key = str(payload.get("exchange", "")).strip()
+    if scope not in {"all", "account"}:
+        raise ValueError("scope must be all or account")
+    if scope == "account" and not exchange_key:
+        raise ValueError("exchange is required for account scope")
+
+    allowed_symbols = _exchange_balance_symbols(cfg, exec_cfg)
+    exchanges_by_key = {exchange.key: exchange for exchange in _all_account_exchanges(cfg)}
+    if exchange_key and exchange_key not in exchanges_by_key:
+        raise ValueError(f"unknown exchange account: {exchange_key}")
+
+    current_activity = await fetch_order_activity_payload(
+        cfg,
+        manager,
+        exec_cfg,
+    )
+    candidates = [
+        order
+        for order in current_activity.get("open_orders", [])
+        if scope == "all" or order.get("exchange") == exchange_key
+    ]
+    canceled = []
+    errors = []
+    for order in candidates:
+        order_id = str(order.get("id") or "").strip()
+        order_exchange = str(order.get("exchange") or "")
+        symbol = str(order.get("symbol") or "")
+        if not order_id:
+            errors.append({"order": order, "error": "order id is missing"})
+            continue
+        if symbol not in allowed_symbols.get(order_exchange, []):
+            errors.append({"order": order, "error": f"symbol is not configured: {symbol}"})
+            continue
+        try:
+            exchange = exchanges_by_key[order_exchange]
+            raw = await manager.cancel_order(
+                exchange,
+                symbol=symbol,
+                order_id=order_id,
+            )
+            canceled.append(
+                _normalize_order(exchange, raw, symbol)
+                if isinstance(raw, dict)
+                else {
+                    "exchange": order_exchange,
+                    "symbol": symbol,
+                    "id": order_id,
+                    "status": str(raw),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                {
+                    "exchange": order_exchange,
+                    "symbol": symbol,
+                    "order_id": order_id,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+
+    event = write_trade_event(
+        cfg.trade_log,
+        {
+            "type": "manual_bulk_cancel",
+            "strategy": "manual",
+            "mode": "live",
+            "status": "canceled" if not errors else "partial",
+            "plan": {
+                "exchange": exchange_key if scope == "account" else "all",
+                "symbol": "configured_open_orders",
+                "side": "",
+            },
+            "execution": {
+                "canceled_count": len(canceled),
+                "placed_count": 0,
+                "placed_order_ids": [],
+                "canceled_order_ids": [
+                    str(order.get("id") or "") for order in canceled
+                ],
+            },
+            "risk": {
+                "approved": True,
+                "level": "manual",
+                "reasons": [],
+                "warnings": [item["error"] for item in errors],
+                "order_count": len(candidates),
+                "total_quote_notional": sum(
+                    float(order.get("cost") or 0.0) for order in candidates
+                ),
+            },
+            "cancel_errors": errors,
+        },
+    )
+    return {
+        "ok": len(errors) == 0,
+        "scope": scope,
+        "exchange": exchange_key,
+        "requested_count": len(candidates),
+        "canceled_count": len(canceled),
+        "error_count": len(errors),
+        "canceled": canceled,
+        "errors": errors,
+        "event": event,
+    }
+
+
 def _configured_average_entry_prices(cfg: BotConfig) -> dict[str, float]:
     prices: dict[str, float] = {}
     if cfg.portfolio.asset:
@@ -2846,6 +3271,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "errors": [],
             "warnings": [],
         },
+        "trading_console": build_trading_console_payload(cfg),
         "onchain": {
             "status": "disabled",
             "label": cfg.onchain_monitor.label,
@@ -2921,6 +3347,9 @@ class MonitorState:
         self._program_running = True
         self._program_updated_at = time.time()
         self._slow_execution_overrides: dict[str, Any] = {}
+        self._strategy_paused: dict[str, bool] = {
+            strategy_id: False for strategy_id in STRATEGY_IDS
+        }
         self._payload = _build_initial_payload(cfg, poll_seconds)
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
 
@@ -2949,6 +3378,28 @@ class MonitorState:
                 current_config = self._payload["slow_execution"].get("config", {})
                 current_config.update(overrides)
                 self._payload["slow_execution"]["config"] = current_config
+
+    async def strategy_pauses(self) -> dict[str, bool]:
+        async with self._lock:
+            return dict(self._strategy_paused)
+
+    async def set_strategy_paused(
+        self,
+        strategy_id: str,
+        paused: bool,
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        if strategy_id not in STRATEGY_IDS:
+            raise ValueError(f"unknown strategy: {strategy_id}")
+        async with self._lock:
+            self._strategy_paused[strategy_id] = paused
+            self._payload["trading_console"] = build_trading_console_payload(
+                cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+            )
+            return json.loads(json.dumps(self._payload["trading_console"]))
 
     async def set_running(self, running: bool) -> dict[str, Any]:
         async with self._lock:
@@ -2996,6 +3447,7 @@ class MonitorState:
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
         slow_execution: dict[str, Any],
+        trading_console: dict[str, Any],
         portfolio: dict[str, Any],
     ) -> None:
         opportunity_dicts = [item.to_dict() for item in opportunities]
@@ -3028,6 +3480,7 @@ class MonitorState:
                 "onchain": onchain,
                 "market_maker": market_maker,
                 "slow_execution": slow_execution,
+                "trading_console": trading_console,
                 "portfolio": portfolio,
                 "program": {
                     "running": self._program_running,
@@ -3268,6 +3721,9 @@ async def monitor_loop(
     order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
         "order_activity"
     ]
+    trading_console_payload = _build_initial_payload(cfg, poll_seconds)[
+        "trading_console"
+    ]
     market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
     slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
         "slow_execution"
@@ -3292,6 +3748,7 @@ async def monitor_loop(
                 runtime_slow_execution = await state.slow_execution_config(
                     cfg.slow_execution
                 )
+                strategy_pauses = await state.strategy_pauses()
                 portfolio_books: dict[tuple[str, str], OrderBookSnapshot] = {}
                 if strategy in {"all", "spot-spread"} and cfg.spot_markets:
                     symbols_by_exchange = _symbols_for_configured_spot_markets(cfg)
@@ -3312,23 +3769,46 @@ async def monitor_loop(
                     portfolio_books = books
                     quote_rates = _quote_rates_from_sources(cfg, books)
                     rows = build_market_rows(cfg.spot_markets, books, quote_rates)
-                    opportunities = find_converted_spot_spread_opportunities(
-                        books=books,
-                        exchanges=cfg.spot_exchanges,
-                        markets=cfg.spot_markets,
-                        notional_quote=cfg.notional_quote,
-                        min_profit_quote=cfg.min_profit_quote,
-                        min_profit_bps=cfg.min_profit_bps,
-                        quote_rates=quote_rates,
-                        common_quote_currency=cfg.common_quote_currency,
-                    )
+                    if strategy_pauses.get("spot_spread", False):
+                        opportunities = []
+                    else:
+                        opportunities = find_converted_spot_spread_opportunities(
+                            books=books,
+                            exchanges=cfg.spot_exchanges,
+                            markets=cfg.spot_markets,
+                            notional_quote=cfg.notional_quote,
+                            min_profit_quote=cfg.min_profit_quote,
+                            min_profit_bps=cfg.min_profit_bps,
+                            quote_rates=quote_rates,
+                            common_quote_currency=cfg.common_quote_currency,
+                        )
                     warnings = _missing_market_warnings(rows)
-                    market_maker_payload = build_market_maker_payload(cfg, books)
-                    slow_execution_payload = build_slow_execution_payload(
-                        cfg,
-                        books,
-                        runtime_slow_execution,
-                    )
+                    if strategy_pauses.get("market_maker", False):
+                        market_maker_payload = {
+                            "status": "paused",
+                            "mode": "paused",
+                            "plan": None,
+                            "error": None,
+                        }
+                    else:
+                        market_maker_payload = build_market_maker_payload(cfg, books)
+                    if strategy_pauses.get("slow_execution", False):
+                        slow_execution_payload = {
+                            "status": "paused",
+                            "mode": "paused",
+                            "plan": None,
+                            "config": slow_execution_config_to_dict(
+                                runtime_slow_execution
+                            ),
+                            "accounts": slow_execution_accounts(cfg.spot_exchanges),
+                            "error": None,
+                        }
+                    else:
+                        slow_execution_payload = build_slow_execution_payload(
+                            cfg,
+                            books,
+                            runtime_slow_execution,
+                        )
                     portfolio_payload = build_portfolio_pnl(cfg, books, quote_rates)
                 else:
                     opportunities = await scan_with_manager(cfg, strategy, manager)
@@ -3444,6 +3924,13 @@ async def monitor_loop(
                         order_activity_payload,
                     )
 
+                trading_console_payload = build_trading_console_payload(
+                    cfg,
+                    runtime_slow_execution,
+                    strategy_paused=strategy_pauses,
+                    order_activity=order_activity_payload,
+                )
+
                 if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
                     try:
                         onchain_payload, previous_onchain_amounts = (
@@ -3504,6 +3991,7 @@ async def monitor_loop(
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
                     slow_execution=slow_execution_payload,
+                    trading_console=trading_console_payload,
                     portfolio=portfolio_payload,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -3613,6 +4101,74 @@ async def api_cancel_order(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def api_cancel_bulk_orders(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    manager = ExchangeManager()
+    try:
+        runtime_slow_execution = await state.slow_execution_config(cfg.slow_execution)
+        result = await cancel_bulk_orders_payload(
+            cfg,
+            manager,
+            payload,
+            runtime_slow_execution,
+        )
+        order_activity = await fetch_order_activity_payload(
+            cfg,
+            manager,
+            runtime_slow_execution,
+        )
+        await state.set_order_activity(order_activity)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response(
+            {"error": f"{exc.__class__.__name__}: {exc}"},
+            status=500,
+        )
+    finally:
+        await manager.close()
+
+    result["order_activity"] = order_activity
+    return web.json_response(result)
+
+
+async def api_strategy_control(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        strategy_id = str(payload.get("strategy", "")).strip()
+        paused = payload.get("paused")
+        if not strategy_id:
+            raise ValueError("strategy is required")
+        if not isinstance(paused, bool):
+            raise ValueError("paused must be a boolean")
+        trading_console = await state.set_strategy_paused(
+            strategy_id,
+            paused,
+            cfg=cfg,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    return web.json_response(
+        {
+            "ok": True,
+            "strategy": strategy_id,
+            "paused": paused,
+            "trading_console": trading_console,
+        }
+    )
+
+
 async def api_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -3645,6 +4201,8 @@ def create_app(
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_post("/api/orders/cancel", api_cancel_order)
+    app.router.add_post("/api/orders/cancel-bulk", api_cancel_bulk_orders)
+    app.router.add_post("/api/strategies/control", api_strategy_control)
     app.router.add_get("/api/health", api_health)
     return app
 
