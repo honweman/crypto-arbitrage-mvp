@@ -114,7 +114,7 @@ The top row shows configured positions, cash balances, and P/L attribution:
 }
 ```
 
-`Cash Position` combines configured USDC, USDT, and KRW balances into the common quote currency using `quote_rates`; the small line below it keeps the per-currency amounts visible. `Price Move` is calculated per asset from `position_base * (current_mark_price - average_entry_price)`, then summed across all configured positions. The mark price for each asset is the average converted mid price across available spot books for that asset. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
+`Cash Position` combines configured USDC, USDT, and KRW balances into the common quote currency using `quote_rates`; the small line below it keeps the per-currency amounts visible. `Account Balances` reads live private balances from exchanges with configured API env vars every 10 seconds, aggregates the same target currencies across accounts, and shows per-account free/used/total balances in the monitor table. `Price Move` is calculated per asset from `position_base * (current_mark_price - average_entry_price)`, then summed across all configured positions. The mark price for each asset is the average converted mid price across available spot books for that asset. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
 
 To add another spot asset later, add its markets to `spot_markets`, add one position entry under `portfolio.positions`, and add any new quote-currency conversion to `quote_rates` or `quote_rate_sources`:
 

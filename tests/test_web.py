@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
 from arbitrage_bot.config import (
     AssetPosition,
@@ -23,6 +25,7 @@ from arbitrage_bot.web import (
     build_market_rows,
     build_operations_payload,
     build_slow_execution_payload,
+    fetch_account_balances_payload,
     slow_execution_accounts,
 )
 
@@ -64,6 +67,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Auto Buy/Sell", HTML)
         self.assertIn("/api/auto-buy-sell", HTML)
         self.assertNotIn("Slow Execution", HTML)
+
+    def test_page_includes_account_balances(self) -> None:
+        self.assertIn("Account Balances", HTML)
+        self.assertIn('id="account-balances"', HTML)
 
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
@@ -377,6 +384,88 @@ class WebMonitorTest(unittest.TestCase):
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_account_balances_payload_summarizes_totals(self) -> None:
+        class FakeBalanceManager:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def fetch_balance(self, _: ExchangeConfig) -> dict[str, object]:
+                self.calls += 1
+                return {
+                    "free": {"ACS": 1000.0, "USDT": 20.0},
+                    "used": {"ACS": 0.0, "USDT": 1.0},
+                    "total": {"ACS": 1000.0, "USDT": 21.0},
+                }
+
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                )
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    market_type="spot",
+                    api_key_env="BYBIT_API_KEY",
+                    secret_env="BYBIT_SECRET",
+                )
+            ],
+        )
+        manager = FakeBalanceManager()
+
+        with patch.dict(
+            os.environ,
+            {"BYBIT_API_KEY": "key", "BYBIT_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await fetch_account_balances_payload(cfg, manager)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["checked_account_count"], 1)
+        self.assertEqual(manager.calls, 1)
+        totals = {row["currency"]: row for row in payload["totals"]}
+        self.assertEqual(totals["ACS"]["total"], 1000.0)
+        self.assertEqual(totals["USDT"]["free"], 20.0)
+        self.assertEqual(payload["accounts"][0]["status"], "ok")
+
+    async def test_fetch_account_balances_skips_missing_api_env(self) -> None:
+        class FakeBalanceManager:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def fetch_balance(self, _: ExchangeConfig) -> dict[str, object]:
+                self.calls += 1
+                return {}
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    market_type="spot",
+                    api_key_env="BYBIT_API_KEY",
+                    secret_env="BYBIT_SECRET",
+                )
+            ],
+        )
+        manager = FakeBalanceManager()
+
+        with patch.dict(os.environ, {}, clear=True):
+            payload = await fetch_account_balances_payload(cfg, manager)
+
+        self.assertEqual(payload["status"], "warning")
+        self.assertEqual(payload["checked_account_count"], 0)
+        self.assertEqual(manager.calls, 0)
+        self.assertEqual(
+            payload["accounts"][0]["balance"]["skipped_reason"],
+            "api env vars missing",
+        )
+
     async def test_program_switch_updates_running_state(self) -> None:
         state = MonitorState(make_config(), 1.0)
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .account_check import _auth_env_status, _balance_currencies, _summarize_balance
 from .config import (
     BotConfig,
     ExchangeConfig,
@@ -33,6 +34,9 @@ from .slow_execution import build_slow_execution_plan
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
 from .trade_log import read_recent_trade_entries, summarize_trade_entries
+
+
+ACCOUNT_BALANCE_POLL_SECONDS = 10.0
 
 
 HTML = """<!doctype html>
@@ -101,7 +105,7 @@ HTML = """<!doctype html>
 
     .portfolio-bar {
       display: grid;
-      grid-template-columns: repeat(8, minmax(118px, 1fr));
+      grid-template-columns: repeat(9, minmax(118px, 1fr));
       gap: 1px;
       overflow: hidden;
       margin-bottom: 18px;
@@ -522,6 +526,11 @@ HTML = """<!doctype html>
         <div id="portfolio-cash-detail" class="subtle detail">--</div>
       </div>
       <div class="metric">
+        <div class="label">Account Balances</div>
+        <div id="account-balances-total" class="value">--</div>
+        <div id="account-balances-detail" class="subtle detail">--</div>
+      </div>
+      <div class="metric">
         <div class="label">Mark Price</div>
         <div id="portfolio-mark" class="value">--</div>
       </div>
@@ -577,6 +586,28 @@ HTML = """<!doctype html>
         <div id="onchain-status" class="value">--</div>
       </div>
     </div>
+
+    <section>
+      <div class="section-title">
+        <h2>Account Balances</h2>
+        <span id="account-balances-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Currency</th>
+              <th class="num">Free</th>
+              <th class="num">Used</th>
+              <th class="num">Total</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="account-balances"></tbody>
+        </table>
+      </div>
+    </section>
 
     <section>
       <div class="section-title">
@@ -819,6 +850,98 @@ HTML = """<!doctype html>
         const tr = document.createElement("tr");
         tr.innerHTML = `<td>${currency}</td><td class="num">${fmt.format(rate)}</td>`;
         body.appendChild(tr);
+      }
+    }
+
+    function formatBalanceAmount(value) {
+      if (value == null) return "--";
+      return Math.abs(value) >= 1_000_000 ? compact.format(value) : fmt.format(value);
+    }
+
+    function balanceStatusClass(status) {
+      return status === "ok" ? "ok" : "missing";
+    }
+
+    function sortBalanceCurrencies(rows) {
+      const preferredOrder = { ACS: 0, USDC: 1, USDT: 2, USD: 3, KRW: 4 };
+      return [...(rows || [])].sort((left, right) => {
+        const leftRank = preferredOrder[left.currency] ?? 99;
+        const rightRank = preferredOrder[right.currency] ?? 99;
+        return leftRank === rightRank
+          ? String(left.currency).localeCompare(String(right.currency))
+          : leftRank - rightRank;
+      });
+    }
+
+    function renderAccountBalanceSummary(accountBalances) {
+      const totals = sortBalanceCurrencies(accountBalances?.totals || []);
+      const valueEl = document.getElementById("account-balances-total");
+      const detailEl = document.getElementById("account-balances-detail");
+      if (totals.length === 0) {
+        valueEl.textContent = "--";
+        detailEl.textContent = accountBalances?.status || "--";
+        detailEl.title = detailEl.textContent;
+        return;
+      }
+
+      valueEl.textContent = totals.length === 1
+        ? `${formatBalanceAmount(totals[0].total)} ${totals[0].currency}`
+        : `${totals.length} currencies`;
+      const detail = totals
+        .slice(0, 5)
+        .map((row) => `${row.currency} ${formatBalanceAmount(row.total)}`)
+        .join(" · ");
+      detailEl.textContent = detail;
+      detailEl.title = totals
+        .map((row) => `${row.currency} free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · total ${formatBalanceAmount(row.total)}`)
+        .join(" | ");
+    }
+
+    function renderAccountBalances(accountBalances) {
+      renderAccountBalanceSummary(accountBalances);
+      text(
+        "account-balances-meta",
+        accountBalances
+          ? `${accountBalances.status || "unknown"} · checked ${accountBalances.checked_account_count || 0}/${accountBalances.total_account_count || 0} · ${formatAge(accountBalances.last_finished)}`
+          : ""
+      );
+
+      const body = document.getElementById("account-balances");
+      body.innerHTML = "";
+      const accounts = accountBalances?.accounts || [];
+      if (accounts.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">No account balances yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const account of accounts) {
+        const rows = sortBalanceCurrencies(account.balance?.currencies || []);
+        if (rows.length === 0) {
+          const message = account.balance?.error || account.balance?.skipped_reason || "No non-zero target balances.";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td colspan="4">${escapeHtml(message)}</td>
+            <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
+          `;
+          body.appendChild(tr);
+          continue;
+        }
+
+        for (const row of rows) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td>${escapeHtml(row.currency)}</td>
+            <td class="num">${formatBalanceAmount(row.free)}</td>
+            <td class="num">${formatBalanceAmount(row.used)}</td>
+            <td class="num">${formatBalanceAmount(row.total)}</td>
+            <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
+          `;
+          body.appendChild(tr);
+        }
       }
     }
 
@@ -1252,6 +1375,7 @@ HTML = """<!doctype html>
         renderOperations(data.operations);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderMarkets(data.markets);
+        renderAccountBalances(data.account_balances);
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
         renderSlowExecution(data.slow_execution);
@@ -1358,6 +1482,166 @@ def slow_execution_accounts(exchanges: Iterable[ExchangeConfig]) -> list[dict[st
     ]
 
 
+def _exchange_balance_symbols(
+    cfg: BotConfig,
+    exec_cfg: SlowExecutionConfig | None = None,
+) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for market in cfg.spot_markets:
+        symbols.setdefault(market.exchange, set()).add(market.symbol)
+
+    if cfg.market_maker.exchange and cfg.market_maker.symbol:
+        symbols.setdefault(cfg.market_maker.exchange, set()).add(cfg.market_maker.symbol)
+
+    runtime_exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
+    if runtime_exec_cfg.exchange and runtime_exec_cfg.symbol:
+        symbols.setdefault(runtime_exec_cfg.exchange, set()).add(runtime_exec_cfg.symbol)
+
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _all_account_exchanges(cfg: BotConfig) -> list[ExchangeConfig]:
+    return [*cfg.spot_exchanges, *cfg.derivative_exchanges]
+
+
+def _account_balance_status(accounts: list[dict[str, Any]]) -> str:
+    if not accounts:
+        return "warning"
+    if any(account["status"] == "error" for account in accounts):
+        return "error"
+    if any(account["status"] == "warning" for account in accounts):
+        return "warning"
+    return "ok"
+
+
+async def _fetch_exchange_balance_payload(
+    manager: ExchangeManager,
+    exchange: ExchangeConfig,
+    symbols: list[str],
+) -> dict[str, Any]:
+    auth = _auth_env_status(exchange)
+    account: dict[str, Any] = {
+        "exchange": exchange.key,
+        "label": exchange.label or exchange.key,
+        "id": exchange.id,
+        "market_type": exchange.market_type,
+        "symbols": symbols,
+        "auth": {
+            "configured": auth["configured"],
+            "private_checks_enabled": auth["private_checks_enabled"],
+            "missing_env": auth["missing_env"],
+        },
+        "status": "ok",
+        "warnings": [],
+        "errors": [],
+        "balance": {
+            "checked": False,
+            "skipped_reason": None,
+            "currencies": [],
+        },
+    }
+
+    if not auth["configured"]:
+        account["status"] = "warning"
+        account["warnings"].append("API env vars are not configured")
+        account["balance"]["skipped_reason"] = "api env vars not configured"
+        return account
+    if auth["missing_env"]:
+        account["status"] = "warning"
+        account["warnings"].append("one or more configured API env vars are not set")
+        account["balance"]["skipped_reason"] = "api env vars missing"
+        return account
+
+    try:
+        balance = await manager.fetch_balance(exchange)
+    except Exception as exc:  # noqa: BLE001
+        message = f"{exc.__class__.__name__}: {exc}"
+        account["status"] = "error"
+        account["errors"].append(message)
+        account["balance"] = {
+            "checked": True,
+            "error": message,
+            "currencies": [],
+        }
+        return account
+
+    currencies = _summarize_balance(
+        balance,
+        _balance_currencies(symbols),
+        include_zero=False,
+    )
+    account["balance"] = {
+        "checked": True,
+        "currencies": currencies,
+    }
+    return account
+
+
+def _aggregate_account_balance_totals(
+    accounts: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    totals: dict[str, dict[str, Any]] = {}
+    for account in accounts:
+        if not account.get("balance", {}).get("checked"):
+            continue
+        for row in account.get("balance", {}).get("currencies", []):
+            currency = str(row["currency"]).upper()
+            total_row = totals.setdefault(
+                currency,
+                {
+                    "currency": currency,
+                    "free": 0.0,
+                    "used": 0.0,
+                    "total": 0.0,
+                },
+            )
+            for field in ("free", "used", "total"):
+                value = row.get(field)
+                if value is not None:
+                    total_row[field] += float(value)
+
+    preferred = {"ACS": 0, "USDC": 1, "USDT": 2, "USD": 3, "KRW": 4}
+    return sorted(
+        totals.values(),
+        key=lambda row: (preferred.get(row["currency"], 99), row["currency"]),
+    )
+
+
+async def fetch_account_balances_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    exec_cfg: SlowExecutionConfig | None = None,
+) -> dict[str, Any]:
+    symbols_by_exchange = _exchange_balance_symbols(cfg, exec_cfg)
+    exchanges = _all_account_exchanges(cfg)
+    accounts = await asyncio.gather(
+        *[
+            _fetch_exchange_balance_payload(
+                manager,
+                exchange,
+                symbols_by_exchange.get(exchange.key, []),
+            )
+            for exchange in exchanges
+        ]
+    )
+    errors = [
+        f"{account['exchange']}: {error}"
+        for account in accounts
+        for error in account.get("errors", [])
+    ]
+    return {
+        "status": _account_balance_status(accounts),
+        "accounts": accounts,
+        "totals": _aggregate_account_balance_totals(accounts),
+        "checked_account_count": sum(
+            1 for account in accounts if account.get("balance", {}).get("checked")
+        ),
+        "total_account_count": len(accounts),
+        "last_finished": time.time(),
+        "errors": errors,
+    }
+
+
 def _slow_execution_overrides_from_payload(
     payload: dict[str, Any],
     allowed_exchanges: set[str] | None = None,
@@ -1431,6 +1715,15 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
         "quote_rates": cfg.quote_rates,
         "opportunities": [],
         "recent_opportunities": [],
+        "account_balances": {
+            "status": "starting",
+            "accounts": [],
+            "totals": [],
+            "checked_account_count": 0,
+            "total_account_count": len(_all_account_exchanges(cfg)),
+            "last_finished": None,
+            "errors": [],
+        },
         "onchain": {
             "status": "disabled",
             "label": cfg.onchain_monitor.label,
@@ -1569,6 +1862,7 @@ class MonitorState:
         quote_rates: dict[str, float],
         opportunities: list[Opportunity],
         warnings: list[str],
+        account_balances: dict[str, Any],
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
         slow_execution: dict[str, Any],
@@ -1599,6 +1893,7 @@ class MonitorState:
                 "quote_rates": quote_rates,
                 "opportunities": opportunity_dicts,
                 "recent_opportunities": list(self._recent_opportunities),
+                "account_balances": account_balances,
                 "onchain": onchain,
                 "market_maker": market_maker,
                 "slow_execution": slow_execution,
@@ -1836,6 +2131,9 @@ async def monitor_loop(
         else None
     )
     onchain_payload = _build_initial_payload(cfg, poll_seconds)["onchain"]
+    account_balances_payload = _build_initial_payload(cfg, poll_seconds)[
+        "account_balances"
+    ]
     market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
     slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
         "slow_execution"
@@ -1843,6 +2141,7 @@ async def monitor_loop(
     portfolio_payload = _build_initial_payload(cfg, poll_seconds)["portfolio"]
     previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
+    next_balance_scan = 0.0
     scan_count = 0
     try:
         while True:
@@ -1920,6 +2219,25 @@ async def monitor_loop(
                     ]
 
                 now = time.monotonic()
+                if now >= next_balance_scan:
+                    try:
+                        account_balances_payload = await fetch_account_balances_payload(
+                            cfg,
+                            manager,
+                            runtime_slow_execution,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        account_balances_payload = {
+                            "status": "error",
+                            "accounts": [],
+                            "totals": [],
+                            "checked_account_count": 0,
+                            "total_account_count": len(_all_account_exchanges(cfg)),
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
+                    next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
+
                 if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
                     try:
                         onchain_payload, previous_onchain_amounts = (
@@ -1944,6 +2262,9 @@ async def monitor_loop(
 
                 if onchain_payload.get("status") == "error":
                     warnings = [*warnings, f"On-chain: {onchain_payload.get('error')}"]
+                if account_balances_payload.get("status") == "error":
+                    errors = account_balances_payload.get("errors") or ["unavailable"]
+                    warnings = [*warnings, f"Account balances: {errors[0]}"]
                 if market_maker_payload.get("status") == "error":
                     warnings = [
                         *warnings,
@@ -1969,6 +2290,7 @@ async def monitor_loop(
                     quote_rates=quote_rates,
                     opportunities=opportunities,
                     warnings=warnings,
+                    account_balances=account_balances_payload,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
                     slow_execution=slow_execution_payload,
