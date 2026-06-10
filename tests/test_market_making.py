@@ -846,6 +846,17 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["available"])
         self.assertIsNone(payload["quote_to_common_rate"])
 
+    def test_quote_conversion_strips_contract_settlement_suffix(self) -> None:
+        cfg = self._cfg(
+            quote_rates={"USD": 1.0, "USDT": 1.0},
+        )
+
+        payload = market_maker_quote_conversion(cfg, "BTC/USDT:USDT")
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["quote_currency"], "USDT")
+        self.assertEqual(payload["quote_to_common_rate"], 1.0)
+
     async def test_run_loop_clamps_interval_to_one_second(self) -> None:
         class StopLoop(Exception):
             pass

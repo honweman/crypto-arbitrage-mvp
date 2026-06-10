@@ -8,6 +8,7 @@ from arbitrage_bot.config import (
     AlertConfig,
     AssetPosition,
     BotConfig,
+    CashAndCarryPair,
     ExchangeConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
@@ -24,6 +25,7 @@ from arbitrage_bot.web import (
     HTML,
     MonitorState,
     _market_maker_overrides_from_payload,
+    _cash_and_carry_pairs_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
     _spot_markets_from_payload,
@@ -55,6 +57,8 @@ def make_config(
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
     spot_exchanges: list[ExchangeConfig] | None = None,
+    cash_and_carry_pairs: list[CashAndCarryPair] | None = None,
+    derivative_exchanges: list[ExchangeConfig] | None = None,
     risk: RiskConfig | None = None,
     trade_log: TradeLogConfig | None = None,
     alerts: AlertConfig | None = None,
@@ -75,9 +79,9 @@ def make_config(
         portfolio=portfolio or PortfolioConfig(),
         spot_symbols=[],
         spot_markets=spot_markets or [],
-        cash_and_carry_pairs=[],
+        cash_and_carry_pairs=cash_and_carry_pairs or [],
         spot_exchanges=spot_exchanges or [],
-        derivative_exchanges=[],
+        derivative_exchanges=derivative_exchanges or [],
         risk=risk or RiskConfig(),
         trade_log=trade_log or TradeLogConfig(enabled=False),
         alerts=alerts or AlertConfig(),
@@ -104,6 +108,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="markets-form"', HTML)
         self.assertIn('id="market-symbol"', HTML)
         self.assertIn('id="markets-config"', HTML)
+
+    def test_page_includes_cash_and_carry_config_controls(self) -> None:
+        self.assertIn("Cash & Carry Pairs", HTML)
+        self.assertIn("/api/cash-and-carry-pairs", HTML)
+        self.assertIn('id="carry-form"', HTML)
+        self.assertIn('id="carry-derivative-symbol"', HTML)
+        self.assertIn('id="carry-config"', HTML)
 
     def test_page_includes_account_balances(self) -> None:
         self.assertIn("Account Balances", HTML)
@@ -190,6 +201,51 @@ class WebMonitorTest(unittest.TestCase):
                     ]
                 },
                 allowed_exchanges={"bybit-spot"},
+            )
+
+    def test_cash_and_carry_payload_sanitizes_pair(self) -> None:
+        pairs = _cash_and_carry_pairs_from_payload(
+            {
+                "cash_and_carry_pairs": [
+                    {
+                        "spot_symbol": "btc/usdt",
+                        "derivative_symbol": "btc/usdt:usdt",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(pairs[0].spot_symbol, "BTC/USDT")
+        self.assertEqual(pairs[0].derivative_symbol, "BTC/USDT:USDT")
+
+    def test_cash_and_carry_payload_rejects_duplicates(self) -> None:
+        with self.assertRaises(ValueError):
+            _cash_and_carry_pairs_from_payload(
+                {
+                    "cash_and_carry_pairs": [
+                        {
+                            "spot_symbol": "BTC/USDT",
+                            "derivative_symbol": "BTC/USDT:USDT",
+                        },
+                        {
+                            "spot_symbol": "btc/usdt",
+                            "derivative_symbol": "btc/usdt:usdt",
+                        },
+                    ]
+                }
+            )
+
+    def test_cash_and_carry_payload_rejects_base_mismatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "base must match"):
+            _cash_and_carry_pairs_from_payload(
+                {
+                    "cash_and_carry_pairs": [
+                        {
+                            "spot_symbol": "BTC/USDT",
+                            "derivative_symbol": "ETH/USDT:USDT",
+                        }
+                    ]
+                }
             )
 
     def test_trading_console_payload_reports_live_and_paused_strategies(self) -> None:
@@ -1454,6 +1510,43 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             update["market_maker"]["accounts"][0]["symbols"],
             ["BTC/USDT"],
         )
+
+    async def test_cash_and_carry_update_changes_runtime_pairs(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[ExchangeConfig(id="binance", label="binance-spot")],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                )
+            ],
+        )
+        state = MonitorState(cfg, 1.0)
+
+        update = await state.set_cash_and_carry_pairs(
+            [
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            cfg=cfg,
+        )
+        runtime_cfg = await state.runtime_config(cfg)
+        payload = await state.get()
+
+        self.assertEqual(runtime_cfg.cash_and_carry_pairs[0].spot_symbol, "BTC/USDT")
+        self.assertEqual(
+            payload["config"]["cash_and_carry_pairs"][0]["derivative_symbol"],
+            "BTC/USDT:USDT",
+        )
+        mm_accounts = {
+            row["key"]: row for row in payload["market_maker"]["accounts"]
+        }
+        self.assertIn("BTC/USDT:USDT", mm_accounts["binance-swap"]["symbols"])
+        strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
+        self.assertTrue(strategies["cash_and_carry"]["configured"])
 
     async def test_strategy_pause_updates_trading_console(self) -> None:
         cfg = make_config(

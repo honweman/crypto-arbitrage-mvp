@@ -59,6 +59,20 @@ LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
         batch_create=True,
         batch_cancel=True,
     ),
+    "binance": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+        batch_create=True,
+        batch_cancel=True,
+    ),
+    "binanceusdm": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+        batch_create=True,
+        batch_cancel=True,
+    ),
     "coinbase": LimitOrderFeatures(
         post_only=True,
         client_order_id=True,

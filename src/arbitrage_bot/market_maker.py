@@ -33,7 +33,9 @@ def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
 
 
 def quote_currency(symbol: str) -> str:
-    return symbol.split("/", 1)[1].upper() if "/" in symbol else ""
+    if "/" not in symbol:
+        return ""
+    return symbol.split("/", 1)[1].split(":", 1)[0].upper()
 
 
 def quote_to_common_rate(cfg: BotConfig, symbol: str) -> float | None:

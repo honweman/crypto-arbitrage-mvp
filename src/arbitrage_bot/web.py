@@ -28,6 +28,7 @@ from .auto_buy_sell_task import (
 from .config import (
     AssetPosition,
     BotConfig,
+    CashAndCarryPair,
     ExchangeConfig,
     MarketMakerConfig,
     RiskConfig,
@@ -67,7 +68,12 @@ from .trade_log import (
 ACCOUNT_BALANCE_POLL_SECONDS = 10.0
 ORDER_ACTIVITY_POLL_SECONDS = 5.0
 ORDER_ACTIVITY_LIMIT = 20
-STRATEGY_IDS = {"market_maker", "slow_execution", "spot_spread"}
+STRATEGY_IDS = {
+    "market_maker",
+    "slow_execution",
+    "spot_spread",
+    "cash_and_carry",
+}
 PNL_SOURCE_LABELS = {
     "market_maker": "Market Maker",
     "arbitrage": "Arbitrage",
@@ -997,6 +1003,36 @@ HTML = """<!doctype html>
 
     <section data-page="control">
       <div class="section-title">
+        <h2>Cash & Carry Pairs</h2>
+        <span id="carry-config-meta" class="subtle"></span>
+      </div>
+      <form id="carry-form" class="control-panel">
+        <div class="field">
+          <label for="carry-spot-symbol">Spot Symbol</label>
+          <input id="carry-spot-symbol" type="text" placeholder="BTC/USDT">
+        </div>
+        <div class="field">
+          <label for="carry-derivative-symbol">Contract Symbol</label>
+          <input id="carry-derivative-symbol" type="text" placeholder="BTC/USDT:USDT">
+        </div>
+        <button id="carry-add" class="control-button" type="submit">Add Pair</button>
+      </form>
+      <div class="table-wrap">
+        <table class="markets-config-table">
+          <thead>
+            <tr>
+              <th>Spot Symbol</th>
+              <th>Contract Symbol</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="carry-config"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="control">
+      <div class="section-title">
         <h2>Risk Controls</h2>
         <span id="risk-control-meta" class="subtle"></span>
       </div>
@@ -1440,7 +1476,7 @@ HTML = """<!doctype html>
     }
 
     function quoteCurrency(symbol) {
-      return String(symbol || "").split("/")[1] || "QUOTE";
+      return (String(symbol || "").split("/")[1] || "QUOTE").split(":")[0];
     }
 
     function formatSymbolQuantity(value, symbol, mode) {
@@ -1608,7 +1644,9 @@ HTML = """<!doctype html>
 
     let cancelOrderBusy = new Set();
     let marketsConfigBusy = false;
+    let carryConfigBusy = false;
     let currentSpotMarkets = [];
+    let currentCashCarryPairs = [];
 
     async function cancelOrder(order, button) {
       const key = `${order.exchange}:${order.symbol}:${order.id}`;
@@ -1869,6 +1907,13 @@ HTML = """<!doctype html>
       };
     }
 
+    function normalizeCashCarryPair(row) {
+      return {
+        spot_symbol: String(row.spot_symbol || "").trim().toUpperCase(),
+        derivative_symbol: String(row.derivative_symbol || "").trim().toUpperCase(),
+      };
+    }
+
     function renderMarketExchangeSelect(exchanges) {
       const select = document.getElementById("market-exchange");
       const selected = select.value;
@@ -1969,6 +2014,80 @@ HTML = """<!doctype html>
       button.disabled = true;
       await applySpotMarkets(
         currentSpotMarkets.filter((_, itemIndex) => itemIndex !== index)
+      );
+    }
+
+    function renderCashCarryConfig(data) {
+      if (carryConfigBusy) return;
+      const config = data.config || {};
+      const derivativeExchanges = config.derivative_exchanges || [];
+      currentCashCarryPairs = (config.cash_and_carry_pairs || []).map(normalizeCashCarryPair);
+      text(
+        "carry-config-meta",
+        `${currentCashCarryPairs.length} pair${currentCashCarryPairs.length === 1 ? "" : "s"} · ${derivativeExchanges.length} contract account${derivativeExchanges.length === 1 ? "" : "s"}`
+      );
+
+      const body = document.getElementById("carry-config");
+      body.innerHTML = "";
+      if (currentCashCarryPairs.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="3">No cash & carry pairs configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      currentCashCarryPairs.forEach((pair, index) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(pair.spot_symbol)}</td>
+          <td>${escapeHtml(pair.derivative_symbol)}</td>
+          <td class="carry-action"></td>
+        `;
+        const action = tr.querySelector(".carry-action");
+        const button = document.createElement("button");
+        button.className = "danger-button";
+        button.type = "button";
+        button.textContent = "Remove";
+        button.addEventListener("click", () => removeCashCarryPair(index, button));
+        action.appendChild(button);
+        body.appendChild(tr);
+      });
+    }
+
+    async function applyCashCarryPairs(pairs) {
+      if (carryConfigBusy) return;
+      carryConfigBusy = true;
+      try {
+        const res = await fetch("/api/cash-and-carry-pairs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cash_and_carry_pairs: pairs }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "cash & carry update failed");
+        await refresh();
+      } catch (error) {
+        text("carry-config-meta", `update failed: ${error.message || error}`);
+      } finally {
+        carryConfigBusy = false;
+      }
+    }
+
+    async function addCashCarryPair(event) {
+      event.preventDefault();
+      const pair = normalizeCashCarryPair({
+        spot_symbol: document.getElementById("carry-spot-symbol").value,
+        derivative_symbol: document.getElementById("carry-derivative-symbol").value,
+      });
+      await applyCashCarryPairs([...currentCashCarryPairs, pair]);
+      document.getElementById("carry-spot-symbol").value = "";
+      document.getElementById("carry-derivative-symbol").value = "";
+    }
+
+    async function removeCashCarryPair(index, button) {
+      button.disabled = true;
+      await applyCashCarryPairs(
+        currentCashCarryPairs.filter((_, itemIndex) => itemIndex !== index)
       );
     }
 
@@ -2348,6 +2467,8 @@ HTML = """<!doctype html>
     function displayStrategy(value) {
       if (value === "slow_execution") return "Auto Buy/Sell";
       if (value === "market_maker") return "Market Maker";
+      if (value === "spot_spread") return "Spot Arbitrage";
+      if (value === "cash_and_carry") return "Cash & Carry";
       return value || "--";
     }
 
@@ -2844,6 +2965,7 @@ HTML = """<!doctype html>
 
         renderOperations(data.operations);
         renderMarketsConfig(data);
+        renderCashCarryConfig(data);
         renderRiskControls(data.operations, data.trading_console);
         renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
@@ -2879,6 +3001,7 @@ HTML = """<!doctype html>
       riskFormDirty = true;
     });
     document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
+    document.getElementById("carry-form").addEventListener("submit", addCashCarryPair);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
     document.getElementById("mm-form").addEventListener("input", () => {
       mmFormDirty = true;
@@ -2993,6 +3116,23 @@ def _spot_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     symbols: dict[str, set[str]] = {}
     for market in cfg.spot_markets:
         symbols.setdefault(market.exchange, set()).add(market.symbol)
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _market_maker_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {
+        exchange: set(items)
+        for exchange, items in _spot_symbols_by_exchange(cfg).items()
+    }
+    for pair in cfg.cash_and_carry_pairs:
+        for exchange in cfg.spot_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
+        for exchange in cfg.derivative_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
+    if cfg.market_maker.exchange and cfg.market_maker.symbol:
+        symbols.setdefault(cfg.market_maker.exchange, set()).add(
+            cfg.market_maker.symbol
+        )
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
@@ -3136,6 +3276,17 @@ def build_trading_console_payload(
             strategy_allowed=_risk_strategy_enabled(cfg, "spot_spread"),
             mode="scan",
         ),
+        strategy_row(
+            strategy_id="cash_and_carry",
+            label="Cash & Carry",
+            configured=bool(cfg.cash_and_carry_pairs and cfg.derivative_exchanges),
+            exchange="",
+            symbol=",".join(
+                sorted({pair.spot_symbol for pair in cfg.cash_and_carry_pairs})
+            ),
+            strategy_allowed=_risk_strategy_enabled(cfg, "cash_and_carry"),
+            mode="scan",
+        ),
     ]
     return {
         "live_trading": live_base,
@@ -3154,6 +3305,12 @@ def _exchange_balance_symbols(
     symbols: dict[str, set[str]] = {}
     for market in cfg.spot_markets:
         symbols.setdefault(market.exchange, set()).add(market.symbol)
+
+    for pair in cfg.cash_and_carry_pairs:
+        for exchange in cfg.spot_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
+        for exchange in cfg.derivative_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
 
     if cfg.market_maker.exchange and cfg.market_maker.symbol:
         symbols.setdefault(cfg.market_maker.exchange, set()).add(cfg.market_maker.symbol)
@@ -4329,6 +4486,33 @@ def spot_markets_to_list(markets: Iterable[SpotMarketConfig]) -> list[dict[str, 
     return [spot_market_to_dict(market) for market in markets]
 
 
+def cash_and_carry_pair_to_dict(pair: CashAndCarryPair) -> dict[str, Any]:
+    return {
+        "spot_symbol": pair.spot_symbol,
+        "derivative_symbol": pair.derivative_symbol,
+    }
+
+
+def cash_and_carry_pairs_to_list(
+    pairs: Iterable[CashAndCarryPair],
+) -> list[dict[str, Any]]:
+    return [cash_and_carry_pair_to_dict(pair) for pair in pairs]
+
+
+def exchange_configs_to_list(
+    exchanges: Iterable[ExchangeConfig],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": exchange.key,
+            "label": exchange.label or exchange.key,
+            "id": exchange.id,
+            "market_type": exchange.market_type,
+        }
+        for exchange in exchanges
+    ]
+
+
 def _spot_markets_from_payload(
     payload: dict[str, Any],
     *,
@@ -4379,6 +4563,53 @@ def _spot_markets_from_payload(
             )
         )
     return markets
+
+
+def _cash_and_carry_pairs_from_payload(
+    payload: dict[str, Any],
+) -> list[CashAndCarryPair]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    raw_pairs = payload.get("cash_and_carry_pairs")
+    if raw_pairs is None:
+        raw_pairs = payload.get("pairs")
+    if not isinstance(raw_pairs, list):
+        raise ValueError("cash_and_carry_pairs must be a list")
+
+    pairs: list[CashAndCarryPair] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(raw_pairs, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"cash_and_carry_pairs[{index}] must be an object")
+        spot_symbol = str(item.get("spot_symbol", "")).strip().upper()
+        derivative_symbol = str(item.get("derivative_symbol", "")).strip().upper()
+        if not spot_symbol or "/" not in spot_symbol:
+            raise ValueError(
+                f"cash_and_carry_pairs[{index}].spot_symbol must look like BASE/QUOTE"
+            )
+        if not derivative_symbol or "/" not in derivative_symbol:
+            raise ValueError(
+                f"cash_and_carry_pairs[{index}].derivative_symbol must look like BASE/QUOTE"
+            )
+        spot_base, _ = _symbol_base_quote(spot_symbol)
+        derivative_base, _ = _symbol_base_quote(derivative_symbol)
+        if spot_base != derivative_base:
+            raise ValueError(
+                f"cash_and_carry_pairs[{index}] spot and contract base must match"
+            )
+        key = (spot_symbol, derivative_symbol)
+        if key in seen:
+            raise ValueError(
+                f"duplicate cash & carry pair: {spot_symbol} {derivative_symbol}"
+            )
+        seen.add(key)
+        pairs.append(
+            CashAndCarryPair(
+                spot_symbol=spot_symbol,
+                derivative_symbol=derivative_symbol,
+            )
+        )
+    return pairs
 
 
 def _non_negative_float(payload: dict[str, Any], field: str) -> float:
@@ -4486,15 +4717,13 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "min_profit_bps": cfg.min_profit_bps,
             "common_quote_currency": cfg.common_quote_currency,
             "spot_markets": spot_markets_to_list(cfg.spot_markets),
-            "spot_exchanges": [
-                {
-                    "key": exchange.key,
-                    "label": exchange.label or exchange.key,
-                    "id": exchange.id,
-                    "market_type": exchange.market_type,
-                }
-                for exchange in cfg.spot_exchanges
-            ],
+            "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
+                cfg.cash_and_carry_pairs
+            ),
+            "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
+            "derivative_exchanges": exchange_configs_to_list(
+                cfg.derivative_exchanges
+            ),
         },
         "scan": {
             "count": 0,
@@ -4578,8 +4807,8 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "plan": None,
             "config": market_maker_config_to_dict(cfg.market_maker),
             "accounts": slow_execution_accounts(
-                cfg.spot_exchanges,
-                _spot_symbols_by_exchange(cfg),
+                _all_account_exchanges(cfg),
+                _market_maker_symbols_by_exchange(cfg),
             ),
             "runtime": {},
             "error": None,
@@ -4659,6 +4888,7 @@ class MonitorState:
         self._market_maker_overrides: dict[str, Any] = {}
         self._slow_execution_overrides: dict[str, Any] = {}
         self._spot_markets_override: list[SpotMarketConfig] | None = None
+        self._cash_and_carry_pairs_override: list[CashAndCarryPair] | None = None
         self._strategy_paused: dict[str, bool] = {
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
@@ -4676,6 +4906,11 @@ class MonitorState:
                 self._spot_markets_override
                 if self._spot_markets_override is not None
                 else cfg.spot_markets
+            ),
+            cash_and_carry_pairs=(
+                self._cash_and_carry_pairs_override
+                if self._cash_and_carry_pairs_override is not None
+                else cfg.cash_and_carry_pairs
             ),
             risk=replace(cfg.risk, **self._risk_overrides),
             market_maker=replace(
@@ -4724,8 +4959,8 @@ class MonitorState:
                 current_config.update(overrides)
                 self._payload["market_maker"]["config"] = current_config
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
-                    runtime_cfg.spot_exchanges,
-                    _spot_symbols_by_exchange(runtime_cfg),
+                    _all_account_exchanges(runtime_cfg),
+                    _market_maker_symbols_by_exchange(runtime_cfg),
                 )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -4790,19 +5025,13 @@ class MonitorState:
                 self._payload["config"]["spot_markets"] = spot_markets_to_list(
                     runtime_cfg.spot_markets
                 )
-                self._payload["config"]["spot_exchanges"] = [
-                    {
-                        "key": exchange.key,
-                        "label": exchange.label or exchange.key,
-                        "id": exchange.id,
-                        "market_type": exchange.market_type,
-                    }
-                    for exchange in runtime_cfg.spot_exchanges
-                ]
+                self._payload["config"]["spot_exchanges"] = exchange_configs_to_list(
+                    runtime_cfg.spot_exchanges
+                )
             if "market_maker" in self._payload:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
-                    runtime_cfg.spot_exchanges,
-                    symbols_by_exchange,
+                    _all_account_exchanges(runtime_cfg),
+                    _market_maker_symbols_by_exchange(runtime_cfg),
                 )
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
@@ -4822,6 +5051,45 @@ class MonitorState:
                         "spot_markets": spot_markets_to_list(runtime_cfg.spot_markets),
                         "market_maker": self._payload.get("market_maker", {}),
                         "slow_execution": self._payload.get("slow_execution", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
+    async def set_cash_and_carry_pairs(
+        self,
+        pairs: list[CashAndCarryPair],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._cash_and_carry_pairs_override = pairs
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "config" in self._payload:
+                self._payload["config"]["cash_and_carry_pairs"] = (
+                    cash_and_carry_pairs_to_list(runtime_cfg.cash_and_carry_pairs)
+                )
+                self._payload["config"]["derivative_exchanges"] = (
+                    exchange_configs_to_list(runtime_cfg.derivative_exchanges)
+                )
+            if "market_maker" in self._payload:
+                self._payload["market_maker"]["accounts"] = slow_execution_accounts(
+                    _all_account_exchanges(runtime_cfg),
+                    _market_maker_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            return json.loads(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
+                            runtime_cfg.cash_and_carry_pairs
+                        ),
                         "trading_console": self._payload["trading_console"],
                     }
                 )
@@ -4978,15 +5246,13 @@ class MonitorState:
                     "min_profit_bps": cfg.min_profit_bps,
                     "common_quote_currency": cfg.common_quote_currency,
                     "spot_markets": spot_markets_to_list(cfg.spot_markets),
-                    "spot_exchanges": [
-                        {
-                            "key": exchange.key,
-                            "label": exchange.label or exchange.key,
-                            "id": exchange.id,
-                            "market_type": exchange.market_type,
-                        }
-                        for exchange in cfg.spot_exchanges
-                    ],
+                    "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
+                        cfg.cash_and_carry_pairs
+                    ),
+                    "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
+                    "derivative_exchanges": exchange_configs_to_list(
+                        cfg.derivative_exchanges
+                    ),
                 },
                 "scan": {
                     "count": scan_count,
@@ -5034,15 +5300,15 @@ class MonitorState:
                         "min_profit_bps": cfg.min_profit_bps,
                         "common_quote_currency": cfg.common_quote_currency,
                         "spot_markets": spot_markets_to_list(cfg.spot_markets),
-                        "spot_exchanges": [
-                            {
-                                "key": exchange.key,
-                                "label": exchange.label or exchange.key,
-                                "id": exchange.id,
-                                "market_type": exchange.market_type,
-                            }
-                            for exchange in cfg.spot_exchanges
-                        ],
+                        "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
+                            cfg.cash_and_carry_pairs
+                        ),
+                        "spot_exchanges": exchange_configs_to_list(
+                            cfg.spot_exchanges
+                        ),
+                        "derivative_exchanges": exchange_configs_to_list(
+                            cfg.derivative_exchanges
+                        ),
                     },
                     "scan": {
                         "count": scan_count,
@@ -5074,8 +5340,8 @@ def build_market_maker_payload(
 ) -> dict[str, Any]:
     maker_cfg = cfg.market_maker
     accounts = slow_execution_accounts(
-        cfg.spot_exchanges,
-        _spot_symbols_by_exchange(cfg),
+        _all_account_exchanges(cfg),
+        _market_maker_symbols_by_exchange(cfg),
     )
     config_payload = market_maker_config_to_dict(maker_cfg)
     conversion = (
@@ -5089,7 +5355,11 @@ def build_market_maker_payload(
         }
     )
     exchange_cfg = next(
-        (exchange for exchange in cfg.spot_exchanges if exchange.key == maker_cfg.exchange),
+        (
+            exchange
+            for exchange in _all_account_exchanges(cfg)
+            if exchange.key == maker_cfg.exchange
+        ),
         None,
     )
     exchange_features = (
@@ -5421,6 +5691,24 @@ async def monitor_loop(
                         symbols_by_exchange,
                         runtime_cfg.order_book_depth,
                     )
+                    derivative_keys = {
+                        exchange.key for exchange in runtime_cfg.derivative_exchanges
+                    }
+                    if (
+                        runtime_cfg.market_maker.enabled
+                        and runtime_cfg.market_maker.exchange in derivative_keys
+                        and runtime_cfg.market_maker.symbol
+                    ):
+                        derivative_books = await manager.fetch_order_books(
+                            runtime_cfg.derivative_exchanges,
+                            {
+                                runtime_cfg.market_maker.exchange: {
+                                    runtime_cfg.market_maker.symbol
+                                }
+                            },
+                            runtime_cfg.order_book_depth,
+                        )
+                        books.update(derivative_books)
                     portfolio_books = books
                     quote_rates = _quote_rates_from_sources(runtime_cfg, books)
                     rows = build_market_rows(
@@ -5441,7 +5729,29 @@ async def monitor_loop(
                             quote_rates=quote_rates,
                             common_quote_currency=runtime_cfg.common_quote_currency,
                         )
-                    warnings = _missing_market_warnings(rows)
+                    extra_warnings: list[str] = []
+                    if (
+                        strategy == "all"
+                        and runtime_cfg.cash_and_carry_pairs
+                        and not strategy_pauses.get("cash_and_carry", False)
+                    ):
+                        try:
+                            opportunities.extend(
+                                await scan_with_manager(
+                                    runtime_cfg,
+                                    "cash-and-carry",
+                                    manager,
+                                )
+                            )
+                            opportunities.sort(
+                                key=lambda item: item.profit_bps,
+                                reverse=True,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            extra_warnings.append(
+                                f"Cash & carry scan failed: {exc.__class__.__name__}: {exc}"
+                            )
+                    warnings = [*_missing_market_warnings(rows), *extra_warnings]
                     if strategy_pauses.get("market_maker", False):
                         market_maker_payload = {
                             "status": "paused",
@@ -5862,7 +6172,11 @@ async def _tracked_market_maker_order_ids(
     if not maker_cfg.exchange or not maker_cfg.symbol or not prefix:
         return sorted(tracked)
     exchange = next(
-        (item for item in cfg.spot_exchanges if item.key == maker_cfg.exchange),
+        (
+            item
+            for item in _all_account_exchanges(cfg)
+            if item.key == maker_cfg.exchange
+        ),
         None,
     )
     if exchange is None:
@@ -6406,10 +6720,12 @@ async def api_market_maker(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
-        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+        symbols_by_exchange = _market_maker_symbols_by_exchange(runtime_cfg)
         overrides = _market_maker_overrides_from_payload(
             payload,
-            allowed_exchanges={exchange.key for exchange in runtime_cfg.spot_exchanges},
+            allowed_exchanges={
+                exchange.key for exchange in _all_account_exchanges(runtime_cfg)
+            },
             symbols_by_exchange=symbols_by_exchange,
         )
     except (json.JSONDecodeError, ValueError) as exc:
@@ -6439,6 +6755,18 @@ async def api_markets(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
     return web.json_response(await state.set_spot_markets(markets, cfg=cfg))
+
+
+async def api_cash_and_carry_pairs(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        pairs = _cash_and_carry_pairs_from_payload(payload)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    return web.json_response(await state.set_cash_and_carry_pairs(pairs, cfg=cfg))
 
 
 async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
@@ -6683,6 +7011,7 @@ def create_app(
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)
     app.router.add_post("/api/markets", api_markets)
+    app.router.add_post("/api/cash-and-carry-pairs", api_cash_and_carry_pairs)
     app.router.add_post("/api/risk", api_risk)
     app.router.add_post("/api/market-maker", api_market_maker)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)

@@ -101,13 +101,18 @@
     "allow_slow_execution": true,
     "strategy_enabled": {
       "market_maker": true,
-      "slow_execution": true
+      "slow_execution": true,
+      "spot_spread": true,
+      "cash_and_carry": true
     },
     "account_enabled": {
       "bithumb-spot": true,
       "bybit-spot": true,
+      "binance-spot": true,
       "coinbase-spot": true,
-      "upbit-spot": true
+      "upbit-spot": true,
+      "binance-swap": true,
+      "bybit-swap": true
     },
     "require_post_only": false,
     "max_order_quote": 5.0,
@@ -222,6 +227,17 @@
       }
     },
     {
+      "id": "binance",
+      "label": "binance-spot",
+      "market_type": "spot",
+      "fee_bps": 10.0,
+      "api_key_env": "BINANCE_API_KEY",
+      "secret_env": "BINANCE_SECRET",
+      "options": {
+        "defaultType": "spot"
+      }
+    },
+    {
       "id": "coinbase",
       "label": "coinbase-spot",
       "market_type": "spot",
@@ -238,5 +254,28 @@
       "secret_env": "UPBIT_SECRET"
     }
   ],
-  "derivative_exchanges": []
+  "derivative_exchanges": [
+    {
+      "id": "binanceusdm",
+      "label": "binance-swap",
+      "market_type": "swap",
+      "fee_bps": 5.0,
+      "api_key_env": "BINANCE_API_KEY",
+      "secret_env": "BINANCE_SECRET",
+      "options": {
+        "defaultType": "swap"
+      }
+    },
+    {
+      "id": "bybit",
+      "label": "bybit-swap",
+      "market_type": "swap",
+      "fee_bps": 5.5,
+      "api_key_env": "BYBIT_API_KEY",
+      "secret_env": "BYBIT_SECRET",
+      "options": {
+        "defaultType": "swap"
+      }
+    }
+  ]
 }

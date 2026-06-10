@@ -60,7 +60,11 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(cfg.risk.require_post_only)
         self.assertTrue(cfg.risk.strategy_enabled["market_maker"])
         self.assertTrue(cfg.risk.strategy_enabled["slow_execution"])
+        self.assertTrue(cfg.risk.strategy_enabled["cash_and_carry"])
         self.assertTrue(cfg.risk.account_enabled["bybit-spot"])
+        self.assertTrue(cfg.risk.account_enabled["binance-spot"])
+        self.assertTrue(cfg.risk.account_enabled["binance-swap"])
+        self.assertTrue(cfg.risk.account_enabled["bybit-swap"])
         self.assertEqual(cfg.risk.max_order_quote, 5.0)
         self.assertEqual(cfg.risk.max_cycle_quote, 25.0)
         self.assertEqual(cfg.risk.max_position_base_by_asset["ACS"], 0.0)
@@ -95,6 +99,14 @@ class ConfigTest(unittest.TestCase):
             )
         )
         self.assertTrue(any(exchange.key == "upbit-spot" for exchange in cfg.spot_exchanges))
+        spot_by_key = {exchange.key: exchange for exchange in cfg.spot_exchanges}
+        derivative_by_key = {exchange.key: exchange for exchange in cfg.derivative_exchanges}
+        self.assertEqual(spot_by_key["binance-spot"].id, "binance")
+        self.assertEqual(spot_by_key["binance-spot"].options["defaultType"], "spot")
+        self.assertEqual(derivative_by_key["binance-swap"].id, "binanceusdm")
+        self.assertEqual(derivative_by_key["binance-swap"].market_type, "swap")
+        self.assertEqual(derivative_by_key["bybit-swap"].id, "bybit")
+        self.assertEqual(derivative_by_key["bybit-swap"].options["defaultType"], "swap")
 
 
 if __name__ == "__main__":

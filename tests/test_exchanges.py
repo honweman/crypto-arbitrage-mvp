@@ -129,6 +129,34 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertTrue(features.batch_cancel)
         self.assertEqual(errors, [])
 
+    def test_binance_limit_order_features_allow_post_only(self) -> None:
+        cfg = ExchangeConfig(id="binance", label="binance-spot")
+
+        features = limit_order_features(cfg)
+        errors = limit_order_capability_errors(cfg, post_only=True)
+
+        self.assertTrue(features.post_only)
+        self.assertTrue(features.client_order_id)
+        self.assertTrue(features.batch_create)
+        self.assertTrue(features.batch_cancel)
+        self.assertEqual(errors, [])
+
+    def test_binance_usdm_limit_order_features_allow_post_only(self) -> None:
+        cfg = ExchangeConfig(
+            id="binanceusdm",
+            label="binance-swap",
+            market_type="swap",
+        )
+
+        features = limit_order_features(cfg)
+        errors = limit_order_capability_errors(cfg, post_only=True)
+
+        self.assertTrue(features.post_only)
+        self.assertTrue(features.client_order_id)
+        self.assertTrue(features.batch_create)
+        self.assertTrue(features.batch_cancel)
+        self.assertEqual(errors, [])
+
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_limit_orders_loads_markets_once(self) -> None:

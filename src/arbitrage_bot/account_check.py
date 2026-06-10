@@ -38,8 +38,16 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     for market in cfg.spot_markets:
         symbols.setdefault(market.exchange, set()).add(market.symbol)
 
+    for pair in cfg.cash_and_carry_pairs:
+        for exchange in cfg.spot_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
+        for exchange in cfg.derivative_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
+
     if cfg.market_maker.exchange and cfg.market_maker.symbol:
-        symbols.setdefault(cfg.market_maker.exchange, set()).add(cfg.market_maker.symbol)
+        symbols.setdefault(cfg.market_maker.exchange, set()).add(
+            cfg.market_maker.symbol
+        )
     if cfg.slow_execution.exchange and cfg.slow_execution.symbol:
         symbols.setdefault(cfg.slow_execution.exchange, set()).add(
             cfg.slow_execution.symbol
