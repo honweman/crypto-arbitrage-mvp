@@ -162,6 +162,43 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_task["open_order_ids"], ["order-2"])
         self.assertEqual(third_task["filled_base"], 2.0)
 
+    async def test_quote_target_progress_completes_from_filled_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            task = await service.create_task(
+                self._slow_cfg(total_base=0.0, total_quote=0.001)
+            )
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp)
+
+            first = await service.run_due_tasks(cfg, manager)
+            first_task = first["tasks"][0]
+            self.assertEqual(manager.created, 1)
+            self.assertEqual(first_task["progress_mode"], "quote")
+            self.assertEqual(first_task["filled_quote"], 0.0)
+
+            manager.open_order_ids = []
+            manager.trades = [
+                {
+                    "id": "trade-1",
+                    "order": "order-1",
+                    "amount": 5.0,
+                    "cost": 0.001,
+                    "timestamp": 1_000_000,
+                }
+            ]
+            service._tasks[0].next_run_at = 0.0
+            second = await service.run_due_tasks(cfg, manager)
+            second_task = second["tasks"][0]
+
+        self.assertEqual(task["status"], "running")
+        self.assertEqual(manager.created, 1)
+        self.assertEqual(second_task["status"], "complete")
+        self.assertEqual(second_task["progress_mode"], "quote")
+        self.assertAlmostEqual(second_task["filled_quote"], 0.001)
+        self.assertAlmostEqual(second_task["remaining_quote"], 0.0)
+        self.assertAlmostEqual(second_task["progress_pct"], 100.0)
+
     def test_validate_task_config_requires_one_slice_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "configure exactly one"):
             validate_task_config(self._slow_cfg(slice_base=1.0, slice_base_min=1.0))
@@ -169,6 +206,8 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
     def _slow_cfg(
         self,
         *,
+        total_base: float = 10.0,
+        total_quote: float = 0.0,
         slice_base: float = 0.0,
         slice_base_min: float = 5.0,
     ) -> SlowExecutionConfig:
@@ -177,7 +216,8 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             exchange="bybit-spot",
             symbol="ACS/USDT",
             side="buy",
-            total_base=10.0,
+            total_base=total_base,
+            total_quote=total_quote,
             slice_base=slice_base,
             slice_base_min=slice_base_min,
             slice_base_max=5.0,

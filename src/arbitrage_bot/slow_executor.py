@@ -33,6 +33,7 @@ async def build_plan(
     manager: ExchangeManager,
     *,
     submitted_base: float = 0.0,
+    submitted_quote: float = 0.0,
 ) -> SlowExecutionPlan:
     exec_cfg = cfg.slow_execution
     if not exec_cfg.enabled:
@@ -54,6 +55,7 @@ async def build_plan(
         book,
         exec_cfg,
         submitted_base=submitted_base,
+        submitted_quote=submitted_quote,
     )
 
 
@@ -188,19 +190,28 @@ async def run_cycle(
     manager: ExchangeManager,
     *,
     submitted_base: float,
+    submitted_quote: float = 0.0,
     live: bool,
     replace_existing: bool,
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
 ) -> tuple[dict[str, Any], float]:
-    plan = await build_plan(cfg, manager, submitted_base=submitted_base)
+    plan = await build_plan(
+        cfg,
+        manager,
+        submitted_base=submitted_base,
+        submitted_quote=submitted_quote,
+    )
     next_submitted_base = submitted_base
+    next_submitted_quote = submitted_quote
     payload: dict[str, Any] = {
         "type": "slow_execution",
         "mode": "live" if live else "dry_run",
         "status": plan.status,
         "plan": plan.to_dict(),
         "tracks_submitted_base": True,
+        "tracks_submitted_quote": True,
+        "next_submitted_quote": next_submitted_quote,
     }
     risk_orders = []
     if plan.order is not None:
@@ -287,9 +298,12 @@ async def run_cycle(
         )
         payload["status"] = "placed"
         next_submitted_base = plan.order.submitted_base_after
+        next_submitted_quote = plan.order.submitted_quote_after
     elif plan.order is not None:
         next_submitted_base = plan.order.submitted_base_after
+        next_submitted_quote = plan.order.submitted_quote_after
 
+    payload["next_submitted_quote"] = next_submitted_quote
     return payload, next_submitted_base
 
 
@@ -309,6 +323,7 @@ async def run_loop(
     interval = max(1.0, interval)
     manager = ExchangeManager()
     submitted_base = 0.0
+    submitted_quote = 0.0
     previous_mid_price: float | None = None
     last_cancel_at: float | None = None
     try:
@@ -318,6 +333,7 @@ async def run_loop(
                 cfg,
                 manager,
                 submitted_base=submitted_base,
+                submitted_quote=submitted_quote,
                 live=live,
                 replace_existing=replace_existing,
                 previous_mid_price=previous_mid_price,
@@ -331,6 +347,11 @@ async def run_loop(
                 mid_price = plan_payload.get("mid_price")
                 if isinstance(mid_price, (int, float)):
                     previous_mid_price = float(mid_price)
+                order_payload = plan_payload.get("order")
+                if isinstance(order_payload, dict):
+                    submitted_quote_after = order_payload.get("submitted_quote_after")
+                    if isinstance(submitted_quote_after, (int, float)):
+                        submitted_quote = float(submitted_quote_after)
             execution = payload.get("execution", {})
             if (
                 isinstance(execution, dict)
@@ -380,7 +401,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="Keep submitting configured Auto Buy/Sell slices until total_base is submitted.",
+        help=(
+            "Keep submitting configured Auto Buy/Sell slices until total_base "
+            "or total_quote is submitted."
+        ),
     )
     parser.add_argument(
         "--interval-seconds",

@@ -364,6 +364,7 @@ class WebMonitorTest(unittest.TestCase):
                 "exchange": "bybit-spot",
                 "side": "buy",
                 "total_base": "1000",
+                "total_quote": "5",
                 "slice_base_min": "10",
                 "slice_base_max": "20",
                 "randomize_slice": True,
@@ -379,6 +380,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["exchange"], "bybit-spot")
         self.assertEqual(overrides["symbol"], "ACS/USDT")
         self.assertEqual(overrides["side"], "buy")
+        self.assertEqual(overrides["total_quote"], 5.0)
         self.assertEqual(overrides["slice_base"], 0.0)
         self.assertEqual(overrides["slice_quote"], 0.0)
         self.assertEqual(overrides["slice_base_min"], 10.0)

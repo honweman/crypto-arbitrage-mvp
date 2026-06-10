@@ -86,6 +86,7 @@ class SlowExecutionConfig:
     symbol: str = ""
     side: str = "sell"
     total_base: float = 0.0
+    total_quote: float = 0.0
     slice_base: float = 0.0
     slice_base_min: float = 0.0
     slice_base_max: float = 0.0
@@ -361,6 +362,7 @@ def load_config(path: str | Path) -> BotConfig:
             symbol=slow_execution_raw.get("symbol", ""),
             side=slow_execution_raw.get("side", "sell").lower(),
             total_base=float(slow_execution_raw.get("total_base", 0.0)),
+            total_quote=float(slow_execution_raw.get("total_quote", 0.0)),
             slice_base=float(slow_execution_raw.get("slice_base", 0.0)),
             slice_base_min=float(slow_execution_raw.get("slice_base_min", 0.0)),
             slice_base_max=float(slow_execution_raw.get("slice_base_max", 0.0)),

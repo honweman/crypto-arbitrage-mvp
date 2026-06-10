@@ -18,6 +18,8 @@ class SlowExecutionOrder:
     quote_notional: float
     submitted_base_before: float
     submitted_base_after: float
+    submitted_quote_before: float
+    submitted_quote_after: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -27,6 +29,8 @@ class SlowExecutionOrder:
             "quote_notional": self.quote_notional,
             "submitted_base_before": self.submitted_base_before,
             "submitted_base_after": self.submitted_base_after,
+            "submitted_quote_before": self.submitted_quote_before,
+            "submitted_quote_after": self.submitted_quote_after,
         }
 
 
@@ -42,6 +46,10 @@ class SlowExecutionPlan:
     total_base: float
     submitted_base: float
     remaining_base: float
+    total_quote: float
+    submitted_quote: float
+    remaining_quote: float
+    progress_mode: str
     interval_seconds: float
     order_ttl_seconds: float
     slice_base: float
@@ -70,6 +78,10 @@ class SlowExecutionPlan:
             "total_base": self.total_base,
             "submitted_base": self.submitted_base,
             "remaining_base": self.remaining_base,
+            "total_quote": self.total_quote,
+            "submitted_quote": self.submitted_quote,
+            "remaining_quote": self.remaining_quote,
+            "progress_mode": self.progress_mode,
             "interval_seconds": self.interval_seconds,
             "order_ttl_seconds": self.order_ttl_seconds,
             "slice_base": self.slice_base,
@@ -153,11 +165,14 @@ def build_slow_execution_plan(
     cfg: SlowExecutionConfig,
     *,
     submitted_base: float = 0.0,
+    submitted_quote: float = 0.0,
     random_fn: Callable[[], float] | None = None,
 ) -> SlowExecutionPlan:
     side = _validate_side(cfg.side)
-    if cfg.total_base <= 0:
-        raise ValueError("slow_execution.total_base must be positive")
+    if cfg.total_base < 0 or cfg.total_quote < 0:
+        raise ValueError("slow_execution.total_base and total_quote must be non-negative")
+    if cfg.total_base <= 0 and cfg.total_quote <= 0:
+        raise ValueError("slow_execution.total_base or total_quote must be positive")
     if cfg.interval_seconds <= 0:
         raise ValueError("slow_execution.interval_seconds must be positive")
     if cfg.order_ttl_seconds < 0:
@@ -189,10 +204,37 @@ def build_slow_execution_plan(
         order_price,
         (random_fn or random.random)(),
     )
-    safe_submitted = min(max(0.0, submitted_base), cfg.total_base)
-    remaining_base = max(0.0, cfg.total_base - safe_submitted)
+    base_target_enabled = cfg.total_base > 0
+    quote_target_enabled = cfg.total_quote > 0
+    safe_submitted_base = (
+        min(max(0.0, submitted_base), cfg.total_base)
+        if base_target_enabled
+        else max(0.0, submitted_base)
+    )
+    safe_submitted_quote = (
+        min(max(0.0, submitted_quote), cfg.total_quote)
+        if quote_target_enabled
+        else max(0.0, submitted_quote)
+    )
+    remaining_base_cap = (
+        max(0.0, cfg.total_base - safe_submitted_base)
+        if base_target_enabled
+        else float("inf")
+    )
+    remaining_quote_cap = (
+        max(0.0, cfg.total_quote - safe_submitted_quote)
+        if quote_target_enabled
+        else float("inf")
+    )
+    remaining_base = (
+        remaining_base_cap
+        if base_target_enabled
+        else remaining_quote_cap / order_price
+    )
+    remaining_quote = remaining_quote_cap if quote_target_enabled else 0.0
+    progress_mode = "quote" if quote_target_enabled else "base"
 
-    if remaining_base <= 0:
+    def make_plan(status: str, order: SlowExecutionOrder | None = None) -> SlowExecutionPlan:
         return SlowExecutionPlan(
             exchange=cfg.exchange,
             symbol=cfg.symbol,
@@ -202,8 +244,12 @@ def build_slow_execution_plan(
             mid_price=mid_price,
             existing_spread_bps=existing_spread_bps,
             total_base=cfg.total_base,
-            submitted_base=safe_submitted,
-            remaining_base=0.0,
+            submitted_base=safe_submitted_base,
+            remaining_base=remaining_base,
+            total_quote=cfg.total_quote,
+            submitted_quote=safe_submitted_quote,
+            remaining_quote=remaining_quote,
+            progress_mode=progress_mode,
             interval_seconds=cfg.interval_seconds,
             order_ttl_seconds=cfg.order_ttl_seconds,
             slice_base=cfg.slice_base,
@@ -212,95 +258,47 @@ def build_slow_execution_plan(
             slice_quote=cfg.slice_quote,
             randomize_slice=cfg.randomize_slice,
             stop_price=cfg.stop_price,
-            order=None,
-            status="complete",
+            order=order,
+            status=status,
             observed_at=time(),
             **metric_kwargs,
         )
+
+    if (
+        (base_target_enabled and remaining_base_cap <= 0)
+        or (quote_target_enabled and remaining_quote_cap <= 0)
+    ):
+        remaining_base = 0.0 if base_target_enabled else remaining_base
+        remaining_quote = 0.0 if quote_target_enabled else remaining_quote
+        return make_plan("complete")
 
     if _is_stopped_by_price(side, order_price, cfg.stop_price):
-        return SlowExecutionPlan(
-            exchange=cfg.exchange,
-            symbol=cfg.symbol,
-            side=side,
-            best_bid=best_bid,
-            best_ask=best_ask,
-            mid_price=mid_price,
-            existing_spread_bps=existing_spread_bps,
-            total_base=cfg.total_base,
-            submitted_base=safe_submitted,
-            remaining_base=remaining_base,
-            interval_seconds=cfg.interval_seconds,
-            order_ttl_seconds=cfg.order_ttl_seconds,
-            slice_base=cfg.slice_base,
-            slice_base_min=cfg.slice_base_min,
-            slice_base_max=cfg.slice_base_max,
-            slice_quote=cfg.slice_quote,
-            randomize_slice=cfg.randomize_slice,
-            stop_price=cfg.stop_price,
-            order=None,
-            status="stopped_by_price",
-            observed_at=time(),
-            **metric_kwargs,
-        )
+        return make_plan("stopped_by_price")
 
-    order_base = min(remaining_base, selected_slice_base)
+    remaining_quote_as_base = (
+        remaining_quote_cap / order_price if quote_target_enabled else float("inf")
+    )
+    order_base = min(remaining_base_cap, remaining_quote_as_base, selected_slice_base)
     quote_notional = order_base * order_price
     if quote_notional < cfg.min_order_quote:
-        return SlowExecutionPlan(
-            exchange=cfg.exchange,
-            symbol=cfg.symbol,
-            side=side,
-            best_bid=best_bid,
-            best_ask=best_ask,
-            mid_price=mid_price,
-            existing_spread_bps=existing_spread_bps,
-            total_base=cfg.total_base,
-            submitted_base=safe_submitted,
-            remaining_base=remaining_base,
-            interval_seconds=cfg.interval_seconds,
-            order_ttl_seconds=cfg.order_ttl_seconds,
-            slice_base=cfg.slice_base,
-            slice_base_min=cfg.slice_base_min,
-            slice_base_max=cfg.slice_base_max,
-            slice_quote=cfg.slice_quote,
-            randomize_slice=cfg.randomize_slice,
-            stop_price=cfg.stop_price,
-            order=None,
-            status="below_min_order_quote",
-            observed_at=time(),
-            **metric_kwargs,
-        )
+        return make_plan("below_min_order_quote")
 
     order = SlowExecutionOrder(
         side=side,
         price=order_price,
         amount=order_base,
         quote_notional=quote_notional,
-        submitted_base_before=safe_submitted,
-        submitted_base_after=safe_submitted + order_base,
+        submitted_base_before=safe_submitted_base,
+        submitted_base_after=(
+            min(cfg.total_base, safe_submitted_base + order_base)
+            if base_target_enabled
+            else safe_submitted_base + order_base
+        ),
+        submitted_quote_before=safe_submitted_quote,
+        submitted_quote_after=(
+            min(cfg.total_quote, safe_submitted_quote + quote_notional)
+            if quote_target_enabled
+            else safe_submitted_quote + quote_notional
+        ),
     )
-    return SlowExecutionPlan(
-        exchange=cfg.exchange,
-        symbol=cfg.symbol,
-        side=side,
-        best_bid=best_bid,
-        best_ask=best_ask,
-        mid_price=mid_price,
-        existing_spread_bps=existing_spread_bps,
-        total_base=cfg.total_base,
-        submitted_base=safe_submitted,
-        remaining_base=remaining_base,
-        interval_seconds=cfg.interval_seconds,
-        order_ttl_seconds=cfg.order_ttl_seconds,
-        slice_base=cfg.slice_base,
-        slice_base_min=cfg.slice_base_min,
-        slice_base_max=cfg.slice_base_max,
-        slice_quote=cfg.slice_quote,
-        randomize_slice=cfg.randomize_slice,
-        stop_price=cfg.stop_price,
-        order=order,
-        status="planned",
-        observed_at=time(),
-        **metric_kwargs,
-    )
+    return make_plan("planned", order)

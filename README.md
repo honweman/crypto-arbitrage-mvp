@@ -223,6 +223,7 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
   "symbol": "ACS/USDT",
   "side": "sell",
   "total_base": 100000.0,
+  "total_quote": 0.0,
   "slice_base": 0.0,
   "slice_base_min": 3000.0,
   "slice_base_max": 5000.0,
@@ -238,9 +239,11 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
 }
 ```
 
-Use exactly one sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current execution-side price. Auto Buy/Sell uses a marketable limit price: buys at the current best ask and sells at the current best bid. Keep `slow_execution.post_only` false and `risk.require_post_only` false for this strategy if you want immediate taker-style execution.
+Use `total_base` to cap the total base asset amount, such as ACS, or `total_quote` to cap the total quote currency amount, such as USDC, USDT, or KRW. If both are set, Auto Buy/Sell stops when either cap is reached. Progress is shown against `total_quote` when it is configured; otherwise it uses `total_base`.
 
-The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, the min/max order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
+Use exactly one per-order sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current execution-side price. Auto Buy/Sell uses a marketable limit price: buys at the current best ask and sells at the current best bid. Keep `slow_execution.post_only` false and `risk.require_post_only` false for this strategy if you want immediate taker-style execution.
+
+The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, `total_quote`, the min/max base order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
 
 For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
 

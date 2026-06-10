@@ -35,6 +35,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.slow_execution.symbol, "ACS/USDT")
         self.assertEqual(cfg.slow_execution.side, "sell")
         self.assertEqual(cfg.slow_execution.interval_seconds, 60.0)
+        self.assertEqual(cfg.slow_execution.total_quote, 0.0)
         self.assertEqual(cfg.slow_execution.slice_base_min, 0.0)
         self.assertEqual(cfg.slow_execution.slice_base_max, 0.0)
         self.assertFalse(cfg.slow_execution.randomize_slice)

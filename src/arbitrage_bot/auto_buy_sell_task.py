@@ -40,8 +40,10 @@ def validate_task_config(cfg: SlowExecutionConfig) -> None:
         raise ValueError("symbol is required")
     if cfg.side not in {"buy", "sell"}:
         raise ValueError("side must be buy or sell")
-    if cfg.total_base <= 0:
-        raise ValueError("total_base must be positive")
+    if cfg.total_base < 0 or cfg.total_quote < 0:
+        raise ValueError("total_base and total_quote must be non-negative")
+    if cfg.total_base <= 0 and cfg.total_quote <= 0:
+        raise ValueError("total_base or total_quote must be positive")
     if cfg.interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
     if cfg.order_ttl_seconds < 0:
@@ -118,15 +120,31 @@ class AutoBuySellTask:
 
     def to_dict(self) -> dict[str, Any]:
         cfg = self.exec_cfg
-        remaining_base = max(0.0, cfg.total_base - self.filled_base)
+        base_target_enabled = cfg.total_base > 0
+        quote_target_enabled = cfg.total_quote > 0
+        remaining_base = (
+            max(0.0, cfg.total_base - self.filled_base)
+            if base_target_enabled
+            else 0.0
+        )
+        remaining_quote = (
+            max(0.0, cfg.total_quote - self.filled_quote)
+            if quote_target_enabled
+            else 0.0
+        )
+        progress_mode = "quote" if quote_target_enabled else "base"
+        progress_value = self.filled_quote if quote_target_enabled else self.filled_base
+        progress_total = cfg.total_quote if quote_target_enabled else cfg.total_base
         progress_pct = (
-            min(100.0, max(0.0, self.filled_base / cfg.total_base * 100))
-            if cfg.total_base > 0
+            min(100.0, max(0.0, progress_value / progress_total * 100))
+            if progress_total > 0
             else 0.0
         )
         return {
             **asdict(self),
             "remaining_base": remaining_base,
+            "remaining_quote": remaining_quote,
+            "progress_mode": progress_mode,
             "progress_pct": progress_pct,
             "progress_label": "Bought" if cfg.side == "buy" else "Sold",
             "open_order_count": len(self.open_order_ids),
@@ -291,7 +309,7 @@ class AutoBuySellTaskService:
         task.updated_at = now
         try:
             await self._refresh_task_activity(task, runtime_cfg, manager)
-            if task.filled_base >= task_cfg.total_base:
+            if _task_is_complete(task, task_cfg):
                 task.status = "complete"
                 task.finished_at = time.time()
                 task.last_status = "complete"
@@ -304,6 +322,7 @@ class AutoBuySellTaskService:
                 runtime_cfg,
                 manager,
                 submitted_base=task.filled_base,
+                submitted_quote=task.filled_quote,
                 live=True,
                 replace_existing=False,
             )
@@ -439,8 +458,16 @@ class AutoBuySellTaskService:
             filled_base += max(trade_fill["amount"], order_fill["amount"])
             filled_quote += max(trade_fill["cost"], order_fill["cost"])
 
-        task.filled_base = min(task.exec_cfg.total_base, max(task.filled_base, filled_base))
-        task.filled_quote = max(task.filled_quote, filled_quote)
+        task.filled_base = (
+            min(task.exec_cfg.total_base, max(task.filled_base, filled_base))
+            if task.exec_cfg.total_base > 0
+            else max(task.filled_base, filled_base)
+        )
+        task.filled_quote = (
+            min(task.exec_cfg.total_quote, max(task.filled_quote, filled_quote))
+            if task.exec_cfg.total_quote > 0
+            else max(task.filled_quote, filled_quote)
+        )
         task.open_order_ids = sorted(open_ids)
         task.known_trade_ids = sorted(known_trade_ids)
 
@@ -462,3 +489,11 @@ def _task_status_from_cycle_status(status: str) -> str:
     if status == "planned":
         return "running"
     return status or "running"
+
+
+def _task_is_complete(task: AutoBuySellTask, cfg: SlowExecutionConfig) -> bool:
+    if cfg.total_base > 0 and task.filled_base >= cfg.total_base:
+        return True
+    if cfg.total_quote > 0 and task.filled_quote >= cfg.total_quote:
+        return True
+    return False

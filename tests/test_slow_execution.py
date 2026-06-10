@@ -60,6 +60,83 @@ class SlowExecutionTest(unittest.TestCase):
         self.assertAlmostEqual(plan.order.amount, 250.0 / 101.0)
         self.assertAlmostEqual(plan.order.quote_notional, 250.0)
 
+    def test_total_quote_caps_last_order(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=100.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="buy",
+            total_base=10.0,
+            total_quote=250.0,
+            slice_base=10.0,
+            interval_seconds=60.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg, submitted_quote=200.0)
+
+        self.assertEqual(plan.progress_mode, "quote")
+        self.assertEqual(plan.remaining_quote, 50.0)
+        self.assertIsNotNone(plan.order)
+        self.assertAlmostEqual(plan.order.amount, 0.5)
+        self.assertAlmostEqual(plan.order.quote_notional, 50.0)
+        self.assertAlmostEqual(plan.order.submitted_quote_before, 200.0)
+        self.assertAlmostEqual(plan.order.submitted_quote_after, 250.0)
+
+    def test_total_quote_only_is_valid_target(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=100.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="buy",
+            total_quote=250.0,
+            slice_quote=100.0,
+            interval_seconds=60.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.progress_mode, "quote")
+        self.assertEqual(plan.total_base, 0.0)
+        self.assertAlmostEqual(plan.remaining_base, 2.5)
+        self.assertIsNotNone(plan.order)
+        self.assertAlmostEqual(plan.order.amount, 1.0)
+        self.assertAlmostEqual(plan.order.quote_notional, 100.0)
+
+    def test_complete_when_submitted_quote_reaches_total_quote(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=100.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="buy",
+            total_quote=250.0,
+            slice_quote=100.0,
+            interval_seconds=60.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg, submitted_quote=250.0)
+
+        self.assertEqual(plan.status, "complete")
+        self.assertEqual(plan.remaining_quote, 0.0)
+        self.assertIsNone(plan.order)
+
     def test_complete_when_submitted_reaches_total(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",

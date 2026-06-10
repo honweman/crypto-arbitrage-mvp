@@ -1054,11 +1054,15 @@ HTML = """<!doctype html>
           <input id="slow-total-base" type="number" min="0" step="any">
         </div>
         <div class="field">
-          <label for="slow-slice-min">Min/Order</label>
+          <label for="slow-total-quote">Total Quote</label>
+          <input id="slow-total-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-slice-min">Min Base/Order</label>
           <input id="slow-slice-min" type="number" min="0" step="any">
         </div>
         <div class="field">
-          <label for="slow-slice-max">Max/Order</label>
+          <label for="slow-slice-max">Max Base/Order</label>
           <input id="slow-slice-max" type="number" min="0" step="any">
         </div>
         <label class="check-field">
@@ -1220,6 +1224,19 @@ HTML = """<!doctype html>
       if (!ts) return "--";
       const age = Math.max(0, Date.now() / 1000 - ts);
       return age < 60 ? `${age.toFixed(0)}s ago` : `${(age / 60).toFixed(1)}m ago`;
+    }
+
+    function baseCurrency(symbol) {
+      return String(symbol || "").split("/")[0] || "BASE";
+    }
+
+    function quoteCurrency(symbol) {
+      return String(symbol || "").split("/")[1] || "QUOTE";
+    }
+
+    function formatSymbolQuantity(value, symbol, mode) {
+      const currency = mode === "quote" ? quoteCurrency(symbol) : baseCurrency(symbol);
+      return `${currency} ${formatBalanceAmount(value || 0)}`;
     }
 
     function renderMarkets(markets) {
@@ -1743,6 +1760,13 @@ HTML = """<!doctype html>
 
       const plan = slowExecution.plan;
       const order = plan.order;
+      const progressMode = plan.progress_mode || ((plan.total_quote || 0) > 0 ? "quote" : "base");
+      const submittedText = progressMode === "quote"
+        ? `${formatSymbolQuantity(order.submitted_quote_before, plan.symbol, "quote")} / ${formatSymbolQuantity(plan.total_quote, plan.symbol, "quote")}`
+        : `${formatSymbolQuantity(order.submitted_base_before, plan.symbol, "base")} / ${formatSymbolQuantity(plan.total_base, plan.symbol, "base")}`;
+      const remainingText = progressMode === "quote"
+        ? formatSymbolQuantity(plan.remaining_quote, plan.symbol, "quote")
+        : formatSymbolQuantity(plan.remaining_base, plan.symbol, "base");
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
@@ -1751,8 +1775,8 @@ HTML = """<!doctype html>
         <td class="num">${fmt.format(order.price)}</td>
         <td class="num">${compact.format(order.amount)}</td>
         <td class="num">${money.format(order.quote_notional)}</td>
-        <td class="num">${compact.format(order.submitted_base_before)} / ${compact.format(plan.total_base)}</td>
-        <td class="num">${compact.format(plan.remaining_base)}</td>
+        <td class="num">${submittedText}</td>
+        <td class="num">${remainingText}</td>
         <td class="num">${plan.interval_seconds}s</td>
         <td class="num">${plan.order_ttl_seconds || 0}s</td>
         <td class="num">${plan.stop_price ? fmt.format(plan.stop_price) : "--"}</td>
@@ -1782,14 +1806,18 @@ HTML = """<!doctype html>
         const status = task.status || "--";
         const statusClass = status === "complete" ? "risk-ok" : status === "paused" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
         const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
+        const progressMode = task.progress_mode || ((config.total_quote || 0) > 0 ? "quote" : "base");
+        const filledValue = progressMode === "quote" ? task.filled_quote : task.filled_base;
+        const totalValue = progressMode === "quote" ? config.total_quote : config.total_base;
+        const remainingValue = progressMode === "quote" ? task.remaining_quote : task.remaining_base;
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
           <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
           <td>${escapeHtml(config.exchange || "--")}</td>
           <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
-          <td class="num">${progressLabel} ${compact.format(task.filled_base || 0)} / ${compact.format(config.total_base || 0)}</td>
-          <td class="num">${compact.format(task.remaining_base || 0)}</td>
+          <td class="num">${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}</td>
+          <td class="num">${formatSymbolQuantity(remainingValue, config.symbol, progressMode)}</td>
           <td class="num">${(task.progress_pct || 0).toFixed(2)}%</td>
           <td class="num">${task.open_order_count || 0}</td>
           <td>${formatAge(task.last_cycle_at)}</td>
@@ -2200,6 +2228,7 @@ HTML = """<!doctype html>
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "");
       document.getElementById("slow-side").value = config.side || "sell";
       setNumericField("slow-total-base", config.total_base || 0);
+      setNumericField("slow-total-quote", config.total_quote || 0);
       setNumericField("slow-slice-min", config.slice_base_min || config.slice_base || 0);
       setNumericField("slow-slice-max", config.slice_base_max || config.slice_base || 0);
       document.getElementById("slow-randomize").checked = Boolean(config.randomize_slice);
@@ -2215,6 +2244,7 @@ HTML = """<!doctype html>
         symbol: selectedSlowSymbol(),
         side: document.getElementById("slow-side").value,
         total_base: numericValue("slow-total-base"),
+        total_quote: numericValue("slow-total-quote"),
         slice_base_min: numericValue("slow-slice-min"),
         slice_base_max: numericValue("slow-slice-max"),
         randomize_slice: document.getElementById("slow-randomize").checked,
@@ -3672,6 +3702,7 @@ def _slow_execution_overrides_from_payload(
 
     numeric_fields = {
         "total_base",
+        "total_quote",
         "slice_base_min",
         "slice_base_max",
         "interval_seconds",
