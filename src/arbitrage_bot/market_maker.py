@@ -76,6 +76,49 @@ def _scaled_market_context(
     )
 
 
+def _plan_reprice_bps(
+    previous_plan: dict[str, Any] | None,
+    current_plan: MarketMakerPlan,
+) -> float | None:
+    if not previous_plan:
+        return None
+    if previous_plan.get("exchange") != current_plan.exchange:
+        return None
+    if previous_plan.get("symbol") != current_plan.symbol:
+        return None
+    previous_orders = previous_plan.get("orders")
+    if not isinstance(previous_orders, list):
+        return None
+    if len(previous_orders) != len(current_plan.orders):
+        return None
+
+    previous_by_key = {
+        (item.get("side"), item.get("level")): item
+        for item in previous_orders
+        if isinstance(item, dict)
+    }
+    max_change_bps = 0.0
+    for order in current_plan.orders:
+        previous_order = previous_by_key.get((order.side, order.level))
+        if not isinstance(previous_order, dict):
+            return None
+        previous_price = previous_order.get("price")
+        previous_quote = previous_order.get("quote_notional")
+        if not isinstance(previous_price, (int, float)):
+            return None
+        if not isinstance(previous_quote, (int, float)):
+            return None
+        if abs(float(previous_quote) - order.quote_notional) > 1e-12:
+            return None
+        price_change_bps = (
+            abs(order.price - float(previous_price))
+            / current_plan.mid_price
+            * 10_000
+        )
+        max_change_bps = max(max_change_bps, price_change_bps)
+    return max_change_bps
+
+
 async def build_plan(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -108,6 +151,7 @@ async def place_plan(
     *,
     replace_existing: bool,
     replace_order_ids: list[str] | None = None,
+    prepared_orders: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     maker_cfg = cfg.market_maker
     exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
@@ -122,21 +166,38 @@ async def place_plan(
 
     placed = []
     timestamp_ms = int(time.time() * 1000)
+    prepared_orders = prepared_orders or []
+    prepared_creator = getattr(manager, "create_prepared_limit_order", None)
     for index, order in enumerate(plan.orders, start=1):
         client_order_id = (
             f"{maker_cfg.client_order_prefix}-{timestamp_ms}-{index}"
             if maker_cfg.client_order_prefix
             else None
         )
-        raw = await manager.create_limit_order(
-            exchange_cfg,
-            symbol=maker_cfg.symbol,
-            side=order.side,
-            amount=order.amount,
-            price=order.price,
-            post_only=maker_cfg.post_only,
-            client_order_id=client_order_id,
+        prepared = (
+            prepared_orders[index - 1]
+            if index <= len(prepared_orders)
+            else None
         )
+        if prepared is not None and prepared_creator is not None:
+            raw = await prepared_creator(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+                side=order.side,
+                prepared=prepared,
+                post_only=maker_cfg.post_only,
+                client_order_id=client_order_id,
+            )
+        else:
+            raw = await manager.create_limit_order(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+                side=order.side,
+                amount=order.amount,
+                price=order.price,
+                post_only=maker_cfg.post_only,
+                client_order_id=client_order_id,
+            )
         placed.append(raw)
 
     return {
@@ -183,35 +244,33 @@ async def validate_plan_orders(
 ) -> dict[str, Any]:
     exchange_cfg = _find_exchange(cfg, cfg.market_maker.exchange)
     rows = []
-    for order in plan.orders:
+    batch_preparer = getattr(manager, "prepare_limit_orders", None)
+    if batch_preparer is not None:
         try:
-            rows.append(
-                await manager.prepare_limit_order(
-                    exchange_cfg,
-                    symbol=cfg.market_maker.symbol,
-                    side=order.side,
-                    amount=order.amount,
-                    price=order.price,
-                )
+            rows = await batch_preparer(
+                exchange_cfg,
+                symbol=cfg.market_maker.symbol,
+                orders=[order.to_dict() for order in plan.orders],
             )
         except Exception as exc:  # noqa: BLE001
-            rows.append(
-                {
-                    "exchange": exchange_cfg.key,
-                    "symbol": cfg.market_maker.symbol,
-                    "side": order.side,
-                    "status": "error",
-                    "requested_amount": order.amount,
-                    "requested_price": order.price,
-                    "amount": None,
-                    "price": None,
-                    "cost": order.quote_notional,
-                    "limits": {},
-                    "precision": {},
-                    "errors": [f"{exc.__class__.__name__}: {exc}"],
-                    "warnings": [],
-                }
-            )
+            rows = [
+                _validation_error_row(cfg, exchange_cfg, order, exc)
+                for order in plan.orders
+            ]
+    else:
+        for order in plan.orders:
+            try:
+                rows.append(
+                    await manager.prepare_limit_order(
+                        exchange_cfg,
+                        symbol=cfg.market_maker.symbol,
+                        side=order.side,
+                        amount=order.amount,
+                        price=order.price,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                rows.append(_validation_error_row(cfg, exchange_cfg, order, exc))
     summary = summarize_order_validations(rows)
     capability_errors = limit_order_capability_errors(
         exchange_cfg,
@@ -236,6 +295,29 @@ async def validate_plan_orders(
         summary["warning_count"] = len(summary["warnings"])
     summary["exchange_features"] = features.to_dict()
     return summary
+
+
+def _validation_error_row(
+    cfg: BotConfig,
+    exchange_cfg: ExchangeConfig,
+    order: Any,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        "exchange": exchange_cfg.key,
+        "symbol": cfg.market_maker.symbol,
+        "side": order.side,
+        "status": "error",
+        "requested_amount": order.amount,
+        "requested_price": order.price,
+        "amount": None,
+        "price": None,
+        "cost": order.quote_notional,
+        "limits": {},
+        "precision": {},
+        "errors": [f"{exc.__class__.__name__}: {exc}"],
+        "warnings": [],
+    }
 
 
 def _block_for_validation(
@@ -265,6 +347,7 @@ async def run_cycle(
     live: bool,
     replace_existing: bool,
     replace_order_ids: list[str] | None = None,
+    previous_plan: dict[str, Any] | None = None,
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
 ) -> dict[str, Any]:
@@ -355,6 +438,26 @@ async def run_cycle(
         if not payload["risk"]["approved"]:
             payload["status"] = "blocked_by_risk"
             return payload
+        reprice_bps = _plan_reprice_bps(previous_plan, plan)
+        payload["reprice_bps"] = reprice_bps
+        if (
+            cfg.market_maker.reprice_threshold_bps > 0
+            and reprice_bps is not None
+            and reprice_bps < cfg.market_maker.reprice_threshold_bps
+            and replace_order_ids
+        ):
+            payload["status"] = "unchanged"
+            payload["execution"] = {
+                "canceled_count": 0,
+                "cancel_errors": [],
+                "placed_count": 0,
+                "placed_order_ids": [],
+                "reason": (
+                    f"reprice {reprice_bps:.4f} bps is below threshold "
+                    f"{cfg.market_maker.reprice_threshold_bps:.4f} bps"
+                ),
+            }
+            return payload
         validation = await validate_plan_orders(cfg, manager, plan)
         payload["order_validation"] = validation
         if validation["status"] != "ok":
@@ -365,6 +468,7 @@ async def run_cycle(
             plan,
             replace_existing=replace_existing,
             replace_order_ids=replace_order_ids if should_cancel_tracked else None,
+            prepared_orders=validation.get("orders"),
         )
         payload["status"] = "placed"
 
@@ -387,6 +491,7 @@ async def run_loop(
     interval = max(1.0, interval)
     manager = ExchangeManager()
     previous_mid_price: float | None = None
+    previous_plan: dict[str, Any] | None = None
     last_cancel_at: float | None = None
     try:
         while True:
@@ -396,6 +501,7 @@ async def run_loop(
                 manager,
                 live=live,
                 replace_existing=replace_existing,
+                previous_plan=previous_plan,
                 previous_mid_price=previous_mid_price,
                 last_cancel_at=last_cancel_at,
             )
@@ -404,6 +510,7 @@ async def run_loop(
             sys.stdout.flush()
             plan_payload = payload.get("plan", {})
             if isinstance(plan_payload, dict):
+                previous_plan = plan_payload
                 mid_price = plan_payload.get("mid_price")
                 if isinstance(mid_price, (int, float)):
                     previous_mid_price = float(mid_price)

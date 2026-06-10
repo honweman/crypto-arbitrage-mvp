@@ -451,6 +451,7 @@ class WebMonitorTest(unittest.TestCase):
                 "depth_shape": "linear",
                 "min_order_quote": "0.5",
                 "min_distance_bps": "20",
+                "reprice_threshold_bps": "2.5",
                 "poll_seconds": "1",
                 "post_only": True,
             },
@@ -468,6 +469,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["depth_shape"], "linear")
         self.assertEqual(overrides["min_order_quote"], 0.5)
         self.assertEqual(overrides["min_distance_bps"], 20.0)
+        self.assertEqual(overrides["reprice_threshold_bps"], 2.5)
         self.assertEqual(overrides["poll_seconds"], 1.0)
         self.assertTrue(overrides["post_only"])
 

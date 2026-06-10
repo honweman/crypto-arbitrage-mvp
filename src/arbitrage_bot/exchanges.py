@@ -129,6 +129,21 @@ def _credential_from_env(env_name: str | None) -> str | None:
     return value.replace("\\n", "\n")
 
 
+def _market_from_loaded_markets(
+    client: Any,
+    markets: Any,
+    symbol: str,
+) -> dict[str, Any] | None:
+    market = None
+    if isinstance(markets, dict):
+        market = markets.get(symbol)
+    if market is None:
+        market_getter = getattr(client, "market", None)
+        if market_getter is not None:
+            market = market_getter(symbol)
+    return market if isinstance(market, dict) else None
+
+
 class ExchangeManager:
     def __init__(self) -> None:
         self._clients: dict[str, Any] = {}
@@ -293,6 +308,40 @@ class ExchangeManager:
             params,
         )
 
+    async def create_prepared_limit_order(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        side: Side,
+        prepared: dict[str, Any],
+        post_only: bool = True,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        capability_errors = limit_order_capability_errors(
+            cfg,
+            post_only=post_only,
+        )
+        if capability_errors:
+            raise ValueError("; ".join(capability_errors))
+        if prepared.get("errors"):
+            raise ValueError("; ".join(str(error) for error in prepared["errors"]))
+
+        client = self.client(cfg)
+        params: dict[str, Any] = {}
+        if post_only:
+            params["postOnly"] = True
+        if client_order_id and limit_order_features(cfg).client_order_id:
+            params["clientOrderId"] = client_order_id
+        return await client.create_order(
+            symbol,
+            "limit",
+            side,
+            float(prepared["amount"]),
+            float(prepared["price"]),
+            params,
+        )
+
     async def prepare_limit_order(
         self,
         cfg: ExchangeConfig,
@@ -304,14 +353,7 @@ class ExchangeManager:
     ) -> dict[str, Any]:
         client = self.client(cfg)
         markets = await client.load_markets()
-        market = None
-        if isinstance(markets, dict):
-            market = markets.get(symbol)
-        if market is None:
-            market_getter = getattr(client, "market", None)
-            if market_getter is not None:
-                market = market_getter(symbol)
-        market = market if isinstance(market, dict) else None
+        market = _market_from_loaded_markets(client, markets, symbol)
         order_amount = float(client.amount_to_precision(symbol, amount))
         order_price = float(client.price_to_precision(symbol, price))
         return validate_prepared_limit_order(
@@ -324,6 +366,36 @@ class ExchangeManager:
             price=order_price,
             market=market,
         )
+
+    async def prepare_limit_orders(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        orders: Iterable[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        client = self.client(cfg)
+        markets = await client.load_markets()
+        market = _market_from_loaded_markets(client, markets, symbol)
+        rows = []
+        for order in orders:
+            amount = float(order["amount"])
+            price = float(order["price"])
+            order_amount = float(client.amount_to_precision(symbol, amount))
+            order_price = float(client.price_to_precision(symbol, price))
+            rows.append(
+                validate_prepared_limit_order(
+                    exchange=cfg.key,
+                    symbol=symbol,
+                    side=order["side"],
+                    requested_amount=amount,
+                    requested_price=price,
+                    amount=order_amount,
+                    price=order_price,
+                    market=market,
+                )
+            )
+        return rows
 
     async def cancel_open_orders(
         self,

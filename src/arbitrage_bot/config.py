@@ -75,6 +75,7 @@ class MarketMakerConfig:
     depth_shape: str = "linear"
     min_order_quote: float = 0.0
     min_distance_bps: float = 0.0
+    reprice_threshold_bps: float = 0.0
     poll_seconds: float = 1.0
     post_only: bool = True
     cancel_existing_orders: bool = False
@@ -350,6 +351,9 @@ def load_config(path: str | Path) -> BotConfig:
             depth_shape=str(market_maker_raw.get("depth_shape", "linear")).lower(),
             min_order_quote=float(market_maker_raw.get("min_order_quote", 0.0)),
             min_distance_bps=float(market_maker_raw.get("min_distance_bps", 0.0)),
+            reprice_threshold_bps=float(
+                market_maker_raw.get("reprice_threshold_bps", 0.0)
+            ),
             poll_seconds=float(market_maker_raw.get("poll_seconds", 1.0)),
             post_only=bool(market_maker_raw.get("post_only", True)),
             cancel_existing_orders=bool(

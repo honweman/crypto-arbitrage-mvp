@@ -48,6 +48,7 @@
     "depth_shape": "linear",
     "min_order_quote": 0.1,
     "min_distance_bps": 0.0,
+    "reprice_threshold_bps": 2.0,
     "poll_seconds": 1,
     "post_only": true,
     "cancel_existing_orders": false,

@@ -1184,6 +1184,10 @@ HTML = """<!doctype html>
           <input id="mm-min-distance" type="number" min="0" step="any">
         </div>
         <div class="field">
+          <label for="mm-reprice">Reprice Bps</label>
+          <input id="mm-reprice" type="number" min="0" step="any">
+        </div>
+        <div class="field">
           <label for="mm-poll">Refresh Sec</label>
           <input id="mm-poll" type="number" min="1" step="any">
         </div>
@@ -2302,6 +2306,7 @@ HTML = """<!doctype html>
       document.getElementById("mm-depth-shape").value = config.depth_shape || "linear";
       setNumericField("mm-min-quote", config.min_order_quote || 0);
       setNumericField("mm-min-distance", config.min_distance_bps || 0);
+      setNumericField("mm-reprice", config.reprice_threshold_bps || 0);
       setNumericField("mm-poll", config.poll_seconds || 1);
       document.getElementById("mm-post-only").checked = Boolean(config.post_only);
     }
@@ -2318,6 +2323,7 @@ HTML = """<!doctype html>
         depth_shape: document.getElementById("mm-depth-shape").value,
         min_order_quote: numericValue("mm-min-quote"),
         min_distance_bps: numericValue("mm-min-distance"),
+        reprice_threshold_bps: numericValue("mm-reprice"),
         poll_seconds: numericValue("mm-poll"),
         post_only: document.getElementById("mm-post-only").checked,
       };
@@ -3991,6 +3997,7 @@ def _market_maker_overrides_from_payload(
     non_negative_float_fields = {
         "min_order_quote",
         "min_distance_bps",
+        "reprice_threshold_bps",
     }
     for field in non_negative_float_fields:
         if field in payload:
@@ -5442,6 +5449,7 @@ async def market_maker_task_loop(
     cycle_count = 0
     last_cancel_at: float | None = None
     previous_mid_price: float | None = None
+    previous_plan: dict[str, Any] | None = None
     runtime: dict[str, Any] = {
         "status": "starting",
         "mode": "dry_run",
@@ -5497,6 +5505,8 @@ async def market_maker_task_loop(
                     open_order_ids = []
                     open_order_exchange = ""
                     open_order_symbol = ""
+                    previous_plan = None
+                    previous_mid_price = None
 
                 if live_allowed or open_order_ids:
                     open_order_ids = await _tracked_market_maker_order_ids(
@@ -5546,6 +5556,7 @@ async def market_maker_task_loop(
                         live=True,
                         replace_existing=False,
                         replace_order_ids=open_order_ids,
+                        previous_plan=previous_plan,
                         previous_mid_price=previous_mid_price,
                         last_cancel_at=last_cancel_at,
                     )
@@ -5560,6 +5571,7 @@ async def market_maker_task_loop(
                         plan_payload.get("mid_price"),
                         (int, float),
                     ):
+                        previous_plan = plan_payload
                         previous_mid_price = float(plan_payload["mid_price"])
                     execution = (
                         payload.get("execution")

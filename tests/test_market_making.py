@@ -302,6 +302,268 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["execution"]["placed_count"], 20)
         self.assertEqual(len(payload["execution"]["placed_order_ids"]), 20)
 
+    async def test_live_cycle_reuses_batch_prepared_orders_for_placement(
+        self,
+    ) -> None:
+        class FakeManager:
+            def __init__(self) -> None:
+                self.batch_prepare_count = 0
+                self.single_prepare_count = 0
+                self.prepared_create_count = 0
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                self.batch_prepare_count += 1
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": float(order["amount"]) * float(order["price"]),
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def prepare_limit_order(self, *_: object, **__: object) -> None:
+                self.single_prepare_count += 1
+                raise AssertionError("live MM should use batch-prepared orders")
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                prepared: dict[str, object],
+                **__: object,
+            ) -> dict[str, str]:
+                self.prepared_create_count += 1
+                return {
+                    "id": f"new-mm-{self.prepared_create_count}",
+                    "price": str(prepared["price"]),
+                }
+
+        manager = FakeManager()
+        payload = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    levels=2,
+                    quote_per_level=1.0,
+                    depth_shape="flat",
+                ),
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_cycle_quote=100.0,
+                    max_open_orders=50,
+                    require_post_only=False,
+                ),
+            ),
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertEqual(manager.batch_prepare_count, 1)
+        self.assertEqual(manager.single_prepare_count, 0)
+        self.assertEqual(manager.prepared_create_count, 4)
+
+    async def test_live_cycle_skips_reprice_when_plan_change_is_small(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [{"id": "old-mm-1"}]
+
+            async def prepare_limit_orders(self, *_: object, **__: object) -> None:
+                raise AssertionError("unchanged plan should not validate orders")
+
+            async def create_prepared_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("unchanged plan should not place orders")
+
+        cfg = self._cfg(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                levels=2,
+                quote_per_level=1.0,
+                depth_shape="flat",
+                reprice_threshold_bps=2.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                require_post_only=False,
+            ),
+        )
+        previous_plan = build_symmetric_market_maker_plan(
+            OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            ),
+            cfg.market_maker,
+        ).to_dict()
+
+        payload = await run_cycle(
+            cfg,
+            FakeManager(),  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=["old-mm-1"],
+            previous_plan=previous_plan,
+        )
+
+        self.assertEqual(payload["status"], "unchanged")
+        self.assertEqual(payload["execution"]["placed_count"], 0)
+        self.assertEqual(payload["execution"]["canceled_count"], 0)
+        self.assertAlmostEqual(payload["reprice_bps"], 0.0)
+
+    async def test_live_cycle_reprices_when_plan_change_exceeds_threshold(self) -> None:
+        class FakeManager:
+            def __init__(self) -> None:
+                self.prepared_create_count = 0
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.000141, amount=100_000)],
+                    asks=[BookLevel(price=0.000161, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [{"id": "old-mm-1"}]
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, object]:
+                return {"id": order_id, "status": "canceled"}
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": float(order["amount"]) * float(order["price"]),
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, str]:
+                self.prepared_create_count += 1
+                return {"id": f"new-mm-{self.prepared_create_count}"}
+
+        cfg = self._cfg(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                levels=2,
+                quote_per_level=1.0,
+                depth_shape="flat",
+                reprice_threshold_bps=2.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        previous_plan = build_symmetric_market_maker_plan(
+            OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            ),
+            cfg.market_maker,
+        ).to_dict()
+        manager = FakeManager()
+
+        payload = await run_cycle(
+            cfg,
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=["old-mm-1"],
+            previous_plan=previous_plan,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertGreater(payload["reprice_bps"], 2.0)
+        self.assertEqual(payload["execution"]["canceled_count"], 1)
+        self.assertEqual(manager.prepared_create_count, 4)
+
     async def test_bithumb_post_only_is_blocked_before_placing(self) -> None:
         class FakeManager:
             async def fetch_order_book(

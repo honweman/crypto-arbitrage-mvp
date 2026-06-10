@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from arbitrage_bot.config import ExchangeConfig, load_config
 from arbitrage_bot.exchanges import (
+    ExchangeManager,
     _credential_from_env,
     _proxy_options_from_env,
     limit_order_capability_errors,
@@ -125,6 +126,50 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertTrue(features.post_only)
         self.assertTrue(features.client_order_id)
         self.assertEqual(errors, [])
+
+
+class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_limit_orders_loads_markets_once(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.load_markets_count = 0
+
+            async def load_markets(self) -> dict[str, object]:
+                self.load_markets_count += 1
+                return {
+                    "ACS/USDT": {
+                        "limits": {
+                            "amount": {"min": 0.0, "max": None},
+                            "price": {"min": 0.0, "max": None},
+                            "cost": {"min": 0.0, "max": None},
+                        },
+                        "precision": {"amount": 0.1, "price": 0.0000001},
+                    }
+                }
+
+            def amount_to_precision(self, _: str, amount: float) -> str:
+                return f"{amount:.1f}"
+
+            def price_to_precision(self, _: str, price: float) -> str:
+                return f"{price:.7f}"
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        rows = await manager.prepare_limit_orders(
+            cfg,
+            symbol="ACS/USDT",
+            orders=[
+                {"side": "buy", "amount": 10.01, "price": 0.00014001},
+                {"side": "sell", "amount": 11.02, "price": 0.00015002},
+            ],
+        )
+
+        self.assertEqual(client.load_markets_count, 1)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["status"], "ok")
 
 
 if __name__ == "__main__":
