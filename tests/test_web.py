@@ -26,6 +26,7 @@ from arbitrage_bot.web import (
     _market_maker_overrides_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
+    _spot_markets_from_payload,
     _daily_report_due,
     _ip_allowed,
     _make_session_token,
@@ -92,6 +93,18 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="slow-tasks"', HTML)
         self.assertNotIn("Slow Execution", HTML)
 
+    def test_page_uses_generic_dashboard_title(self) -> None:
+        self.assertIn("Crypto Trading Dashboard", HTML)
+        self.assertIn("Multi-asset arbitrage", HTML)
+        self.assertNotIn("ACS Arbitrage Monitor", HTML)
+
+    def test_page_includes_market_config_controls(self) -> None:
+        self.assertIn("Markets", HTML)
+        self.assertIn("/api/markets", HTML)
+        self.assertIn('id="markets-form"', HTML)
+        self.assertIn('id="market-symbol"', HTML)
+        self.assertIn('id="markets-config"', HTML)
+
     def test_page_includes_account_balances(self) -> None:
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
@@ -124,6 +137,60 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="risk-strategies"', HTML)
         self.assertIn('id="risk-max-order"', HTML)
         self.assertIn('id="risk-max-exposure"', HTML)
+
+    def test_spot_markets_payload_sanitizes_new_market(self) -> None:
+        markets = _spot_markets_from_payload(
+            {
+                "spot_markets": [
+                    {
+                        "asset": "btc",
+                        "exchange": "bybit-spot",
+                        "symbol": "btc/usdt",
+                    }
+                ]
+            },
+            allowed_exchanges={"bybit-spot"},
+        )
+
+        self.assertEqual(markets[0].asset, "BTC")
+        self.assertEqual(markets[0].exchange, "bybit-spot")
+        self.assertEqual(markets[0].symbol, "BTC/USDT")
+        self.assertEqual(markets[0].quote_currency, "USDT")
+
+    def test_spot_markets_payload_rejects_unknown_account(self) -> None:
+        with self.assertRaises(ValueError):
+            _spot_markets_from_payload(
+                {
+                    "spot_markets": [
+                        {
+                            "asset": "BTC",
+                            "exchange": "missing",
+                            "symbol": "BTC/USDT",
+                        }
+                    ]
+                },
+                allowed_exchanges={"bybit-spot"},
+            )
+
+    def test_spot_markets_payload_rejects_duplicates(self) -> None:
+        with self.assertRaises(ValueError):
+            _spot_markets_from_payload(
+                {
+                    "spot_markets": [
+                        {
+                            "asset": "BTC",
+                            "exchange": "bybit-spot",
+                            "symbol": "BTC/USDT",
+                        },
+                        {
+                            "asset": "BTC",
+                            "exchange": "bybit-spot",
+                            "symbol": "BTC/USDT",
+                        },
+                    ]
+                },
+                allowed_exchanges={"bybit-spot"},
+            )
 
     def test_trading_console_payload_reports_live_and_paused_strategies(self) -> None:
         cfg = make_config(
@@ -1352,6 +1419,41 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await state.is_running())
         self.assertEqual(resumed["status"], "starting")
         self.assertTrue(resumed["program"]["running"])
+
+    async def test_market_update_changes_runtime_spot_markets(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                )
+            ],
+        )
+        state = MonitorState(cfg, 1.0)
+
+        update = await state.set_spot_markets(
+            [
+                SpotMarketConfig(
+                    asset="BTC",
+                    exchange="bybit-spot",
+                    symbol="BTC/USDT",
+                    quote_currency="USDT",
+                )
+            ],
+            cfg=cfg,
+        )
+        runtime_cfg = await state.runtime_config(cfg)
+        payload = await state.get()
+
+        self.assertEqual(runtime_cfg.spot_markets[0].asset, "BTC")
+        self.assertEqual(payload["config"]["spot_markets"][0]["symbol"], "BTC/USDT")
+        self.assertEqual(
+            update["market_maker"]["accounts"][0]["symbols"],
+            ["BTC/USDT"],
+        )
 
     async def test_strategy_pause_updates_trading_console(self) -> None:
         cfg = make_config(

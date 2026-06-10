@@ -145,7 +145,7 @@ HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ACS Arbitrage Monitor</title>
+  <title>Crypto Trading Dashboard</title>
   <style>
     :root {
       color-scheme: light;
@@ -438,6 +438,10 @@ HTML = """<!doctype html>
 
     .console-actions {
       grid-template-columns: 150px minmax(220px, 1fr);
+    }
+
+    .markets-config-table {
+      min-width: 720px;
     }
 
     .balance-table th,
@@ -766,8 +770,8 @@ HTML = """<!doctype html>
 <body>
   <header>
     <div>
-      <h1>ACS Arbitrage Monitor</h1>
-      <div class="subtle">ACS spot arbitrage · market making · auto buy/sell</div>
+      <h1>Crypto Trading Dashboard</h1>
+      <div class="subtle">Multi-asset arbitrage · market making · auto buy/sell</div>
       <nav class="view-nav" aria-label="Page views">
         <a class="view-tab active" data-view-tab="monitor" href="#monitor">Monitor</a>
         <a class="view-tab" data-view-tab="control" href="#control">Control & Config</a>
@@ -951,6 +955,42 @@ HTML = """<!doctype html>
             </tr>
           </thead>
           <tbody id="console-recent-fills"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="control">
+      <div class="section-title">
+        <h2>Markets</h2>
+        <span id="markets-config-meta" class="subtle"></span>
+      </div>
+      <form id="markets-form" class="control-panel">
+        <div class="field">
+          <label for="market-asset">Asset</label>
+          <input id="market-asset" type="text" placeholder="BTC">
+        </div>
+        <div class="field">
+          <label for="market-exchange">Account</label>
+          <select id="market-exchange"></select>
+        </div>
+        <div class="field">
+          <label for="market-symbol">Symbol</label>
+          <input id="market-symbol" type="text" placeholder="BTC/USDT">
+        </div>
+        <button id="market-add" class="control-button" type="submit">Add Market</button>
+      </form>
+      <div class="table-wrap">
+        <table class="markets-config-table">
+          <thead>
+            <tr>
+              <th>Asset</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Quote</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="markets-config"></tbody>
         </table>
       </div>
     </section>
@@ -1567,6 +1607,8 @@ HTML = """<!doctype html>
     }
 
     let cancelOrderBusy = new Set();
+    let marketsConfigBusy = false;
+    let currentSpotMarkets = [];
 
     async function cancelOrder(order, button) {
       const key = `${order.exchange}:${order.symbol}:${order.id}`;
@@ -1814,6 +1856,120 @@ HTML = """<!doctype html>
       renderConsoleStrategies(tradingConsole);
       renderOpenOrders(orderActivity, "console-open-orders", true);
       renderRecentFills(orderActivity, "console-recent-fills");
+    }
+
+    function normalizeMarketRow(row) {
+      const symbol = String(row.symbol || "").trim().toUpperCase();
+      const quote = String(row.quote_currency || quoteCurrency(symbol)).trim().toUpperCase();
+      return {
+        asset: String(row.asset || baseCurrency(symbol)).trim().toUpperCase(),
+        exchange: String(row.exchange || "").trim(),
+        symbol,
+        quote_currency: quote,
+      };
+    }
+
+    function renderMarketExchangeSelect(exchanges) {
+      const select = document.getElementById("market-exchange");
+      const selected = select.value;
+      const signature = JSON.stringify((exchanges || []).map((exchange) => [
+        exchange.key,
+        exchange.label,
+        exchange.id,
+        exchange.market_type,
+      ]));
+      if (select.dataset.signature === signature) return;
+      select.dataset.signature = signature;
+      select.innerHTML = "";
+      for (const exchange of exchanges || []) {
+        const option = document.createElement("option");
+        option.value = exchange.key;
+        option.textContent = exchange.label || exchange.key;
+        select.appendChild(option);
+      }
+      if (selected && [...select.options].some((option) => option.value === selected)) {
+        select.value = selected;
+      }
+    }
+
+    function renderMarketsConfig(data) {
+      if (marketsConfigBusy) return;
+      const config = data.config || {};
+      const exchanges = config.spot_exchanges || [];
+      currentSpotMarkets = (config.spot_markets || []).map(normalizeMarketRow);
+      renderMarketExchangeSelect(exchanges);
+      text(
+        "markets-config-meta",
+        `${currentSpotMarkets.length} market${currentSpotMarkets.length === 1 ? "" : "s"} · ${exchanges.length} account${exchanges.length === 1 ? "" : "s"}`
+      );
+
+      const body = document.getElementById("markets-config");
+      body.innerHTML = "";
+      if (currentSpotMarkets.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="5">No markets configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      currentSpotMarkets.forEach((market, index) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(market.asset)}</td>
+          <td>${escapeHtml(market.exchange)}</td>
+          <td>${escapeHtml(market.symbol)}</td>
+          <td>${escapeHtml(market.quote_currency)}</td>
+          <td class="market-action"></td>
+        `;
+        const action = tr.querySelector(".market-action");
+        const button = document.createElement("button");
+        button.className = "danger-button";
+        button.type = "button";
+        button.textContent = "Remove";
+        button.addEventListener("click", () => removeSpotMarket(index, button));
+        action.appendChild(button);
+        body.appendChild(tr);
+      });
+    }
+
+    async function applySpotMarkets(markets) {
+      if (marketsConfigBusy) return;
+      marketsConfigBusy = true;
+      try {
+        const res = await fetch("/api/markets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ spot_markets: markets }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "markets update failed");
+        await refresh();
+      } catch (error) {
+        text("markets-config-meta", `update failed: ${error.message || error}`);
+      } finally {
+        marketsConfigBusy = false;
+      }
+    }
+
+    async function addSpotMarket(event) {
+      event.preventDefault();
+      const exchange = document.getElementById("market-exchange").value;
+      const symbol = document.getElementById("market-symbol").value.trim().toUpperCase();
+      const asset = (
+        document.getElementById("market-asset").value.trim().toUpperCase()
+        || baseCurrency(symbol)
+      );
+      const nextMarket = normalizeMarketRow({ asset, exchange, symbol });
+      await applySpotMarkets([...currentSpotMarkets, nextMarket]);
+      document.getElementById("market-asset").value = "";
+      document.getElementById("market-symbol").value = "";
+    }
+
+    async function removeSpotMarket(index, button) {
+      button.disabled = true;
+      await applySpotMarkets(
+        currentSpotMarkets.filter((_, itemIndex) => itemIndex !== index)
+      );
     }
 
     function renderStrategySummaries(data) {
@@ -2687,6 +2843,7 @@ HTML = """<!doctype html>
         text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
 
         renderOperations(data.operations);
+        renderMarketsConfig(data);
         renderRiskControls(data.operations, data.trading_console);
         renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
@@ -2721,6 +2878,7 @@ HTML = """<!doctype html>
     document.getElementById("risk-form").addEventListener("input", () => {
       riskFormDirty = true;
     });
+    document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
     document.getElementById("mm-form").addEventListener("input", () => {
       mmFormDirty = true;
@@ -4158,6 +4316,71 @@ def _market_maker_overrides_from_payload(
     return overrides
 
 
+def spot_market_to_dict(market: SpotMarketConfig) -> dict[str, Any]:
+    return {
+        "asset": market.asset,
+        "exchange": market.exchange,
+        "symbol": market.symbol,
+        "quote_currency": market.quote_currency,
+    }
+
+
+def spot_markets_to_list(markets: Iterable[SpotMarketConfig]) -> list[dict[str, Any]]:
+    return [spot_market_to_dict(market) for market in markets]
+
+
+def _spot_markets_from_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_exchanges: set[str],
+) -> list[SpotMarketConfig]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    raw_markets = payload.get("spot_markets")
+    if raw_markets is None:
+        raw_markets = payload.get("markets")
+    if not isinstance(raw_markets, list):
+        raise ValueError("spot_markets must be a list")
+
+    markets: list[SpotMarketConfig] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(raw_markets, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"spot_markets[{index}] must be an object")
+        asset = str(item.get("asset", "")).strip().upper()
+        exchange = str(item.get("exchange", "")).strip()
+        symbol = str(item.get("symbol", "")).strip().upper()
+        quote_currency = str(item.get("quote_currency", "")).strip().upper()
+        if not asset:
+            raise ValueError(f"spot_markets[{index}].asset is required")
+        if not exchange:
+            raise ValueError(f"spot_markets[{index}].exchange is required")
+        if exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        if not symbol or "/" not in symbol:
+            raise ValueError(f"spot_markets[{index}].symbol must look like BASE/QUOTE")
+        inferred_quote = symbol.split("/", 1)[1].upper()
+        if not quote_currency:
+            quote_currency = inferred_quote
+        if quote_currency != inferred_quote:
+            raise ValueError(
+                f"spot_markets[{index}].quote_currency must match symbol quote"
+            )
+        key = (exchange, symbol)
+        if key in seen:
+            raise ValueError(f"duplicate spot market: {exchange} {symbol}")
+        seen.add(key)
+        markets.append(
+            SpotMarketConfig(
+                asset=asset,
+                exchange=exchange,
+                symbol=symbol,
+                quote_currency=quote_currency,
+            )
+        )
+    return markets
+
+
 def _non_negative_float(payload: dict[str, Any], field: str) -> float:
     try:
         value = float(payload[field])
@@ -4262,6 +4485,16 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "min_profit_quote": cfg.min_profit_quote,
             "min_profit_bps": cfg.min_profit_bps,
             "common_quote_currency": cfg.common_quote_currency,
+            "spot_markets": spot_markets_to_list(cfg.spot_markets),
+            "spot_exchanges": [
+                {
+                    "key": exchange.key,
+                    "label": exchange.label or exchange.key,
+                    "id": exchange.id,
+                    "market_type": exchange.market_type,
+                }
+                for exchange in cfg.spot_exchanges
+            ],
         },
         "scan": {
             "count": 0,
@@ -4425,6 +4658,7 @@ class MonitorState:
         self._risk_overrides: dict[str, Any] = {}
         self._market_maker_overrides: dict[str, Any] = {}
         self._slow_execution_overrides: dict[str, Any] = {}
+        self._spot_markets_override: list[SpotMarketConfig] | None = None
         self._strategy_paused: dict[str, bool] = {
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
@@ -4438,6 +4672,11 @@ class MonitorState:
     def _runtime_config_unlocked(self, cfg: BotConfig) -> BotConfig:
         return replace(
             cfg,
+            spot_markets=(
+                self._spot_markets_override
+                if self._spot_markets_override is not None
+                else cfg.spot_markets
+            ),
             risk=replace(cfg.risk, **self._risk_overrides),
             market_maker=replace(
                 cfg.market_maker,
@@ -4521,13 +4760,72 @@ class MonitorState:
     async def set_slow_execution_overrides(
         self,
         overrides: dict[str, Any],
+        *,
+        cfg: BotConfig | None = None,
     ) -> None:
         async with self._lock:
             self._slow_execution_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg) if cfg else None
             if "slow_execution" in self._payload:
                 current_config = self._payload["slow_execution"].get("config", {})
                 current_config.update(overrides)
                 self._payload["slow_execution"]["config"] = current_config
+                if runtime_cfg is not None:
+                    self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
+                        runtime_cfg.spot_exchanges,
+                        _spot_symbols_by_exchange(runtime_cfg),
+                    )
+
+    async def set_spot_markets(
+        self,
+        markets: list[SpotMarketConfig],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._spot_markets_override = markets
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+            if "config" in self._payload:
+                self._payload["config"]["spot_markets"] = spot_markets_to_list(
+                    runtime_cfg.spot_markets
+                )
+                self._payload["config"]["spot_exchanges"] = [
+                    {
+                        "key": exchange.key,
+                        "label": exchange.label or exchange.key,
+                        "id": exchange.id,
+                        "market_type": exchange.market_type,
+                    }
+                    for exchange in runtime_cfg.spot_exchanges
+                ]
+            if "market_maker" in self._payload:
+                self._payload["market_maker"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    symbols_by_exchange,
+                )
+            if "slow_execution" in self._payload:
+                self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    symbols_by_exchange,
+                )
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            return json.loads(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "spot_markets": spot_markets_to_list(runtime_cfg.spot_markets),
+                        "market_maker": self._payload.get("market_maker", {}),
+                        "slow_execution": self._payload.get("slow_execution", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
 
     async def set_risk_overrides(
         self,
@@ -4679,6 +4977,16 @@ class MonitorState:
                     "min_profit_quote": cfg.min_profit_quote,
                     "min_profit_bps": cfg.min_profit_bps,
                     "common_quote_currency": cfg.common_quote_currency,
+                    "spot_markets": spot_markets_to_list(cfg.spot_markets),
+                    "spot_exchanges": [
+                        {
+                            "key": exchange.key,
+                            "label": exchange.label or exchange.key,
+                            "id": exchange.id,
+                            "market_type": exchange.market_type,
+                        }
+                        for exchange in cfg.spot_exchanges
+                    ],
                 },
                 "scan": {
                     "count": scan_count,
@@ -4725,6 +5033,16 @@ class MonitorState:
                         "min_profit_quote": cfg.min_profit_quote,
                         "min_profit_bps": cfg.min_profit_bps,
                         "common_quote_currency": cfg.common_quote_currency,
+                        "spot_markets": spot_markets_to_list(cfg.spot_markets),
+                        "spot_exchanges": [
+                            {
+                                "key": exchange.key,
+                                "label": exchange.label or exchange.key,
+                                "id": exchange.id,
+                                "market_type": exchange.market_type,
+                            }
+                            for exchange in cfg.spot_exchanges
+                        ],
                     },
                     "scan": {
                         "count": scan_count,
@@ -6052,8 +6370,12 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     try:
         payload = await request.json()
-        symbols_by_exchange = _spot_symbols_by_exchange(cfg)
-        accounts = slow_execution_accounts(cfg.spot_exchanges, symbols_by_exchange)
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+        )
         allowed_exchanges = {account["key"] for account in accounts}
         overrides = _slow_execution_overrides_from_payload(
             payload,
@@ -6063,15 +6385,16 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    await state.set_slow_execution_overrides(overrides)
+    await state.set_slow_execution_overrides(overrides, cfg=cfg)
     current_config = await state.slow_execution_config(cfg.slow_execution)
+    runtime_cfg = await state.runtime_config(cfg)
     return web.json_response(
         {
             "ok": True,
             "config": slow_execution_config_to_dict(current_config),
             "accounts": slow_execution_accounts(
-                cfg.spot_exchanges,
-                _spot_symbols_by_exchange(cfg),
+                runtime_cfg.spot_exchanges,
+                _spot_symbols_by_exchange(runtime_cfg),
             ),
         }
     )
@@ -6082,10 +6405,11 @@ async def api_market_maker(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     try:
         payload = await request.json()
-        symbols_by_exchange = _spot_symbols_by_exchange(cfg)
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
         overrides = _market_maker_overrides_from_payload(
             payload,
-            allowed_exchanges={exchange.key for exchange in cfg.spot_exchanges},
+            allowed_exchanges={exchange.key for exchange in runtime_cfg.spot_exchanges},
             symbols_by_exchange=symbols_by_exchange,
         )
     except (json.JSONDecodeError, ValueError) as exc:
@@ -6102,14 +6426,33 @@ async def api_market_maker(request: web.Request) -> web.Response:
     )
 
 
+async def api_markets(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        markets = _spot_markets_from_payload(
+            payload,
+            allowed_exchanges={exchange.key for exchange in cfg.spot_exchanges},
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    return web.json_response(await state.set_spot_markets(markets, cfg=cfg))
+
+
 async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     try:
         payload = await request.json()
-        symbols_by_exchange = _spot_symbols_by_exchange(cfg)
-        accounts = slow_execution_accounts(cfg.spot_exchanges, symbols_by_exchange)
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+        )
         allowed_exchanges = {account["key"] for account in accounts}
         overrides = _slow_execution_overrides_from_payload(
             payload,
@@ -6126,7 +6469,8 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         {
             **overrides,
             "enabled": True,
-        }
+        },
+        cfg=cfg,
     )
     task = await tasks.create_task(task_config)
     snapshot = await tasks.snapshot()
@@ -6338,6 +6682,7 @@ def create_app(
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/control", api_control)
+    app.router.add_post("/api/markets", api_markets)
     app.router.add_post("/api/risk", api_risk)
     app.router.add_post("/api/market-maker", api_market_maker)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
