@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import BotConfig, ExchangeConfig, load_config
 from .exchanges import ExchangeManager
+from .order_validation import summarize_order_validations
 from .risk import (
     RiskMarketContext,
     RiskOrder,
@@ -95,6 +96,63 @@ async def place_plan(
         "placed_count": 1,
         "placed_order_ids": [raw.get("id")] if isinstance(raw, dict) else [],
     }
+
+
+async def validate_plan_order(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    plan: SlowExecutionPlan,
+) -> dict[str, Any]:
+    if plan.order is None:
+        return summarize_order_validations([])
+
+    exec_cfg = cfg.slow_execution
+    exchange_cfg = _find_exchange(cfg, exec_cfg.exchange)
+    try:
+        row = await manager.prepare_limit_order(
+            exchange_cfg,
+            symbol=exec_cfg.symbol,
+            side=plan.order.side,
+            amount=plan.order.amount,
+            price=plan.order.price,
+        )
+    except Exception as exc:  # noqa: BLE001
+        row = {
+            "exchange": exchange_cfg.key,
+            "symbol": exec_cfg.symbol,
+            "side": plan.order.side,
+            "status": "error",
+            "requested_amount": plan.order.amount,
+            "requested_price": plan.order.price,
+            "amount": None,
+            "price": None,
+            "cost": plan.order.quote_notional,
+            "limits": {},
+            "precision": {},
+            "errors": [f"{exc.__class__.__name__}: {exc}"],
+            "warnings": [],
+        }
+    return summarize_order_validations([row])
+
+
+def _block_for_validation(
+    payload: dict[str, Any],
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
+    risk["approved"] = False
+    risk["level"] = "blocked"
+    risk["reasons"] = [
+        *list(risk.get("reasons", [])),
+        *[f"order validation: {error}" for error in validation.get("errors", [])],
+    ]
+    risk["warnings"] = [
+        *list(risk.get("warnings", [])),
+        *validation.get("warnings", []),
+    ]
+    payload["risk"] = risk
+    payload["status"] = "blocked_by_risk"
+    return payload
 
 
 async def cancel_order_ids(
@@ -217,6 +275,10 @@ async def run_cycle(
         if not risk.approved:
             payload["status"] = "blocked_by_risk"
             return payload, next_submitted_base
+        validation = await validate_plan_order(cfg, manager, plan)
+        payload["order_validation"] = validation
+        if validation["status"] != "ok":
+            return _block_for_validation(payload, validation), next_submitted_base
         payload["execution"] = await place_plan(
             cfg,
             manager,

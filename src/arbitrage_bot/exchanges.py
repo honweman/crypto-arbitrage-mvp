@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import ExchangeConfig
 from .models import OrderBookSnapshot, Side
+from .order_validation import validate_prepared_limit_order
 from .orderbook import normalize_levels
 
 
@@ -197,10 +198,18 @@ class ExchangeManager:
         post_only: bool = True,
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
+        prepared = await self.prepare_limit_order(
+            cfg,
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            price=price,
+        )
+        if prepared["errors"]:
+            raise ValueError("; ".join(prepared["errors"]))
         client = self.client(cfg)
-        await client.load_markets()
-        order_amount = float(client.amount_to_precision(symbol, amount))
-        order_price = float(client.price_to_precision(symbol, price))
+        order_amount = prepared["amount"]
+        order_price = prepared["price"]
         params: dict[str, Any] = {}
         if post_only:
             params["postOnly"] = True
@@ -213,6 +222,38 @@ class ExchangeManager:
             order_amount,
             order_price,
             params,
+        )
+
+    async def prepare_limit_order(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        side: Side,
+        amount: float,
+        price: float,
+    ) -> dict[str, Any]:
+        client = self.client(cfg)
+        markets = await client.load_markets()
+        market = None
+        if isinstance(markets, dict):
+            market = markets.get(symbol)
+        if market is None:
+            market_getter = getattr(client, "market", None)
+            if market_getter is not None:
+                market = market_getter(symbol)
+        market = market if isinstance(market, dict) else None
+        order_amount = float(client.amount_to_precision(symbol, amount))
+        order_price = float(client.price_to_precision(symbol, price))
+        return validate_prepared_limit_order(
+            exchange=cfg.key,
+            symbol=symbol,
+            side=side,
+            requested_amount=amount,
+            requested_price=price,
+            amount=order_amount,
+            price=order_price,
+            market=market,
         )
 
     async def cancel_open_orders(

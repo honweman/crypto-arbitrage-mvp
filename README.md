@@ -368,7 +368,7 @@ By default, live trading is blocked until you explicitly set `risk.allow_live_tr
 
 The kill switches are `trading_enabled`, `allow_market_maker`, `allow_slow_execution`, `strategy_enabled`, and `account_enabled`. Position and exposure limits use `portfolio.positions` as the current base inventory and the current order book midpoint as the mark price. A `0.0` limit disables that specific check. Daily loss checks use configured `portfolio.realized_pnl` plus the current daily P/L snapshot when `pnl_store.enabled` is true.
 
-Order safety checks include max single-order notional, max cycle notional, max planned orders, projected max open orders, max cancels per cycle, and optional minimum seconds between cancel cycles. Market quality checks include minimum bid/ask depth, max bid/ask spread, max level-to-level order book gap, max adverse slippage, max price jump versus the previous cycle, max plan age, and max order book timestamp age.
+Order safety checks include max single-order notional, max cycle notional, max planned orders, projected max open orders, max cancels per cycle, optional minimum seconds between cancel cycles, and exchange market-rule validation. Before live MM or Auto Buy/Sell orders are placed, the executor loads the exchange market metadata, rounds amount/price through CCXT precision helpers, and blocks the whole batch if any order violates exchange minimum/maximum amount, price, or cost limits. Market quality checks include minimum bid/ask depth, max bid/ask spread, max level-to-level order book gap, max adverse slippage, max price jump versus the previous cycle, max plan age, and max order book timestamp age.
 
 Every market maker and Auto Buy/Sell cycle is written to JSONL when `trade_log.enabled` is true:
 
@@ -499,7 +499,7 @@ Before trading, update `fee_bps` to match your account tier and confirm all thre
 ## Next steps before live trading
 
 1. Add paper trading with order lifecycle simulation.
-2. Add stronger exchange precision and minimum order validation.
-3. Add transfer and withdrawal availability checks.
-4. Store full quote and decision history in a database for post-trade analysis.
-5. Add exchange statement reconciliation for audited daily realized P/L.
+2. Add transfer and withdrawal availability checks.
+3. Store full quote and decision history in a database for post-trade analysis.
+4. Add exchange statement reconciliation for audited daily realized P/L.
+5. Add order-fill lifecycle alerts for stale, partially filled, or repeatedly rejected orders.

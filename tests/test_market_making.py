@@ -100,6 +100,69 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["risk"]["approved"])
         self.assertNotIn("execution", payload)
 
+    async def test_live_cycle_blocks_invalid_exchange_limits_before_placing(
+        self,
+    ) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "side": "buy",
+                    "status": "error",
+                    "requested_amount": 1.0,
+                    "requested_price": 0.00015,
+                    "amount": 1.0,
+                    "price": 0.00015,
+                    "cost": 0.00015,
+                    "limits": {},
+                    "precision": {},
+                    "errors": ["cost 0.00015 is below exchange minimum 1"],
+                    "warnings": [],
+                }
+
+            async def create_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("invalid live cycle must not place orders")
+
+        payload = await run_cycle(
+            self._cfg(
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_cycle_quote=100.0,
+                )
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_risk")
+        self.assertEqual(payload["order_validation"]["status"], "error")
+        self.assertFalse(payload["risk"]["approved"])
+        self.assertTrue(
+            any("order validation" in reason for reason in payload["risk"]["reasons"])
+        )
+        self.assertNotIn("execution", payload)
+
     async def test_run_loop_clamps_interval_to_one_second(self) -> None:
         class StopLoop(Exception):
             pass
