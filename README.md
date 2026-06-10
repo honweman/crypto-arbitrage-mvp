@@ -116,6 +116,8 @@ The top row shows configured positions, cash balances, and P/L attribution:
 
 `Account Balances` reads live private balances from exchanges with configured API env vars every 10 seconds, aggregates target currencies across accounts, and shows per-account free/used/total balances in the monitor table. When at least one account balance is available, the top `Position` and `Cash Position` cards sync from those live account totals: configured spot base assets such as ACS are treated as positions, while quote and cash currencies such as USD, USDC, USDT, and KRW are treated as cash. If no private account balance is available, the cards fall back to the configured `portfolio` values. `Price Move` is calculated only when an `average_entry_price` is configured; otherwise it stays at zero until cost basis is available. The mark price for each asset is the average converted mid price across available spot books for that asset. `MM P/L` and `Arb P/L` currently read from `realized_pnl`; once live fills are recorded, those fields can be populated automatically from market-maker and arbitrage executions.
 
+`Orders & Fills` reads private open orders, recently closed orders, and recent fills for configured symbols every 5 seconds when the account API env vars are available. Each open order row includes a `Cancel` action that sends a guarded cancel request for that exact exchange, symbol, and order ID, then writes a `manual_order_cancel` event to the trade log and refreshes the order state.
+
 To add another spot asset later, add its markets to `spot_markets`, add one position entry under `portfolio.positions`, and add any new quote-currency conversion to `quote_rates` or `quote_rate_sources`:
 
 ```json

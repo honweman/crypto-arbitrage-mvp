@@ -34,10 +34,16 @@ from .pnl import build_portfolio_pnl
 from .slow_execution import build_slow_execution_plan
 from .solana import SolanaTokenClient, fetch_top_token_owners
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
-from .trade_log import read_recent_trade_entries, summarize_trade_entries
+from .trade_log import (
+    read_recent_trade_entries,
+    summarize_trade_entries,
+    write_trade_event,
+)
 
 
 ACCOUNT_BALANCE_POLL_SECONDS = 10.0
+ORDER_ACTIVITY_POLL_SECONDS = 5.0
+ORDER_ACTIVITY_LIMIT = 20
 
 
 HTML = """<!doctype html>
@@ -256,6 +262,10 @@ HTML = """<!doctype html>
       background: var(--surface);
     }
 
+    .stacked-table {
+      margin-top: 10px;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -264,6 +274,14 @@ HTML = """<!doctype html>
 
     .balance-table {
       min-width: 680px;
+    }
+
+    .orders-table {
+      min-width: 1040px;
+    }
+
+    .fills-table {
+      min-width: 980px;
     }
 
     .balance-table th,
@@ -496,6 +514,24 @@ HTML = """<!doctype html>
       opacity: 0.55;
     }
 
+    .danger-button {
+      min-height: 28px;
+      padding: 5px 9px;
+      border: 1px solid #e6bbb4;
+      border-radius: 6px;
+      background: #fbe9e6;
+      color: var(--red);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    .danger-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       .header-actions { width: 100%; justify-content: space-between; }
@@ -503,6 +539,8 @@ HTML = """<!doctype html>
       .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .balance-table { min-width: 620px; }
+      .orders-table { min-width: 960px; }
+      .fills-table { min-width: 920px; }
       .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .account-field { grid-column: 1 / -1; }
       .opportunity { grid-template-columns: 1fr; }
@@ -617,6 +655,51 @@ HTML = """<!doctype html>
             </tr>
           </thead>
           <tbody id="account-balances"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <h2>Orders & Fills</h2>
+        <span id="orders-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Status</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Filled</th>
+              <th class="num">Remaining</th>
+              <th class="num">Cost</th>
+              <th>Updated</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="open-orders"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="fills-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Cost</th>
+              <th>Fee</th>
+              <th>Order</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="recent-fills"></tbody>
         </table>
       </div>
     </section>
@@ -956,6 +1039,140 @@ HTML = """<!doctype html>
           body.appendChild(tr);
         }
       }
+    }
+
+    function formatTimestamp(value) {
+      if (value == null) return "--";
+      const ts = Number(value);
+      if (!Number.isFinite(ts)) return "--";
+      return new Date(ts).toLocaleString();
+    }
+
+    function formatFee(fee) {
+      if (!fee) return "--";
+      const cost = fee.cost == null ? "--" : formatBalanceAmount(fee.cost);
+      return fee.currency ? `${cost} ${fee.currency}` : cost;
+    }
+
+    function shortId(value) {
+      if (!value) return "--";
+      const textValue = String(value);
+      return textValue.length > 12 ? `${textValue.slice(0, 8)}...` : textValue;
+    }
+
+    function orderSideClass(side) {
+      return side === "buy" ? "side-buy" : side === "sell" ? "side-sell" : "";
+    }
+
+    let cancelOrderBusy = new Set();
+
+    async function cancelOrder(order, button) {
+      const key = `${order.exchange}:${order.symbol}:${order.id}`;
+      if (cancelOrderBusy.has(key)) return;
+      cancelOrderBusy.add(key);
+      button.disabled = true;
+      button.textContent = "Canceling";
+      try {
+        const res = await fetch("/api/orders/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            exchange: order.exchange,
+            symbol: order.symbol,
+            order_id: order.id,
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || "cancel failed");
+        if (payload.order_activity) {
+          renderOrderActivity(payload.order_activity);
+        }
+        await refresh();
+      } catch (error) {
+        text("orders-meta", `cancel failed: ${error.message || error}`);
+        button.disabled = false;
+        button.textContent = "Cancel";
+      } finally {
+        cancelOrderBusy.delete(key);
+      }
+    }
+
+    function renderOpenOrders(orderActivity) {
+      const body = document.getElementById("open-orders");
+      body.innerHTML = "";
+      const orders = orderActivity?.open_orders || [];
+      if (orders.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="11">No open orders.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const order of orders) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(order.label || order.exchange)}</td>
+          <td>${escapeHtml(order.symbol || "--")}</td>
+          <td class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
+          <td>${escapeHtml(order.status || "--")}</td>
+          <td class="num">${order.price == null ? "--" : fmt.format(order.price)}</td>
+          <td class="num">${formatBalanceAmount(order.amount)}</td>
+          <td class="num">${formatBalanceAmount(order.filled)}</td>
+          <td class="num">${formatBalanceAmount(order.remaining)}</td>
+          <td class="num">${formatBalanceAmount(order.cost)}</td>
+          <td>${formatTimestamp(order.timestamp)}</td>
+          <td class="order-action"></td>
+        `;
+        const action = tr.querySelector(".order-action");
+        const button = document.createElement("button");
+        button.className = "danger-button";
+        button.type = "button";
+        button.textContent = "Cancel";
+        button.disabled = !order.id;
+        button.title = order.id || "";
+        button.addEventListener("click", () => cancelOrder(order, button));
+        action.appendChild(button);
+        body.appendChild(tr);
+      }
+    }
+
+    function renderRecentFills(orderActivity) {
+      const body = document.getElementById("recent-fills");
+      body.innerHTML = "";
+      const fills = orderActivity?.recent_trades || [];
+      if (fills.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="9">No recent fills.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const fill of fills) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(fill.label || fill.exchange)}</td>
+          <td>${escapeHtml(fill.symbol || "--")}</td>
+          <td class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
+          <td class="num">${fill.price == null ? "--" : fmt.format(fill.price)}</td>
+          <td class="num">${formatBalanceAmount(fill.amount)}</td>
+          <td class="num">${formatBalanceAmount(fill.cost)}</td>
+          <td>${escapeHtml(formatFee(fill.fee))}</td>
+          <td title="${escapeHtml(fill.order_id || "")}">${escapeHtml(shortId(fill.order_id))}</td>
+          <td>${formatTimestamp(fill.timestamp)}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderOrderActivity(orderActivity) {
+      text(
+        "orders-meta",
+        orderActivity
+          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
+          : ""
+      );
+      renderOpenOrders(orderActivity);
+      renderRecentFills(orderActivity);
     }
 
     function renderOpportunities(items) {
@@ -1389,6 +1606,7 @@ HTML = """<!doctype html>
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderMarkets(data.markets);
         renderAccountBalances(data.account_balances);
+        renderOrderActivity(data.order_activity);
         renderPortfolio(data.portfolio);
         renderMarketMaker(data.market_maker);
         renderSlowExecution(data.slow_execution);
@@ -1620,6 +1838,330 @@ def _aggregate_account_balance_totals(
     )
 
 
+def _number_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_fee_payload(raw: dict[str, Any]) -> dict[str, Any] | None:
+    fee = raw.get("fee")
+    if not isinstance(fee, dict):
+        return None
+    cost = _number_or_none(fee.get("cost"))
+    currency = fee.get("currency")
+    if cost is None and currency is None:
+        return None
+    return {
+        "cost": cost,
+        "currency": str(currency) if currency is not None else "",
+    }
+
+
+def _normalize_order(
+    exchange: ExchangeConfig,
+    raw: dict[str, Any],
+    fallback_symbol: str,
+) -> dict[str, Any]:
+    price = _number_or_none(raw.get("price"))
+    amount = _number_or_none(raw.get("amount"))
+    filled = _number_or_none(raw.get("filled"))
+    remaining = _number_or_none(raw.get("remaining"))
+    cost = _number_or_none(raw.get("cost"))
+    if cost is None and price is not None and amount is not None:
+        cost = price * amount
+    return {
+        "exchange": exchange.key,
+        "label": exchange.label or exchange.key,
+        "id": str(raw.get("id", "")),
+        "client_order_id": str(
+            raw.get("clientOrderId") or raw.get("clientOrderID") or ""
+        ),
+        "symbol": str(raw.get("symbol") or fallback_symbol),
+        "side": str(raw.get("side") or ""),
+        "type": str(raw.get("type") or ""),
+        "status": str(raw.get("status") or ""),
+        "price": price,
+        "average": _number_or_none(raw.get("average")),
+        "amount": amount,
+        "filled": filled,
+        "remaining": remaining,
+        "cost": cost,
+        "fee": _order_fee_payload(raw),
+        "timestamp": _number_or_none(raw.get("timestamp")),
+        "datetime": raw.get("datetime"),
+    }
+
+
+def _normalize_trade(
+    exchange: ExchangeConfig,
+    raw: dict[str, Any],
+    fallback_symbol: str,
+) -> dict[str, Any]:
+    return {
+        "exchange": exchange.key,
+        "label": exchange.label or exchange.key,
+        "id": str(raw.get("id", "")),
+        "order_id": str(raw.get("order") or ""),
+        "symbol": str(raw.get("symbol") or fallback_symbol),
+        "side": str(raw.get("side") or ""),
+        "type": str(raw.get("type") or ""),
+        "price": _number_or_none(raw.get("price")),
+        "amount": _number_or_none(raw.get("amount")),
+        "cost": _number_or_none(raw.get("cost")),
+        "fee": _order_fee_payload(raw),
+        "timestamp": _number_or_none(raw.get("timestamp")),
+        "datetime": raw.get("datetime"),
+    }
+
+
+def _activity_status(accounts: list[dict[str, Any]]) -> str:
+    if not accounts:
+        return "warning"
+    if any(account["status"] == "error" for account in accounts):
+        return "error"
+    if any(account["status"] == "warning" for account in accounts):
+        return "warning"
+    return "ok"
+
+
+async def _fetch_exchange_order_activity(
+    manager: ExchangeManager,
+    exchange: ExchangeConfig,
+    symbols: list[str],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    auth = _auth_env_status(exchange)
+    account: dict[str, Any] = {
+        "exchange": exchange.key,
+        "label": exchange.label or exchange.key,
+        "id": exchange.id,
+        "market_type": exchange.market_type,
+        "symbols": symbols,
+        "status": "ok",
+        "warnings": [],
+        "errors": [],
+        "open_orders": [],
+        "closed_orders": [],
+        "recent_trades": [],
+    }
+    if not symbols:
+        account["status"] = "warning"
+        account["warnings"].append("no configured symbols")
+        return account
+    if not auth["configured"]:
+        account["status"] = "warning"
+        account["warnings"].append("API env vars are not configured")
+        return account
+    if auth["missing_env"]:
+        account["status"] = "warning"
+        account["warnings"].append("one or more configured API env vars are not set")
+        return account
+
+    for symbol in symbols:
+        try:
+            open_orders = await manager.fetch_open_orders(exchange, symbol=symbol)
+            account["open_orders"].extend(
+                _normalize_order(exchange, order, symbol) for order in open_orders
+            )
+        except Exception as exc:  # noqa: BLE001
+            account["errors"].append(
+                f"{symbol} open orders failed: {exc.__class__.__name__}: {exc}"
+            )
+
+        try:
+            closed_orders = await manager.fetch_closed_orders(
+                exchange,
+                symbol=symbol,
+                limit=limit,
+            )
+            account["closed_orders"].extend(
+                _normalize_order(exchange, order, symbol) for order in closed_orders
+            )
+        except Exception as exc:  # noqa: BLE001
+            account["warnings"].append(
+                f"{symbol} closed orders unavailable: {exc.__class__.__name__}: {exc}"
+            )
+
+        try:
+            trades = await manager.fetch_my_trades(
+                exchange,
+                symbol=symbol,
+                limit=limit,
+            )
+            account["recent_trades"].extend(
+                _normalize_trade(exchange, trade, symbol) for trade in trades
+            )
+        except Exception as exc:  # noqa: BLE001
+            account["warnings"].append(
+                f"{symbol} fills unavailable: {exc.__class__.__name__}: {exc}"
+            )
+
+    if account["errors"]:
+        account["status"] = "error"
+    elif account["warnings"]:
+        account["status"] = "warning"
+    account["open_order_count"] = len(account["open_orders"])
+    account["closed_order_count"] = len(account["closed_orders"])
+    account["recent_trade_count"] = len(account["recent_trades"])
+    return account
+
+
+def _sort_activity_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: float(row.get("timestamp") or 0),
+        reverse=True,
+    )
+
+
+async def fetch_order_activity_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    exec_cfg: SlowExecutionConfig | None = None,
+    *,
+    limit: int = ORDER_ACTIVITY_LIMIT,
+) -> dict[str, Any]:
+    symbols_by_exchange = _exchange_balance_symbols(cfg, exec_cfg)
+    exchanges = _all_account_exchanges(cfg)
+    accounts = await asyncio.gather(
+        *[
+            _fetch_exchange_order_activity(
+                manager,
+                exchange,
+                symbols_by_exchange.get(exchange.key, []),
+                limit=limit,
+            )
+            for exchange in exchanges
+        ]
+    )
+    open_orders = _sort_activity_rows(
+        order for account in accounts for order in account["open_orders"]
+    )
+    closed_orders = _sort_activity_rows(
+        order for account in accounts for order in account["closed_orders"]
+    )[:limit]
+    recent_trades = _sort_activity_rows(
+        trade for account in accounts for trade in account["recent_trades"]
+    )[:limit]
+    errors = [
+        f"{account['exchange']}: {error}"
+        for account in accounts
+        for error in account.get("errors", [])
+    ]
+    warnings = [
+        f"{account['exchange']}: {warning}"
+        for account in accounts
+        for warning in account.get("warnings", [])
+    ]
+    checked_accounts = sum(
+        1
+        for account in accounts
+        if account.get("open_order_count") is not None and not account.get("errors")
+    )
+    return {
+        "status": _activity_status(accounts),
+        "accounts": accounts,
+        "open_orders": open_orders,
+        "closed_orders": closed_orders,
+        "recent_trades": recent_trades,
+        "open_order_count": len(open_orders),
+        "closed_order_count": len(closed_orders),
+        "recent_trade_count": len(recent_trades),
+        "checked_account_count": checked_accounts,
+        "total_account_count": len(accounts),
+        "last_finished": time.time(),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _find_exchange_by_key(cfg: BotConfig, key: str) -> ExchangeConfig:
+    for exchange in _all_account_exchanges(cfg):
+        if exchange.key == key:
+            return exchange
+    raise ValueError(f"unknown exchange account: {key}")
+
+
+async def cancel_order_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    payload: dict[str, Any],
+    exec_cfg: SlowExecutionConfig | None = None,
+) -> dict[str, Any]:
+    exchange_key = str(payload.get("exchange", "")).strip()
+    symbol = str(payload.get("symbol", "")).strip()
+    order_id = str(payload.get("order_id", "")).strip()
+    if not exchange_key:
+        raise ValueError("exchange is required")
+    if not symbol:
+        raise ValueError("symbol is required")
+    if not order_id:
+        raise ValueError("order_id is required")
+
+    exchange = _find_exchange_by_key(cfg, exchange_key)
+    allowed_symbols = set(_exchange_balance_symbols(cfg, exec_cfg).get(exchange.key, []))
+    if symbol not in allowed_symbols:
+        raise ValueError(f"symbol is not configured for account: {symbol}")
+    auth = _auth_env_status(exchange)
+    if not auth["configured"]:
+        raise ValueError("API env vars are not configured for this exchange")
+    if auth["missing_env"]:
+        raise ValueError("one or more configured API env vars are not set")
+
+    canceled = await manager.cancel_order(
+        exchange,
+        symbol=symbol,
+        order_id=order_id,
+    )
+    cancel_summary = (
+        _normalize_order(exchange, canceled, symbol)
+        if isinstance(canceled, dict)
+        else {"id": order_id, "status": str(canceled), "symbol": symbol}
+    )
+    event = write_trade_event(
+        cfg.trade_log,
+        {
+            "type": "manual_order_cancel",
+            "strategy": "manual",
+            "mode": "live",
+            "status": "canceled",
+            "plan": {
+                "exchange": exchange.key,
+                "symbol": symbol,
+                "side": "",
+            },
+            "execution": {
+                "canceled_count": 1,
+                "placed_count": 0,
+                "placed_order_ids": [],
+                "canceled_order_ids": [order_id],
+            },
+            "risk": {
+                "approved": True,
+                "level": "manual",
+                "reasons": [],
+                "warnings": [],
+                "order_count": 0,
+                "total_quote_notional": 0.0,
+            },
+            "cancel_result": cancel_summary,
+        },
+    )
+    return {
+        "ok": True,
+        "exchange": exchange.key,
+        "symbol": symbol,
+        "order_id": order_id,
+        "canceled": cancel_summary,
+        "event": event,
+    }
+
+
 def _configured_average_entry_prices(cfg: BotConfig) -> dict[str, float]:
     prices: dict[str, float] = {}
     if cfg.portfolio.asset:
@@ -1812,6 +2354,21 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "last_finished": None,
             "errors": [],
         },
+        "order_activity": {
+            "status": "starting",
+            "accounts": [],
+            "open_orders": [],
+            "closed_orders": [],
+            "recent_trades": [],
+            "open_order_count": 0,
+            "closed_order_count": 0,
+            "recent_trade_count": 0,
+            "checked_account_count": 0,
+            "total_account_count": len(_all_account_exchanges(cfg)),
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
+        },
         "onchain": {
             "status": "disabled",
             "label": cfg.onchain_monitor.label,
@@ -1938,6 +2495,10 @@ class MonitorState:
             }
             self._payload["warnings"] = ["Program paused"]
 
+    async def set_order_activity(self, order_activity: dict[str, Any]) -> None:
+        async with self._lock:
+            self._payload["order_activity"] = order_activity
+
     async def set_scan_result(
         self,
         *,
@@ -1951,6 +2512,7 @@ class MonitorState:
         opportunities: list[Opportunity],
         warnings: list[str],
         account_balances: dict[str, Any],
+        order_activity: dict[str, Any],
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
         slow_execution: dict[str, Any],
@@ -1982,6 +2544,7 @@ class MonitorState:
                 "opportunities": opportunity_dicts,
                 "recent_opportunities": list(self._recent_opportunities),
                 "account_balances": account_balances,
+                "order_activity": order_activity,
                 "onchain": onchain,
                 "market_maker": market_maker,
                 "slow_execution": slow_execution,
@@ -2222,6 +2785,9 @@ async def monitor_loop(
     account_balances_payload = _build_initial_payload(cfg, poll_seconds)[
         "account_balances"
     ]
+    order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
+        "order_activity"
+    ]
     market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
     slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
         "slow_execution"
@@ -2230,6 +2796,7 @@ async def monitor_loop(
     previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
     next_balance_scan = 0.0
+    next_order_activity_scan = 0.0
     scan_count = 0
     try:
         while True:
@@ -2328,6 +2895,31 @@ async def monitor_loop(
                         }
                     next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
 
+                if now >= next_order_activity_scan:
+                    try:
+                        order_activity_payload = await fetch_order_activity_payload(
+                            cfg,
+                            manager,
+                            runtime_slow_execution,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        order_activity_payload = {
+                            "status": "error",
+                            "accounts": [],
+                            "open_orders": [],
+                            "closed_orders": [],
+                            "recent_trades": [],
+                            "open_order_count": 0,
+                            "closed_order_count": 0,
+                            "recent_trade_count": 0,
+                            "checked_account_count": 0,
+                            "total_account_count": len(_all_account_exchanges(cfg)),
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                            "warnings": [],
+                        }
+                    next_order_activity_scan = now + ORDER_ACTIVITY_POLL_SECONDS
+
                 if portfolio_books:
                     portfolio_payload = build_synced_portfolio_pnl(
                         cfg,
@@ -2363,6 +2955,9 @@ async def monitor_loop(
                 if account_balances_payload.get("status") == "error":
                     errors = account_balances_payload.get("errors") or ["unavailable"]
                     warnings = [*warnings, f"Account balances: {errors[0]}"]
+                if order_activity_payload.get("status") == "error":
+                    errors = order_activity_payload.get("errors") or ["unavailable"]
+                    warnings = [*warnings, f"Orders: {errors[0]}"]
                 if market_maker_payload.get("status") == "error":
                     warnings = [
                         *warnings,
@@ -2389,6 +2984,7 @@ async def monitor_loop(
                     opportunities=opportunities,
                     warnings=warnings,
                     account_balances=account_balances_payload,
+                    order_activity=order_activity_payload,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
                     slow_execution=slow_execution_payload,
@@ -2462,6 +3058,45 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     )
 
 
+async def api_cancel_order(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    manager = ExchangeManager()
+    try:
+        runtime_slow_execution = await state.slow_execution_config(cfg.slow_execution)
+        result = await cancel_order_payload(
+            cfg,
+            manager,
+            payload,
+            runtime_slow_execution,
+        )
+        order_activity = await fetch_order_activity_payload(
+            cfg,
+            manager,
+            runtime_slow_execution,
+        )
+        await state.set_order_activity(order_activity)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response(
+            {"error": f"{exc.__class__.__name__}: {exc}"},
+            status=500,
+        )
+    finally:
+        await manager.close()
+
+    result["order_activity"] = order_activity
+    return web.json_response(result)
+
+
 async def api_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -2493,6 +3128,7 @@ def create_app(
     app.router.add_post("/api/control", api_control)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
+    app.router.add_post("/api/orders/cancel", api_cancel_order)
     app.router.add_get("/api/health", api_health)
     return app
 

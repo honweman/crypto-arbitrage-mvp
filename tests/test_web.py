@@ -26,7 +26,9 @@ from arbitrage_bot.web import (
     build_operations_payload,
     build_slow_execution_payload,
     build_synced_portfolio_pnl,
+    cancel_order_payload,
     fetch_account_balances_payload,
+    fetch_order_activity_payload,
     slow_execution_accounts,
 )
 
@@ -72,6 +74,12 @@ class WebMonitorTest(unittest.TestCase):
     def test_page_includes_account_balances(self) -> None:
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
+
+    def test_page_includes_orders_and_fills(self) -> None:
+        self.assertIn("Orders & Fills", HTML)
+        self.assertIn("/api/orders/cancel", HTML)
+        self.assertIn('id="open-orders"', HTML)
+        self.assertIn('id="recent-fills"', HTML)
 
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
@@ -463,6 +471,203 @@ class WebMonitorTest(unittest.TestCase):
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_order_activity_payload_summarizes_orders_and_fills(self) -> None:
+        class FakeOrderManager:
+            async def fetch_open_orders(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "id": "order-open-1",
+                        "symbol": symbol,
+                        "side": "buy",
+                        "type": "limit",
+                        "status": "open",
+                        "price": 0.00014,
+                        "amount": 1000.0,
+                        "filled": 100.0,
+                        "remaining": 900.0,
+                        "cost": 0.14,
+                        "timestamp": 123_000,
+                    }
+                ]
+
+            async def fetch_closed_orders(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+                limit: int = 20,
+            ) -> list[dict[str, object]]:
+                if limit != 20:
+                    raise AssertionError(limit)
+                return [
+                    {
+                        "id": "order-closed-1",
+                        "symbol": symbol,
+                        "side": "sell",
+                        "status": "closed",
+                        "price": 0.00015,
+                        "amount": 500.0,
+                        "filled": 500.0,
+                        "remaining": 0.0,
+                        "timestamp": 124_000,
+                    }
+                ]
+
+            async def fetch_my_trades(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+                limit: int = 20,
+            ) -> list[dict[str, object]]:
+                if limit != 20:
+                    raise AssertionError(limit)
+                return [
+                    {
+                        "id": "trade-1",
+                        "order": "order-closed-1",
+                        "symbol": symbol,
+                        "side": "sell",
+                        "price": 0.00015,
+                        "amount": 500.0,
+                        "cost": 0.075,
+                        "fee": {"cost": 0.0001, "currency": "USDC"},
+                        "timestamp": 125_000,
+                    }
+                ]
+
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    market_type="spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                )
+            ],
+        )
+
+        with patch.dict(
+            os.environ,
+            {"COINBASE_API_KEY": "key", "COINBASE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await fetch_order_activity_payload(cfg, FakeOrderManager())
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["open_order_count"], 1)
+        self.assertEqual(payload["closed_order_count"], 1)
+        self.assertEqual(payload["recent_trade_count"], 1)
+        self.assertEqual(payload["open_orders"][0]["id"], "order-open-1")
+        self.assertEqual(payload["recent_trades"][0]["order_id"], "order-closed-1")
+        self.assertEqual(payload["recent_trades"][0]["fee"]["currency"], "USDC")
+
+    async def test_cancel_order_payload_validates_and_cancels_configured_symbol(self) -> None:
+        class FakeCancelManager:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str]] = []
+
+            async def cancel_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+                order_id: str,
+            ) -> dict[str, object]:
+                self.calls.append((exchange.key, symbol, order_id))
+                return {"id": order_id, "status": "canceled"}
+
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    market_type="spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                )
+            ],
+        )
+        manager = FakeCancelManager()
+
+        with patch.dict(
+            os.environ,
+            {"COINBASE_API_KEY": "key", "COINBASE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await cancel_order_payload(
+                cfg,
+                manager,
+                {
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                    "order_id": "order-open-1",
+                },
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(manager.calls, [("coinbase-spot", "ACS/USDC", "order-open-1")])
+        self.assertEqual(payload["event"]["type"], "manual_order_cancel")
+
+    async def test_cancel_order_payload_rejects_unconfigured_symbol(self) -> None:
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    market_type="spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                )
+            ],
+        )
+
+        with patch.dict(
+            os.environ,
+            {"COINBASE_API_KEY": "key", "COINBASE_SECRET": "secret"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "symbol is not configured"):
+                await cancel_order_payload(
+                    cfg,
+                    object(),
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbol": "BTC/USDC",
+                        "order_id": "order-open-1",
+                    },
+                )
+
     async def test_fetch_account_balances_payload_summarizes_totals(self) -> None:
         class FakeBalanceManager:
             def __init__(self) -> None:

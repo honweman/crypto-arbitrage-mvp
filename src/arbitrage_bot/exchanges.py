@@ -242,6 +242,32 @@ class ExchangeManager:
         client = self.client(cfg)
         return await client.fetch_open_orders(symbol)
 
+    async def fetch_closed_orders(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        client = self.client(cfg)
+        fetcher = getattr(client, "fetch_closed_orders", None)
+        if fetcher is None:
+            return []
+        return await fetcher(symbol, None, limit)
+
+    async def fetch_my_trades(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        client = self.client(cfg)
+        fetcher = getattr(client, "fetch_my_trades", None)
+        if fetcher is None:
+            return []
+        return await fetcher(symbol, None, limit)
+
     async def fetch_balance(self, cfg: ExchangeConfig) -> dict[str, Any]:
         client = self.client(cfg)
         return await client.fetch_balance()
