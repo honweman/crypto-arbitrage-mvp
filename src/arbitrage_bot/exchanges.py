@@ -230,6 +230,28 @@ class ExchangeManager:
         client = self.client(cfg)
         return await client.fetch_open_orders(symbol)
 
+    async def fetch_balance(self, cfg: ExchangeConfig) -> dict[str, Any]:
+        client = self.client(cfg)
+        return await client.fetch_balance()
+
+    async def fetch_market_info(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+    ) -> dict[str, Any] | None:
+        client = self.client(cfg)
+        markets = await client.load_markets()
+        if isinstance(markets, dict) and symbol in markets:
+            market = markets[symbol]
+            return market if isinstance(market, dict) else None
+
+        market_getter = getattr(client, "market", None)
+        if market_getter is None:
+            return None
+        market = market_getter(symbol)
+        return market if isinstance(market, dict) else None
+
     async def cancel_order(
         self,
         cfg: ExchangeConfig,

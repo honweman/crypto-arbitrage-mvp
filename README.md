@@ -269,6 +269,40 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.slow_executor \
 
 The slow executor tracks submitted base amount, not confirmed fills. If an order rests unfilled, it still counts toward the submitted schedule. For fill-aware execution, add order and trade polling before using it for larger live sizes.
 
+## Read-only account preflight
+
+Before using `--live`, run the account preflight check. It does not create or cancel orders. It checks configured API environment variables, public market metadata, current order book, private balances, open orders, and the active risk switches for each configured account.
+
+```bash
+export BYBIT_API_KEY="..."
+export BYBIT_SECRET="..."
+
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.account_check \
+  --config config.acs.json \
+  --exchange bybit-spot \
+  --symbol ACS/USDT
+```
+
+Without `--exchange`, it checks all configured exchange entries. Without `--symbol`, it uses symbols from `spot_markets`, `market_maker`, and `slow_execution`.
+
+Useful variants:
+
+```bash
+# Check all configured ACS spot accounts and show zero balances too.
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.account_check \
+  --config config.acs.json \
+  --include-zero-balances
+
+# Check one account with two symbols.
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.account_check \
+  --config config.acs.json \
+  --exchange bybit-spot \
+  --symbol ACS/USDT \
+  --symbol BTC/USDT
+```
+
+Treat a `status: "error"` result as a blocker for live testing. A `status: "warning"` often means the command could read public market data but live trading is still intentionally disabled, an API env var is missing, or the account is disabled by risk config.
+
 ## Risk controls, events, and alerts
 
 Live market maker and slow execution orders now pass through a risk gate before any exchange order is submitted. Dry-run mode still prints the plan, but the payload includes a `risk` decision so you can see whether the same action would be allowed in live mode.
@@ -453,7 +487,7 @@ Before trading, update `fee_bps` to match your account tier and confirm all thre
 
 ## Next steps before live trading
 
-1. Add account balance checks and inventory targets per exchange.
+1. Add fill polling so inventory and realized P/L update from real executions.
 2. Add paper trading with order lifecycle simulation.
 3. Add stronger exchange precision and minimum order validation.
 4. Add transfer and withdrawal availability checks.
