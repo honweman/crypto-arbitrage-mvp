@@ -142,7 +142,7 @@ def _build_position_payload(
     )
     price_move_pnl = (
         position.position_base * (mark_price - position.average_entry_price)
-        if mark_price is not None
+        if mark_price is not None and position.average_entry_price > 0
         else 0.0
     )
     return {

@@ -14,6 +14,7 @@ from aiohttp import web
 
 from .account_check import _auth_env_status, _balance_currencies, _summarize_balance
 from .config import (
+    AssetPosition,
     BotConfig,
     ExchangeConfig,
     SlowExecutionConfig,
@@ -105,7 +106,7 @@ HTML = """<!doctype html>
 
     .portfolio-bar {
       display: grid;
-      grid-template-columns: repeat(9, minmax(118px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       gap: 1px;
       overflow: hidden;
       margin-bottom: 18px;
@@ -131,7 +132,7 @@ HTML = """<!doctype html>
 
     .metric .value {
       font-variant-numeric: tabular-nums;
-      font-size: 21px;
+      font-size: 18px;
       font-weight: 700;
       white-space: nowrap;
       overflow: hidden;
@@ -259,6 +260,16 @@ HTML = """<!doctype html>
       width: 100%;
       border-collapse: collapse;
       min-width: 1080px;
+    }
+
+    .balance-table {
+      min-width: 680px;
+    }
+
+    .balance-table th,
+    .balance-table td {
+      padding: 9px 10px;
+      font-size: 12px;
     }
 
     th, td {
@@ -491,6 +502,7 @@ HTML = """<!doctype html>
       main { padding: 14px; }
       .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .statusbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .balance-table { min-width: 620px; }
       .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .account-field { grid-column: 1 / -1; }
       .opportunity { grid-template-columns: 1fr; }
@@ -526,7 +538,7 @@ HTML = """<!doctype html>
         <div id="portfolio-cash-detail" class="subtle detail">--</div>
       </div>
       <div class="metric">
-        <div class="label">Account Balances</div>
+        <div class="label">Balances</div>
         <div id="account-balances-total" class="value">--</div>
         <div id="account-balances-detail" class="subtle detail">--</div>
       </div>
@@ -593,7 +605,7 @@ HTML = """<!doctype html>
         <span id="account-balances-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="balance-table">
           <thead>
             <tr>
               <th>Account</th>
@@ -812,6 +824,7 @@ HTML = """<!doctype html>
     const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     const money = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     const compact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
 
     function text(id, value) {
       document.getElementById(id).textContent = value;
@@ -855,7 +868,7 @@ HTML = """<!doctype html>
 
     function formatBalanceAmount(value) {
       if (value == null) return "--";
-      return Math.abs(value) >= 1_000_000 ? compact.format(value) : fmt.format(value);
+      return Math.abs(value) >= 1_000_000 ? shortNumber.format(value) : fmt.format(value);
     }
 
     function balanceStatusClass(status) {
@@ -1087,7 +1100,7 @@ HTML = """<!doctype html>
 
     function formatCashDetail(portfolio) {
       const balances = portfolio?.cash_balances || {};
-      const preferredOrder = { USDC: 0, USDT: 1, KRW: 2 };
+      const preferredOrder = { USDC: 0, USDT: 1, USD: 2, KRW: 3 };
       const pieces = Object.entries(balances)
         .sort(([left], [right]) => {
           const leftRank = preferredOrder[left] ?? 99;
@@ -1605,6 +1618,81 @@ def _aggregate_account_balance_totals(
         totals.values(),
         key=lambda row: (preferred.get(row["currency"], 99), row["currency"]),
     )
+
+
+def _configured_average_entry_prices(cfg: BotConfig) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    if cfg.portfolio.asset:
+        prices[cfg.portfolio.asset.upper()] = cfg.portfolio.average_entry_price
+    for position in cfg.portfolio.positions:
+        prices[position.asset.upper()] = position.average_entry_price
+    return prices
+
+
+def _configured_position_assets(cfg: BotConfig) -> set[str]:
+    assets = {market.asset.upper() for market in cfg.spot_markets}
+    if cfg.portfolio.asset:
+        assets.add(cfg.portfolio.asset.upper())
+    assets.update(position.asset.upper() for position in cfg.portfolio.positions)
+    return assets
+
+
+def _account_balance_totals_by_currency(
+    account_balances: dict[str, Any],
+) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for row in account_balances.get("totals", []):
+        currency = str(row.get("currency", "")).upper()
+        if not currency:
+            continue
+        value = row.get("total")
+        if value is not None:
+            totals[currency] = float(value)
+    return totals
+
+
+def build_synced_portfolio_pnl(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+    quote_rates: dict[str, float],
+    account_balances: dict[str, Any],
+) -> dict[str, Any]:
+    if int(account_balances.get("checked_account_count", 0) or 0) <= 0:
+        payload = build_portfolio_pnl(cfg, books, quote_rates)
+        payload["balance_source"] = "configured"
+        return payload
+
+    totals_by_currency = _account_balance_totals_by_currency(account_balances)
+    position_assets = _configured_position_assets(cfg)
+    average_prices = _configured_average_entry_prices(cfg)
+    positions = [
+        AssetPosition(
+            asset=asset,
+            position_base=totals_by_currency.get(asset, 0.0),
+            average_entry_price=average_prices.get(asset, 0.0),
+        )
+        for asset in sorted(position_assets)
+    ]
+    cash_balances = {
+        currency: amount
+        for currency, amount in sorted(totals_by_currency.items())
+        if currency not in position_assets
+    }
+    live_portfolio = replace(
+        cfg.portfolio,
+        enabled=True,
+        positions=positions,
+        cash_balances=cash_balances,
+    )
+    payload = build_portfolio_pnl(
+        replace(cfg, portfolio=live_portfolio),
+        books,
+        quote_rates,
+    )
+    payload["balance_source"] = "live_accounts"
+    payload["balance_status"] = account_balances.get("status")
+    payload["balance_observed_at"] = account_balances.get("last_finished")
+    return payload
 
 
 async def fetch_account_balances_payload(
@@ -2157,6 +2245,7 @@ async def monitor_loop(
                 runtime_slow_execution = await state.slow_execution_config(
                     cfg.slow_execution
                 )
+                portfolio_books: dict[tuple[str, str], OrderBookSnapshot] = {}
                 if strategy in {"all", "spot-spread"} and cfg.spot_markets:
                     symbols_by_exchange = _symbols_for_configured_spot_markets(cfg)
                     if (
@@ -2173,6 +2262,7 @@ async def monitor_loop(
                         symbols_by_exchange,
                         cfg.order_book_depth,
                     )
+                    portfolio_books = books
                     quote_rates = _quote_rates_from_sources(cfg, books)
                     rows = build_market_rows(cfg.spot_markets, books, quote_rates)
                     opportunities = find_converted_spot_spread_opportunities(
@@ -2237,6 +2327,14 @@ async def monitor_loop(
                             "errors": [str(exc)],
                         }
                     next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
+
+                if portfolio_books:
+                    portfolio_payload = build_synced_portfolio_pnl(
+                        cfg,
+                        portfolio_books,
+                        quote_rates,
+                        account_balances_payload,
+                    )
 
                 if cfg.onchain_monitor.enabled and now >= next_onchain_scan:
                     try:

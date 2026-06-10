@@ -25,6 +25,7 @@ from arbitrage_bot.web import (
     build_market_rows,
     build_operations_payload,
     build_slow_execution_payload,
+    build_synced_portfolio_pnl,
     fetch_account_balances_payload,
     slow_execution_accounts,
 )
@@ -381,6 +382,84 @@ class WebMonitorTest(unittest.TestCase):
 
         self.assertEqual(payload["cash_missing_rates"], ["EUR"])
         self.assertAlmostEqual(payload["cash_value"], 5.0)
+
+    def test_synced_portfolio_uses_live_account_balances(self) -> None:
+        cfg = make_config(
+            portfolio=PortfolioConfig(
+                enabled=True,
+                positions=[
+                    AssetPosition(
+                        asset="ACS",
+                        position_base=0.0,
+                        average_entry_price=0.0,
+                    )
+                ],
+                cash_balances={"USDC": 0.0},
+            ),
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+        )
+        books = {
+            ("coinbase-spot", "ACS/USDC"): OrderBookSnapshot(
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            )
+        }
+        account_balances = {
+            "status": "ok",
+            "checked_account_count": 1,
+            "last_finished": 123.0,
+            "totals": [
+                {"currency": "ACS", "free": 1000.0, "used": 100.0, "total": 1100.0},
+                {"currency": "USDC", "free": 10.0, "used": 5.0, "total": 15.0},
+                {"currency": "USD", "free": 2.0, "used": 0.0, "total": 2.0},
+            ],
+        }
+
+        payload = build_synced_portfolio_pnl(
+            cfg,
+            books,
+            {"USDC": 1.0, "USD": 1.0},
+            account_balances,
+        )
+
+        self.assertEqual(payload["balance_source"], "live_accounts")
+        self.assertAlmostEqual(payload["position_base"], 1100.0)
+        self.assertAlmostEqual(payload["positions"][0]["position_value"], 0.165)
+        self.assertAlmostEqual(payload["cash_balances"]["USDC"], 15.0)
+        self.assertAlmostEqual(payload["cash_balances"]["USD"], 2.0)
+        self.assertAlmostEqual(payload["cash_value"], 17.0)
+        self.assertAlmostEqual(payload["sources"]["price_move"], 0.0)
+
+    def test_synced_portfolio_falls_back_without_private_balances(self) -> None:
+        cfg = make_config(
+            portfolio=PortfolioConfig(
+                enabled=True,
+                asset="ACS",
+                position_base=100.0,
+                average_entry_price=0.00010,
+                cash_balances={"USDC": 3.0},
+            )
+        )
+
+        payload = build_synced_portfolio_pnl(
+            cfg,
+            {},
+            {"USDC": 1.0},
+            {"checked_account_count": 0, "totals": []},
+        )
+
+        self.assertEqual(payload["balance_source"], "configured")
+        self.assertAlmostEqual(payload["position_base"], 100.0)
+        self.assertAlmostEqual(payload["cash_value"], 3.0)
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
