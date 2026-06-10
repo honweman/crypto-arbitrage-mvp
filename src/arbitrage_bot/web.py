@@ -5199,7 +5199,7 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             symbols_by_exchange=symbols_by_exchange,
         )
         base_config = await state.slow_execution_config(cfg.slow_execution)
-        task_config = replace(base_config, **overrides, enabled=True)
+        task_config = replace(base_config, **{**overrides, "enabled": True})
         validate_task_config(task_config)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
