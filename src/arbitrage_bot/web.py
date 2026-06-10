@@ -1107,7 +1107,7 @@ HTML = """<!doctype html>
               <th>Side</th>
               <th>Exchange</th>
               <th>Symbol</th>
-              <th class="num">Mid Price</th>
+              <th class="num">Order Price</th>
               <th class="num">Slice Amount</th>
               <th class="num">Quote</th>
               <th class="num">Submitted</th>
@@ -2308,7 +2308,9 @@ HTML = """<!doctype html>
         text("warnings", (data.warnings || []).join(" · "));
         text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
         text("mm-meta", data.market_maker?.plan ? `${data.market_maker.mode || "dry_run"} · ${data.market_maker.plan.exchange} ${data.market_maker.plan.symbol} · mid ${fmt.format(data.market_maker.plan.mid_price)} · spread ${data.market_maker.plan.existing_spread_bps.toFixed(2)} bps` : (data.market_maker?.status || "disabled"));
-        text("slow-meta", data.slow_execution?.plan ? `${data.slow_execution.mode || "dry_run"} · ${data.slow_execution.plan.exchange} ${data.slow_execution.plan.symbol} · ${data.slow_execution.plan.side.toUpperCase()} · mid ${fmt.format(data.slow_execution.plan.mid_price)}` : (data.slow_execution?.status || "disabled"));
+        const slowPlan = data.slow_execution?.plan;
+        const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
+        text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
 
         renderOperations(data.operations);
         renderRiskControls(data.operations, data.trading_console);

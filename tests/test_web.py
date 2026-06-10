@@ -238,7 +238,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(len(payload["plan"]["orders"]), 20)
 
-    def test_build_slow_execution_payload_returns_midpoint_order(self) -> None:
+    def test_build_slow_execution_payload_returns_best_bid_sell_order(self) -> None:
         cfg = make_config(
             slow_execution=SlowExecutionConfig(
                 enabled=True,
@@ -265,8 +265,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(payload["plan"]["side"], "sell")
         self.assertAlmostEqual(payload["plan"]["mid_price"], 0.00015)
+        self.assertAlmostEqual(payload["plan"]["order"]["price"], 0.00014)
         self.assertAlmostEqual(payload["plan"]["order"]["amount"], 1_000.0)
-        self.assertAlmostEqual(payload["plan"]["order"]["quote_notional"], 0.15)
+        self.assertAlmostEqual(payload["plan"]["order"]["quote_notional"], 0.14)
 
     def test_slow_execution_payload_uses_range_config(self) -> None:
         cfg = make_config(

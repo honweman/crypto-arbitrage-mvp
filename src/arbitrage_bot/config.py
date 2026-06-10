@@ -95,7 +95,7 @@ class SlowExecutionConfig:
     order_ttl_seconds: float = 0.0
     stop_price: float = 0.0
     min_order_quote: float = 0.0
-    post_only: bool = True
+    post_only: bool = False
     cancel_existing_orders: bool = False
     client_order_prefix: str = "crypto-arb-slow"
 
@@ -376,7 +376,7 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             stop_price=float(slow_execution_raw.get("stop_price", 0.0)),
             min_order_quote=float(slow_execution_raw.get("min_order_quote", 0.0)),
-            post_only=bool(slow_execution_raw.get("post_only", True)),
+            post_only=bool(slow_execution_raw.get("post_only", False)),
             cancel_existing_orders=bool(
                 slow_execution_raw.get("cancel_existing_orders", False)
             ),

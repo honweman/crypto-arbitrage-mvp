@@ -214,7 +214,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
 
 The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle.
 
-The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. This tool submits one buy or sell limit order at the current midpoint between best bid and best ask. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
+The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. This tool submits one buy or sell marketable limit order at the current execution-side top of book: buys use the best ask and sells use the best bid. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
 
 ```json
 "slow_execution": {
@@ -232,17 +232,17 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
   "order_ttl_seconds": 20.0,
   "stop_price": 0.00012,
   "min_order_quote": 0.1,
-  "post_only": true,
+  "post_only": false,
   "cancel_existing_orders": false,
   "client_order_prefix": "crypto-arb-slow"
 }
 ```
 
-Use exactly one sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current midpoint.
+Use exactly one sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current execution-side price. Auto Buy/Sell uses a marketable limit price: buys at the current best ask and sells at the current best bid. Keep `slow_execution.post_only` false and `risk.require_post_only` false for this strategy if you want immediate taker-style execution.
 
 The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, the min/max order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
 
-For `stop_price`, a sell schedule stops when midpoint price is at or below the stop price. A buy schedule stops when midpoint price is at or above the stop price.
+For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
 
 To preview the next slice without placing anything:
 
@@ -259,7 +259,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.auto_buy_sell \
   --loop
 ```
 
-To place real midpoint orders, configure API env vars on the target exchange entry, fund the account, and run with explicit live confirmation:
+To place real marketable limit orders, configure API env vars on the target exchange entry, fund the account, and run with explicit live confirmation:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m arbitrage_bot.auto_buy_sell \
@@ -334,7 +334,7 @@ By default, live trading is blocked until you explicitly set `risk.allow_live_tr
   "account_enabled": {
     "bybit-spot": true
   },
-  "require_post_only": true,
+  "require_post_only": false,
   "max_order_quote": 5.0,
   "max_cycle_quote": 25.0,
   "max_position_base": 0.0,

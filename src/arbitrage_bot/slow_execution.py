@@ -115,7 +115,7 @@ def _range_slice_base(
 
 def _configured_slice_base(
     cfg: SlowExecutionConfig,
-    mid_price: float,
+    order_price: float,
     random_value: float,
 ) -> float:
     range_slice = _range_slice_base(cfg, random_value)
@@ -133,19 +133,19 @@ def _configured_slice_base(
         return range_slice
     if cfg.slice_base > 0:
         return cfg.slice_base
-    return cfg.slice_quote / mid_price
+    return cfg.slice_quote / order_price
 
 
 def _is_stopped_by_price(
     side: Side,
-    mid_price: float,
+    order_price: float,
     stop_price: float,
 ) -> bool:
     if stop_price <= 0:
         return False
     if side == "sell":
-        return mid_price <= stop_price
-    return mid_price >= stop_price
+        return order_price <= stop_price
+    return order_price >= stop_price
 
 
 def build_slow_execution_plan(
@@ -172,6 +172,7 @@ def build_slow_execution_plan(
 
     mid_price = (best_bid + best_ask) / 2
     existing_spread_bps = (best_ask - best_bid) / mid_price * 10_000
+    order_price = best_ask if side == "buy" else best_bid
     metrics = order_book_metric_snapshot(book)
     metric_kwargs = {
         "bid_depth_quote": float(metrics["bid_depth_quote"] or 0.0),
@@ -185,7 +186,7 @@ def build_slow_execution_plan(
     }
     selected_slice_base = _configured_slice_base(
         cfg,
-        mid_price,
+        order_price,
         (random_fn or random.random)(),
     )
     safe_submitted = min(max(0.0, submitted_base), cfg.total_base)
@@ -217,7 +218,7 @@ def build_slow_execution_plan(
             **metric_kwargs,
         )
 
-    if _is_stopped_by_price(side, mid_price, cfg.stop_price):
+    if _is_stopped_by_price(side, order_price, cfg.stop_price):
         return SlowExecutionPlan(
             exchange=cfg.exchange,
             symbol=cfg.symbol,
@@ -244,7 +245,7 @@ def build_slow_execution_plan(
         )
 
     order_base = min(remaining_base, selected_slice_base)
-    quote_notional = order_base * mid_price
+    quote_notional = order_base * order_price
     if quote_notional < cfg.min_order_quote:
         return SlowExecutionPlan(
             exchange=cfg.exchange,
@@ -273,7 +274,7 @@ def build_slow_execution_plan(
 
     order = SlowExecutionOrder(
         side=side,
-        price=mid_price,
+        price=order_price,
         amount=order_base,
         quote_notional=quote_notional,
         submitted_base_before=safe_submitted,

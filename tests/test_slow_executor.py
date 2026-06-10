@@ -76,13 +76,13 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
                     "side": "sell",
                     "status": "error",
                     "requested_amount": 1.0,
-                    "requested_price": 0.00015,
+                    "requested_price": 0.00014,
                     "amount": 1.0,
-                    "price": 0.00015,
-                    "cost": 0.00015,
+                    "price": 0.00014,
+                    "cost": 0.00014,
                     "limits": {},
                     "precision": {},
-                    "errors": ["cost 0.00015 is below exchange minimum 1"],
+                    "errors": ["cost 0.00014 is below exchange minimum 1"],
                     "warnings": [],
                 }
 
@@ -90,7 +90,13 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("invalid live cycle must not place orders")
 
         payload, submitted_base = await run_cycle(
-            self._cfg(risk=RiskConfig(allow_live_trading=True, max_open_orders=50)),
+            self._cfg(
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_open_orders=50,
+                )
+            ),
             FakeManager(),  # type: ignore[arg-type]
             submitted_base=0.0,
             live=True,

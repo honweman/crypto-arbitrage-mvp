@@ -6,7 +6,7 @@ from arbitrage_bot.slow_execution import build_slow_execution_plan
 
 
 class SlowExecutionTest(unittest.TestCase):
-    def test_builds_midpoint_slice_order(self) -> None:
+    def test_sell_order_uses_best_bid(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",
             symbol="ACS/USDT",
@@ -30,12 +30,12 @@ class SlowExecutionTest(unittest.TestCase):
         self.assertEqual(plan.remaining_base, 6.0)
         self.assertIsNotNone(plan.order)
         self.assertEqual(plan.order.side, "sell")
-        self.assertAlmostEqual(plan.order.price, 100.0)
+        self.assertAlmostEqual(plan.order.price, 90.0)
         self.assertAlmostEqual(plan.order.amount, 2.0)
-        self.assertAlmostEqual(plan.order.quote_notional, 200.0)
+        self.assertAlmostEqual(plan.order.quote_notional, 180.0)
         self.assertAlmostEqual(plan.order.submitted_base_after, 6.0)
 
-    def test_slice_quote_converts_to_base_amount(self) -> None:
+    def test_buy_order_uses_best_ask_and_slice_quote_converts_at_order_price(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",
             symbol="ACS/USDT",
@@ -56,8 +56,8 @@ class SlowExecutionTest(unittest.TestCase):
 
         self.assertIsNotNone(plan.order)
         self.assertEqual(plan.order.side, "buy")
-        self.assertAlmostEqual(plan.order.price, 100.0)
-        self.assertAlmostEqual(plan.order.amount, 2.5)
+        self.assertAlmostEqual(plan.order.price, 101.0)
+        self.assertAlmostEqual(plan.order.amount, 250.0 / 101.0)
         self.assertAlmostEqual(plan.order.quote_notional, 250.0)
 
     def test_complete_when_submitted_reaches_total(self) -> None:

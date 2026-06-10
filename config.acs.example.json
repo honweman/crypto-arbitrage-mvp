@@ -66,7 +66,7 @@
     "order_ttl_seconds": 0.0,
     "stop_price": 0.0,
     "min_order_quote": 0.1,
-    "post_only": true,
+    "post_only": false,
     "cancel_existing_orders": false,
     "client_order_prefix": "crypto-arb-slow"
   },
@@ -105,7 +105,7 @@
       "coinbase-spot": true,
       "upbit-spot": true
     },
-    "require_post_only": true,
+    "require_post_only": false,
     "max_order_quote": 5.0,
     "max_cycle_quote": 25.0,
     "max_position_base": 0.0,

@@ -374,7 +374,7 @@ async def run_loop(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Auto Buy/Sell midpoint executor with guarded live order placement"
+        description="Auto Buy/Sell top-of-book executor with guarded live order placement"
     )
     parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
     parser.add_argument(
