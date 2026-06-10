@@ -84,6 +84,15 @@ def _float_value(value: Any) -> float:
         return 0.0
 
 
+def _trade_cost(raw: dict[str, Any]) -> float:
+    cost = _float_value(raw.get("cost"))
+    if cost > 0:
+        return cost
+    amount = _float_value(raw.get("amount"))
+    price = _float_value(raw.get("price"))
+    return amount * price if amount > 0 and price > 0 else 0.0
+
+
 def _order_id(raw: dict[str, Any]) -> str:
     return str(raw.get("id") or raw.get("order") or "")
 
@@ -438,16 +447,24 @@ class AutoBuySellTaskService:
             if _order_id(order) in tracked
         }
         trade_fills: dict[str, dict[str, float]] = {}
-        known_trade_ids: set[str] = set(task.known_trade_ids)
+        previous_known_trade_ids: set[str] = set(task.known_trade_ids)
+        known_trade_ids: set[str] = set(previous_known_trade_ids)
+        new_trade_base = 0.0
+        new_trade_quote = 0.0
         for trade in trades:
             order_id = _trade_order_id(trade)
             if order_id not in tracked:
                 continue
+            amount = _float_value(trade.get("amount"))
+            cost = _trade_cost(trade)
             row = trade_fills.setdefault(order_id, {"amount": 0.0, "cost": 0.0})
-            row["amount"] += _float_value(trade.get("amount"))
-            row["cost"] += _float_value(trade.get("cost"))
+            row["amount"] += amount
+            row["cost"] += cost
             trade_id = str(trade.get("id") or "")
             if trade_id:
+                if trade_id not in previous_known_trade_ids:
+                    new_trade_base += amount
+                    new_trade_quote += cost
                 known_trade_ids.add(trade_id)
                 task.last_fill_at = _float_value(trade.get("timestamp")) / 1000 or time.time()
 
@@ -469,15 +486,17 @@ class AutoBuySellTaskService:
             filled_base += max(trade_fill["amount"], order_fill["amount"])
             filled_quote += max(trade_fill["cost"], order_fill["cost"])
 
+        next_filled_base = max(task.filled_base + new_trade_base, filled_base)
+        next_filled_quote = max(task.filled_quote + new_trade_quote, filled_quote)
         task.filled_base = (
-            min(task.exec_cfg.total_base, max(task.filled_base, filled_base))
+            min(task.exec_cfg.total_base, next_filled_base)
             if task.exec_cfg.total_base > 0
-            else max(task.filled_base, filled_base)
+            else next_filled_base
         )
         task.filled_quote = (
-            min(task.exec_cfg.total_quote, max(task.filled_quote, filled_quote))
+            min(task.exec_cfg.total_quote, next_filled_quote)
             if task.exec_cfg.total_quote > 0
-            else max(task.filled_quote, filled_quote)
+            else next_filled_quote
         )
         task.open_order_ids = sorted(open_ids)
         task.known_trade_ids = sorted(known_trade_ids)

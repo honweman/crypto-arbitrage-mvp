@@ -287,6 +287,51 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(second_task["remaining_quote"], 0.0)
         self.assertAlmostEqual(second_task["progress_pct"], 100.0)
 
+    async def test_refresh_accumulates_new_trades_beyond_recent_order_window(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(
+                self._slow_cfg(total_base=0.0, total_quote=20.0)
+            )
+            manager = FakeTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(total_base=0.0, total_quote=20.0),
+            )
+            service._tasks[0].placed_order_ids = ["old-order", "new-order"]
+            service._tasks[0].known_trade_ids = ["old-trade"]
+            service._tasks[0].filled_base = 100.0
+            service._tasks[0].filled_quote = 10.0
+            manager.trades = [
+                {
+                    "id": "old-trade",
+                    "order": "old-order",
+                    "amount": 10.0,
+                    "cost": 1.0,
+                    "timestamp": 1_000_000,
+                },
+                {
+                    "id": "new-trade",
+                    "order": "new-order",
+                    "amount": 2.0,
+                    "price": 1.5,
+                    "timestamp": 2_000_000,
+                },
+            ]
+
+            await service._refresh_task_activity(service._tasks[0], cfg, manager)
+            first_refresh = service._tasks[0].to_dict()
+            await service._refresh_task_activity(service._tasks[0], cfg, manager)
+            second_refresh = service._tasks[0].to_dict()
+
+        self.assertAlmostEqual(first_refresh["filled_base"], 102.0)
+        self.assertAlmostEqual(first_refresh["filled_quote"], 13.0)
+        self.assertIn("new-trade", first_refresh["known_trade_ids"])
+        self.assertAlmostEqual(second_refresh["filled_base"], 102.0)
+        self.assertAlmostEqual(second_refresh["filled_quote"], 13.0)
+
     def test_validate_task_config_requires_one_slice_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "configure exactly one"):
             validate_task_config(self._slow_cfg(slice_base=1.0, slice_base_min=1.0))
