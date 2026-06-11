@@ -17,6 +17,7 @@ from .trade_log import write_trade_event
 
 RUNNING_TASK_STATUSES = {
     "running",
+    "waiting_for_start_price",
     "waiting_for_fill",
     "waiting_for_interval",
     "blocked_by_risk",
@@ -48,6 +49,8 @@ def validate_task_config(cfg: SlowExecutionConfig) -> None:
         raise ValueError("side must be buy or sell")
     if cfg.total_base < 0 or cfg.total_quote < 0:
         raise ValueError("total_base and total_quote must be non-negative")
+    if cfg.start_price < 0 or cfg.stop_price < 0:
+        raise ValueError("start_price and stop_price must be non-negative")
     if cfg.total_base <= 0 and cfg.total_quote <= 0:
         raise ValueError("total_base or total_quote must be positive")
     if cfg.interval_seconds <= 0:
@@ -125,6 +128,7 @@ class AutoBuySellTask:
     order_created_at: dict[str, float] = field(default_factory=dict)
     filled_base: float = 0.0
     filled_quote: float = 0.0
+    start_price_triggered: bool = False
     canceled_count: int = 0
     placed_count: int = 0
     cycle_count: int = 0
@@ -340,6 +344,7 @@ class AutoBuySellTaskService:
                 manager,
                 submitted_base=task.filled_base,
                 submitted_quote=task.filled_quote,
+                start_price_triggered=task.start_price_triggered,
                 live=True,
                 replace_existing=False,
             )
@@ -354,6 +359,11 @@ class AutoBuySellTaskService:
             )
             task.last_error = None
             task.status = _task_status_from_cycle_status(task.last_status)
+            if (
+                task_cfg.start_price > 0
+                and task.last_status != "waiting_for_start_price"
+            ):
+                task.start_price_triggered = True
 
             if task.last_status in TERMINAL_TASK_STATUSES:
                 task.finished_at = time.time()
@@ -531,6 +541,8 @@ class AutoBuySellTaskService:
 def _task_status_from_cycle_status(status: str) -> str:
     if status in TERMINAL_TASK_STATUSES:
         return status
+    if status == "waiting_for_start_price":
+        return "waiting_for_start_price"
     if status == "placed":
         return "waiting_for_fill"
     if status == "blocked_by_risk":

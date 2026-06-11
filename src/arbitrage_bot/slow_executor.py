@@ -34,6 +34,7 @@ async def build_plan(
     *,
     submitted_base: float = 0.0,
     submitted_quote: float = 0.0,
+    start_price_triggered: bool = False,
 ) -> SlowExecutionPlan:
     exec_cfg = cfg.slow_execution
     if not exec_cfg.enabled:
@@ -56,6 +57,7 @@ async def build_plan(
         exec_cfg,
         submitted_base=submitted_base,
         submitted_quote=submitted_quote,
+        start_price_triggered=start_price_triggered,
     )
 
 
@@ -195,12 +197,14 @@ async def run_cycle(
     replace_existing: bool,
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
+    start_price_triggered: bool = False,
 ) -> tuple[dict[str, Any], float]:
     plan = await build_plan(
         cfg,
         manager,
         submitted_base=submitted_base,
         submitted_quote=submitted_quote,
+        start_price_triggered=start_price_triggered,
     )
     next_submitted_base = submitted_base
     next_submitted_quote = submitted_quote
@@ -211,6 +215,8 @@ async def run_cycle(
         "plan": plan.to_dict(),
         "tracks_submitted_base": True,
         "tracks_submitted_quote": True,
+        "start_price_triggered": start_price_triggered
+        or plan.status != "waiting_for_start_price",
         "next_submitted_quote": next_submitted_quote,
     }
     risk_orders = []
@@ -324,6 +330,7 @@ async def run_loop(
     manager = ExchangeManager()
     submitted_base = 0.0
     submitted_quote = 0.0
+    start_price_triggered = cfg.slow_execution.start_price <= 0
     previous_mid_price: float | None = None
     last_cancel_at: float | None = None
     try:
@@ -338,11 +345,14 @@ async def run_loop(
                 replace_existing=replace_existing,
                 previous_mid_price=previous_mid_price,
                 last_cancel_at=last_cancel_at,
+                start_price_triggered=start_price_triggered,
             )
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
             write_trade_event(cfg.trade_log, payload)
             sys.stdout.flush()
             plan_payload = payload.get("plan", {})
+            if cfg.slow_execution.start_price > 0 and payload.get("status") != "waiting_for_start_price":
+                start_price_triggered = True
             if isinstance(plan_payload, dict):
                 mid_price = plan_payload.get("mid_price")
                 if isinstance(mid_price, (int, float)):

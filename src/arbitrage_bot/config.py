@@ -97,6 +97,7 @@ class SlowExecutionConfig:
     randomize_slice: bool = False
     interval_seconds: float = 60.0
     order_ttl_seconds: float = 0.0
+    start_price: float = 0.0
     stop_price: float = 0.0
     min_order_quote: float = 0.0
     post_only: bool = False
@@ -384,6 +385,7 @@ def load_config(path: str | Path) -> BotConfig:
             order_ttl_seconds=float(
                 slow_execution_raw.get("order_ttl_seconds", 0.0)
             ),
+            start_price=float(slow_execution_raw.get("start_price", 0.0)),
             stop_price=float(slow_execution_raw.get("stop_price", 0.0)),
             min_order_quote=float(slow_execution_raw.get("min_order_quote", 0.0)),
             post_only=bool(slow_execution_raw.get("post_only", False)),

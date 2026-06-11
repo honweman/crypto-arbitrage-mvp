@@ -41,6 +41,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.slow_execution.slice_base_max, 0.0)
         self.assertFalse(cfg.slow_execution.randomize_slice)
         self.assertEqual(cfg.slow_execution.order_ttl_seconds, 0.0)
+        self.assertEqual(cfg.slow_execution.start_price, 0.0)
         self.assertEqual(cfg.slow_execution.stop_price, 0.0)
         self.assertFalse(cfg.slow_execution.post_only)
         self.assertTrue(cfg.portfolio.enabled)

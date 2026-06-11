@@ -1267,6 +1267,10 @@ HTML = """<!doctype html>
           <input id="slow-ttl" type="number" min="0" step="any">
         </div>
         <div class="field">
+          <label for="slow-start-price">Start Price</label>
+          <input id="slow-start-price" type="number" min="0" step="any">
+        </div>
+        <div class="field">
           <label for="slow-stop-price">Stop Price</label>
           <input id="slow-stop-price" type="number" min="0" step="any">
         </div>
@@ -1307,6 +1311,7 @@ HTML = """<!doctype html>
               <th class="num">Remaining</th>
               <th class="num">Interval</th>
               <th class="num">Cancel</th>
+              <th class="num">Start</th>
               <th class="num">Stop</th>
             </tr>
           </thead>
@@ -2243,7 +2248,7 @@ HTML = """<!doctype html>
       body.innerHTML = "";
       if (!slowExecution || !slowExecution.plan || !slowExecution.plan.order) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="11">${slowExecution?.status || "disabled"}</td>`;
+        tr.innerHTML = `<td colspan="12">${slowExecution?.status || "disabled"}</td>`;
         body.appendChild(tr);
         return;
       }
@@ -2269,6 +2274,7 @@ HTML = """<!doctype html>
         <td class="num">${remainingText}</td>
         <td class="num">${plan.interval_seconds}s</td>
         <td class="num">${plan.order_ttl_seconds || 0}s</td>
+        <td class="num">${plan.start_price ? fmt.format(plan.start_price) : "--"}</td>
         <td class="num">${plan.stop_price ? fmt.format(plan.stop_price) : "--"}</td>
       `;
       body.appendChild(tr);
@@ -2843,6 +2849,7 @@ HTML = """<!doctype html>
       document.getElementById("slow-randomize").checked = Boolean(config.randomize_slice);
       setNumericField("slow-interval", config.interval_seconds || 60);
       setNumericField("slow-ttl", config.order_ttl_seconds || 0);
+      setNumericField("slow-start-price", config.start_price || 0);
       setNumericField("slow-stop-price", config.stop_price || 0);
     }
 
@@ -2859,6 +2866,7 @@ HTML = """<!doctype html>
         randomize_slice: document.getElementById("slow-randomize").checked,
         interval_seconds: numericValue("slow-interval"),
         order_ttl_seconds: numericValue("slow-ttl"),
+        start_price: numericValue("slow-start-price"),
         stop_price: numericValue("slow-stop-price"),
       };
     }
@@ -4380,6 +4388,7 @@ def _slow_execution_overrides_from_payload(
         "slice_base_max",
         "interval_seconds",
         "order_ttl_seconds",
+        "start_price",
         "stop_price",
     }
     for field in numeric_fields:

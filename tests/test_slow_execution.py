@@ -255,6 +255,105 @@ class SlowExecutionTest(unittest.TestCase):
         self.assertEqual(plan.status, "stopped_by_price")
         self.assertIsNone(plan.order)
 
+    def test_start_price_waits_for_sell_trigger(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="sell",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            start_price=100.0,
+            stop_price=95.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.status, "waiting_for_start_price")
+        self.assertIsNone(plan.order)
+        self.assertEqual(plan.start_price, 100.0)
+
+    def test_start_price_allows_sell_at_or_above_trigger(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=100.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="sell",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            start_price=100.0,
+            stop_price=95.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.status, "planned")
+        self.assertIsNotNone(plan.order)
+        self.assertEqual(plan.order.price, 100.0)
+
+    def test_triggered_sell_continues_below_start_until_stop(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="sell",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            start_price=100.0,
+            stop_price=95.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg, start_price_triggered=True)
+
+        self.assertEqual(plan.status, "planned")
+        self.assertIsNotNone(plan.order)
+        self.assertEqual(plan.order.price, 99.0)
+
+    def test_triggered_sell_stops_below_stop_price(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=94.0, amount=10.0)],
+            asks=[BookLevel(price=95.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="sell",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            start_price=100.0,
+            stop_price=95.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg, start_price_triggered=True)
+
+        self.assertEqual(plan.status, "stopped_by_price")
+        self.assertIsNone(plan.order)
+
     def test_stop_price_blocks_buy_above_ceiling(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",
@@ -276,6 +375,29 @@ class SlowExecutionTest(unittest.TestCase):
         plan = build_slow_execution_plan(book, cfg)
 
         self.assertEqual(plan.status, "stopped_by_price")
+        self.assertIsNone(plan.order)
+
+    def test_start_price_waits_for_buy_trigger(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            side="buy",
+            total_base=10.0,
+            slice_base=1.0,
+            interval_seconds=60.0,
+            start_price=100.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.status, "waiting_for_start_price")
         self.assertIsNone(plan.order)
 
 

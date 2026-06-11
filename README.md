@@ -252,6 +252,7 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
   "randomize_slice": true,
   "interval_seconds": 60.0,
   "order_ttl_seconds": 20.0,
+  "start_price": 0.00015,
   "stop_price": 0.00012,
   "min_order_quote": 0.1,
   "post_only": false,
@@ -264,11 +265,11 @@ Use `total_base` to cap the total base asset amount, such as ACS, or `total_quot
 
 Use exactly one per-order sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current execution-side price. Auto Buy/Sell uses a marketable limit price: buys at the current best ask and sells at the current best bid. Keep `slow_execution.post_only` false and `risk.require_post_only` false for this strategy if you want immediate taker-style execution.
 
-The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, `total_quote`, the min/max base order size range, randomization, `interval_seconds`, `order_ttl_seconds`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
+The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, `total_quote`, the min/max base order size range, randomization, `interval_seconds`, `order_ttl_seconds`, `start_price`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
 
 The control page also exposes runtime market setup. `Markets` configures spot arbitrage symbols per account, while `Cash & Carry Pairs` configures spot-vs-contract symbols for basis scanning. For Binance USDT perpetuals and Bybit USDT perpetuals, ccxt symbols usually look like `BTC/USDT:USDT` or `ETH/USDT:USDT`; the spot side remains `BTC/USDT` or `ETH/USDT`. The ACS example config includes `binance-spot`, `binance-swap` (`binanceusdm`), and `bybit-swap`, but does not assume ACS is listed on those venues. Add only the symbols that actually exist on the target exchange.
 
-For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
+For `start_price`, a sell schedule waits until the best bid is at or above the start price before placing the first marketable sell order. A buy schedule waits until the best ask is at or below the start price before placing the first marketable buy order. After an Auto Buy/Sell task has triggered, it keeps running until the configured amount is filled or `stop_price` is hit. For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
 
 To preview the next slice without placing anything:
 

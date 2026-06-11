@@ -29,6 +29,8 @@ class FakeTaskManager:
     def __init__(self) -> None:
         self.created = 0
         self.canceled = 0
+        self.bid_price = 0.00014
+        self.ask_price = 0.00016
         self.open_order_ids: list[str] = []
         self.closed_orders: list[dict[str, object]] = []
         self.trades: list[dict[str, object]] = []
@@ -41,8 +43,8 @@ class FakeTaskManager:
         return OrderBookSnapshot(
             exchange="bybit-spot",
             symbol="ACS/USDT",
-            bids=[BookLevel(price=0.00014, amount=100_000)],
-            asks=[BookLevel(price=0.00016, amount=100_000)],
+            bids=[BookLevel(price=self.bid_price, amount=100_000)],
+            asks=[BookLevel(price=self.ask_price, amount=100_000)],
         )
 
     async def fetch_open_orders(
@@ -177,6 +179,47 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(second_task["last_plan"]["submitted_base"], 2.0)
         self.assertEqual(second_task["open_order_ids"], ["order-2"])
         self.assertEqual(third_task["filled_base"], 2.0)
+
+    async def test_task_waits_for_start_price_then_remains_triggered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            slow_cfg = self._slow_cfg(
+                total_base=15.0,
+                slice_base_min=5.0,
+                start_price=0.00015,
+                stop_price=0.00013,
+                side="sell",
+            )
+            await service.create_task(slow_cfg)
+            manager = FakeTaskManager()
+            manager.bid_price = 0.00014
+            manager.ask_price = 0.00016
+            cfg = self._cfg(tmp, slow_execution=slow_cfg)
+
+            waiting = await service.run_due_tasks(cfg, manager)
+            waiting_task = waiting["tasks"][0]
+
+            manager.bid_price = 0.00015
+            manager.ask_price = 0.00016
+            service._tasks[0].next_run_at = 0.0
+            triggered = await service.run_due_tasks(cfg, manager)
+            triggered_task = triggered["tasks"][0]
+
+            manager.open_order_ids = []
+            manager.bid_price = 0.00014
+            manager.ask_price = 0.00016
+            service._tasks[0].next_run_at = 0.0
+            service._tasks[0].order_created_at["order-1"] = time.time() - 2.0
+            continued = await service.run_due_tasks(cfg, manager)
+            continued_task = continued["tasks"][0]
+
+        self.assertEqual(waiting_task["status"], "waiting_for_start_price")
+        self.assertEqual(manager.created, 2)
+        self.assertFalse(waiting_task["start_price_triggered"])
+        self.assertTrue(triggered_task["start_price_triggered"])
+        self.assertEqual(triggered_task["open_order_ids"], ["order-1"])
+        self.assertTrue(continued_task["start_price_triggered"])
+        self.assertEqual(continued_task["open_order_ids"], ["order-2"])
 
     async def test_stale_order_cancel_respects_next_interval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -345,12 +388,15 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         slice_base_min: float = 5.0,
         interval_seconds: float = 1.0,
         order_ttl_seconds: float = 0.0,
+        start_price: float = 0.0,
+        stop_price: float = 0.0,
+        side: str = "buy",
     ) -> SlowExecutionConfig:
         return SlowExecutionConfig(
             enabled=True,
             exchange="bybit-spot",
             symbol="ACS/USDT",
-            side="buy",
+            side=side,
             total_base=total_base,
             total_quote=total_quote,
             slice_base=slice_base,
@@ -358,6 +404,8 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             slice_base_max=5.0,
             interval_seconds=interval_seconds,
             order_ttl_seconds=order_ttl_seconds,
+            start_price=start_price,
+            stop_price=stop_price,
             min_order_quote=0.0,
         )
 

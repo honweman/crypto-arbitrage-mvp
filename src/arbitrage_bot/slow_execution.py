@@ -57,6 +57,7 @@ class SlowExecutionPlan:
     slice_base_max: float
     slice_quote: float
     randomize_slice: bool
+    start_price: float
     stop_price: float
     order: SlowExecutionOrder | None
     status: str
@@ -89,6 +90,7 @@ class SlowExecutionPlan:
             "slice_base_max": self.slice_base_max,
             "slice_quote": self.slice_quote,
             "randomize_slice": self.randomize_slice,
+            "start_price": self.start_price,
             "stop_price": self.stop_price,
             "order": None if self.order is None else self.order.to_dict(),
             "status": self.status,
@@ -160,12 +162,25 @@ def _is_stopped_by_price(
     return order_price >= stop_price
 
 
+def _is_waiting_for_start_price(
+    side: Side,
+    order_price: float,
+    start_price: float,
+) -> bool:
+    if start_price <= 0:
+        return False
+    if side == "sell":
+        return order_price < start_price
+    return order_price > start_price
+
+
 def build_slow_execution_plan(
     book: OrderBookSnapshot,
     cfg: SlowExecutionConfig,
     *,
     submitted_base: float = 0.0,
     submitted_quote: float = 0.0,
+    start_price_triggered: bool = False,
     random_fn: Callable[[], float] | None = None,
 ) -> SlowExecutionPlan:
     side = _validate_side(cfg.side)
@@ -257,6 +272,7 @@ def build_slow_execution_plan(
             slice_base_max=cfg.slice_base_max,
             slice_quote=cfg.slice_quote,
             randomize_slice=cfg.randomize_slice,
+            start_price=cfg.start_price,
             stop_price=cfg.stop_price,
             order=order,
             status=status,
@@ -271,6 +287,12 @@ def build_slow_execution_plan(
         remaining_base = 0.0 if base_target_enabled else remaining_base
         remaining_quote = 0.0 if quote_target_enabled else remaining_quote
         return make_plan("complete")
+
+    if (
+        not start_price_triggered
+        and _is_waiting_for_start_price(side, order_price, cfg.start_price)
+    ):
+        return make_plan("waiting_for_start_price")
 
     if _is_stopped_by_price(side, order_price, cfg.stop_price):
         return make_plan("stopped_by_price")

@@ -95,6 +95,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("/api/auto-buy-sell/tasks", HTML)
         self.assertIn('id="slow-create-task"', HTML)
         self.assertIn('id="slow-tasks"', HTML)
+        self.assertIn('id="slow-start-price"', HTML)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_page_uses_generic_dashboard_title(self) -> None:
@@ -520,6 +521,7 @@ class WebMonitorTest(unittest.TestCase):
                 "randomize_slice": True,
                 "interval_seconds": "5",
                 "order_ttl_seconds": "2",
+                "start_price": "0.02",
                 "stop_price": "0.01",
             },
             allowed_exchanges={"bybit-spot"},
@@ -531,6 +533,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["symbol"], "ACS/USDT")
         self.assertEqual(overrides["side"], "buy")
         self.assertEqual(overrides["total_quote"], 5.0)
+        self.assertEqual(overrides["start_price"], 0.02)
+        self.assertEqual(overrides["stop_price"], 0.01)
         self.assertEqual(overrides["slice_base"], 0.0)
         self.assertEqual(overrides["slice_quote"], 0.0)
         self.assertEqual(overrides["slice_base_min"], 10.0)
