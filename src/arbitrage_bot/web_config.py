@@ -7,12 +7,22 @@ from typing import Any
 from .config import (
     BotConfig,
     CashAndCarryPair,
+    DcaConfig,
     ExchangeConfig,
     MarketMakerConfig,
     RiskConfig,
     SlowExecutionConfig,
+    SpotGridConfig,
     SpotMarketConfig,
 )
+
+
+def spot_grid_config_to_dict(cfg: SpotGridConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def dca_config_to_dict(cfg: DcaConfig) -> dict[str, Any]:
+    return asdict(cfg)
 
 
 def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
@@ -48,6 +58,17 @@ def _market_maker_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
         symbols.setdefault(cfg.market_maker.exchange, set()).add(
             cfg.market_maker.symbol
         )
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _grid_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {
+        exchange: set(items)
+        for exchange, items in _spot_symbols_by_exchange(cfg).items()
+    }
+    for strategy_cfg in (cfg.spot_grid, cfg.dca):
+        if strategy_cfg.exchange and strategy_cfg.symbol:
+            symbols.setdefault(strategy_cfg.exchange, set()).add(strategy_cfg.symbol)
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
@@ -159,6 +180,37 @@ def _slow_execution_overrides_from_payload(
     return overrides
 
 
+def _account_symbol_overrides_from_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_exchanges: set[str] | None,
+    symbols_by_exchange: dict[str, list[str]] | None,
+) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    symbols_by_exchange = symbols_by_exchange or {}
+    if "exchange" in payload:
+        exchange = str(payload["exchange"]).strip()
+        if not exchange:
+            raise ValueError("exchange is required")
+        if allowed_exchanges is not None and exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        overrides["exchange"] = exchange
+
+    if "symbol" in payload:
+        symbol = str(payload["symbol"]).strip()
+        if not symbol:
+            raise ValueError("symbol is required")
+        selected_exchange = overrides.get("exchange")
+        if selected_exchange and symbols_by_exchange.get(selected_exchange):
+            if symbol not in symbols_by_exchange[selected_exchange]:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        overrides["symbol"] = symbol
+    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
+        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
+
+    return overrides
+
+
 def _market_maker_overrides_from_payload(
     payload: dict[str, Any],
     allowed_exchanges: set[str] | None = None,
@@ -230,6 +282,140 @@ def _market_maker_overrides_from_payload(
         "inventory_target_base",
         "inventory_band_base",
         "inventory_max_deviation_base",
+    }
+    for field in non_negative_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    return overrides
+
+
+def _spot_grid_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    overrides = _account_symbol_overrides_from_payload(
+        payload,
+        allowed_exchanges=allowed_exchanges,
+        symbols_by_exchange=symbols_by_exchange,
+    )
+
+    for field in {"enabled", "live_enabled", "auto_rebuild", "post_only"}:
+        if field in payload:
+            if not isinstance(payload[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+            overrides[field] = payload[field]
+
+    if "spacing" in payload:
+        spacing = str(payload["spacing"]).strip().lower()
+        if spacing not in {"arithmetic", "geometric"}:
+            raise ValueError("spacing must be arithmetic or geometric")
+        overrides["spacing"] = spacing
+
+    if "grid_count" in payload:
+        overrides["grid_count"] = _non_negative_int(payload, "grid_count")
+        if overrides["grid_count"] <= 0:
+            raise ValueError("grid_count must be positive")
+
+    if "max_open_orders" in payload:
+        overrides["max_open_orders"] = _non_negative_int(payload, "max_open_orders")
+        if overrides["max_open_orders"] <= 0:
+            raise ValueError("max_open_orders must be positive")
+
+    if "cancel_retry_attempts" in payload:
+        overrides["cancel_retry_attempts"] = _non_negative_int(
+            payload,
+            "cancel_retry_attempts",
+        )
+
+    positive_float_fields = {
+        "lower_price",
+        "upper_price",
+        "quote_per_grid",
+    }
+    for field in positive_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+            if overrides[field] <= 0:
+                raise ValueError(f"{field} must be positive")
+
+    non_negative_float_fields = {
+        "take_profit_price",
+        "stop_loss_price",
+        "max_position_base",
+        "min_grid_step_bps",
+    }
+    for field in non_negative_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    lower = overrides.get("lower_price")
+    upper = overrides.get("upper_price")
+    if lower is not None and upper is not None and upper <= lower:
+        raise ValueError("upper_price must be greater than lower_price")
+
+    return overrides
+
+
+def _dca_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    overrides = _account_symbol_overrides_from_payload(
+        payload,
+        allowed_exchanges=allowed_exchanges,
+        symbols_by_exchange=symbols_by_exchange,
+    )
+
+    for field in {"enabled", "live_enabled"}:
+        if field in payload:
+            if not isinstance(payload[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+            overrides[field] = payload[field]
+
+    if "side" in payload:
+        side = str(payload["side"]).strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        overrides["side"] = side
+
+    if "price_mode" in payload:
+        price_mode = str(payload["price_mode"]).strip().lower()
+        if price_mode not in {"taker", "maker"}:
+            raise ValueError("price_mode must be taker or maker")
+        overrides["price_mode"] = price_mode
+
+    if "max_orders" in payload:
+        overrides["max_orders"] = _non_negative_int(payload, "max_orders")
+        if overrides["max_orders"] <= 0:
+            raise ValueError("max_orders must be positive")
+
+    positive_float_fields = {
+        "interval_seconds",
+        "quote_per_order",
+        "size_multiplier",
+    }
+    for field in positive_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+            if overrides[field] <= 0:
+                raise ValueError(f"{field} must be positive")
+    if "size_multiplier" in overrides and overrides["size_multiplier"] < 1:
+        raise ValueError("size_multiplier must be greater than or equal to 1")
+
+    non_negative_float_fields = {
+        "trigger_price",
+        "average_entry_price",
+        "take_profit_price",
+        "max_position_base",
+        "max_loss_quote",
+        "price_offset_bps",
     }
     for field in non_negative_float_fields:
         if field in payload:

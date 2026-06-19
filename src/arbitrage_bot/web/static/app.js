@@ -245,6 +245,8 @@ function balanceStatusClass(status) {
       if (value === "market_maker") return "Market Maker";
       if (value === "arbitrage") return "Arbitrage";
       if (value === "auto_buy_sell" || value === "slow_execution") return "Auto Buy/Sell";
+      if (value === "spot_grid") return "Spot Grid";
+      if (value === "dca") return "DCA Bot";
       if (value === "manual") return "Manual";
       if (value === "unattributed") return "Unattributed";
       return value || "--";
@@ -1341,6 +1343,62 @@ function balanceStatusClass(status) {
       body.appendChild(tr);
     }
 
+    function renderSpotGrid(spotGrid) {
+      const body = document.getElementById("grid-orders");
+      body.innerHTML = "";
+      const orders = spotGrid?.plan?.orders || [];
+      if (orders.length === 0) {
+        const tr = document.createElement("tr");
+        const status = spotGrid?.error || spotGrid?.plan?.reason || spotGrid?.status || "disabled";
+        tr.innerHTML = `<td colspan="6">${escapeHtml(status)}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const order of orders) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${String(order.side || "").toUpperCase()}</td>
+          <td class="num">${order.level}</td>
+          <td class="num">${fmt.format(order.price)}</td>
+          <td class="num">${compact.format(order.amount)}</td>
+          <td class="num">${formatSymbolQuantity(order.quote_notional, spotGrid.plan.symbol, "quote")}</td>
+          <td class="num">${Number(order.distance_bps || 0).toFixed(2)} bps</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderDca(dca) {
+      const body = document.getElementById("dca-orders");
+      body.innerHTML = "";
+      const plan = dca?.plan;
+      const schedule = plan?.order_schedule || [];
+      if (!plan || schedule.length === 0) {
+        const tr = document.createElement("tr");
+        const status = dca?.error || dca?.status || "disabled";
+        tr.innerHTML = `<td colspan="6">${escapeHtml(status)}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      const nextOrder = plan.next_order;
+      const displayPrice = nextOrder?.price || (plan.side === "buy" ? plan.best_ask : plan.best_bid);
+      for (const row of schedule) {
+        const isNext = nextOrder && Number(row.order_index) === Number(nextOrder.order_index);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="num">${row.order_index}</td>
+          <td class="${plan.side === "buy" ? "side-buy" : "side-sell"}">${String(plan.side || "").toUpperCase()}</td>
+          <td class="num">${fmt.format(displayPrice)}</td>
+          <td class="num">${compact.format(row.amount_at_current_price || 0)}</td>
+          <td class="num">${formatSymbolQuantity(row.quote_notional, plan.symbol, "quote")}</td>
+          <td>${isNext ? "Next" : escapeHtml(plan.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function formatDue(ts) {
       if (!ts) return "--";
       const seconds = ts - Date.now() / 1000;
@@ -1563,6 +1621,8 @@ function balanceStatusClass(status) {
     function displayStrategy(value) {
       if (value === "slow_execution") return "Auto Buy/Sell";
       if (value === "market_maker") return "Market Maker";
+      if (value === "spot_grid") return "Spot Grid";
+      if (value === "dca") return "DCA Bot";
       if (value === "spot_spread") return "Spot Arbitrage";
       if (value === "cash_and_carry") return "Cash & Carry";
       return value || "--";
@@ -1654,6 +1714,10 @@ function balanceStatusClass(status) {
     let mmFormBusy = false;
     let slowFormDirty = false;
     let slowFormBusy = false;
+    let gridFormDirty = false;
+    let gridFormBusy = false;
+    let dcaFormDirty = false;
+    let dcaFormBusy = false;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -2063,6 +2127,195 @@ function balanceStatusClass(status) {
       }
     }
 
+    function selectedStrategyAccount(inputName) {
+      return document.querySelector(`input[name="${inputName}"]:checked`)?.value || "";
+    }
+
+    function selectedStrategySymbol(inputName) {
+      return document.querySelector(`input[name="${inputName}"]:checked`)?.dataset.symbol || "";
+    }
+
+    function renderStrategyAccounts(containerId, inputName, accounts, selectedExchange, onDirty) {
+      const body = document.getElementById(containerId);
+      const list = Array.isArray(accounts) ? accounts : [];
+      const signature = JSON.stringify({
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
+        selectedExchange,
+      });
+      if (body.dataset.signature === signature) return;
+      body.dataset.signature = signature;
+      body.innerHTML = "";
+      if (list.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "subtle";
+        empty.textContent = "No accounts";
+        body.appendChild(empty);
+        return;
+      }
+
+      for (const account of list) {
+        const label = document.createElement("label");
+        label.className = "account-option";
+        const symbol = account.symbol || (account.symbols || [])[0] || "";
+        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.name = inputName;
+        checkbox.value = account.key;
+        checkbox.dataset.symbol = symbol;
+        checkbox.checked = account.key === selectedExchange;
+        checkbox.addEventListener("change", (event) => {
+          if (event.target.checked) {
+            document.querySelectorAll(`input[name="${inputName}"]`).forEach((item) => {
+              if (item !== event.target) item.checked = false;
+            });
+          } else if (!selectedStrategyAccount(inputName)) {
+            event.target.checked = true;
+          }
+          onDirty();
+        });
+        const textNode = document.createElement("span");
+        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
+        label.appendChild(checkbox);
+        label.appendChild(textNode);
+        body.appendChild(label);
+      }
+    }
+
+    function renderSpotGridConfig(config, accounts) {
+      if (!config || gridFormDirty || gridFormBusy) return;
+      document.getElementById("grid-enabled").checked = Boolean(config.enabled);
+      document.getElementById("grid-live-enabled").checked = Boolean(config.live_enabled);
+      renderStrategyAccounts("grid-accounts", "grid-account", accounts, config.exchange || "", () => {
+        gridFormDirty = true;
+      });
+      setNumericField("grid-lower", config.lower_price || 0);
+      setNumericField("grid-upper", config.upper_price || 0);
+      setNumericField("grid-count", config.grid_count || 1);
+      document.getElementById("grid-spacing").value = config.spacing || "arithmetic";
+      setNumericField("grid-quote", config.quote_per_grid || 0);
+      setNumericField("grid-take-profit", config.take_profit_price || 0);
+      setNumericField("grid-stop-loss", config.stop_loss_price || 0);
+      document.getElementById("grid-auto-rebuild").checked = Boolean(config.auto_rebuild);
+      setNumericField("grid-max-position", config.max_position_base || 0);
+      setNumericField("grid-max-open-orders", config.max_open_orders || 1);
+      setNumericField("grid-min-step", config.min_grid_step_bps || 0);
+      setNumericField("grid-cancel-retries", config.cancel_retry_attempts || 0);
+      document.getElementById("grid-post-only").checked = Boolean(config.post_only);
+    }
+
+    function spotGridPayloadFromForm() {
+      return {
+        enabled: document.getElementById("grid-enabled").checked,
+        live_enabled: document.getElementById("grid-live-enabled").checked,
+        exchange: selectedStrategyAccount("grid-account"),
+        symbol: selectedStrategySymbol("grid-account"),
+        lower_price: numericValue("grid-lower"),
+        upper_price: numericValue("grid-upper"),
+        grid_count: numericValue("grid-count"),
+        spacing: document.getElementById("grid-spacing").value,
+        quote_per_grid: numericValue("grid-quote"),
+        take_profit_price: numericValue("grid-take-profit"),
+        stop_loss_price: numericValue("grid-stop-loss"),
+        auto_rebuild: document.getElementById("grid-auto-rebuild").checked,
+        max_position_base: numericValue("grid-max-position"),
+        max_open_orders: numericValue("grid-max-open-orders"),
+        min_grid_step_bps: numericValue("grid-min-step"),
+        cancel_retry_attempts: numericValue("grid-cancel-retries"),
+        post_only: document.getElementById("grid-post-only").checked,
+      };
+    }
+
+    async function applySpotGridConfig(event) {
+      event.preventDefault();
+      if (gridFormBusy) return;
+      gridFormBusy = true;
+      const button = document.getElementById("grid-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/spot-grid", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(spotGridPayloadFromForm()),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "spot grid update failed");
+        gridFormDirty = false;
+        await refresh();
+      } catch (error) {
+        text("grid-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        gridFormBusy = false;
+      }
+    }
+
+    function renderDcaConfig(config, accounts) {
+      if (!config || dcaFormDirty || dcaFormBusy) return;
+      document.getElementById("dca-enabled").checked = Boolean(config.enabled);
+      document.getElementById("dca-live-enabled").checked = Boolean(config.live_enabled);
+      renderStrategyAccounts("dca-accounts", "dca-account", accounts, config.exchange || "", () => {
+        dcaFormDirty = true;
+      });
+      document.getElementById("dca-side").value = config.side || "buy";
+      setNumericField("dca-trigger", config.trigger_price || 0);
+      setNumericField("dca-interval", config.interval_seconds || 3600);
+      setNumericField("dca-quote", config.quote_per_order || 0);
+      setNumericField("dca-multiplier", config.size_multiplier || 1);
+      setNumericField("dca-max-orders", config.max_orders || 1);
+      setNumericField("dca-average-entry", config.average_entry_price || 0);
+      setNumericField("dca-take-profit", config.take_profit_price || 0);
+      setNumericField("dca-max-position", config.max_position_base || 0);
+      setNumericField("dca-max-loss", config.max_loss_quote || 0);
+      document.getElementById("dca-price-mode").value = config.price_mode || "taker";
+      setNumericField("dca-offset-bps", config.price_offset_bps || 0);
+    }
+
+    function dcaPayloadFromForm() {
+      return {
+        enabled: document.getElementById("dca-enabled").checked,
+        live_enabled: document.getElementById("dca-live-enabled").checked,
+        exchange: selectedStrategyAccount("dca-account"),
+        symbol: selectedStrategySymbol("dca-account"),
+        side: document.getElementById("dca-side").value,
+        trigger_price: numericValue("dca-trigger"),
+        interval_seconds: numericValue("dca-interval"),
+        quote_per_order: numericValue("dca-quote"),
+        size_multiplier: numericValue("dca-multiplier"),
+        max_orders: numericValue("dca-max-orders"),
+        average_entry_price: numericValue("dca-average-entry"),
+        take_profit_price: numericValue("dca-take-profit"),
+        max_position_base: numericValue("dca-max-position"),
+        max_loss_quote: numericValue("dca-max-loss"),
+        price_mode: document.getElementById("dca-price-mode").value,
+        price_offset_bps: numericValue("dca-offset-bps"),
+      };
+    }
+
+    async function applyDcaConfig(event) {
+      event.preventDefault();
+      if (dcaFormBusy) return;
+      dcaFormBusy = true;
+      const button = document.getElementById("dca-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/dca", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(dcaPayloadFromForm()),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "dca update failed");
+        dcaFormDirty = false;
+        await refresh();
+      } catch (error) {
+        text("dca-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        dcaFormBusy = false;
+      }
+    }
+
     async function createAutoBuySellTask() {
       if (slowFormBusy) return;
       slowFormBusy = true;
@@ -2196,6 +2449,25 @@ function balanceStatusClass(status) {
       const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
       text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
 
+      const gridPlan = data.spot_grid?.plan;
+      const gridReason = (data.spot_grid?.safety?.reasons || [])[0] || data.spot_grid?.error || "";
+      text(
+        "grid-meta",
+        gridPlan
+          ? `${data.spot_grid.mode || "dry_run"} · ${gridPlan.exchange} ${gridPlan.symbol} · mid ${fmt.format(gridPlan.mid_price)} · step ${Number(gridPlan.grid_step_bps || 0).toFixed(2)} bps · orders ${(gridPlan.orders || []).length}${gridReason ? ` · ${gridReason}` : ""}`
+          : `${data.spot_grid?.status || "disabled"}${gridReason ? ` · ${gridReason}` : ""}`
+      );
+
+      const dcaPlan = data.dca?.plan;
+      const dcaReason = (data.dca?.safety?.reasons || [])[0] || data.dca?.error || "";
+      const dcaNext = dcaPlan?.next_order ? `next ${fmt.format(dcaPlan.next_order.price)}` : (dcaPlan?.reason || data.dca?.status || "disabled");
+      text(
+        "dca-meta",
+        dcaPlan
+          ? `${data.dca.mode || "dry_run"} · ${dcaPlan.exchange} ${dcaPlan.symbol} · ${String(dcaPlan.side || "").toUpperCase()} · ${dcaNext} · ${dcaPlan.max_orders || 0} orders${dcaReason ? ` · ${dcaReason}` : ""}`
+          : `${data.dca?.status || "disabled"}${dcaReason ? ` · ${dcaReason}` : ""}`
+      );
+
       renderPortfolio(data.portfolio);
       renderStrategySummaries(data);
     }
@@ -2218,6 +2490,10 @@ function balanceStatusClass(status) {
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderSlowExecution(data.slow_execution);
         renderSlowExecutionTasks(data.slow_execution?.tasks);
+        renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
+        renderSpotGrid(data.spot_grid);
+        renderDcaConfig(data.dca?.config, data.dca?.accounts);
+        renderDca(data.dca);
         return;
       }
       if (activePage === "records") {
@@ -2312,6 +2588,14 @@ function balanceStatusClass(status) {
       slowFormDirty = true;
     });
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
+    document.getElementById("grid-form").addEventListener("input", () => {
+      gridFormDirty = true;
+    });
+    document.getElementById("grid-form").addEventListener("submit", applySpotGridConfig);
+    document.getElementById("dca-form").addEventListener("input", () => {
+      dcaFormDirty = true;
+    });
+    document.getElementById("dca-form").addEventListener("submit", applyDcaConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
     setInterval(refresh, 1000);

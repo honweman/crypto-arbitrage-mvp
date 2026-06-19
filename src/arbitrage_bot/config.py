@@ -118,6 +118,49 @@ class SlowExecutionConfig:
 
 
 @dataclass(frozen=True)
+class SpotGridConfig:
+    enabled: bool = False
+    live_enabled: bool = False
+    exchange: str = ""
+    symbol: str = ""
+    lower_price: float = 0.0
+    upper_price: float = 0.0
+    grid_count: int = 10
+    spacing: str = "arithmetic"
+    quote_per_grid: float = 1.0
+    take_profit_price: float = 0.0
+    stop_loss_price: float = 0.0
+    auto_rebuild: bool = False
+    max_position_base: float = 0.0
+    max_open_orders: int = 20
+    min_grid_step_bps: float = 10.0
+    cancel_retry_attempts: int = 3
+    post_only: bool = True
+    client_order_prefix: str = "crypto-arb-grid"
+
+
+@dataclass(frozen=True)
+class DcaConfig:
+    enabled: bool = False
+    live_enabled: bool = False
+    exchange: str = ""
+    symbol: str = ""
+    side: str = "buy"
+    trigger_price: float = 0.0
+    interval_seconds: float = 3600.0
+    quote_per_order: float = 1.0
+    size_multiplier: float = 1.0
+    max_orders: int = 10
+    average_entry_price: float = 0.0
+    take_profit_price: float = 0.0
+    max_position_base: float = 0.0
+    max_loss_quote: float = 0.0
+    price_mode: str = "taker"
+    price_offset_bps: float = 0.0
+    client_order_prefix: str = "crypto-arb-dca"
+
+
+@dataclass(frozen=True)
 class AssetPosition:
     asset: str
     position_base: float = 0.0
@@ -244,6 +287,8 @@ class BotConfig:
     cash_and_carry_pairs: list[CashAndCarryPair]
     spot_exchanges: list[ExchangeConfig]
     derivative_exchanges: list[ExchangeConfig]
+    spot_grid: SpotGridConfig = field(default_factory=SpotGridConfig)
+    dca: DcaConfig = field(default_factory=DcaConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
     strategy_timeline: StrategyTimelineConfig = field(
@@ -355,6 +400,8 @@ def load_config(path: str | Path) -> BotConfig:
     )
     market_maker_raw = raw.get("market_maker", {})
     slow_execution_raw = raw.get("slow_execution", {})
+    spot_grid_raw = raw.get("spot_grid", {})
+    dca_raw = raw.get("dca", {})
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
     trade_log_raw = raw.get("trade_log", {})
@@ -480,6 +527,53 @@ def load_config(path: str | Path) -> BotConfig:
             client_order_prefix=slow_execution_raw.get(
                 "client_order_prefix",
                 "crypto-arb-slow",
+            ),
+        ),
+        spot_grid=SpotGridConfig(
+            enabled=bool(spot_grid_raw.get("enabled", False)),
+            live_enabled=bool(spot_grid_raw.get("live_enabled", False)),
+            exchange=spot_grid_raw.get("exchange", ""),
+            symbol=spot_grid_raw.get("symbol", ""),
+            lower_price=float(spot_grid_raw.get("lower_price", 0.0)),
+            upper_price=float(spot_grid_raw.get("upper_price", 0.0)),
+            grid_count=int(spot_grid_raw.get("grid_count", 10)),
+            spacing=str(spot_grid_raw.get("spacing", "arithmetic")).lower(),
+            quote_per_grid=float(spot_grid_raw.get("quote_per_grid", 1.0)),
+            take_profit_price=float(spot_grid_raw.get("take_profit_price", 0.0)),
+            stop_loss_price=float(spot_grid_raw.get("stop_loss_price", 0.0)),
+            auto_rebuild=bool(spot_grid_raw.get("auto_rebuild", False)),
+            max_position_base=float(spot_grid_raw.get("max_position_base", 0.0)),
+            max_open_orders=int(spot_grid_raw.get("max_open_orders", 20)),
+            min_grid_step_bps=float(spot_grid_raw.get("min_grid_step_bps", 10.0)),
+            cancel_retry_attempts=int(
+                spot_grid_raw.get("cancel_retry_attempts", 3)
+            ),
+            post_only=bool(spot_grid_raw.get("post_only", True)),
+            client_order_prefix=spot_grid_raw.get(
+                "client_order_prefix",
+                "crypto-arb-grid",
+            ),
+        ),
+        dca=DcaConfig(
+            enabled=bool(dca_raw.get("enabled", False)),
+            live_enabled=bool(dca_raw.get("live_enabled", False)),
+            exchange=dca_raw.get("exchange", ""),
+            symbol=dca_raw.get("symbol", ""),
+            side=str(dca_raw.get("side", "buy")).lower(),
+            trigger_price=float(dca_raw.get("trigger_price", 0.0)),
+            interval_seconds=float(dca_raw.get("interval_seconds", 3600.0)),
+            quote_per_order=float(dca_raw.get("quote_per_order", 1.0)),
+            size_multiplier=float(dca_raw.get("size_multiplier", 1.0)),
+            max_orders=int(dca_raw.get("max_orders", 10)),
+            average_entry_price=float(dca_raw.get("average_entry_price", 0.0)),
+            take_profit_price=float(dca_raw.get("take_profit_price", 0.0)),
+            max_position_base=float(dca_raw.get("max_position_base", 0.0)),
+            max_loss_quote=float(dca_raw.get("max_loss_quote", 0.0)),
+            price_mode=str(dca_raw.get("price_mode", "taker")).lower(),
+            price_offset_bps=float(dca_raw.get("price_offset_bps", 0.0)),
+            client_order_prefix=dca_raw.get(
+                "client_order_prefix",
+                "crypto-arb-dca",
             ),
         ),
         portfolio=PortfolioConfig(

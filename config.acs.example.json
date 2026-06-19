@@ -89,6 +89,45 @@
     "cancel_existing_orders": false,
     "client_order_prefix": "crypto-arb-slow"
   },
+  "spot_grid": {
+    "enabled": false,
+    "live_enabled": false,
+    "exchange": "bybit-spot",
+    "symbol": "ACS/USDT",
+    "lower_price": 0.0,
+    "upper_price": 0.0,
+    "grid_count": 10,
+    "spacing": "arithmetic",
+    "quote_per_grid": 1.0,
+    "take_profit_price": 0.0,
+    "stop_loss_price": 0.0,
+    "auto_rebuild": false,
+    "max_position_base": 0.0,
+    "max_open_orders": 20,
+    "min_grid_step_bps": 10.0,
+    "cancel_retry_attempts": 3,
+    "post_only": true,
+    "client_order_prefix": "crypto-arb-grid"
+  },
+  "dca": {
+    "enabled": false,
+    "live_enabled": false,
+    "exchange": "bybit-spot",
+    "symbol": "ACS/USDT",
+    "side": "buy",
+    "trigger_price": 0.0,
+    "interval_seconds": 3600.0,
+    "quote_per_order": 1.0,
+    "size_multiplier": 1.0,
+    "max_orders": 10,
+    "average_entry_price": 0.0,
+    "take_profit_price": 0.0,
+    "max_position_base": 0.0,
+    "max_loss_quote": 0.0,
+    "price_mode": "taker",
+    "price_offset_bps": 0.0,
+    "client_order_prefix": "crypto-arb-dca"
+  },
   "portfolio": {
     "enabled": true,
     "positions": [
@@ -117,6 +156,8 @@
     "strategy_enabled": {
       "market_maker": true,
       "slow_execution": true,
+      "spot_grid": true,
+      "dca": true,
       "spot_spread": true,
       "cash_and_carry": true
     },

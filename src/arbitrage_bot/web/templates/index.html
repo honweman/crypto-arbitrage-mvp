@@ -778,6 +778,195 @@
 
     <section data-page="settings" class="compact-section">
       <div class="section-title">
+        <h2>Spot Grid</h2>
+        <span id="grid-meta" class="subtle"></span>
+      </div>
+      <form id="grid-form" class="control-panel">
+        <label class="check-field">
+          <input id="grid-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="grid-live-enabled" type="checkbox">
+          Live Ready
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="grid-accounts" class="account-options"></div>
+        </div>
+        <div class="form-divider">Range</div>
+        <div class="field">
+          <label for="grid-lower">Lower</label>
+          <input id="grid-lower" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="grid-upper">Upper</label>
+          <input id="grid-upper" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="grid-count">Grids</label>
+          <input id="grid-count" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="grid-spacing">Spacing</label>
+          <select id="grid-spacing">
+            <option value="arithmetic">Arithmetic</option>
+            <option value="geometric">Geometric</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="grid-quote">Quote/Grid</label>
+          <input id="grid-quote" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Stops</div>
+        <div class="field">
+          <label for="grid-take-profit">Take Profit</label>
+          <input id="grid-take-profit" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="grid-stop-loss">Stop Loss</label>
+          <input id="grid-stop-loss" type="number" min="0" step="any">
+        </div>
+        <label class="check-field">
+          <input id="grid-auto-rebuild" type="checkbox">
+          Auto Rebuild
+        </label>
+        <div class="form-divider">Risk</div>
+        <div class="field">
+          <label for="grid-max-position">Max Position</label>
+          <input id="grid-max-position" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="grid-max-open-orders">Max Orders</label>
+          <input id="grid-max-open-orders" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="grid-min-step">Min Step bps</label>
+          <input id="grid-min-step" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="grid-cancel-retries">Cancel Retries</label>
+          <input id="grid-cancel-retries" type="number" min="0" step="1">
+        </div>
+        <label class="check-field">
+          <input id="grid-post-only" type="checkbox">
+          Post Only
+        </label>
+        <button id="grid-apply" class="control-button" type="submit">Apply</button>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th class="num">Level</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Quote</th>
+              <th class="num">Distance</th>
+            </tr>
+          </thead>
+          <tbody id="grid-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>DCA Bot</h2>
+        <span id="dca-meta" class="subtle"></span>
+      </div>
+      <form id="dca-form" class="control-panel">
+        <label class="check-field">
+          <input id="dca-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="dca-live-enabled" type="checkbox">
+          Live Ready
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="dca-accounts" class="account-options"></div>
+        </div>
+        <div class="field">
+          <label for="dca-side">Side</label>
+          <select id="dca-side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="form-divider">Trigger</div>
+        <div class="field">
+          <label for="dca-trigger">Trigger Price</label>
+          <input id="dca-trigger" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-interval">Interval Sec</label>
+          <input id="dca-interval" type="number" min="1" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-quote">Quote/Order</label>
+          <input id="dca-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-multiplier">Multiplier</label>
+          <input id="dca-multiplier" type="number" min="1" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-max-orders">Max Orders</label>
+          <input id="dca-max-orders" type="number" min="1" step="1">
+        </div>
+        <div class="form-divider">Exit</div>
+        <div class="field">
+          <label for="dca-average-entry">Avg Cost</label>
+          <input id="dca-average-entry" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-take-profit">Take Profit</label>
+          <input id="dca-take-profit" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-max-position">Max Position</label>
+          <input id="dca-max-position" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="dca-max-loss">Max Loss</label>
+          <input id="dca-max-loss" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Pricing</div>
+        <div class="field">
+          <label for="dca-price-mode">Price Mode</label>
+          <select id="dca-price-mode">
+            <option value="taker">Taker Top</option>
+            <option value="maker">Maker Top</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="dca-offset-bps">Offset bps</label>
+          <input id="dca-offset-bps" type="number" min="0" step="any">
+        </div>
+        <button id="dca-apply" class="control-button" type="submit">Apply</button>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Order</th>
+              <th>Side</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Quote</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="dca-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
         <h2>Market Maker</h2>
         <span id="mm-meta" class="subtle"></span>
       </div>

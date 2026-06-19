@@ -55,6 +55,7 @@ from ..config import (
 )
 from ..exchanges import ExchangeManager, limit_order_features
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
+from ..grid_trading import build_dca_plan, build_spot_grid_plan
 from ..main import (
     StrategyName,
     _quote_rates_from_sources,
@@ -116,18 +117,23 @@ from ..trade_log import (
 )
 from ..web_config import (
     _cash_and_carry_pairs_from_payload,
+    _dca_overrides_from_payload,
+    _grid_symbols_by_exchange,
     _market_maker_overrides_from_payload,
     _market_maker_symbols_by_exchange,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
+    _spot_grid_overrides_from_payload,
     _spot_markets_from_payload,
     _spot_symbols_by_exchange,
     cash_and_carry_pairs_to_list,
+    dca_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
     risk_config_to_dict,
     slow_execution_accounts,
     slow_execution_config_to_dict,
+    spot_grid_config_to_dict,
     spot_markets_to_list,
 )
 
@@ -139,6 +145,8 @@ SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS = 10.0
 STRATEGY_IDS = {
     "market_maker",
     "slow_execution",
+    "spot_grid",
+    "dca",
     "spot_spread",
     "cash_and_carry",
 }
@@ -573,6 +581,24 @@ def build_trading_console_payload(
             and _risk_strategy_enabled(cfg, "slow_execution"),
         ),
         strategy_row(
+            strategy_id="spot_grid",
+            label="Spot Grid",
+            configured=cfg.spot_grid.enabled,
+            exchange=cfg.spot_grid.exchange,
+            symbol=cfg.spot_grid.symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "spot_grid"),
+            live_ready=cfg.spot_grid.live_enabled,
+        ),
+        strategy_row(
+            strategy_id="dca",
+            label="DCA Bot",
+            configured=cfg.dca.enabled,
+            exchange=cfg.dca.exchange,
+            symbol=cfg.dca.symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "dca"),
+            live_ready=cfg.dca.live_enabled,
+        ),
+        strategy_row(
             strategy_id="spot_spread",
             label="Spot Arbitrage",
             configured=bool(cfg.spot_markets),
@@ -623,6 +649,12 @@ def _exchange_balance_symbols(
     runtime_exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     if runtime_exec_cfg.exchange and runtime_exec_cfg.symbol:
         symbols.setdefault(runtime_exec_cfg.exchange, set()).add(runtime_exec_cfg.symbol)
+
+    if cfg.spot_grid.exchange and cfg.spot_grid.symbol:
+        symbols.setdefault(cfg.spot_grid.exchange, set()).add(cfg.spot_grid.symbol)
+
+    if cfg.dca.exchange and cfg.dca.symbol:
+        symbols.setdefault(cfg.dca.exchange, set()).add(cfg.dca.symbol)
 
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
@@ -713,6 +745,8 @@ def _readiness_strategy_reasons(
     account_statuses: dict[str, dict[str, Any]],
     market_maker: dict[str, Any] | None,
     slow_execution: dict[str, Any] | None,
+    spot_grid: dict[str, Any] | None = None,
+    dca: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     strategy_id = str(strategy.get("id") or "")
@@ -749,6 +783,21 @@ def _readiness_strategy_reasons(
     if strategy_id == "slow_execution" and isinstance(slow_execution, dict):
         if slow_execution.get("status") == "error" and slow_execution.get("error"):
             reasons.append(str(slow_execution["error"]))
+    strategy_payload = {
+        "spot_grid": spot_grid,
+        "dca": dca,
+    }.get(strategy_id)
+    if isinstance(strategy_payload, dict):
+        if strategy_payload.get("status") == "error" and strategy_payload.get("error"):
+            reasons.append(str(strategy_payload["error"]))
+        safety = (
+            strategy_payload.get("safety")
+            if isinstance(strategy_payload.get("safety"), dict)
+            else {}
+        )
+        for message in list(safety.get("reasons", []) or [])[:2]:
+            if message:
+                reasons.append(str(message))
 
     return _dedupe_readiness_messages(reasons)
 
@@ -761,6 +810,8 @@ def build_readiness_payload(
     trading_console: dict[str, Any] | None = None,
     market_maker: dict[str, Any] | None = None,
     slow_execution: dict[str, Any] | None = None,
+    spot_grid: dict[str, Any] | None = None,
+    dca: dict[str, Any] | None = None,
     markets: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -769,6 +820,8 @@ def build_readiness_payload(
     trading_console = trading_console or build_trading_console_payload(cfg)
     market_maker = market_maker or {}
     slow_execution = slow_execution or {}
+    spot_grid = spot_grid or {}
+    dca = dca or {}
     symbols_by_exchange = _exchange_balance_symbols(cfg)
     balance_by_exchange = _account_payload_by_exchange(account_balances)
     order_by_exchange = _account_payload_by_exchange(order_activity)
@@ -863,6 +916,8 @@ def build_readiness_payload(
             account_statuses=account_statuses,
             market_maker=market_maker,
             slow_execution=slow_execution,
+            spot_grid=spot_grid,
+            dca=dca,
         )
         if strategy.get("live"):
             status = "live"
@@ -2090,6 +2145,14 @@ def _load_runtime_overrides(path: Path, cfg: BotConfig) -> dict[str, Any]:
             raw.get("slow_execution_overrides"),
             cfg.slow_execution,
         ),
+        "spot_grid_overrides": _dataclass_overrides(
+            raw.get("spot_grid_overrides"),
+            cfg.spot_grid,
+        ),
+        "dca_overrides": _dataclass_overrides(
+            raw.get("dca_overrides"),
+            cfg.dca,
+        ),
         "strategy_paused": {
             key: bool(value)
             for key, value in (raw.get("strategy_paused") or {}).items()
@@ -2356,6 +2419,50 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "active_count": 0,
                 "updated_at": time.time(),
             },
+            "error": None,
+        },
+        "spot_grid": {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "config": spot_grid_config_to_dict(cfg.spot_grid),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _grid_symbols_by_exchange(cfg),
+            ),
+            "quote_conversion": (
+                market_maker_quote_conversion(cfg, cfg.spot_grid.symbol)
+                if cfg.spot_grid.symbol
+                else {
+                    "quote_currency": "",
+                    "common_quote_currency": cfg.common_quote_currency,
+                    "quote_to_common_rate": None,
+                    "available": False,
+                }
+            ),
+            "safety": None,
+            "error": None,
+        },
+        "dca": {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "config": dca_config_to_dict(cfg.dca),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _grid_symbols_by_exchange(cfg),
+            ),
+            "quote_conversion": (
+                market_maker_quote_conversion(cfg, cfg.dca.symbol)
+                if cfg.dca.symbol
+                else {
+                    "quote_currency": "",
+                    "common_quote_currency": cfg.common_quote_currency,
+                    "quote_to_common_rate": None,
+                    "available": False,
+                }
+            ),
+            "safety": None,
             "error": None,
         },
         "spot_arbitrage": {
@@ -2711,6 +2818,427 @@ def build_slow_execution_payload(
         "plan": plan.to_dict(),
         "config": config_payload,
         "accounts": accounts,
+        "error": None,
+    }
+
+
+def _strategy_quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]:
+    if not symbol:
+        return {
+            "quote_currency": "",
+            "common_quote_currency": cfg.common_quote_currency,
+            "quote_to_common_rate": None,
+            "available": False,
+        }
+    return market_maker_quote_conversion(cfg, symbol)
+
+
+def _converted_market_context(
+    *,
+    exchange: str,
+    symbol: str,
+    best_bid: float,
+    best_ask: float,
+    mid_price: float,
+    bid_depth_quote: float,
+    ask_depth_quote: float,
+    max_level_gap_bps: float,
+    order_book_timestamp_ms: int | None,
+    order_book_received_at: float | None,
+    quote_rate_for_risk: float,
+) -> RiskMarketContext:
+    return RiskMarketContext(
+        exchange=exchange,
+        symbol=symbol,
+        best_bid=best_bid * quote_rate_for_risk,
+        best_ask=best_ask * quote_rate_for_risk,
+        mid_price=mid_price * quote_rate_for_risk,
+        bid_depth_quote=bid_depth_quote * quote_rate_for_risk,
+        ask_depth_quote=ask_depth_quote * quote_rate_for_risk,
+        max_level_gap_bps=max_level_gap_bps,
+        order_book_timestamp_ms=order_book_timestamp_ms,
+        order_book_received_at=order_book_received_at,
+    )
+
+
+def _strategy_safety_base(
+    cfg: BotConfig,
+    conversion: dict[str, Any],
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "approved": False,
+        "level": "blocked" if error else "disabled",
+        "currency": cfg.common_quote_currency,
+        "quote_conversion": conversion,
+        "order_count": 0,
+        "buy_order_count": 0,
+        "sell_order_count": 0,
+        "total_quote_notional": 0.0,
+        "max_order_quote_notional": 0.0,
+        "min_order_quote_notional": 0.0,
+        "reasons": [error] if error else [],
+        "warnings": [],
+        "risk": None,
+    }
+
+
+def build_spot_grid_safety_payload(
+    cfg: BotConfig,
+    plan: Any | None,
+    conversion: dict[str, Any],
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    base_payload = _strategy_safety_base(cfg, conversion, error=error)
+    if plan is None:
+        return base_payload
+
+    quote_rate = conversion.get("quote_to_common_rate")
+    quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
+    quote_values = [
+        order.quote_notional * quote_rate_for_risk for order in plan.orders
+    ]
+    risk_orders = [
+        RiskOrder(
+            strategy="spot_grid",
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            side=order.side,
+            amount=order.amount,
+            price=order.price * quote_rate_for_risk,
+            quote_notional=order.quote_notional * quote_rate_for_risk,
+            distance_bps=order.distance_bps,
+        )
+        for order in plan.orders
+    ]
+    risk = evaluate_order_batch(
+        cfg.risk,
+        risk_orders,
+        strategy="spot_grid",
+        live=True,
+        existing_spread_bps=(plan.best_ask - plan.best_bid) / plan.mid_price * 10_000,
+        plan_observed_at=plan.observed_at,
+        market=_converted_market_context(
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            best_bid=plan.best_bid,
+            best_ask=plan.best_ask,
+            mid_price=plan.mid_price,
+            bid_depth_quote=plan.bid_depth_quote,
+            ask_depth_quote=plan.ask_depth_quote,
+            max_level_gap_bps=plan.max_level_gap_bps,
+            order_book_timestamp_ms=plan.order_book_timestamp_ms,
+            order_book_received_at=plan.order_book_received_at,
+            quote_rate_for_risk=quote_rate_for_risk,
+        ),
+        current_positions_base=portfolio_positions_base(cfg.portfolio),
+        daily_pnl_quote=current_daily_pnl_quote(cfg),
+        existing_open_order_count=0,
+        expected_cancel_count=len(plan.orders),
+        post_only=cfg.spot_grid.post_only,
+    )
+    risk_payload = risk.to_dict()
+    reasons = list(risk_payload.get("reasons", []))
+    warnings = list(risk_payload.get("warnings", []))
+    if quote_rate is None:
+        reasons.append(
+            f"missing quote rate for {conversion.get('quote_currency') or '?'} -> "
+            f"{cfg.common_quote_currency}"
+        )
+    if plan.status != "planned":
+        reasons.append(plan.reason)
+    if cfg.spot_grid.max_position_base > 0:
+        base_asset = _base_currency_from_symbol(plan.symbol)
+        current_base = portfolio_positions_base(cfg.portfolio).get(base_asset, 0.0)
+        buy_base = sum(order.amount for order in plan.orders if order.side == "buy")
+        projected_base = current_base + buy_base
+        if projected_base > cfg.spot_grid.max_position_base:
+            reasons.append(
+                f"{base_asset} projected grid position {projected_base:.8f} exceeds "
+                f"spot_grid.max_position_base {cfg.spot_grid.max_position_base:.8f}"
+            )
+    approved = len(reasons) == 0
+    return {
+        **base_payload,
+        "approved": approved,
+        "level": "ok" if approved else "blocked",
+        "order_count": len(plan.orders),
+        "buy_order_count": sum(1 for order in plan.orders if order.side == "buy"),
+        "sell_order_count": sum(1 for order in plan.orders if order.side == "sell"),
+        "total_quote_notional": sum(quote_values),
+        "max_order_quote_notional": max(quote_values) if quote_values else 0.0,
+        "min_order_quote_notional": min(quote_values) if quote_values else 0.0,
+        "reasons": _dedupe_readiness_messages(reasons),
+        "warnings": warnings,
+        "risk": {
+            **risk_payload,
+            "approved": approved,
+            "level": "ok" if approved else "blocked",
+            "reasons": _dedupe_readiness_messages(reasons),
+            "warnings": warnings,
+            "currency": cfg.common_quote_currency,
+            "quote_conversion": conversion,
+        },
+        "market": {
+            "grid_step_bps": plan.grid_step_bps,
+            "bid_depth_quote": plan.bid_depth_quote * quote_rate_for_risk,
+            "ask_depth_quote": plan.ask_depth_quote * quote_rate_for_risk,
+            "max_level_gap_bps": plan.max_level_gap_bps,
+            "order_book_timestamp_ms": plan.order_book_timestamp_ms,
+            "order_book_received_at": plan.order_book_received_at,
+        },
+    }
+
+
+def build_dca_safety_payload(
+    cfg: BotConfig,
+    plan: Any | None,
+    conversion: dict[str, Any],
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    base_payload = _strategy_safety_base(cfg, conversion, error=error)
+    if plan is None:
+        return base_payload
+
+    quote_rate = conversion.get("quote_to_common_rate")
+    quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
+    order = plan.next_order
+    risk_orders = [
+        RiskOrder(
+            strategy="dca",
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            side=order.side,
+            amount=order.amount,
+            price=order.price * quote_rate_for_risk,
+            quote_notional=order.quote_notional * quote_rate_for_risk,
+        )
+    ] if order is not None else []
+    risk = evaluate_order_batch(
+        cfg.risk,
+        risk_orders,
+        strategy="dca",
+        live=True,
+        existing_spread_bps=(plan.best_ask - plan.best_bid) / plan.mid_price * 10_000,
+        plan_observed_at=plan.observed_at,
+        market=_converted_market_context(
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            best_bid=plan.best_bid,
+            best_ask=plan.best_ask,
+            mid_price=plan.mid_price,
+            bid_depth_quote=plan.bid_depth_quote,
+            ask_depth_quote=plan.ask_depth_quote,
+            max_level_gap_bps=plan.max_level_gap_bps,
+            order_book_timestamp_ms=plan.order_book_timestamp_ms,
+            order_book_received_at=plan.order_book_received_at,
+            quote_rate_for_risk=quote_rate_for_risk,
+        ),
+        current_positions_base=portfolio_positions_base(cfg.portfolio),
+        daily_pnl_quote=current_daily_pnl_quote(cfg),
+        existing_open_order_count=0,
+        post_only=plan.price_mode == "maker",
+    )
+    risk_payload = risk.to_dict()
+    reasons = list(risk_payload.get("reasons", []))
+    warnings = list(risk_payload.get("warnings", []))
+    if quote_rate is None:
+        reasons.append(
+            f"missing quote rate for {conversion.get('quote_currency') or '?'} -> "
+            f"{cfg.common_quote_currency}"
+        )
+    if plan.status not in {"ready", "waiting_for_trigger"}:
+        reasons.append(plan.reason)
+    if cfg.dca.max_position_base > 0 and order is not None:
+        base_asset = _base_currency_from_symbol(plan.symbol)
+        current_base = portfolio_positions_base(cfg.portfolio).get(base_asset, 0.0)
+        projected_base = (
+            current_base + order.amount
+            if order.side == "buy"
+            else max(0.0, current_base - order.amount)
+        )
+        if projected_base > cfg.dca.max_position_base:
+            reasons.append(
+                f"{base_asset} projected DCA position {projected_base:.8f} exceeds "
+                f"dca.max_position_base {cfg.dca.max_position_base:.8f}"
+            )
+    if cfg.dca.max_loss_quote > 0 and cfg.dca.average_entry_price > 0:
+        base_asset = _base_currency_from_symbol(plan.symbol)
+        current_base = portfolio_positions_base(cfg.portfolio).get(base_asset, 0.0)
+        unrealized_loss = max(
+            0.0,
+            (cfg.dca.average_entry_price - plan.mid_price) * current_base,
+        ) * quote_rate_for_risk
+        if unrealized_loss > cfg.dca.max_loss_quote:
+            reasons.append(
+                f"DCA unrealized loss {unrealized_loss:.8f} exceeds "
+                f"dca.max_loss_quote {cfg.dca.max_loss_quote:.8f}"
+            )
+    approved = len(reasons) == 0
+    quote_values = [
+        row["quote_notional"] * quote_rate_for_risk
+        for row in plan.order_schedule
+    ]
+    return {
+        **base_payload,
+        "approved": approved,
+        "level": "ok" if approved else "blocked",
+        "order_count": len(risk_orders),
+        "buy_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "buy"),
+        "sell_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "sell"),
+        "total_quote_notional": sum(quote_values),
+        "max_order_quote_notional": max(quote_values) if quote_values else 0.0,
+        "min_order_quote_notional": min(quote_values) if quote_values else 0.0,
+        "reasons": _dedupe_readiness_messages(reasons),
+        "warnings": warnings,
+        "risk": {
+            **risk_payload,
+            "approved": approved,
+            "level": "ok" if approved else "blocked",
+            "reasons": _dedupe_readiness_messages(reasons),
+            "warnings": warnings,
+            "currency": cfg.common_quote_currency,
+            "quote_conversion": conversion,
+        },
+        "market": {
+            "bid_depth_quote": plan.bid_depth_quote * quote_rate_for_risk,
+            "ask_depth_quote": plan.ask_depth_quote * quote_rate_for_risk,
+            "max_level_gap_bps": plan.max_level_gap_bps,
+            "order_book_timestamp_ms": plan.order_book_timestamp_ms,
+            "order_book_received_at": plan.order_book_received_at,
+        },
+    }
+
+
+def build_spot_grid_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    grid_cfg = cfg.spot_grid
+    config_payload = spot_grid_config_to_dict(grid_cfg)
+    accounts = slow_execution_accounts(cfg.spot_exchanges, _grid_symbols_by_exchange(cfg))
+    conversion = _strategy_quote_conversion(cfg, grid_cfg.symbol)
+    if not grid_cfg.enabled:
+        return {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_spot_grid_safety_payload(cfg, None, conversion),
+            "error": None,
+        }
+
+    book = books.get((grid_cfg.exchange, grid_cfg.symbol))
+    if book is None:
+        error = f"Missing {grid_cfg.exchange} {grid_cfg.symbol}"
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_spot_grid_safety_payload(cfg, None, conversion, error=error),
+            "error": error,
+        }
+
+    try:
+        plan = build_spot_grid_plan(book, grid_cfg)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_spot_grid_safety_payload(
+                cfg,
+                None,
+                conversion,
+                error=str(exc),
+            ),
+            "error": str(exc),
+        }
+
+    return {
+        "status": plan.status,
+        "mode": "dry_run",
+        "plan": plan.to_dict(),
+        "config": config_payload,
+        "accounts": accounts,
+        "quote_conversion": conversion,
+        "safety": build_spot_grid_safety_payload(cfg, plan, conversion),
+        "error": None,
+    }
+
+
+def build_dca_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    dca_cfg = cfg.dca
+    config_payload = dca_config_to_dict(dca_cfg)
+    accounts = slow_execution_accounts(cfg.spot_exchanges, _grid_symbols_by_exchange(cfg))
+    conversion = _strategy_quote_conversion(cfg, dca_cfg.symbol)
+    if not dca_cfg.enabled:
+        return {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_dca_safety_payload(cfg, None, conversion),
+            "error": None,
+        }
+
+    book = books.get((dca_cfg.exchange, dca_cfg.symbol))
+    if book is None:
+        error = f"Missing {dca_cfg.exchange} {dca_cfg.symbol}"
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_dca_safety_payload(cfg, None, conversion, error=error),
+            "error": error,
+        }
+
+    try:
+        plan = build_dca_plan(book, dca_cfg)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_dca_safety_payload(
+                cfg,
+                None,
+                conversion,
+                error=str(exc),
+            ),
+            "error": str(exc),
+        }
+
+    return {
+        "status": plan.status,
+        "mode": "dry_run",
+        "plan": plan.to_dict(),
+        "config": config_payload,
+        "accounts": accounts,
+        "quote_conversion": conversion,
+        "safety": build_dca_safety_payload(cfg, plan, conversion),
         "error": None,
     }
 
@@ -3469,6 +3997,106 @@ async def api_slow_execution(request: web.Request) -> web.Response:
                 runtime_cfg.spot_exchanges,
                 _spot_symbols_by_exchange(runtime_cfg),
             ),
+        }
+    )
+
+
+async def api_spot_grid(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _grid_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+        )
+        overrides = _spot_grid_overrides_from_payload(
+            payload,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        current_config = await state.spot_grid_config(runtime_cfg.spot_grid)
+        target_symbol = str(overrides.get("symbol") or current_config.symbol)
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(target_symbol)
+        ])
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    update = await state.set_spot_grid_overrides(overrides, cfg=cfg)
+    current_config = await state.spot_grid_config(cfg.spot_grid)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="spot_grid_config",
+        target=f"{current_config.exchange} {current_config.symbol}".strip(),
+        detail="updated Spot Grid config",
+        payload=overrides,
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "config": spot_grid_config_to_dict(current_config),
+            "accounts": slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                _grid_symbols_by_exchange(runtime_cfg),
+            ),
+            **update,
+        }
+    )
+
+
+async def api_dca(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _grid_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+        )
+        overrides = _dca_overrides_from_payload(
+            payload,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        current_config = await state.dca_config(runtime_cfg.dca)
+        target_symbol = str(overrides.get("symbol") or current_config.symbol)
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(target_symbol)
+        ])
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    update = await state.set_dca_overrides(overrides, cfg=cfg)
+    current_config = await state.dca_config(cfg.dca)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="dca_config",
+        target=f"{current_config.exchange} {current_config.symbol}".strip(),
+        detail="updated DCA Bot config",
+        payload=overrides,
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "config": dca_config_to_dict(current_config),
+            "accounts": slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                _grid_symbols_by_exchange(runtime_cfg),
+            ),
+            **update,
         }
     )
 

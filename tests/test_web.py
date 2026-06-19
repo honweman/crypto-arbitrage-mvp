@@ -14,12 +14,14 @@ from arbitrage_bot.config import (
     AssetPosition,
     BotConfig,
     CashAndCarryPair,
+    DcaConfig,
     ExchangeConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
     PortfolioConfig,
     RiskConfig,
     SlowExecutionConfig,
+    SpotGridConfig,
     SpotMarketConfig,
     StrategyTimelineConfig,
     TradeLogConfig,
@@ -45,8 +47,10 @@ from arbitrage_bot.web import (
     _market_maker_order_sync_delta,
     _market_maker_overrides_from_payload,
     _cash_and_carry_pairs_from_payload,
+    _dca_overrides_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
+    _spot_grid_overrides_from_payload,
     _spot_markets_from_payload,
     _daily_report_due,
     _global_scan_health_warnings,
@@ -64,9 +68,11 @@ from arbitrage_bot.web import (
     build_market_maker_payload,
     build_market_maker_quality_payload,
     build_market_rows,
+    build_dca_payload,
     build_operations_payload,
     build_readiness_payload,
     build_slow_execution_payload,
+    build_spot_grid_payload,
     build_synced_portfolio_pnl,
     build_trading_console_payload,
     cancel_bulk_orders_payload,
@@ -93,6 +99,8 @@ def make_config(
     *,
     market_maker: MarketMakerConfig | None = None,
     slow_execution: SlowExecutionConfig | None = None,
+    spot_grid: SpotGridConfig | None = None,
+    dca: DcaConfig | None = None,
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
     spot_exchanges: list[ExchangeConfig] | None = None,
@@ -117,6 +125,8 @@ def make_config(
         onchain_monitor=OnchainMonitorConfig(),
         market_maker=market_maker or MarketMakerConfig(),
         slow_execution=slow_execution or SlowExecutionConfig(),
+        spot_grid=spot_grid or SpotGridConfig(),
+        dca=dca or DcaConfig(),
         portfolio=portfolio or PortfolioConfig(),
         spot_symbols=[],
         spot_markets=spot_markets or [],
@@ -258,6 +268,23 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="mm-quality-fills"', HTML)
         self.assertIn('id="mm-quality-spread"', HTML)
 
+    def test_page_includes_spot_grid_and_dca_controls(self) -> None:
+        self.assertIn("Spot Grid", HTML)
+        self.assertIn("/api/spot-grid", HTML)
+        self.assertIn('id="grid-form"', HTML)
+        self.assertIn('id="grid-lower"', HTML)
+        self.assertIn('id="grid-upper"', HTML)
+        self.assertIn('id="grid-spacing"', HTML)
+        self.assertIn('id="grid-auto-rebuild"', HTML)
+        self.assertIn('id="grid-orders"', HTML)
+        self.assertIn("DCA Bot", HTML)
+        self.assertIn("/api/dca", HTML)
+        self.assertIn('id="dca-form"', HTML)
+        self.assertIn('id="dca-trigger"', HTML)
+        self.assertIn('id="dca-multiplier"', HTML)
+        self.assertIn('id="dca-average-entry"', HTML)
+        self.assertIn('id="dca-orders"', HTML)
+
     def test_page_includes_risk_controls(self) -> None:
         self.assertIn("Risk Controls", HTML)
         self.assertIn("/api/risk", HTML)
@@ -393,6 +420,18 @@ class WebMonitorTest(unittest.TestCase):
                 exchange="coinbase-spot",
                 symbol="ACS/USDC",
             ),
+            spot_grid=SpotGridConfig(
+                enabled=True,
+                live_enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            dca=DcaConfig(
+                enabled=True,
+                live_enabled=False,
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+            ),
             spot_exchanges=[
                 ExchangeConfig(id="bybit", label="bybit-spot"),
                 ExchangeConfig(id="coinbase", label="coinbase-spot"),
@@ -401,6 +440,7 @@ class WebMonitorTest(unittest.TestCase):
                 allow_live_trading=True,
                 allow_market_maker=True,
                 allow_slow_execution=True,
+                strategy_enabled={"spot_grid": True, "dca": True},
             ),
         )
 
@@ -422,6 +462,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(strategies["market_maker"]["live"])
         self.assertTrue(strategies["slow_execution"]["paused"])
         self.assertFalse(strategies["slow_execution"]["live"])
+        self.assertTrue(strategies["spot_grid"]["live"])
+        self.assertFalse(strategies["dca"]["live"])
+        self.assertFalse(strategies["dca"]["live_ready"])
         self.assertEqual(accounts["coinbase-spot"]["open_order_count"], 2)
         self.assertEqual(payload["recent_trade_count"], 5)
 
@@ -898,6 +941,84 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(accounts[0]["symbol"], "")
         self.assertEqual(accounts[0]["symbols"], [])
 
+    def test_build_spot_grid_payload_returns_plan_and_safety(self) -> None:
+        cfg = make_config(
+            spot_grid=SpotGridConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                lower_price=90.0,
+                upper_price=110.0,
+                grid_count=4,
+                quote_per_grid=5.0,
+                max_open_orders=4,
+                min_grid_step_bps=1.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_order_quote=10.0,
+                max_cycle_quote=25.0,
+                max_open_orders=10,
+            ),
+        )
+        books = {
+            ("bybit-spot", "ACS/USD"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                bids=[BookLevel(price=99.0, amount=100_000)],
+                asks=[BookLevel(price=101.0, amount=100_000)],
+            )
+        }
+
+        payload = build_spot_grid_payload(cfg, books)
+
+        self.assertEqual(payload["status"], "planned")
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["config"]["grid_count"], 4)
+        self.assertEqual(len(payload["plan"]["orders"]), 4)
+        self.assertTrue(payload["safety"]["approved"])
+        self.assertEqual(payload["safety"]["order_count"], 4)
+
+    def test_build_dca_payload_returns_ready_plan_and_safety(self) -> None:
+        cfg = make_config(
+            dca=DcaConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                side="buy",
+                trigger_price=102.0,
+                quote_per_order=5.0,
+                size_multiplier=2.0,
+                max_orders=3,
+                interval_seconds=60.0,
+                price_mode="maker",
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_order_quote=10.0,
+                max_cycle_quote=25.0,
+                max_open_orders=10,
+            ),
+        )
+        books = {
+            ("bybit-spot", "ACS/USD"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                bids=[BookLevel(price=99.0, amount=100_000)],
+                asks=[BookLevel(price=101.0, amount=100_000)],
+            )
+        }
+
+        payload = build_dca_payload(cfg, books)
+
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["plan"]["next_order"]["side"], "buy")
+        self.assertEqual(
+            [row["quote_notional"] for row in payload["plan"]["order_schedule"]],
+            [5.0, 10.0, 20.0],
+        )
+        self.assertTrue(payload["safety"]["approved"])
+
     def test_slow_execution_update_payload_is_sanitized(self) -> None:
         overrides = _slow_execution_overrides_from_payload(
             {
@@ -963,6 +1084,81 @@ class WebMonitorTest(unittest.TestCase):
                 allowed_exchanges={"coinbase-spot"},
                 symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
             )
+
+    def test_spot_grid_update_payload_is_sanitized(self) -> None:
+        overrides = _spot_grid_overrides_from_payload(
+            {
+                "enabled": True,
+                "live_enabled": False,
+                "exchange": "bybit-spot",
+                "lower_price": "0.0001",
+                "upper_price": "0.0002",
+                "grid_count": "20",
+                "spacing": "geometric",
+                "quote_per_grid": "1.5",
+                "take_profit_price": "0.00025",
+                "stop_loss_price": "0.00008",
+                "auto_rebuild": True,
+                "max_position_base": "1000000",
+                "max_open_orders": "30",
+                "min_grid_step_bps": "5",
+                "cancel_retry_attempts": "4",
+                "post_only": True,
+            },
+            allowed_exchanges={"bybit-spot"},
+            symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
+        )
+
+        self.assertTrue(overrides["enabled"])
+        self.assertFalse(overrides["live_enabled"])
+        self.assertEqual(overrides["exchange"], "bybit-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDT")
+        self.assertEqual(overrides["spacing"], "geometric")
+        self.assertEqual(overrides["grid_count"], 20)
+        self.assertEqual(overrides["quote_per_grid"], 1.5)
+        self.assertTrue(overrides["auto_rebuild"])
+        self.assertEqual(overrides["cancel_retry_attempts"], 4)
+        self.assertTrue(overrides["post_only"])
+
+    def test_dca_update_payload_is_sanitized(self) -> None:
+        overrides = _dca_overrides_from_payload(
+            {
+                "enabled": True,
+                "live_enabled": False,
+                "exchange": "bybit-spot",
+                "side": "sell",
+                "trigger_price": "0.0002",
+                "interval_seconds": "30",
+                "quote_per_order": "2",
+                "size_multiplier": "1.5",
+                "max_orders": "6",
+                "average_entry_price": "0.00012",
+                "take_profit_price": "0.00022",
+                "max_position_base": "2000000",
+                "max_loss_quote": "20",
+                "price_mode": "maker",
+                "price_offset_bps": "2",
+            },
+            allowed_exchanges={"bybit-spot"},
+            symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
+        )
+
+        self.assertTrue(overrides["enabled"])
+        self.assertEqual(overrides["exchange"], "bybit-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDT")
+        self.assertEqual(overrides["side"], "sell")
+        self.assertEqual(overrides["interval_seconds"], 30.0)
+        self.assertEqual(overrides["quote_per_order"], 2.0)
+        self.assertEqual(overrides["size_multiplier"], 1.5)
+        self.assertEqual(overrides["max_orders"], 6)
+        self.assertEqual(overrides["price_mode"], "maker")
+        self.assertEqual(overrides["price_offset_bps"], 2.0)
+
+    def test_grid_and_dca_update_payloads_reject_bad_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "spacing"):
+            _spot_grid_overrides_from_payload({"spacing": "random"})
+        with self.assertRaisesRegex(ValueError, "size_multiplier"):
+            _dca_overrides_from_payload({"size_multiplier": "0.5"})
 
     def test_market_maker_update_payload_is_sanitized(self) -> None:
         overrides = _market_maker_overrides_from_payload(
@@ -2939,6 +3135,54 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             update["market_maker"]["accounts"][0]["symbols"],
             ["BTC/USDT"],
         )
+
+    async def test_grid_and_dca_runtime_overrides_persist(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                )
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = os.path.join(tmp, "web_runtime_overrides.json")
+            state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            await state.set_spot_grid_overrides(
+                {
+                    "enabled": True,
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "lower_price": 0.0001,
+                    "upper_price": 0.0002,
+                    "grid_count": 12,
+                },
+                cfg=cfg,
+            )
+            await state.set_dca_overrides(
+                {
+                    "enabled": True,
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "quote_per_order": 2.0,
+                    "max_orders": 6,
+                },
+                cfg=cfg,
+            )
+
+            restored = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            runtime_cfg = await restored.runtime_config(cfg)
+            payload = await restored.get(view="settings")
+
+        self.assertTrue(runtime_cfg.spot_grid.enabled)
+        self.assertEqual(runtime_cfg.spot_grid.grid_count, 12)
+        self.assertTrue(runtime_cfg.dca.enabled)
+        self.assertEqual(runtime_cfg.dca.max_orders, 6)
+        self.assertEqual(payload["spot_grid"]["config"]["symbol"], "ACS/USDT")
+        self.assertEqual(payload["dca"]["config"]["quote_per_order"], 2.0)
 
     async def test_cash_and_carry_update_changes_runtime_pairs(self) -> None:
         cfg = make_config(

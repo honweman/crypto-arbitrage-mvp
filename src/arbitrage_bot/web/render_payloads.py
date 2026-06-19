@@ -160,6 +160,28 @@ def _compact_slow_execution_payload(
     return result
 
 
+def _compact_strategy_plan_payload(
+    strategy_payload: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return strategy_payload
+    return _copy_payload_keys(
+        strategy_payload,
+        (
+            "status",
+            "mode",
+            "plan",
+            "config",
+            "accounts",
+            "quote_conversion",
+            "safety",
+            "error",
+        ),
+    )
+
+
 def _compact_order_activity_payload(
     order_activity: dict[str, Any],
     *,
@@ -264,6 +286,14 @@ def state_payload_for_view(
         ),
         "slow_execution": _compact_slow_execution_payload(
             payload.get("slow_execution", {}),
+            full=is_settings,
+        ),
+        "spot_grid": _compact_strategy_plan_payload(
+            payload.get("spot_grid", {}),
+            full=is_settings,
+        ),
+        "dca": _compact_strategy_plan_payload(
+            payload.get("dca", {}),
             full=is_settings,
         ),
         "spot_arbitrage": payload.get("spot_arbitrage", {}),

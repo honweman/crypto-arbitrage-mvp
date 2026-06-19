@@ -24,6 +24,10 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
         assets.add(_base_asset_from_symbol(cfg.market_maker.symbol))
     if cfg.slow_execution.symbol:
         assets.add(_base_asset_from_symbol(cfg.slow_execution.symbol))
+    if cfg.spot_grid.symbol:
+        assets.add(_base_asset_from_symbol(cfg.spot_grid.symbol))
+    if cfg.dca.symbol:
+        assets.add(_base_asset_from_symbol(cfg.dca.symbol))
     return sorted(asset for asset in assets if asset)
 
 
@@ -448,6 +452,8 @@ def _filter_state_payload_for_user(
             }
     filter_strategy_section(payload.get("market_maker"))
     filter_strategy_section(payload.get("slow_execution"))
+    filter_strategy_section(payload.get("spot_grid"))
+    filter_strategy_section(payload.get("dca"))
     filter_order_activity(payload.get("order_activity"))
     filter_account_balances(payload.get("account_balances"))
     filter_trading_console(payload.get("trading_console"))

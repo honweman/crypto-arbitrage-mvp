@@ -44,10 +44,13 @@ from ..strategy_timeline import (
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..trade_log import write_trade_event
 from ..web_config import (
+    _grid_symbols_by_exchange,
     _spot_symbols_by_exchange,
+    dca_config_to_dict,
     market_maker_config_to_dict,
     slow_execution_accounts,
     slow_execution_config_to_dict,
+    spot_grid_config_to_dict,
 )
 from . import (
     ACCOUNT_BALANCE_POLL_SECONDS,
@@ -64,7 +67,9 @@ from . import (
     _risk_strategy_enabled,
     build_market_maker_payload,
     build_market_rows,
+    build_dca_payload,
     build_slow_execution_payload,
+    build_spot_grid_payload,
     build_trading_console_payload,
     fetch_account_balances_payload,
     fetch_onchain_payload,
@@ -173,6 +178,8 @@ async def monitor_loop(
     slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
         "slow_execution"
     ]
+    spot_grid_payload = _build_initial_payload(cfg, poll_seconds)["spot_grid"]
+    dca_payload = _build_initial_payload(cfg, poll_seconds)["dca"]
     spot_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
         "spot_arbitrage"
     ]
@@ -309,7 +316,30 @@ async def monitor_loop(
                     "cooldown_seconds": SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS,
                 }
                 portfolio_books: dict[tuple[str, str], OrderBookSnapshot] = {}
-                if strategy in {"all", "spot-spread"} and runtime_cfg.spot_markets:
+                needs_spot_order_books = bool(
+                    runtime_cfg.spot_markets
+                    or (
+                        runtime_slow_execution.enabled
+                        and runtime_slow_execution.exchange
+                        and runtime_slow_execution.symbol
+                    )
+                    or (
+                        runtime_cfg.spot_grid.enabled
+                        and runtime_cfg.spot_grid.exchange
+                        and runtime_cfg.spot_grid.symbol
+                    )
+                    or (
+                        runtime_cfg.dca.enabled
+                        and runtime_cfg.dca.exchange
+                        and runtime_cfg.dca.symbol
+                    )
+                    or (
+                        runtime_cfg.market_maker.enabled
+                        and runtime_cfg.market_maker.exchange
+                        and runtime_cfg.market_maker.symbol
+                    )
+                )
+                if strategy in {"all", "spot-spread"} and needs_spot_order_books:
                     symbols_by_exchange = _symbols_for_configured_spot_markets(
                         runtime_cfg
                     )
@@ -322,6 +352,36 @@ async def monitor_loop(
                             runtime_slow_execution.exchange,
                             set(),
                         ).add(runtime_slow_execution.symbol)
+                    if (
+                        runtime_cfg.spot_grid.enabled
+                        and runtime_cfg.spot_grid.exchange
+                        and runtime_cfg.spot_grid.symbol
+                    ):
+                        symbols_by_exchange.setdefault(
+                            runtime_cfg.spot_grid.exchange,
+                            set(),
+                        ).add(runtime_cfg.spot_grid.symbol)
+                    if (
+                        runtime_cfg.dca.enabled
+                        and runtime_cfg.dca.exchange
+                        and runtime_cfg.dca.symbol
+                    ):
+                        symbols_by_exchange.setdefault(
+                            runtime_cfg.dca.exchange,
+                            set(),
+                        ).add(runtime_cfg.dca.symbol)
+                    spot_exchange_keys = {
+                        exchange.key for exchange in runtime_cfg.spot_exchanges
+                    }
+                    if (
+                        runtime_cfg.market_maker.enabled
+                        and runtime_cfg.market_maker.exchange in spot_exchange_keys
+                        and runtime_cfg.market_maker.symbol
+                    ):
+                        symbols_by_exchange.setdefault(
+                            runtime_cfg.market_maker.exchange,
+                            set(),
+                        ).add(runtime_cfg.market_maker.symbol)
                     books = await manager.fetch_order_books(
                         runtime_cfg.spot_exchanges,
                         symbols_by_exchange,
@@ -397,6 +457,40 @@ async def monitor_loop(
                         }
                     else:
                         market_maker_payload = build_market_maker_payload(
+                            runtime_cfg,
+                            books,
+                        )
+                    if strategy_pauses.get("spot_grid", False):
+                        spot_grid_payload = {
+                            "status": "paused",
+                            "mode": "paused",
+                            "plan": None,
+                            "config": spot_grid_config_to_dict(runtime_cfg.spot_grid),
+                            "accounts": slow_execution_accounts(
+                                runtime_cfg.spot_exchanges,
+                                _grid_symbols_by_exchange(runtime_cfg),
+                            ),
+                            "error": None,
+                        }
+                    else:
+                        spot_grid_payload = build_spot_grid_payload(
+                            runtime_cfg,
+                            books,
+                        )
+                    if strategy_pauses.get("dca", False):
+                        dca_payload = {
+                            "status": "paused",
+                            "mode": "paused",
+                            "plan": None,
+                            "config": dca_config_to_dict(runtime_cfg.dca),
+                            "accounts": slow_execution_accounts(
+                                runtime_cfg.spot_exchanges,
+                                _grid_symbols_by_exchange(runtime_cfg),
+                            ),
+                            "error": None,
+                        }
+                    else:
+                        dca_payload = build_dca_payload(
                             runtime_cfg,
                             books,
                         )
@@ -516,6 +610,28 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _spot_symbols_by_exchange(runtime_cfg),
+                        ),
+                        "error": None,
+                    }
+                    spot_grid_payload = {
+                        "status": "disabled",
+                        "mode": "dry_run",
+                        "plan": None,
+                        "config": spot_grid_config_to_dict(runtime_cfg.spot_grid),
+                        "accounts": slow_execution_accounts(
+                            runtime_cfg.spot_exchanges,
+                            _grid_symbols_by_exchange(runtime_cfg),
+                        ),
+                        "error": None,
+                    }
+                    dca_payload = {
+                        "status": "disabled",
+                        "mode": "dry_run",
+                        "plan": None,
+                        "config": dca_config_to_dict(runtime_cfg.dca),
+                        "accounts": slow_execution_accounts(
+                            runtime_cfg.spot_exchanges,
+                            _grid_symbols_by_exchange(runtime_cfg),
                         ),
                         "error": None,
                     }
@@ -736,6 +852,16 @@ async def monitor_loop(
                         *warnings,
                         f"Auto Buy/Sell: {slow_execution_payload.get('error')}",
                     ]
+                if spot_grid_payload.get("status") == "error":
+                    warnings = [
+                        *warnings,
+                        f"Spot Grid: {spot_grid_payload.get('error')}",
+                    ]
+                if dca_payload.get("status") == "error":
+                    warnings = [
+                        *warnings,
+                        f"DCA Bot: {dca_payload.get('error')}",
+                    ]
                 if spot_arbitrage_payload.get("status") in {
                     "blocked_by_plan",
                     "blocked_by_risk",
@@ -810,6 +936,8 @@ async def monitor_loop(
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
                     slow_execution=slow_execution_payload,
+                    spot_grid=spot_grid_payload,
+                    dca=dca_payload,
                     spot_arbitrage=spot_arbitrage_payload,
                     trading_console=trading_console_payload,
                     portfolio=portfolio_payload,

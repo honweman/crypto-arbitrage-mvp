@@ -13,24 +13,29 @@ from .render_payloads import state_payload_for_view
 from ..config import (
     BotConfig,
     CashAndCarryPair,
+    DcaConfig,
     MarketMakerConfig,
     RiskConfig,
     SlowExecutionConfig,
+    SpotGridConfig,
     SpotMarketConfig,
 )
 from ..models import Opportunity
 from ..portfolio_metrics import build_market_maker_quality_payload
 from ..web_config import (
     _cash_and_carry_pairs_from_payload,
+    _grid_symbols_by_exchange,
     _market_maker_symbols_by_exchange,
     _spot_markets_from_payload,
     _spot_symbols_by_exchange,
     cash_and_carry_pairs_to_list,
+    dca_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
     risk_config_to_dict,
     slow_execution_accounts,
     spot_markets_to_list,
+    spot_grid_config_to_dict,
 )
 from . import (
     STRATEGY_IDS,
@@ -99,6 +104,12 @@ class MonitorState:
         self._slow_execution_overrides: dict[str, Any] = dict(
             store_data.get("slow_execution_overrides", {})
         )
+        self._spot_grid_overrides: dict[str, Any] = dict(
+            store_data.get("spot_grid_overrides", {})
+        )
+        self._dca_overrides: dict[str, Any] = dict(
+            store_data.get("dca_overrides", {})
+        )
         self._spot_markets_override: list[SpotMarketConfig] | None = (
             _spot_markets_from_payload(
                 {"spot_markets": store_data["spot_markets"]},
@@ -154,6 +165,8 @@ class MonitorState:
             "risk_overrides": self._risk_overrides,
             "market_maker_overrides": self._market_maker_overrides,
             "slow_execution_overrides": self._slow_execution_overrides,
+            "spot_grid_overrides": self._spot_grid_overrides,
+            "dca_overrides": self._dca_overrides,
             "strategy_paused": self._strategy_paused,
             "program": self._program_payload_unlocked(),
         }
@@ -211,6 +224,14 @@ class MonitorState:
                 cfg.slow_execution,
                 **self._slow_execution_overrides,
             ),
+            spot_grid=replace(
+                cfg.spot_grid,
+                **self._spot_grid_overrides,
+            ),
+            dca=replace(
+                cfg.dca,
+                **self._dca_overrides,
+            ),
         )
 
     async def get(self, view: str | None = None) -> dict[str, Any]:
@@ -244,6 +265,20 @@ class MonitorState:
         async with self._lock:
             return replace(base_config, **self._market_maker_overrides)
 
+    async def spot_grid_config(
+        self,
+        base_config: SpotGridConfig,
+    ) -> SpotGridConfig:
+        async with self._lock:
+            return replace(base_config, **self._spot_grid_overrides)
+
+    async def dca_config(
+        self,
+        base_config: DcaConfig,
+    ) -> DcaConfig:
+        async with self._lock:
+            return replace(base_config, **self._dca_overrides)
+
     async def set_market_maker_overrides(
         self,
         overrides: dict[str, Any],
@@ -276,6 +311,76 @@ class MonitorState:
                             runtime_cfg.market_maker
                         ),
                         "market_maker": self._payload.get("market_maker", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
+    async def set_spot_grid_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._spot_grid_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "spot_grid" in self._payload:
+                current_config = self._payload["spot_grid"].get("config", {})
+                current_config.update(overrides)
+                self._payload["spot_grid"]["config"] = current_config
+                self._payload["spot_grid"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _grid_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._save_runtime_store_unlocked()
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": spot_grid_config_to_dict(runtime_cfg.spot_grid),
+                        "spot_grid": self._payload.get("spot_grid", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
+    async def set_dca_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._dca_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "dca" in self._payload:
+                current_config = self._payload["dca"].get("config", {})
+                current_config.update(overrides)
+                self._payload["dca"]["config"] = current_config
+                self._payload["dca"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _grid_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._save_runtime_store_unlocked()
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": dca_config_to_dict(runtime_cfg.dca),
+                        "dca": self._payload.get("dca", {}),
                         "trading_console": self._payload["trading_console"],
                     }
                 )
@@ -339,6 +444,16 @@ class MonitorState:
                     runtime_cfg.spot_exchanges,
                     symbols_by_exchange,
                 )
+            if "spot_grid" in self._payload:
+                self._payload["spot_grid"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _grid_symbols_by_exchange(runtime_cfg),
+                )
+            if "dca" in self._payload:
+                self._payload["dca"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _grid_symbols_by_exchange(runtime_cfg),
+                )
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -353,6 +468,8 @@ class MonitorState:
                         "spot_markets": spot_markets_to_list(runtime_cfg.spot_markets),
                         "market_maker": self._payload.get("market_maker", {}),
                         "slow_execution": self._payload.get("slow_execution", {}),
+                        "spot_grid": self._payload.get("spot_grid", {}),
+                        "dca": self._payload.get("dca", {}),
                         "trading_console": self._payload["trading_console"],
                     }
                 )
@@ -537,6 +654,8 @@ class MonitorState:
                 trading_console=trading_console,
                 market_maker=self._payload.get("market_maker", {}),
                 slow_execution=self._payload.get("slow_execution", {}),
+                spot_grid=self._payload.get("spot_grid", {}),
+                dca=self._payload.get("dca", {}),
                 markets=self._payload.get("markets", []),
                 warnings=warning_messages,
             )
@@ -601,6 +720,8 @@ class MonitorState:
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
         slow_execution: dict[str, Any],
+        spot_grid: dict[str, Any],
+        dca: dict[str, Any],
         spot_arbitrage: dict[str, Any],
         trading_console: dict[str, Any],
         portfolio: dict[str, Any],
@@ -658,6 +779,8 @@ class MonitorState:
                 "onchain": onchain,
                 "market_maker": market_maker,
                 "slow_execution": slow_execution,
+                "spot_grid": spot_grid,
+                "dca": dca,
                 "spot_arbitrage": spot_arbitrage,
                 "trading_console": trading_console,
                 "readiness": build_readiness_payload(
@@ -667,6 +790,8 @@ class MonitorState:
                     trading_console=trading_console,
                     market_maker=market_maker,
                     slow_execution=slow_execution,
+                    spot_grid=spot_grid,
+                    dca=dca,
                     markets=markets,
                     warnings=warnings,
                 ),
