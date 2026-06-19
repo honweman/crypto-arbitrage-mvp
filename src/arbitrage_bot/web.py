@@ -13,7 +13,8 @@ import os
 import time
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -26,7 +27,6 @@ from .auto_buy_sell_task import (
     validate_task_config,
 )
 from .config import (
-    AssetPosition,
     BotConfig,
     CashAndCarryPair,
     ExchangeConfig,
@@ -44,7 +44,7 @@ from .main import (
     _symbols_for_configured_spot_markets,
     scan_with_manager,
 )
-from .market_making import build_symmetric_market_maker_plan
+from .market_making import MarketMakerPlan, build_symmetric_market_maker_plan
 from .market_maker import (
     cancel_order_ids as cancel_market_maker_order_ids,
     market_maker_quote_conversion,
@@ -54,32 +54,65 @@ from .market_maker import (
 from .models import OrderBookSnapshot, Opportunity
 from .orderbook_cache import OrderBookCache
 from .pnl import build_portfolio_pnl
-from .risk import current_daily_pnl_quote
+from .portfolio_metrics import (
+    _base_currency_from_symbol,
+    _portfolio_position_for_symbol,
+    _trade_attribution,
+    build_market_maker_quality_payload,
+    build_order_attribution_map,
+    build_synced_portfolio_pnl,
+    enrich_recent_trades_with_pnl,
+)
+from .risk import (
+    RiskMarketContext,
+    RiskOrder,
+    current_daily_pnl_quote,
+    evaluate_order_batch,
+    portfolio_positions_base,
+)
 from .slow_execution import build_slow_execution_plan
-from .solana import SolanaTokenClient, fetch_top_token_owners
+from .solana import (
+    SolanaTokenClient,
+    fetch_top_token_owners,
+    load_cached_holder_snapshot,
+    update_holder_history,
+)
+from .spot_arbitrage_executor import run_spot_arbitrage_execution_cycle
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
 from .trade_log import (
     read_recent_trade_entries,
     summarize_trade_entries,
     write_trade_event,
 )
+from .web_config import (
+    _cash_and_carry_pairs_from_payload,
+    _market_maker_overrides_from_payload,
+    _market_maker_symbols_by_exchange,
+    _risk_overrides_from_payload,
+    _slow_execution_overrides_from_payload,
+    _spot_markets_from_payload,
+    _spot_symbols_by_exchange,
+    cash_and_carry_pairs_to_list,
+    exchange_configs_to_list,
+    market_maker_config_to_dict,
+    risk_config_to_dict,
+    slow_execution_accounts,
+    slow_execution_config_to_dict,
+    spot_markets_to_list,
+)
 
 
 ACCOUNT_BALANCE_POLL_SECONDS = 10.0
 ORDER_ACTIVITY_POLL_SECONDS = 5.0
 ORDER_ACTIVITY_LIMIT = 20
+SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS = 10.0
+RECONCILIATION_AUTO_STOP_WARMUP_SECONDS = 15.0
+STATE_VIEW_IDS = {"status", "settings", "records"}
 STRATEGY_IDS = {
     "market_maker",
     "slow_execution",
     "spot_spread",
     "cash_and_carry",
-}
-PNL_SOURCE_LABELS = {
-    "market_maker": "Market Maker",
-    "arbitrage": "Arbitrage",
-    "auto_buy_sell": "Auto Buy/Sell",
-    "manual": "Manual",
-    "unattributed": "Unattributed",
 }
 SESSION_COOKIE = "crypto_arb_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
@@ -209,7 +242,9 @@ HTML = """<!doctype html>
 
     .statusbar,
     .portfolio-bar,
-    .strategy-overview {
+    .strategy-overview,
+    .mm-safety-grid,
+    .readiness-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       gap: 10px;
@@ -254,8 +289,62 @@ HTML = """<!doctype html>
       white-space: nowrap;
     }
 
+    .mm-safety-grid {
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      margin-bottom: 10px;
+    }
+
+    .metric.compact {
+      min-height: 60px;
+      box-shadow: none;
+    }
+
     .strategy-tile {
       min-height: 76px;
+    }
+
+    .primary-only {
+      display: block;
+    }
+
+    .secondary-metric {
+      display: none;
+    }
+
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    .overview-row {
+      display: grid;
+      grid-template-columns: minmax(76px, 0.7fr) minmax(0, 1.3fr);
+      gap: 10px;
+      align-items: center;
+      min-height: 54px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .overview-row .label {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .overview-row .value {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 15px;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
     }
 
     .subtle {
@@ -408,6 +497,75 @@ HTML = """<!doctype html>
       line-height: 1.3;
     }
 
+    .compact-section {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .compact-section > .section-title {
+      align-items: center;
+      min-height: 44px;
+      margin: 0;
+      padding: 11px 13px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .compact-section > .section-title::after {
+      content: "+";
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: var(--surface-2);
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .compact-section.section-open > .section-title {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .compact-section.section-open > .section-title::after {
+      content: "-";
+      color: var(--text);
+      background: var(--surface);
+    }
+
+    .compact-section > :not(.section-title) {
+      display: none;
+    }
+
+    .compact-section.section-open > :not(.section-title) {
+      display: block;
+      margin: 10px 12px 12px;
+    }
+
+    .compact-section.section-open > .control-panel,
+    .compact-section.section-open > .readiness-grid,
+    .compact-section.section-open > .mm-safety-grid {
+      display: grid;
+    }
+
+    .compact-section.section-open > .feed {
+      display: grid;
+    }
+
+    .compact-section .table-wrap,
+    .compact-section .control-panel,
+    .compact-section .empty {
+      box-shadow: none;
+    }
+
     .table-wrap {
       overflow-x: auto;
       border: 1px solid var(--line);
@@ -438,8 +596,20 @@ HTML = """<!doctype html>
       min-width: 1140px;
     }
 
+    .reconciliation-table {
+      min-width: 980px;
+    }
+
+    .audit-table {
+      min-width: 980px;
+    }
+
     .console-table {
       min-width: 760px;
+    }
+
+    .readiness-table {
+      min-width: 1100px;
     }
 
     .console-actions {
@@ -722,16 +892,21 @@ HTML = """<!doctype html>
         align-items: flex-start;
         padding: 13px 14px;
       }
+      h1 { font-size: 17px; }
       .header-actions { width: 100%; justify-content: space-between; }
       .view-nav { width: 100%; }
       .view-tab { flex: 1; }
       main { padding: 12px 14px 22px; }
       .portfolio-bar,
       .statusbar,
-      .strategy-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .strategy-overview,
+      .readiness-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .balance-table { min-width: 620px; }
       .orders-table { min-width: 960px; }
       .fills-table { min-width: 1080px; }
+      .reconciliation-table { min-width: 920px; }
+      .readiness-table { min-width: 980px; }
+      .audit-table { min-width: 920px; }
       .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .console-actions { grid-template-columns: 1fr; }
       .account-field { grid-column: 1 / -1; }
@@ -744,6 +919,11 @@ HTML = """<!doctype html>
       .portfolio-bar,
       .statusbar { gap: 8px; }
       .strategy-overview { grid-template-columns: 1fr; gap: 8px; }
+      .overview-grid { grid-template-columns: 1fr; }
+      .overview-row {
+        grid-template-columns: 72px minmax(0, 1fr);
+        min-height: 48px;
+      }
       .metric,
       .strategy-tile {
         min-height: 62px;
@@ -766,6 +946,13 @@ HTML = """<!doctype html>
         border-left: 0;
         border-radius: 0;
       }
+      .compact-section.section-open > .table-wrap {
+        margin-right: 12px;
+        margin-left: 12px;
+        border-right: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+        border-radius: 8px;
+      }
       th, td {
         padding: 9px 10px;
         font-size: 12px;
@@ -779,8 +966,9 @@ HTML = """<!doctype html>
       <h1>Crypto Trading Dashboard</h1>
       <div class="subtle">Multi-asset arbitrage · market making · auto buy/sell</div>
       <nav class="view-nav" aria-label="Page views">
-        <a class="view-tab active" data-view-tab="monitor" href="#monitor">Monitor</a>
-        <a class="view-tab" data-view-tab="control" href="#control">Control & Config</a>
+        <a class="view-tab active" data-view-tab="status" href="#status">Status</a>
+        <a class="view-tab" data-view-tab="settings" href="#settings">Settings</a>
+        <a class="view-tab" data-view-tab="records" href="#records">Records</a>
       </nav>
     </div>
     <div class="header-actions">
@@ -794,7 +982,7 @@ HTML = """<!doctype html>
   </header>
 
   <main>
-    <div class="portfolio-bar" data-page="monitor">
+    <div class="portfolio-bar" data-page="status">
       <div class="metric">
         <div class="label">Position</div>
         <div id="portfolio-position" class="value">--</div>
@@ -810,11 +998,11 @@ HTML = """<!doctype html>
         <div id="account-balances-total" class="value">--</div>
         <div id="account-balances-detail" class="subtle detail">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Mark Price</div>
         <div id="portfolio-mark" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Position Value</div>
         <div id="portfolio-value" class="value">--</div>
       </div>
@@ -822,29 +1010,62 @@ HTML = """<!doctype html>
         <div class="label">Total P/L</div>
         <div id="portfolio-total-pnl" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">MM P/L</div>
         <div id="portfolio-mm-pnl" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Arb P/L</div>
         <div id="portfolio-arb-pnl" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Auto P/L</div>
         <div id="portfolio-auto-pnl" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Other P/L</div>
         <div id="portfolio-other-pnl" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Price Move</div>
         <div id="portfolio-price-pnl" class="value">--</div>
       </div>
     </div>
 
-    <div class="strategy-overview" data-page="monitor">
+    <section data-page="status" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Overview</h2>
+        <span id="overview-meta" class="subtle"></span>
+      </div>
+      <div class="overview-grid">
+        <div class="overview-row">
+          <div class="label">Program</div>
+          <div id="overview-program" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">MM</div>
+          <div id="overview-mm" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Arbitrage</div>
+          <div id="overview-arb" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Orders</div>
+          <div id="overview-orders" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Auto</div>
+          <div id="overview-auto" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Risk</div>
+          <div id="overview-risk" class="value">--</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="strategy-overview" data-page="status">
       <div class="strategy-tile">
         <div class="label">Market Maker</div>
         <div id="monitor-mm-summary" class="value">--</div>
@@ -867,12 +1088,89 @@ HTML = """<!doctype html>
       </div>
     </div>
 
-    <div class="statusbar" data-page="monitor">
-      <div class="metric">
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Readiness</h2>
+        <span id="readiness-meta" class="subtle"></span>
+      </div>
+      <div class="readiness-grid">
+        <div class="metric compact">
+          <div class="label">Live Gate</div>
+          <div id="readiness-status" class="value">--</div>
+          <div id="readiness-status-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Accounts</div>
+          <div id="readiness-accounts-summary" class="value">--</div>
+          <div id="readiness-accounts-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Strategies</div>
+          <div id="readiness-strategies-summary" class="value">--</div>
+          <div id="readiness-strategies-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Orders</div>
+          <div id="readiness-orders-summary" class="value">--</div>
+          <div id="readiness-orders-detail" class="subtle detail">--</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="readiness-table">
+          <thead>
+            <tr>
+              <th>Priority</th>
+              <th>Scope</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="readiness-actions"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="readiness-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Type</th>
+              <th>Symbols</th>
+              <th>API</th>
+              <th>Balance</th>
+              <th>Orders</th>
+              <th>Risk</th>
+              <th>Status</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="readiness-accounts"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="readiness-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Configured</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Live</th>
+              <th>Status</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="readiness-strategies"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="statusbar" data-page="status">
+      <div class="metric secondary-metric">
         <div class="label">Scans</div>
         <div id="scan-count" class="value">0</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Latency</div>
         <div id="latency" class="value">--</div>
       </div>
@@ -880,11 +1178,11 @@ HTML = """<!doctype html>
         <div class="label">Opportunity</div>
         <div id="opp-count" class="value">0</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Notional</div>
         <div id="notional" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">Threshold</div>
         <div id="threshold" class="value">--</div>
       </div>
@@ -892,13 +1190,13 @@ HTML = """<!doctype html>
         <div class="label">Updated</div>
         <div id="updated" class="value">--</div>
       </div>
-      <div class="metric">
+      <div class="metric secondary-metric">
         <div class="label">On-chain</div>
         <div id="onchain-status" class="value">--</div>
       </div>
     </div>
 
-    <section data-page="control">
+    <section data-page="records" class="compact-section section-open">
       <div class="section-title">
         <h2>Live Trading Console</h2>
         <span id="console-meta" class="subtle"></span>
@@ -965,7 +1263,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="control">
+    <section data-page="settings" class="compact-section">
       <div class="section-title">
         <h2>Markets</h2>
         <span id="markets-config-meta" class="subtle"></span>
@@ -1001,7 +1299,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="control">
+    <section data-page="settings" class="compact-section">
       <div class="section-title">
         <h2>Cash & Carry Pairs</h2>
         <span id="carry-config-meta" class="subtle"></span>
@@ -1031,7 +1329,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="control">
+    <section data-page="settings" class="compact-section section-open">
       <div class="section-title">
         <h2>Risk Controls</h2>
         <span id="risk-control-meta" class="subtle"></span>
@@ -1050,10 +1348,14 @@ HTML = """<!doctype html>
           <label>Strategies</label>
           <div id="risk-strategies" class="account-options"></div>
         </div>
-        <div class="form-divider">Limits</div>
+        <div class="form-divider">Order Budget</div>
         <div class="field">
-          <label for="risk-max-order">Max/Order</label>
+          <label for="risk-max-order">Max Order</label>
           <input id="risk-max-order" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-cycle">Max Cycle</label>
+          <input id="risk-max-cycle" type="number" min="0" step="any">
         </div>
         <div class="field">
           <label for="risk-max-exposure">Max Exposure</label>
@@ -1062,6 +1364,11 @@ HTML = """<!doctype html>
         <div class="field">
           <label for="risk-max-daily-loss">Daily Loss</label>
           <input id="risk-max-daily-loss" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">MM Guardrails</div>
+        <div class="field">
+          <label for="risk-max-orders-cycle">Max Orders/Cycle</label>
+          <input id="risk-max-orders-cycle" type="number" min="0" step="1">
         </div>
         <div class="field">
           <label for="risk-max-open-orders">Max Open</label>
@@ -1075,15 +1382,54 @@ HTML = """<!doctype html>
           <label for="risk-cancel-cooldown">Cancel Sec</label>
           <input id="risk-cancel-cooldown" type="number" min="0" step="any">
         </div>
+        <div class="form-divider">Market Data</div>
+        <div class="field">
+          <label for="risk-min-book-depth">Min Book Depth</label>
+          <input id="risk-min-book-depth" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-slippage">Max Slippage Bps</label>
+          <input id="risk-max-slippage" type="number" min="0" step="any">
+        </div>
         <div class="field">
           <label for="risk-max-book-age">Book Age Sec</label>
           <input id="risk-max-book-age" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-book-gap">Max Gap Bps</label>
+          <input id="risk-max-book-gap" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-price-jump">Max Jump Bps</label>
+          <input id="risk-max-price-jump" type="number" min="0" step="any">
         </div>
         <button id="risk-apply" class="control-button" type="submit">Apply</button>
       </form>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="records" class="compact-section">
+      <div class="section-title">
+        <h2>Audit Trail</h2>
+        <span id="audit-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Actor</th>
+              <th>Target</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="audit-events"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
       <div class="section-title">
         <h2>Account Balances</h2>
         <span id="account-balances-meta" class="subtle"></span>
@@ -1105,7 +1451,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="records" class="compact-section">
       <div class="section-title">
         <h2>Orders & Fills</h2>
         <span id="orders-meta" class="subtle"></span>
@@ -1149,9 +1495,25 @@ HTML = """<!doctype html>
           <tbody id="recent-fills"></tbody>
         </table>
       </div>
+      <div class="table-wrap stacked-table">
+        <table class="reconciliation-table">
+          <thead>
+            <tr>
+              <th>Level</th>
+              <th>Type</th>
+              <th>Strategy</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Order</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="order-reconciliation"></tbody>
+        </table>
+      </div>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="records" class="compact-section">
       <div class="section-title">
         <h2>Risk & Events</h2>
         <span id="risk-meta" class="subtle"></span>
@@ -1181,7 +1543,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="status" class="compact-section">
       <div class="section-title">
         <h2>Markets</h2>
         <span id="warnings" class="subtle"></span>
@@ -1206,7 +1568,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="status" class="compact-section">
       <div class="section-title">
         <h2>Live Opportunities</h2>
         <span id="common-quote" class="subtle">USD</span>
@@ -1214,7 +1576,7 @@ HTML = """<!doctype html>
       <div id="opportunities" class="feed"></div>
     </section>
 
-    <section data-page="control">
+    <section data-page="settings" class="compact-section">
       <div class="section-title">
         <h2>Auto Buy/Sell</h2>
         <span id="slow-meta" class="subtle"></span>
@@ -1235,7 +1597,23 @@ HTML = """<!doctype html>
             <option value="sell">Sell</option>
           </select>
         </div>
+        <div class="form-divider">Pricing</div>
+        <div class="field">
+          <label for="slow-price-mode">Price Mode</label>
+          <select id="slow-price-mode">
+            <option value="taker">Taker Top</option>
+            <option value="maker">Maker Top</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="slow-offset-bps">Offset bps</label>
+          <input id="slow-offset-bps" type="number" min="0" step="any">
+        </div>
         <div class="form-divider">Target</div>
+        <label class="check-field">
+          <input id="slow-unlimited" type="checkbox">
+          Unlimited
+        </label>
         <div class="field">
           <label for="slow-total-base">Total Base</label>
           <input id="slow-total-base" type="number" min="0" step="any">
@@ -1245,6 +1623,13 @@ HTML = """<!doctype html>
           <input id="slow-total-quote" type="number" min="0" step="any">
         </div>
         <div class="form-divider">Order Size</div>
+        <div class="field">
+          <label for="slow-slice-mode">Size Mode</label>
+          <select id="slow-slice-mode">
+            <option value="configured">Configured</option>
+            <option value="top_level">Top Level</option>
+          </select>
+        </div>
         <div class="field">
           <label for="slow-slice-min">Min Base/Order</label>
           <input id="slow-slice-min" type="number" min="0" step="any">
@@ -1276,6 +1661,7 @@ HTML = """<!doctype html>
         </div>
         <button id="slow-apply" class="control-button" type="submit">Apply</button>
         <button id="slow-create-task" class="control-button" type="button">Create Task</button>
+        <button id="slow-clear-terminal" class="control-button" type="button">Clear Done</button>
       </form>
       <div class="table-wrap stacked-table">
         <table class="orders-table">
@@ -1320,7 +1706,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="control">
+    <section data-page="settings" class="compact-section">
       <div class="section-title">
         <h2>Market Maker</h2>
         <span id="mm-meta" class="subtle"></span>
@@ -1379,8 +1765,62 @@ HTML = """<!doctype html>
           <input id="mm-post-only" type="checkbox">
           Post Only
         </label>
+        <div class="form-divider">Inventory</div>
+        <label class="check-field">
+          <input id="mm-inventory-enabled" type="checkbox">
+          Inventory Control
+        </label>
+        <div class="field">
+          <label for="mm-inventory-target">Target Base</label>
+          <input id="mm-inventory-target" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-inventory-band">No-skew Band</label>
+          <input id="mm-inventory-band" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-inventory-max">Max Deviation</label>
+          <input id="mm-inventory-max" type="number" min="0" step="any">
+        </div>
         <button id="mm-apply" class="control-button" type="submit">Apply</button>
       </form>
+      <div class="mm-safety-grid">
+        <div class="metric compact">
+          <div class="label">Live Gate</div>
+          <div id="mm-safety-status" class="value">--</div>
+          <div id="mm-safety-reason" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Orders</div>
+          <div id="mm-safety-orders" class="value">--</div>
+          <div id="mm-safety-orders-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Budget</div>
+          <div id="mm-safety-budget" class="value">--</div>
+          <div id="mm-safety-budget-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Market Data</div>
+          <div id="mm-safety-market" class="value">--</div>
+          <div id="mm-safety-market-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Inventory</div>
+          <div id="mm-quality-inventory" class="value">--</div>
+          <div id="mm-quality-inventory-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Fills</div>
+          <div id="mm-quality-fills" class="value">--</div>
+          <div id="mm-quality-fills-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Spread P/L</div>
+          <div id="mm-quality-spread" class="value">--</div>
+          <div id="mm-quality-spread-detail" class="subtle detail">--</div>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1398,7 +1838,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="status" class="compact-section">
       <div class="section-title">
         <h2>Quote Rates</h2>
       </div>
@@ -1415,7 +1855,7 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section data-page="monitor">
+    <section data-page="status" class="compact-section">
       <div class="section-title">
         <h2>Solana Top Holders</h2>
         <span id="onchain-meta" class="subtle"></span>
@@ -1429,11 +1869,37 @@ HTML = """<!doctype html>
               <th>Owner Wallet</th>
               <th class="num">Balance</th>
               <th class="num">Supply Share</th>
-              <th class="num">Change</th>
+              <th class="num">Since Online</th>
+              <th class="num">Last Change</th>
+              <th class="num">Changes</th>
               <th class="num">Token Accts</th>
             </tr>
           </thead>
           <tbody id="holders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="records" class="compact-section">
+      <div class="section-title">
+        <h2>Holder Change Log</h2>
+        <span id="onchain-history-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Label</th>
+              <th>Owner Wallet</th>
+              <th class="num">Rank</th>
+              <th class="num">Delta</th>
+              <th class="num">Balance</th>
+              <th class="num">Since Online</th>
+            </tr>
+          </thead>
+          <tbody id="holder-changes"></tbody>
         </table>
       </div>
     </section>
@@ -1443,27 +1909,68 @@ HTML = """<!doctype html>
     const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     const money = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     const compact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
-    const PAGE_IDS = new Set(["monitor", "control"]);
+	    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+	    const PAGE_IDS = new Set(["status", "settings", "records"]);
+	    let currentPage = pageFromLocation();
+	    let lastState = null;
+	    let refreshQueued = false;
+	    const pageStateCache = {};
+	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
+	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
 
     function pageFromLocation() {
       const hashPage = window.location.hash.replace("#", "");
-      return PAGE_IDS.has(hashPage) ? hashPage : "monitor";
+      if (hashPage === "monitor") return "status";
+      if (hashPage === "control") return "settings";
+      return PAGE_IDS.has(hashPage) ? hashPage : "status";
     }
 
-    function setActivePage(page) {
-      const activePage = PAGE_IDS.has(page) ? page : "monitor";
-      document.querySelectorAll("[data-page]").forEach((el) => {
-        el.classList.toggle("active-page", el.dataset.page === activePage);
-      });
+	    function setActivePage(page, options = {}) {
+	      const activePage = PAGE_IDS.has(page) ? page : "status";
+	      currentPage = activePage;
+	      document.querySelectorAll("[data-page]").forEach((el) => {
+	        el.classList.toggle("active-page", el.dataset.page === activePage);
+	      });
       document.querySelectorAll("[data-view-tab]").forEach((tab) => {
         const active = tab.dataset.viewTab === activePage;
         tab.classList.toggle("active", active);
         tab.setAttribute("aria-current", active ? "page" : "false");
       });
-      if (window.location.hash !== `#${activePage}`) {
-        history.replaceState(null, "", `#${activePage}`);
-      }
+	      if (window.location.hash !== `#${activePage}`) {
+	        history.replaceState(null, "", `#${activePage}`);
+	      }
+	      const cachedState = pageStateCache[activePage];
+	      if (cachedState) {
+	        renderCommonState(cachedState);
+	        renderVisiblePage(cachedState, activePage, { force: true });
+	      } else if (lastState) {
+	        renderCommonState(lastState);
+	      }
+	      if (options.refresh !== false) refresh({ force: true });
+	    }
+
+    function setupCompactSections() {
+      document.querySelectorAll(".compact-section > .section-title").forEach((title) => {
+        const section = title.closest(".compact-section");
+        if (!section) return;
+        const sync = () => {
+          title.setAttribute("aria-expanded", section.classList.contains("section-open") ? "true" : "false");
+        };
+        title.setAttribute("role", "button");
+        title.setAttribute("tabindex", "0");
+        title.addEventListener("click", (event) => {
+          if (event.target.closest("a, button, input, label, select, textarea")) return;
+          section.classList.toggle("section-open");
+          sync();
+        });
+        title.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          section.classList.toggle("section-open");
+          sync();
+        });
+        sync();
+      });
     }
 
     function text(id, value) {
@@ -1524,8 +2031,10 @@ HTML = """<!doctype html>
       return Math.abs(value) >= 1_000_000 ? shortNumber.format(value) : fmt.format(value);
     }
 
-    function balanceStatusClass(status) {
-      return status === "ok" ? "ok" : "missing";
+function balanceStatusClass(status) {
+      if (status === "ok") return "ok";
+      if (["idle", "starting", "checking"].includes(status)) return "subtle";
+      return "missing";
     }
 
     function sortBalanceCurrencies(rows) {
@@ -1559,7 +2068,11 @@ HTML = """<!doctype html>
         .join(" · ");
       detailEl.textContent = detail;
       detailEl.title = totals
-        .map((row) => `${row.currency} free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · total ${formatBalanceAmount(row.total)}`)
+        .map((row) => {
+          const reserved = Number(row.open_order_reserved || 0);
+          const reserveText = reserved > 0 ? ` · reserved ${formatBalanceAmount(reserved)}` : "";
+          return `${row.currency} free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · total ${formatBalanceAmount(row.total)}${reserveText}`;
+        })
         .join(" | ");
     }
 
@@ -1598,11 +2111,13 @@ HTML = """<!doctype html>
 
         for (const row of rows) {
           const tr = document.createElement("tr");
+          const reserved = Number(row.open_order_reserved || 0);
+          const usedTitle = reserved > 0 ? `Open-order reserve ${formatBalanceAmount(reserved)} ${row.currency}` : "";
           tr.innerHTML = `
             <td>${escapeHtml(account.label || account.exchange)}</td>
             <td>${escapeHtml(row.currency)}</td>
             <td class="num">${formatBalanceAmount(row.free)}</td>
-            <td class="num">${formatBalanceAmount(row.used)}</td>
+            <td class="num" title="${escapeHtml(usedTitle)}">${formatBalanceAmount(row.used)}</td>
             <td class="num">${formatBalanceAmount(row.total)}</td>
             <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
           `;
@@ -1641,6 +2156,19 @@ HTML = """<!doctype html>
       if (value === "manual") return "Manual";
       if (value === "unattributed") return "Unattributed";
       return value || "--";
+    }
+
+    function displayReconciliationType(value) {
+      const labels = {
+        tracked_order_missing: "Tracked Missing",
+        tracked_order_filled_not_cleared: "Filled, Not Cleared",
+        tracked_order_closed_not_cleared: "Closed, Not Cleared",
+        untracked_open_order: "Untracked Open",
+        unmanaged_strategy_order: "Unmanaged Strategy",
+        unattributed_fill: "Unattributed Fill",
+        order_activity_error: "Activity Error",
+      };
+      return labels[value] || value || "--";
     }
 
     function formatPnlValue(value) {
@@ -1756,23 +2284,69 @@ HTML = """<!doctype html>
       }
     }
 
+    function renderOrderReconciliation(orderActivity) {
+      const body = document.getElementById("order-reconciliation");
+      if (!body) return;
+      body.innerHTML = "";
+      const reconciliation = orderActivity?.reconciliation || {};
+      const issues = reconciliation.issues || [];
+      if (issues.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">Reconciliation OK.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const issue of issues) {
+        const level = String(issue.level || "info").toLowerCase();
+        const levelClass = level === "error" ? "risk-blocked" : level === "warning" ? "missing" : "subtle";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="${levelClass}">${escapeHtml(level.toUpperCase())}</td>
+          <td>${escapeHtml(displayReconciliationType(issue.type))}</td>
+          <td>${escapeHtml(displayStrategy(issue.strategy))}</td>
+          <td>${escapeHtml(issue.exchange || "--")}</td>
+          <td>${escapeHtml(issue.symbol || "--")}</td>
+          <td title="${escapeHtml(issue.order_id || "")}">${escapeHtml(shortId(issue.order_id))}</td>
+          <td title="${escapeHtml(issue.source_id || "")}">${escapeHtml(issue.message || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function renderOrderActivity(orderActivity) {
       const recentPnl = orderActivity?.pnl_summary?.total_realized_pnl;
       const dailyPnl = orderActivity?.daily_pnl?.enabled
         ? orderActivity?.daily_pnl?.total_realized_pnl
         : null;
       const storedFillCount = orderActivity?.pnl_store?.stored_fill_count;
+      const reconciliation = orderActivity?.reconciliation || {};
+      const criticalRecon = reconciliation.critical_issue_count || 0;
+      const reconIssues = reconciliation.issue_count || 0;
+      const reconNotices = reconciliation.notice_count || 0;
+      const reconSuffix = reconciliation.auto_stop_suppressed
+        ? ", suppressed"
+        : "";
+      const reconNoticeText = reconNotices > 0 ? `, notices ${reconNotices}` : "";
+      const reconText = criticalRecon > 0
+        ? `${reconciliation.status || "--"} (issues ${reconIssues}, critical ${criticalRecon}${reconNoticeText}${reconSuffix})`
+        : reconIssues > 0
+          ? `${reconciliation.status || "--"} (issues ${reconIssues}${reconNoticeText})`
+          : reconNotices > 0
+            ? `${reconciliation.status || "--"} (notices ${reconNotices})`
+            : `${reconciliation.status || "--"} (0)`;
       const pnlText = dailyPnl == null
         ? `recent P/L ${formatPnlValue(recentPnl)}`
         : `daily P/L ${formatPnlValue(dailyPnl)} · recent ${formatPnlValue(recentPnl)} · stored ${storedFillCount || 0}`;
       text(
         "orders-meta",
         orderActivity
-          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · ${pnlText} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
+          ? `${orderActivity.status || "unknown"} · open ${orderActivity.open_order_count || 0} · fills ${orderActivity.recent_trade_count || 0} · recon ${reconText} · ${pnlText} · checked ${orderActivity.checked_account_count || 0}/${orderActivity.total_account_count || 0} · ${formatAge(orderActivity.last_finished)}`
           : ""
       );
       renderOpenOrders(orderActivity);
       renderRecentFills(orderActivity);
+      renderOrderReconciliation(orderActivity);
     }
 
     let consoleActionBusy = false;
@@ -1899,6 +2473,138 @@ HTML = """<!doctype html>
       renderConsoleStrategies(tradingConsole);
       renderOpenOrders(orderActivity, "console-open-orders", true);
       renderRecentFills(orderActivity, "console-recent-fills");
+    }
+
+    function readinessClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (["ready", "live", "ok"].includes(value)) return "risk-ok";
+      if (["blocked", "error"].includes(value)) return "risk-blocked";
+      if (["warning", "guarded"].includes(value)) return "missing";
+      if (["checking", "starting", "idle", "paused"].includes(value)) return "risk-off";
+      return "risk-off";
+    }
+
+    function renderReadiness(readiness, runtimeStore) {
+      const payload = readiness || {};
+      const store = runtimeStore || {};
+      const summary = payload.summary || {};
+      const accounts = payload.accounts || [];
+      const strategies = payload.strategies || [];
+      const actions = payload.next_actions || [];
+      const orderChecks = payload.order_checks || {};
+      const balanceChecks = payload.balance_checks || {};
+      const status = payload.status || "starting";
+
+      text(
+        "readiness-meta",
+        `${status} · actions ${summary.action_count ?? actions.length} · blockers ${summary.blocked_count || 0} · warnings ${summary.warning_count || 0} · ${store.error ? "store error" : store.enabled ? "settings saved" : "settings memory-only"} · ${formatAge(payload.checked_at)}`
+      );
+      setValueState("readiness-status", status.toUpperCase(), readinessClass(status));
+      text(
+        "readiness-status-detail",
+        payload.live_trading
+          ? "global live enabled"
+          : payload.risk_enabled === false
+            ? "risk engine off"
+            : "global live disabled"
+      );
+      setValueState(
+        "readiness-accounts-summary",
+        `${summary.ready_accounts || 0}/${summary.used_accounts || 0}`,
+        summary.blocked_accounts > 0 ? "risk-blocked" : summary.warning_accounts > 0 ? "missing" : "risk-ok"
+      );
+      text(
+        "readiness-accounts-detail",
+        `${accounts.length} total · ${summary.idle_accounts || 0} idle`
+      );
+      setValueState(
+        "readiness-strategies-summary",
+        `${summary.live_strategies || 0}/${summary.configured_strategies || 0}`,
+        summary.blocked_strategies > 0 ? "risk-blocked" : "risk-ok"
+      );
+      text(
+        "readiness-strategies-detail",
+        `${strategies.length} tracked · ${summary.paused_strategies || 0} paused`
+      );
+      setValueState(
+        "readiness-orders-summary",
+        orderChecks.reconciliation_status || orderChecks.status || "--",
+        readinessClass(orderChecks.reconciliation_status || orderChecks.status)
+      );
+      text(
+        "readiness-orders-detail",
+        `orders ${orderChecks.status || "--"} · balances ${balanceChecks.status || "--"}`
+      );
+
+      const actionBody = document.getElementById("readiness-actions");
+      actionBody.innerHTML = "";
+      if (actions.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="5">No readiness actions.</td>`;
+        actionBody.appendChild(tr);
+      } else {
+        for (const action of actions) {
+          const level = String(action.priority || "info").toLowerCase();
+          const levelClass = level === "high" ? "risk-blocked" : level === "medium" ? "missing" : "subtle";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td class="${levelClass}">${escapeHtml(level.toUpperCase())}</td>
+            <td>${escapeHtml(action.scope || "--")}</td>
+            <td>${escapeHtml(action.action || "--")}</td>
+            <td class="${readinessClass(action.status)}">${escapeHtml(action.status || "--")}</td>
+            <td title="${escapeHtml(action.detail || "")}">${escapeHtml(action.detail || "--")}</td>
+          `;
+          actionBody.appendChild(tr);
+        }
+      }
+
+      const accountBody = document.getElementById("readiness-accounts");
+      accountBody.innerHTML = "";
+      if (accounts.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="9">No accounts configured.</td>`;
+        accountBody.appendChild(tr);
+      } else {
+        for (const account of accounts) {
+          const tr = document.createElement("tr");
+          const notes = (account.reasons || []).join(" · ") || "--";
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.key)}</td>
+            <td>${escapeHtml(account.market_type || "--")}</td>
+            <td title="${escapeHtml((account.symbols || []).join(", "))}">${escapeHtml(account.symbol_count ? String(account.symbol_count) : "--")}</td>
+            <td class="${account.api_ready ? "risk-ok" : account.symbol_count ? "risk-blocked" : "risk-off"}">${escapeHtml(account.api_status || "--")}</td>
+            <td class="${readinessClass(account.balance_status)}">${escapeHtml(account.balance_status || "--")}</td>
+            <td class="${readinessClass(account.order_status)}">${escapeHtml(account.order_status || "--")}</td>
+            <td class="${account.risk_enabled ? "risk-ok" : "risk-blocked"}">${account.risk_enabled ? "enabled" : "disabled"}</td>
+            <td class="${readinessClass(account.status)}">${escapeHtml(account.status || "--")}</td>
+            <td title="${escapeHtml(notes)}">${escapeHtml(notes)}</td>
+          `;
+          accountBody.appendChild(tr);
+        }
+      }
+
+      const strategyBody = document.getElementById("readiness-strategies");
+      strategyBody.innerHTML = "";
+      if (strategies.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">No strategies configured.</td>`;
+        strategyBody.appendChild(tr);
+        return;
+      }
+      for (const strategy of strategies) {
+        const reasons = (strategy.reasons || []).join(" · ") || "--";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(strategy.label || displayStrategy(strategy.id))}</td>
+          <td class="${strategy.configured ? "risk-ok" : "risk-off"}">${strategy.configured ? "yes" : "no"}</td>
+          <td>${escapeHtml(strategy.exchange || "--")}</td>
+          <td>${escapeHtml(strategy.symbol || "--")}</td>
+          <td class="${strategy.live ? "risk-ok" : "risk-off"}">${strategy.live ? "YES" : "NO"}</td>
+          <td class="${readinessClass(strategy.status)}">${escapeHtml(strategy.status || "--")}</td>
+          <td title="${escapeHtml(reasons)}">${escapeHtml(reasons)}</td>
+        `;
+        strategyBody.appendChild(tr);
+      }
     }
 
     function normalizeMarketRow(row) {
@@ -2097,6 +2803,9 @@ HTML = """<!doctype html>
     }
 
     function renderStrategySummaries(data) {
+      const warnings = data.warnings || [];
+      const program = data.program || {};
+      const scan = data.scan || {};
       const marketMaker = data.market_maker || {};
       const mmRuntime = marketMaker.runtime || {};
       const mmPlan = marketMaker.plan || mmRuntime.last_plan || null;
@@ -2132,11 +2841,35 @@ HTML = """<!doctype html>
       const activity = data.order_activity || {};
       const openOrders = activity.open_order_count || 0;
       const fills = activity.recent_trade_count || 0;
+      const recon = activity.reconciliation || {};
       const dailyPnl = activity.daily_pnl?.enabled
         ? activity.daily_pnl?.total_realized_pnl
         : activity.pnl_summary?.total_realized_pnl;
       text("monitor-orders-summary", `Open ${openOrders} · Fills ${fills}`);
       text("monitor-orders-detail", `P/L ${formatPnlValue(dailyPnl)} · ${formatAge(activity.last_finished)}`);
+      const spot = data.spot_arbitrage || {};
+      text("overview-meta", warnings.length ? `${warnings.length} warning(s)` : `updated ${formatAge(scan.last_finished)}`);
+      text(
+        "overview-program",
+        `${program.running === false ? "Paused" : "Running"} · ${data.status || "--"}`
+      );
+      text(
+        "overview-mm",
+        `${mmMode} · ${mmStatus} · open ${mmRuntime.open_order_count || 0}`
+      );
+      text(
+        "overview-arb",
+        `${spot.mode || "dry_run"} · ${spot.status || "disabled"}`
+      );
+      text(
+        "overview-orders",
+        `open ${openOrders} · fills ${fills} · issues ${recon.issue_count || 0}`
+      );
+      text("overview-auto", autoDetail === "--" ? autoStatus : `${autoStatus} · ${autoDetail}`);
+      text(
+        "overview-risk",
+        `${riskSummary} · max $${money.format(risk.max_order_quote || 0)}`
+      );
     }
 
     function renderOpportunities(items) {
@@ -2173,6 +2906,7 @@ HTML = """<!doctype html>
       const risk = ops?.risk || {};
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
+      const audit = ops?.web_audit || {};
       const dailyPnl = ops?.daily_pnl || {};
       const summary = tradeLog.summary || {};
       const riskState = risk.enabled === false ? "off" : risk.trading_enabled === false ? "trading off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
@@ -2214,6 +2948,156 @@ HTML = """<!doctype html>
         `;
         body.appendChild(tr);
       }
+
+      text(
+        "audit-meta",
+        `${audit.enabled === false ? "off" : "on"} · ${audit.recent_events?.length || 0} recent · ${audit.error || audit.path || ""}`
+      );
+      const auditBody = document.getElementById("audit-events");
+      auditBody.innerHTML = "";
+      const auditEvents = audit.recent_events || [];
+      if (auditEvents.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">No audit events yet.</td>`;
+        auditBody.appendChild(tr);
+        return;
+      }
+      for (const event of auditEvents.slice(0, 30)) {
+        const statusClass = event.status === "ok" ? "risk-ok" : "risk-blocked";
+        const detail = event.detail || event.error || "--";
+        const target = event.target || event.strategy || event.exchange || "--";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${formatAge(event.logged_at)}</td>
+          <td>${escapeHtml(event.action || "--")}</td>
+          <td class="${statusClass}">${escapeHtml(event.status || "--")}</td>
+          <td>${escapeHtml(event.actor_ip || "--")}</td>
+          <td>${escapeHtml(target)}</td>
+          <td title="${escapeHtml(detail)}">${escapeHtml(detail)}</td>
+        `;
+        auditBody.appendChild(tr);
+      }
+    }
+
+    function setValueState(id, value, stateClass) {
+      const el = document.getElementById(id);
+      el.textContent = value;
+      el.className = `value ${stateClass || ""}`.trim();
+    }
+
+    function firstRiskMessage(riskLike) {
+      const reasons = Array.isArray(riskLike?.reasons) ? riskLike.reasons : [];
+      if (reasons.length > 0) return reasons[0];
+      const warnings = Array.isArray(riskLike?.warnings) ? riskLike.warnings : [];
+      if (warnings.length > 0) return warnings[0];
+      return "--";
+    }
+
+    function renderMarketMakerSafety(marketMaker) {
+      const plan = marketMaker?.plan || {};
+      const planOrders = Array.isArray(plan.orders) ? plan.orders : [];
+      const safety = marketMaker?.safety || {};
+      const runtimeRisk = marketMaker?.runtime?.last_risk || null;
+      const risk = runtimeRisk || safety.risk || safety;
+      const limits = safety.limits || {};
+      const quoteRate = marketMaker?.quote_conversion?.quote_to_common_rate;
+      const quoteRateValue = quoteRate == null ? 1 : Number(quoteRate);
+      const planTotal = planOrders.reduce(
+        (sum, order) => sum + Number(order.quote_notional || 0) * quoteRateValue,
+        0
+      );
+      const totalQuote = safety.total_quote_notional ?? risk.total_quote_notional ?? planTotal;
+      const largestOrder = safety.max_order_quote_notional ?? Math.max(0, ...planOrders.map((order) => Number(order.quote_notional || 0) * quoteRateValue));
+      const orderCount = safety.order_count ?? risk.order_count ?? planOrders.length;
+      const approved = risk.approved === true || safety.approved === true;
+      const statusText = marketMaker?.status === "disabled"
+        ? "Disabled"
+        : approved ? "Ready" : "Blocked";
+      const statusClass = marketMaker?.status === "disabled"
+        ? "risk-off"
+        : approved ? "risk-ok" : "risk-blocked";
+
+      setValueState("mm-safety-status", statusText, statusClass);
+      text("mm-safety-reason", firstRiskMessage(risk));
+      setValueState(
+        "mm-safety-orders",
+        `${orderCount}/${limits.max_orders_per_cycle || "--"}`,
+        limits.max_orders_per_cycle > 0 && orderCount > limits.max_orders_per_cycle ? "risk-blocked" : ""
+      );
+      text(
+        "mm-safety-orders-detail",
+        `buy ${safety.buy_order_count ?? "--"} · sell ${safety.sell_order_count ?? "--"} · open cap ${limits.max_open_orders || "--"}`
+      );
+      setValueState(
+        "mm-safety-budget",
+        `$${money.format(totalQuote || 0)}`,
+        limits.max_cycle_quote > 0 && totalQuote > limits.max_cycle_quote ? "risk-blocked" : ""
+      );
+      text(
+        "mm-safety-budget-detail",
+        `largest $${money.format(largestOrder || 0)} / $${money.format(limits.max_order_quote || 0)} · cycle $${money.format(limits.max_cycle_quote || 0)}`
+      );
+
+      const market = safety.market || {};
+      const age = market.order_book_received_at
+        ? Math.max(0, Date.now() / 1000 - market.order_book_received_at)
+        : market.order_book_timestamp_ms
+          ? Math.max(0, Date.now() / 1000 - market.order_book_timestamp_ms / 1000)
+          : null;
+      setValueState(
+        "mm-safety-market",
+        market.existing_spread_bps == null ? "--" : `${Number(market.existing_spread_bps).toFixed(1)} bps`,
+        ""
+      );
+      text(
+        "mm-safety-market-detail",
+        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${(market.max_level_gap_bps || 0).toFixed ? market.max_level_gap_bps.toFixed(1) : market.max_level_gap_bps || 0} bps · age ${age == null ? "--" : age.toFixed(1) + "s"}`
+      );
+      renderMarketMakerQuality(marketMaker);
+    }
+
+    function renderMarketMakerQuality(marketMaker) {
+      const quality = marketMaker?.quality || {};
+      const inventory = quality.inventory || {};
+      const base = inventory.base;
+      const deviation = inventory.deviation_base;
+      const target = inventory.target_base;
+      const buyMult = inventory.buy_multiplier;
+      const sellMult = inventory.sell_multiplier;
+      const daily = quality.daily || {};
+      const usingDaily = quality.window === "daily_pnl";
+      text(
+        "mm-quality-inventory",
+        base == null ? "--" : compact.format(base)
+      );
+      text(
+        "mm-quality-inventory-detail",
+        base == null
+          ? "--"
+          : `target ${compact.format(target || 0)} · dev ${compact.format(deviation || 0)} · buy ${buyMult == null ? "--" : Number(buyMult).toFixed(2)}x / sell ${sellMult == null ? "--" : Number(sellMult).toFixed(2)}x`
+      );
+
+      const buy = quality.buy || {};
+      const sell = quality.sell || {};
+      text(
+        "mm-quality-fills",
+        `${quality.trade_count || 0} ${usingDaily ? "today" : "recent"}`
+      );
+      text(
+        "mm-quality-fills-detail",
+        usingDaily
+          ? `today notional $${money.format(daily.total_notional || 0)} · updated ${formatAge(daily.updated_at)}`
+          : `buy ${buy.trade_count || 0} @ ${buy.average_price == null ? "--" : fmt.format(buy.average_price)} · sell ${sell.trade_count || 0} @ ${sell.average_price == null ? "--" : fmt.format(sell.average_price)}`
+      );
+      setValueState(
+        "mm-quality-spread",
+        quality.realized_spread_bps == null ? "--" : `${Number(quality.realized_spread_bps).toFixed(1)} bps`,
+        quality.realized_spread_bps == null ? "" : quality.realized_spread_bps >= 0 ? "risk-ok" : "risk-blocked"
+      );
+      text(
+        "mm-quality-spread-detail",
+        `P/L ${formatPnlValue(quality.realized_pnl)} · fees ${formatPnlValue(-(quality.total_fees || 0))} · notional $${money.format(quality.total_notional || 0)}`
+      );
     }
 
     function renderMarketMaker(marketMaker) {
@@ -2256,10 +3140,15 @@ HTML = """<!doctype html>
       const plan = slowExecution.plan;
       const order = plan.order;
       const progressMode = plan.progress_mode || ((plan.total_quote || 0) > 0 ? "quote" : "base");
-      const submittedText = progressMode === "quote"
+      const unlimited = progressMode === "unlimited" || plan.unlimited_total;
+      const submittedText = unlimited
+        ? `${formatSymbolQuantity(order.submitted_base_before, plan.symbol, "base")} / Unlimited`
+        : progressMode === "quote"
         ? `${formatSymbolQuantity(order.submitted_quote_before, plan.symbol, "quote")} / ${formatSymbolQuantity(plan.total_quote, plan.symbol, "quote")}`
         : `${formatSymbolQuantity(order.submitted_base_before, plan.symbol, "base")} / ${formatSymbolQuantity(plan.total_base, plan.symbol, "base")}`;
-      const remainingText = progressMode === "quote"
+      const remainingText = unlimited
+        ? "Unlimited"
+        : progressMode === "quote"
         ? formatSymbolQuantity(plan.remaining_quote, plan.symbol, "quote")
         : formatSymbolQuantity(plan.remaining_base, plan.symbol, "base");
       const tr = document.createElement("tr");
@@ -2300,28 +3189,35 @@ HTML = """<!doctype html>
       for (const task of tasks) {
         const config = task.config || {};
         const status = task.status || "--";
-        const statusClass = status === "complete" ? "risk-ok" : status === "paused" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
+        const terminal = ["complete", "stopped", "stopped_by_price", "below_min_order_quote"].includes(status);
+        const statusClass = status === "complete" ? "risk-ok" : status === "paused" || status === "stopped" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
         const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
         const progressMode = task.progress_mode || ((config.total_quote || 0) > 0 ? "quote" : "base");
+        const unlimited = progressMode === "unlimited" || config.unlimited_total;
         const filledValue = progressMode === "quote" ? task.filled_quote : task.filled_base;
         const totalValue = progressMode === "quote" ? config.total_quote : config.total_base;
         const remainingValue = progressMode === "quote" ? task.remaining_quote : task.remaining_base;
+        const filledText = unlimited
+          ? `${progressLabel} ${formatSymbolQuantity(task.filled_base, config.symbol, "base")} / Unlimited`
+          : `${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}`;
+        const remainingText = unlimited ? "Unlimited" : formatSymbolQuantity(remainingValue, config.symbol, progressMode);
+        const progressPct = unlimited ? "--" : `${(task.progress_pct || 0).toFixed(2)}%`;
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
           <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
           <td>${escapeHtml(config.exchange || "--")}</td>
           <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
-          <td class="num">${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}</td>
-          <td class="num">${formatSymbolQuantity(remainingValue, config.symbol, progressMode)}</td>
-          <td class="num">${(task.progress_pct || 0).toFixed(2)}%</td>
+          <td class="num">${filledText}</td>
+          <td class="num">${remainingText}</td>
+          <td class="num">${progressPct}</td>
           <td class="num">${task.open_order_count || 0}</td>
           <td>${formatAge(task.last_cycle_at)}</td>
           <td>${formatDue(task.next_run_at)}</td>
           <td class="strategy-action"></td>
         `;
         const action = tr.querySelector(".strategy-action");
-        if (status !== "complete" && status !== "stopped_by_price" && status !== "below_min_order_quote") {
+        if (!terminal) {
           const button = document.createElement("button");
           button.className = status === "paused" ? "control-button" : "danger-button";
           button.type = "button";
@@ -2332,6 +3228,16 @@ HTML = """<!doctype html>
             button
           ));
           action.appendChild(button);
+          const stopButton = document.createElement("button");
+          stopButton.className = "danger-button";
+          stopButton.type = "button";
+          stopButton.textContent = "Stop";
+          stopButton.addEventListener("click", () => controlAutoBuySellTask(
+            task.id,
+            "stop",
+            stopButton
+          ));
+          action.appendChild(stopButton);
         } else {
           action.textContent = "--";
         }
@@ -2382,13 +3288,25 @@ HTML = """<!doctype html>
       return pieces.length === 0 ? "--" : pieces.join(" · ");
     }
 
+    function formatPositionPrice(position, portfolio) {
+      const price = position?.mark_price ?? portfolio?.mark_price;
+      return price == null ? "price --" : `price $${fmt.format(price)}`;
+    }
+
+    function formatPositionValue(position, portfolio) {
+      const value = position?.position_value ?? portfolio?.position_value;
+      return value == null ? "value --" : `value $${money.format(value)}`;
+    }
+
     function formatPositionDetail(portfolio) {
       const positions = portfolio?.positions || [];
       if (positions.length === 0) {
-        return portfolio?.asset ? `${compact.format(portfolio.position_base || 0)} ${portfolio.asset}` : "--";
+        return portfolio?.asset
+          ? `${portfolio.asset} ${formatPositionPrice(null, portfolio)} · ${formatPositionValue(null, portfolio)}`
+          : "--";
       }
       return positions
-        .map((position) => `${position.asset} ${compact.format(position.position_base || 0)}`)
+        .map((position) => `${position.asset} ${compact.format(position.position_base || 0)} · ${formatPositionPrice(position, portfolio)} · ${formatPositionValue(position, portfolio)}`)
         .join(" · ");
     }
 
@@ -2426,7 +3344,7 @@ HTML = """<!doctype html>
         text("portfolio-position-detail", positionDetail);
       } else {
         text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
-        text("portfolio-position-detail", "--");
+        text("portfolio-position-detail", positionDetail);
       }
       document.getElementById("portfolio-position-detail").title = positionDetail;
       const cashValue = portfolio.cash_value == null ? null : portfolio.cash_value;
@@ -2478,33 +3396,82 @@ HTML = """<!doctype html>
       return value || "--";
     }
 
+    function formatTokenDelta(value) {
+      if (value == null) return "--";
+      return `${value >= 0 ? "+" : ""}${compact.format(value)}`;
+    }
+
+    function deltaClass(value) {
+      return value == null ? "" : value >= 0 ? "ok" : "missing";
+    }
+
+    function displayHolderEventType(value) {
+      if (value === "entered_top_holders") return "Entered Top";
+      if (value === "balance_change") return "Balance";
+      return value || "--";
+    }
+
     function renderHolders(onchain) {
       const body = document.getElementById("holders");
       body.innerHTML = "";
       if (!onchain || !onchain.holders || onchain.holders.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="7">No holder data yet.</td>`;
+        tr.innerHTML = `<td colspan="9">No holder data yet.</td>`;
         body.appendChild(tr);
+      } else {
+        for (const holder of onchain.holders) {
+          const cumulativeDelta = holder.cumulative_delta_amount ?? holder.delta_amount;
+          const lastDelta = holder.last_delta_amount;
+          const label = holder.label || "Unknown";
+          const labelClass = holder.is_labeled ? "known" : "unknown";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${holder.rank}</td>
+            <td><span class="holder-label ${labelClass}" title="${escapeHtml(label)}">${escapeHtml(label)}</span></td>
+            <td title="${holder.owner}">${shortAddress(holder.owner)}</td>
+            <td class="num">${compact.format(holder.amount)}</td>
+            <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(4) + "%"}</td>
+            <td class="num ${deltaClass(cumulativeDelta)}" title="Baseline ${holder.baseline_amount == null ? "--" : compact.format(holder.baseline_amount)}">${formatTokenDelta(cumulativeDelta)}</td>
+            <td class="num ${deltaClass(lastDelta)}" title="${holder.last_change_at ? formatAge(holder.last_change_at) : "No change"}">${formatTokenDelta(lastDelta)}</td>
+            <td class="num">${holder.change_count || 0}</td>
+            <td class="num">${holder.token_account_count}</td>
+          `;
+          body.appendChild(tr);
+        }
+      }
+
+      const history = onchain?.history || {};
+      const baselineText = history.baseline_at ? `since ${formatAge(history.baseline_at)}` : "baseline pending";
+      text(
+        "onchain-history-meta",
+        `${history.event_count || 0} total changes · ${baselineText} · ${history.path || ""}`
+      );
+
+      const changesBody = document.getElementById("holder-changes");
+      changesBody.innerHTML = "";
+      const events = history.recent_events || [];
+      if (events.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No wallet changes recorded since the baseline.</td>`;
+        changesBody.appendChild(tr);
         return;
       }
 
-      for (const holder of onchain.holders) {
-        const delta = holder.delta_amount;
-        const deltaText = delta == null ? "--" : `${delta >= 0 ? "+" : ""}${compact.format(delta)}`;
-        const deltaClass = delta == null ? "" : delta >= 0 ? "ok" : "missing";
-        const label = holder.label || "Unknown";
-        const labelClass = holder.is_labeled ? "known" : "unknown";
+      for (const event of events) {
+        const label = event.label || "Unknown";
+        const labelClass = event.is_labeled ? "known" : "unknown";
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${holder.rank}</td>
+          <td>${formatAge(event.observed_at)}</td>
+          <td>${escapeHtml(displayHolderEventType(event.event_type))}</td>
           <td><span class="holder-label ${labelClass}" title="${escapeHtml(label)}">${escapeHtml(label)}</span></td>
-          <td title="${holder.owner}">${shortAddress(holder.owner)}</td>
-          <td class="num">${compact.format(holder.amount)}</td>
-          <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(4) + "%"}</td>
-          <td class="num ${deltaClass}">${deltaText}</td>
-          <td class="num">${holder.token_account_count}</td>
+          <td title="${event.owner}">${shortAddress(event.owner)}</td>
+          <td class="num">${event.previous_rank && event.previous_rank !== event.rank ? `${event.previous_rank}→${event.rank || "--"}` : event.rank || "--"}</td>
+          <td class="num ${deltaClass(event.delta_amount)}">${formatTokenDelta(event.delta_amount)}</td>
+          <td class="num">${event.amount == null ? "--" : compact.format(event.amount)}</td>
+          <td class="num ${deltaClass(event.cumulative_delta_amount)}">${formatTokenDelta(event.cumulative_delta_amount)}</td>
         `;
-        body.appendChild(tr);
+        changesBody.appendChild(tr);
       }
     }
 
@@ -2597,12 +3564,18 @@ HTML = """<!doctype html>
       const risk = ops?.risk || {};
       document.getElementById("risk-allow-live").checked = Boolean(risk.allow_live_trading);
       setNumericField("risk-max-order", risk.max_order_quote || 0);
+      setNumericField("risk-max-cycle", risk.max_cycle_quote || 0);
       setNumericField("risk-max-exposure", risk.max_exposure_quote || 0);
       setNumericField("risk-max-daily-loss", risk.max_daily_loss_quote || 0);
+      setNumericField("risk-max-orders-cycle", risk.max_orders_per_cycle || 0);
       setNumericField("risk-max-open-orders", risk.max_open_orders || 0);
       setNumericField("risk-max-cancels", risk.max_cancels_per_cycle || 0);
       setNumericField("risk-cancel-cooldown", risk.min_seconds_between_cancels || 0);
+      setNumericField("risk-min-book-depth", risk.min_order_book_depth_quote || 0);
+      setNumericField("risk-max-slippage", risk.max_slippage_bps || 0);
       setNumericField("risk-max-book-age", risk.max_order_book_age_seconds || 0);
+      setNumericField("risk-max-book-gap", risk.max_order_book_gap_bps || 0);
+      setNumericField("risk-max-price-jump", risk.max_price_jump_bps || 0);
 
       const accounts = (tradingConsole?.accounts || []).map((account) => ({
         key: account.key,
@@ -2632,7 +3605,7 @@ HTML = """<!doctype html>
       const liveState = risk.allow_live_trading ? "live allowed" : "live blocked";
       text(
         "risk-control-meta",
-        `${liveState} · max/order $${money.format(risk.max_order_quote || 0)} · exposure $${money.format(risk.max_exposure_quote || 0)} · book age ${risk.max_order_book_age_seconds || 0}s`
+        `${liveState} · max/order $${money.format(risk.max_order_quote || 0)} · cycle $${money.format(risk.max_cycle_quote || 0)} · orders ${risk.max_orders_per_cycle || 0}/cycle · open ${risk.max_open_orders || 0}`
       );
     }
 
@@ -2647,12 +3620,18 @@ HTML = """<!doctype html>
         account_enabled: checkboxMap("risk-account"),
         strategy_enabled: checkboxMap("risk-strategy"),
         max_order_quote: numericValue("risk-max-order"),
+        max_cycle_quote: numericValue("risk-max-cycle"),
         max_exposure_quote: numericValue("risk-max-exposure"),
         max_daily_loss_quote: numericValue("risk-max-daily-loss"),
+        max_orders_per_cycle: numericValue("risk-max-orders-cycle"),
         max_open_orders: numericValue("risk-max-open-orders"),
         max_cancels_per_cycle: numericValue("risk-max-cancels"),
         min_seconds_between_cancels: numericValue("risk-cancel-cooldown"),
+        min_order_book_depth_quote: numericValue("risk-min-book-depth"),
+        max_slippage_bps: numericValue("risk-max-slippage"),
         max_order_book_age_seconds: numericValue("risk-max-book-age"),
+        max_order_book_gap_bps: numericValue("risk-max-book-gap"),
+        max_price_jump_bps: numericValue("risk-max-price-jump"),
       };
       try {
         const res = await fetch("/api/risk", {
@@ -2737,6 +3716,10 @@ HTML = """<!doctype html>
       setNumericField("mm-min-distance", config.min_distance_bps || 0);
       setNumericField("mm-reprice", config.reprice_threshold_bps || 0);
       setNumericField("mm-poll", config.poll_seconds || 1);
+      document.getElementById("mm-inventory-enabled").checked = Boolean(config.inventory_control_enabled);
+      setNumericField("mm-inventory-target", config.inventory_target_base || 0);
+      setNumericField("mm-inventory-band", config.inventory_band_base || 0);
+      setNumericField("mm-inventory-max", config.inventory_max_deviation_base || 0);
       document.getElementById("mm-post-only").checked = Boolean(config.post_only);
     }
 
@@ -2754,6 +3737,10 @@ HTML = """<!doctype html>
         min_distance_bps: numericValue("mm-min-distance"),
         reprice_threshold_bps: numericValue("mm-reprice"),
         poll_seconds: numericValue("mm-poll"),
+        inventory_control_enabled: document.getElementById("mm-inventory-enabled").checked,
+        inventory_target_base: numericValue("mm-inventory-target"),
+        inventory_band_base: numericValue("mm-inventory-band"),
+        inventory_max_deviation_base: numericValue("mm-inventory-max"),
         post_only: document.getElementById("mm-post-only").checked,
       };
     }
@@ -2842,8 +3829,12 @@ HTML = """<!doctype html>
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "");
       document.getElementById("slow-side").value = config.side || "sell";
+      document.getElementById("slow-price-mode").value = config.price_mode || "taker";
+      setNumericField("slow-offset-bps", config.price_offset_bps || 0);
+      document.getElementById("slow-unlimited").checked = Boolean(config.unlimited_total);
       setNumericField("slow-total-base", config.total_base || 0);
       setNumericField("slow-total-quote", config.total_quote || 0);
+      document.getElementById("slow-slice-mode").value = config.slice_mode || "configured";
       setNumericField("slow-slice-min", config.slice_base_min || config.slice_base || 0);
       setNumericField("slow-slice-max", config.slice_base_max || config.slice_base || 0);
       document.getElementById("slow-randomize").checked = Boolean(config.randomize_slice);
@@ -2859,8 +3850,12 @@ HTML = """<!doctype html>
         exchange: selectedSlowAccount(),
         symbol: selectedSlowSymbol(),
         side: document.getElementById("slow-side").value,
+        price_mode: document.getElementById("slow-price-mode").value,
+        price_offset_bps: numericValue("slow-offset-bps"),
+        unlimited_total: document.getElementById("slow-unlimited").checked,
         total_base: numericValue("slow-total-base"),
         total_quote: numericValue("slow-total-quote"),
+        slice_mode: document.getElementById("slow-slice-mode").value,
         slice_base_min: numericValue("slow-slice-min"),
         slice_base_max: numericValue("slow-slice-max"),
         randomize_slice: document.getElementById("slow-randomize").checked,
@@ -2925,7 +3920,7 @@ HTML = """<!doctype html>
         const res = await fetch(`/api/auto-buy-sell/tasks/${encodeURIComponent(taskId)}/control`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action }),
+          body: JSON.stringify({ action, cancel_open_orders: action === "stop" }),
         });
         if (!res.ok) throw new Error("task control failed");
         await refresh();
@@ -2934,74 +3929,198 @@ HTML = """<!doctype html>
       }
     }
 
-    async function refresh() {
+    async function clearTerminalAutoBuySellTasks() {
+      const button = document.getElementById("slow-clear-terminal");
+      button.disabled = true;
       try {
-        const res = await fetch("/api/state", { cache: "no-store" });
-        const data = await res.json();
+        const res = await fetch("/api/auto-buy-sell/tasks/cleanup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ terminal_only: true }),
+        });
+        if (!res.ok) throw new Error("task cleanup failed");
+        await refresh();
+      } finally {
+        button.disabled = false;
+      }
+    }
 
-        const status = document.getElementById("status");
-        status.textContent = data.status || "unknown";
-        status.className = `pill ${data.status || "error"}`;
-        document.getElementById("program-toggle").checked = data.program?.running !== false;
+    let refreshHadSuccess = false;
+    let refreshFailureCount = 0;
+    let refreshInFlight = false;
+    const STATE_FETCH_TIMEOUT_MS = 10000;
 
-        text("scan-count", data.scan?.count ?? 0);
-        text("latency", data.scan?.elapsed_ms == null ? "--" : `${data.scan.elapsed_ms} ms`);
-        text("opp-count", data.opportunities?.length ?? 0);
-        text("notional", data.config ? `$${money.format(data.config.notional_quote)}` : "--");
-        text("threshold", data.config ? `$${data.config.min_profit_quote} / ${data.config.min_profit_bps} bps` : "--");
-        text("updated", formatAge(data.scan?.last_finished));
-        text("onchain-status", data.onchain?.status || "off");
-        text("common-quote", data.config?.common_quote_currency || "USD");
-        text("warnings", (data.warnings || []).join(" · "));
-        text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
-        const mmRuntime = data.market_maker?.runtime || {};
-        const mmPlan = data.market_maker?.plan;
-        const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
-        const mmMarketData = mmRuntime.market_data || data.market_maker?.market_data || {};
-        const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
-        const mmMarketDataText = mmMarketData.source
-          ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(2)}s`}${mmWsText}`
-          : mmWsText;
-        const mmQuote = data.market_maker?.quote_conversion;
-        const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
-        const mmFeatures = data.market_maker?.exchange_features || {};
-        const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
-        text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
-        const slowPlan = data.slow_execution?.plan;
-        const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
-        text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
+    function statusLabel(status) {
+      const value = String(status || "starting").toLowerCase();
+      const labels = {
+        running: "Running",
+        degraded: "Attention",
+        error: "Error",
+        starting: "Checking",
+        checking: "Checking",
+        paused: "Paused",
+        auto_stopped: "Stopped",
+      };
+      return labels[value] || value;
+    }
 
-        renderOperations(data.operations);
+    function pillClassForStatus(status) {
+      if (status === "auto_stopped") return "degraded";
+      if (status === "checking") return "starting";
+      if (["running", "degraded", "error", "starting", "paused"].includes(status)) {
+        return status;
+      }
+      return "degraded";
+    }
+
+    function setHeaderStatus(statusValue, label) {
+      const status = document.getElementById("status");
+      const normalized = statusValue || "starting";
+      status.textContent = label || statusLabel(normalized);
+      status.className = `pill ${pillClassForStatus(normalized)}`;
+    }
+
+    async function fetchWithTimeout(url, options = {}, timeoutMs = STATE_FETCH_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+
+    function renderCommonState(data) {
+      setHeaderStatus(data.status || "starting");
+      document.getElementById("program-toggle").checked = data.program?.running !== false;
+
+      text("scan-count", data.scan?.count ?? 0);
+      text("latency", data.scan?.elapsed_ms == null ? "--" : `${data.scan.elapsed_ms} ms`);
+      text("opp-count", data.opportunities?.length ?? 0);
+      text("notional", data.config ? `$${money.format(data.config.notional_quote)}` : "--");
+      text("threshold", data.config ? `$${data.config.min_profit_quote} / ${data.config.min_profit_bps} bps` : "--");
+      text("updated", formatAge(data.scan?.last_finished));
+      text("onchain-status", data.onchain?.status || "off");
+      text("common-quote", data.config?.common_quote_currency || "USD");
+      text("warnings", (data.warnings || []).join(" · "));
+      text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
+
+      const mmRuntime = data.market_maker?.runtime || {};
+      const mmPlan = data.market_maker?.plan;
+      const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
+      const mmMarketData = mmRuntime.market_data || data.market_maker?.market_data || {};
+      const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
+      const mmMarketDataText = mmMarketData.source
+        ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(2)}s`}${mmWsText}`
+        : mmWsText;
+      const mmQuote = data.market_maker?.quote_conversion;
+      const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
+      const mmFeatures = data.market_maker?.exchange_features || {};
+      const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
+      text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
+
+      const slowPlan = data.slow_execution?.plan;
+      const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
+      text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
+
+      renderPortfolio(data.portfolio);
+      renderStrategySummaries(data);
+    }
+
+    function renderVisiblePage(data, page = currentPage, options = {}) {
+      const activePage = PAGE_IDS.has(page) ? page : "status";
+      const now = Date.now();
+      const minIntervalMs = PAGE_RENDER_INTERVAL_MS[activePage] || 1000;
+      if (!options.force && lastVisibleRenderAt[activePage] && now - lastVisibleRenderAt[activePage] < minIntervalMs) {
+        return;
+      }
+      lastVisibleRenderAt[activePage] = now;
+      if (activePage === "settings") {
         renderMarketsConfig(data);
         renderCashCarryConfig(data);
         renderRiskControls(data.operations, data.trading_console);
         renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
-        renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
-        renderMarkets(data.markets);
-        renderAccountBalances(data.account_balances);
-        renderOrderActivity(data.order_activity);
-        renderTradingConsole(data.trading_console, data.order_activity);
-        renderPortfolio(data.portfolio);
-        renderStrategySummaries(data);
+        renderMarketMakerSafety(data.market_maker);
         renderMarketMaker(data.market_maker);
+        renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderSlowExecution(data.slow_execution);
         renderSlowExecutionTasks(data.slow_execution?.tasks);
-        renderRates(data.quote_rates);
-        renderOpportunities(data.opportunities);
+        return;
+      }
+      if (activePage === "records") {
+        renderOperations(data.operations);
+        renderOrderActivity(data.order_activity);
+        renderTradingConsole(data.trading_console, data.order_activity);
         renderHolders(data.onchain);
+        return;
+      }
+      renderReadiness(data.readiness, data.runtime_store);
+      renderMarkets(data.markets);
+      renderAccountBalances(data.account_balances);
+      renderRates(data.quote_rates);
+      renderOpportunities(data.opportunities);
+      renderHolders(data.onchain);
+    }
+
+    async function refresh(options = {}) {
+      if (refreshInFlight) {
+        if (options.force) refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      const requestedPage = PAGE_IDS.has(currentPage) ? currentPage : "status";
+      try {
+        const stateUrl = `/api/state?view=${encodeURIComponent(requestedPage)}`;
+        const res = await fetchWithTimeout(stateUrl, { cache: "no-store" });
+        if (res.status === 401) {
+          window.location.assign("/login");
+          return;
+        }
+        if (!res.ok) throw new Error(`state request failed (${res.status})`);
+        const data = await res.json();
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+          throw new Error("state response is invalid");
+        }
+        refreshHadSuccess = true;
+        refreshFailureCount = 0;
+
+        lastState = data;
+        pageStateCache[requestedPage] = data;
+        renderCommonState(data);
+        if (requestedPage === currentPage) {
+          renderVisiblePage(data, requestedPage, { force: Boolean(options.force) });
+        }
       } catch (error) {
-        const status = document.getElementById("status");
-        status.textContent = "error";
-        status.className = "pill error";
+        refreshFailureCount += 1;
+        const message = error?.name === "AbortError"
+          ? "state request timed out"
+          : (error?.message || String(error || "state request failed"));
+        if (!refreshHadSuccess) {
+          setHeaderStatus("degraded", "Retrying");
+          text("warnings", `Connecting to server: ${message}`);
+        } else if (refreshFailureCount < 3) {
+          setHeaderStatus("degraded", "Reconnecting");
+          text("warnings", `Connection retry ${refreshFailureCount}/3: ${message}`);
+        } else {
+          setHeaderStatus("degraded", "Stale");
+          text("warnings", `State is stale: ${message}`);
+        }
+      } finally {
+        refreshInFlight = false;
+        if (refreshQueued) {
+          refreshQueued = false;
+          refresh({ force: true });
+        }
       }
     }
 
-    setActivePage(pageFromLocation());
+    setupCompactSections();
+    setActivePage(pageFromLocation(), { refresh: false });
     window.addEventListener("hashchange", () => {
       setActivePage(pageFromLocation());
     });
 
-    refresh();
+    refresh({ force: true });
     document.getElementById("program-toggle").addEventListener("change", (event) => {
       setProgramRunning(event.target.checked);
     });
@@ -3020,6 +4139,7 @@ HTML = """<!doctype html>
     });
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
+    document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
     setInterval(refresh, 1000);
   </script>
 </body>
@@ -3066,16 +4186,26 @@ def build_market_rows(
     return rows
 
 
-def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
-    return asdict(cfg)
-
-
-def market_maker_config_to_dict(cfg: MarketMakerConfig) -> dict[str, Any]:
-    return asdict(cfg)
-
-
-def risk_config_to_dict(cfg: RiskConfig) -> dict[str, Any]:
-    return asdict(cfg)
+def _compact_trade_log_entry(entry: Any) -> dict[str, Any]:
+    row = entry.to_dict()
+    return {
+        "event_id": row.get("event_id", ""),
+        "logged_at": row.get("logged_at"),
+        "event_type": row.get("event_type", ""),
+        "strategy": row.get("strategy", ""),
+        "mode": row.get("mode", ""),
+        "status": row.get("status", ""),
+        "exchange": row.get("exchange", ""),
+        "symbol": row.get("symbol", ""),
+        "side": row.get("side", ""),
+        "order_count": row.get("order_count", 0),
+        "total_quote_notional": row.get("total_quote_notional", 0.0),
+        "placed_count": row.get("placed_count", 0),
+        "canceled_count": row.get("canceled_count", 0),
+        "risk_level": row.get("risk_level", ""),
+        "risk_approved": row.get("risk_approved"),
+        "reason": row.get("reason", ""),
+    }
 
 
 def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
@@ -3085,15 +4215,21 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     except OSError as exc:
         recent_entries = []
         trade_log_error = str(exc)
+    compact_entries = [
+        _compact_trade_log_entry(entry) for entry in recent_entries
+    ]
     trade_log_payload = asdict(cfg.trade_log)
-    trade_log_payload["recent_entries"] = [
-        entry.to_dict() for entry in recent_entries
-    ]
-    trade_log_payload["recent_events"] = [
-        entry.raw for entry in recent_entries
-    ]
+    trade_log_payload["recent_entries"] = compact_entries
+    trade_log_payload["recent_events"] = compact_entries
     trade_log_payload["summary"] = summarize_trade_entries(recent_entries)
     trade_log_payload["error"] = trade_log_error
+    audit_path = default_web_audit_path(cfg)
+    try:
+        audit_events = read_recent_web_audit_events(cfg)
+        audit_error = None
+    except OSError as exc:
+        audit_events = []
+        audit_error = str(exc)
     try:
         daily_pnl = load_daily_pnl_summary(
             cfg.pnl_store,
@@ -3116,53 +4252,15 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
         "risk": asdict(cfg.risk),
         "alerts": asdict(cfg.alerts),
         "trade_log": trade_log_payload,
+        "web_audit": {
+            "enabled": True,
+            "path": audit_path,
+            "recent_events": audit_events,
+            "event_count": len(audit_events),
+            "error": audit_error,
+        },
         "daily_pnl": daily_pnl,
     }
-
-
-def _spot_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
-    symbols: dict[str, set[str]] = {}
-    for market in cfg.spot_markets:
-        symbols.setdefault(market.exchange, set()).add(market.symbol)
-    return {exchange: sorted(items) for exchange, items in symbols.items()}
-
-
-def _market_maker_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
-    symbols: dict[str, set[str]] = {
-        exchange: set(items)
-        for exchange, items in _spot_symbols_by_exchange(cfg).items()
-    }
-    for pair in cfg.cash_and_carry_pairs:
-        for exchange in cfg.spot_exchanges:
-            symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
-        for exchange in cfg.derivative_exchanges:
-            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
-    if cfg.market_maker.exchange and cfg.market_maker.symbol:
-        symbols.setdefault(cfg.market_maker.exchange, set()).add(
-            cfg.market_maker.symbol
-        )
-    return {exchange: sorted(items) for exchange, items in symbols.items()}
-
-
-def slow_execution_accounts(
-    exchanges: Iterable[ExchangeConfig],
-    symbols_by_exchange: dict[str, list[str]] | None = None,
-) -> list[dict[str, Any]]:
-    symbols_by_exchange = symbols_by_exchange or {}
-    rows = []
-    for exchange in exchanges:
-        symbols = symbols_by_exchange.get(exchange.key, [])
-        rows.append(
-            {
-                "key": exchange.key,
-                "label": exchange.key,
-                "id": exchange.id,
-                "market_type": exchange.market_type,
-                "symbol": symbols[0] if symbols else "",
-                "symbols": symbols,
-            }
-        )
-    return rows
 
 
 def _risk_strategy_enabled(cfg: BotConfig, strategy_id: str) -> bool:
@@ -3330,6 +4428,483 @@ def _exchange_balance_symbols(
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
+def _account_payload_by_exchange(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    return {
+        str(account.get("exchange") or ""): account
+        for account in (payload or {}).get("accounts", []) or []
+        if isinstance(account, dict) and account.get("exchange")
+    }
+
+
+def _account_payload_messages(account: dict[str, Any]) -> list[str]:
+    messages = [
+        str(message)
+        for message in [
+            *list(account.get("errors", []) or []),
+            *list(account.get("warnings", []) or []),
+        ]
+        if message
+    ]
+    balance = account.get("balance") if isinstance(account.get("balance"), dict) else {}
+    skipped = balance.get("skipped_reason")
+    if skipped and skipped not in messages:
+        messages.append(str(skipped))
+    error = balance.get("error")
+    if error and error not in messages:
+        messages.append(str(error))
+    return messages
+
+
+def _readiness_message_key(message: str) -> str:
+    normalized = " ".join(str(message or "").lower().split())
+    if "api env" in normalized:
+        if "not configured" in normalized:
+            return "api:not_configured"
+        if "missing" in normalized or "not set" in normalized:
+            return "api:missing"
+    if "no symbols configured" in normalized:
+        return "market:no_symbols"
+    if "account disabled by risk" in normalized:
+        return "risk:account_disabled"
+    if "global live trading disabled" in normalized:
+        return "risk:global_live_disabled"
+    return normalized
+
+
+def _dedupe_readiness_messages(messages: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for message in messages:
+        text_value = str(message or "").strip()
+        if not text_value:
+            continue
+        key = _readiness_message_key(text_value)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(text_value)
+    return deduped
+
+
+def _readiness_action(
+    *,
+    priority: str,
+    scope: str,
+    action: str,
+    status: str,
+    detail: str = "",
+    exchange: str = "",
+    strategy: str = "",
+) -> dict[str, Any]:
+    return {
+        "priority": priority,
+        "scope": scope,
+        "action": action,
+        "status": status,
+        "detail": detail,
+        "exchange": exchange,
+        "strategy": strategy,
+    }
+
+
+def _readiness_strategy_reasons(
+    cfg: BotConfig,
+    strategy: dict[str, Any],
+    *,
+    account_statuses: dict[str, dict[str, Any]],
+    market_maker: dict[str, Any] | None,
+    slow_execution: dict[str, Any] | None,
+) -> list[str]:
+    reasons: list[str] = []
+    strategy_id = str(strategy.get("id") or "")
+    exchange = str(strategy.get("exchange") or "")
+    if not strategy.get("configured"):
+        reasons.append("not configured")
+    if strategy.get("paused"):
+        reasons.append("paused")
+    if not cfg.risk.enabled:
+        reasons.append("risk engine disabled")
+    elif not cfg.risk.trading_enabled:
+        reasons.append("risk trading switch disabled")
+    elif not cfg.risk.allow_live_trading:
+        reasons.append("global live trading disabled")
+    if not strategy.get("strategy_allowed", True):
+        reasons.append("strategy disabled by risk")
+    if not strategy.get("account_enabled", True):
+        reasons.append("account disabled by risk")
+    if not strategy.get("live_ready", True):
+        reasons.append("strategy live switch disabled")
+
+    account = account_statuses.get(exchange)
+    if exchange and account and account.get("status") in {"blocked", "warning"}:
+        account_reason = (account.get("reasons") or [account["status"]])[0]
+        reasons.append(f"account {account['status']}: {account_reason}")
+
+    if strategy_id == "market_maker" and isinstance(market_maker, dict):
+        safety = market_maker.get("safety") if isinstance(market_maker.get("safety"), dict) else {}
+        if market_maker.get("status") == "error" and market_maker.get("error"):
+            reasons.append(str(market_maker["error"]))
+        for message in list(safety.get("reasons", []) or [])[:2]:
+            if message:
+                reasons.append(str(message))
+    if strategy_id == "slow_execution" and isinstance(slow_execution, dict):
+        if slow_execution.get("status") == "error" and slow_execution.get("error"):
+            reasons.append(str(slow_execution["error"]))
+
+    return _dedupe_readiness_messages(reasons)
+
+
+def build_readiness_payload(
+    cfg: BotConfig,
+    *,
+    account_balances: dict[str, Any] | None = None,
+    order_activity: dict[str, Any] | None = None,
+    trading_console: dict[str, Any] | None = None,
+    market_maker: dict[str, Any] | None = None,
+    slow_execution: dict[str, Any] | None = None,
+    markets: list[dict[str, Any]] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    account_balances = account_balances or {}
+    order_activity = order_activity or {}
+    trading_console = trading_console or build_trading_console_payload(cfg)
+    market_maker = market_maker or {}
+    slow_execution = slow_execution or {}
+    symbols_by_exchange = _exchange_balance_symbols(cfg)
+    balance_by_exchange = _account_payload_by_exchange(account_balances)
+    order_by_exchange = _account_payload_by_exchange(order_activity)
+    checking_statuses = {"starting", "checking", "pending"}
+
+    account_rows: list[dict[str, Any]] = []
+    for exchange in _all_account_exchanges(cfg):
+        symbols = symbols_by_exchange.get(exchange.key, [])
+        used = bool(symbols)
+        auth = _auth_env_status(exchange)
+        balance = balance_by_exchange.get(exchange.key, {})
+        orders = order_by_exchange.get(exchange.key, {})
+        balance_status = str(
+            balance.get("status")
+            or (account_balances.get("status") if account_balances.get("accounts") else "starting")
+            or "starting"
+        )
+        order_status = str(
+            orders.get("status")
+            or (order_activity.get("status") if order_activity.get("accounts") else "starting")
+            or "starting"
+        )
+        risk_enabled = _risk_account_enabled(cfg, exchange.key)
+        reasons: list[str] = []
+        if not used:
+            reasons.append("no symbols configured")
+        if used and not auth["configured"]:
+            reasons.append("API env vars are not configured")
+        elif used and auth["missing_env"]:
+            reasons.append("one or more API env vars are not set")
+        if used and not risk_enabled:
+            reasons.append("account disabled by risk")
+        if used and balance_status == "error":
+            reasons.extend(_account_payload_messages(balance) or ["balance check failed"])
+        elif used and balance_status == "warning":
+            reasons.extend(_account_payload_messages(balance) or ["balance check warning"])
+        if used and order_status == "error":
+            reasons.extend(_account_payload_messages(orders) or ["order activity failed"])
+        elif used and order_status == "warning":
+            reasons.extend(_account_payload_messages(orders) or ["order activity warning"])
+
+        if not used:
+            status = "idle"
+        elif balance_status in checking_statuses or order_status in checking_statuses:
+            status = "checking"
+        elif (
+            not auth["private_checks_enabled"]
+            or not risk_enabled
+            or balance_status == "error"
+            or order_status == "error"
+        ):
+            status = "blocked"
+        elif balance_status == "warning" or order_status == "warning":
+            status = "warning"
+        else:
+            status = "ready"
+
+        deduped = _dedupe_readiness_messages(reasons)
+        account_rows.append(
+            {
+                "key": exchange.key,
+                "label": exchange.label or exchange.key,
+                "id": exchange.id,
+                "market_type": exchange.market_type,
+                "symbols": symbols,
+                "symbol_count": len(symbols),
+                "used": used,
+                "api_ready": auth["private_checks_enabled"],
+                "api_status": (
+                    "ready"
+                    if auth["private_checks_enabled"]
+                    else "missing env"
+                    if auth["configured"]
+                    else "not configured"
+                ),
+                "balance_status": balance_status,
+                "order_status": order_status,
+                "risk_enabled": risk_enabled,
+                "status": status,
+                "reasons": deduped[:6],
+            }
+        )
+
+    account_statuses = {row["key"]: row for row in account_rows}
+    strategy_rows: list[dict[str, Any]] = []
+    for strategy in trading_console.get("strategies", []) or []:
+        if not isinstance(strategy, dict):
+            continue
+        reasons = _readiness_strategy_reasons(
+            cfg,
+            strategy,
+            account_statuses=account_statuses,
+            market_maker=market_maker,
+            slow_execution=slow_execution,
+        )
+        if strategy.get("live"):
+            status = "live"
+        elif not strategy.get("configured"):
+            status = "idle"
+        elif strategy.get("paused"):
+            status = "paused"
+        elif not cfg.risk.allow_live_trading:
+            status = "guarded"
+        elif reasons:
+            status = "blocked"
+        else:
+            status = "standby"
+        strategy_rows.append(
+            {
+                **strategy,
+                "status": status,
+                "reasons": reasons[:6],
+            }
+        )
+
+    reconciliation = (
+        order_activity.get("reconciliation")
+        if isinstance(order_activity.get("reconciliation"), dict)
+        else {}
+    )
+    market_missing_count = sum(
+        1 for row in markets or [] if isinstance(row, dict) and row.get("status") != "ok"
+    )
+    ready_accounts = sum(1 for row in account_rows if row["status"] == "ready")
+    used_accounts = sum(1 for row in account_rows if row["used"])
+    checking_accounts = sum(1 for row in account_rows if row["status"] == "checking")
+    blocked_accounts = sum(1 for row in account_rows if row["status"] == "blocked")
+    warning_accounts = sum(1 for row in account_rows if row["status"] == "warning")
+    live_strategies = sum(1 for row in strategy_rows if row["status"] == "live")
+    configured_strategies = sum(1 for row in strategy_rows if row.get("configured"))
+    blocked_strategies = sum(1 for row in strategy_rows if row["status"] == "blocked")
+    warning_count = (
+        warning_accounts
+        + market_missing_count
+        + (1 if reconciliation.get("status") == "warning" else 0)
+        + (1 if order_activity.get("status") == "warning" else 0)
+        + (1 if account_balances.get("status") == "warning" else 0)
+    )
+
+    account_checks_status = str(account_balances.get("status") or "starting")
+    order_checks_status = str(order_activity.get("status") or "starting")
+    if order_activity.get("status") == "error" or account_balances.get("status") == "error":
+        status = "error"
+    elif (
+        checking_accounts
+        or account_checks_status in checking_statuses
+        or order_checks_status in checking_statuses
+    ):
+        status = "checking"
+    elif not (cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading):
+        status = "guarded"
+    elif blocked_accounts or blocked_strategies:
+        status = "blocked"
+    elif warning_count:
+        status = "warning"
+    else:
+        status = "ready"
+
+    next_actions: list[dict[str, Any]] = []
+    for row in account_rows:
+        if not row["used"]:
+            if row["api_status"] != "ready":
+                next_actions.append(
+                    _readiness_action(
+                        priority="low",
+                        scope=row["label"],
+                        action="Add market symbols or leave account idle",
+                        status=row["status"],
+                        detail="This account has no configured symbols, so API readiness does not affect current trading.",
+                        exchange=row["key"],
+                    )
+                )
+            continue
+        if not row["api_ready"]:
+            next_actions.append(
+                _readiness_action(
+                    priority="high",
+                    scope=row["label"],
+                    action="Configure API environment variables",
+                    status=row["status"],
+                    detail=(row["reasons"] or ["API credentials are not ready"])[0],
+                    exchange=row["key"],
+                )
+            )
+        if not row["risk_enabled"]:
+            next_actions.append(
+                _readiness_action(
+                    priority="high",
+                    scope=row["label"],
+                    action="Enable account in Risk Controls",
+                    status=row["status"],
+                    detail="The account switch is off, so live strategies cannot use it.",
+                    exchange=row["key"],
+                )
+            )
+        if row["balance_status"] == "error":
+            next_actions.append(
+                _readiness_action(
+                    priority="high",
+                    scope=row["label"],
+                    action="Fix balance check error",
+                    status=row["balance_status"],
+                    detail="Private balance reads are failing for this account.",
+                    exchange=row["key"],
+                )
+            )
+        if row["order_status"] == "error":
+            next_actions.append(
+                _readiness_action(
+                    priority="high",
+                    scope=row["label"],
+                    action="Fix order activity error",
+                    status=row["order_status"],
+                    detail="Open order or fill reads are failing for this account.",
+                    exchange=row["key"],
+                )
+            )
+
+    for row in strategy_rows:
+        if row["status"] != "blocked":
+            continue
+        next_actions.append(
+            _readiness_action(
+                priority="medium",
+                scope=row.get("label") or row.get("id") or "strategy",
+                action="Resolve strategy blocker",
+                status=row["status"],
+                detail=(row.get("reasons") or ["strategy is blocked"])[0],
+                exchange=str(row.get("exchange") or ""),
+                strategy=str(row.get("id") or ""),
+            )
+        )
+
+    if market_missing_count:
+        next_actions.append(
+            _readiness_action(
+                priority="high",
+                scope="Market Data",
+                action="Fix missing order books or quote rates",
+                status="warning",
+                detail=f"{market_missing_count} configured market(s) are missing usable market data.",
+            )
+        )
+    if order_activity.get("status") in {"warning", "error"}:
+        next_actions.append(
+            _readiness_action(
+                priority="medium" if order_activity.get("status") == "warning" else "high",
+                scope="Orders",
+                action="Review order activity warnings",
+                status=str(order_activity.get("status")),
+                detail="Some configured accounts could not return orders or fills.",
+            )
+        )
+    if int(reconciliation.get("issue_count") or 0) > 0:
+        next_actions.append(
+            _readiness_action(
+                priority="medium",
+                scope="Reconciliation",
+                action="Review order/fill attribution",
+                status=str(reconciliation.get("status") or "warning"),
+                detail=(
+                    f"{reconciliation.get('issue_count')} actionable "
+                    "reconciliation issue(s)."
+                ),
+            )
+        )
+
+    action_priority = {"high": 0, "medium": 1, "low": 2}
+    action_seen: set[tuple[str, str, str]] = set()
+    unique_actions: list[dict[str, Any]] = []
+    for action in sorted(
+        next_actions,
+        key=lambda item: (
+            action_priority.get(str(item.get("priority") or "low"), 9),
+            str(item.get("scope") or ""),
+            str(item.get("action") or ""),
+        ),
+    ):
+        key = (
+            str(action.get("priority") or ""),
+            str(action.get("scope") or ""),
+            str(action.get("action") or ""),
+        )
+        if key in action_seen:
+            continue
+        action_seen.add(key)
+        unique_actions.append(action)
+
+    return {
+        "status": status,
+        "risk_enabled": cfg.risk.enabled,
+        "trading_enabled": cfg.risk.trading_enabled,
+        "live_trading": (
+            cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+        ),
+        "accounts": account_rows,
+        "strategies": strategy_rows,
+        "balance_checks": {
+            "status": account_balances.get("status") or "starting",
+            "checked_account_count": account_balances.get("checked_account_count", 0),
+            "total_account_count": account_balances.get("total_account_count", len(account_rows)),
+        },
+        "order_checks": {
+            "status": order_activity.get("status") or "starting",
+            "open_order_count": order_activity.get("open_order_count", 0),
+            "recent_trade_count": order_activity.get("recent_trade_count", 0),
+            "reconciliation_status": reconciliation.get("status") or "starting",
+            "reconciliation_issue_count": reconciliation.get("issue_count", 0),
+            "reconciliation_notice_count": reconciliation.get("notice_count", 0),
+        },
+        "market_checks": {
+            "market_count": len(markets or []),
+            "missing_count": market_missing_count,
+        },
+        "summary": {
+            "used_accounts": used_accounts,
+            "ready_accounts": ready_accounts,
+            "blocked_accounts": blocked_accounts,
+            "warning_accounts": warning_accounts,
+            "idle_accounts": sum(1 for row in account_rows if row["status"] == "idle"),
+            "checking_accounts": checking_accounts,
+            "configured_strategies": configured_strategies,
+            "live_strategies": live_strategies,
+            "blocked_strategies": blocked_strategies,
+            "paused_strategies": sum(1 for row in strategy_rows if row["status"] == "paused"),
+            "blocked_count": blocked_accounts + blocked_strategies,
+            "warning_count": warning_count,
+            "warning_messages": list(warnings or [])[:6],
+            "action_count": len(unique_actions),
+        },
+        "next_actions": unique_actions[:12],
+        "checked_at": time.time(),
+    }
+
+
 def _all_account_exchanges(cfg: BotConfig) -> list[ExchangeConfig]:
     return [*cfg.spot_exchanges, *cfg.derivative_exchanges]
 
@@ -3342,6 +4917,133 @@ def _account_balance_status(accounts: list[dict[str, Any]]) -> str:
     if any(account["status"] == "warning" for account in accounts):
         return "warning"
     return "ok"
+
+
+def _symbol_base_quote(symbol: str) -> tuple[str, str]:
+    if "/" not in symbol:
+        return "", ""
+    base, quote = symbol.split("/", 1)
+    return base.upper(), quote.split(":", 1)[0].upper()
+
+
+def _open_order_remaining_amount(raw: dict[str, Any]) -> float | None:
+    remaining = _number_or_none(raw.get("remaining"))
+    if remaining is not None:
+        return max(0.0, remaining)
+    amount = _number_or_none(raw.get("amount"))
+    filled = _number_or_none(raw.get("filled"))
+    if amount is not None and filled is not None:
+        return max(0.0, amount - filled)
+    if amount is not None:
+        return max(0.0, amount)
+    return None
+
+
+def _open_order_price(raw: dict[str, Any]) -> float | None:
+    price = _number_or_none(raw.get("price"))
+    if price is not None and price > 0:
+        return price
+    average = _number_or_none(raw.get("average"))
+    if average is not None and average > 0:
+        return average
+    return None
+
+
+def _add_reserve(reserves: dict[str, float], currency: str, amount: float | None) -> None:
+    if not currency or amount is None or amount <= 0:
+        return
+    reserves[currency] = reserves.get(currency, 0.0) + float(amount)
+
+
+async def _fetch_open_order_reserves(
+    manager: ExchangeManager,
+    exchange: ExchangeConfig,
+    symbols: Iterable[str],
+) -> dict[str, Any]:
+    fetcher = getattr(manager, "fetch_open_orders", None)
+    if fetcher is None:
+        return {"currencies": {}, "open_order_count": 0, "warnings": []}
+    reserves: dict[str, float] = {}
+    warnings: list[str] = []
+    open_order_count = 0
+    for symbol in sorted({item for item in symbols if item}):
+        base, quote = _symbol_base_quote(symbol)
+        try:
+            open_orders = await fetcher(exchange, symbol=symbol)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"{symbol} open order reserve check failed: {exc.__class__.__name__}: {exc}"
+            )
+            continue
+        for raw in open_orders:
+            if not isinstance(raw, dict):
+                continue
+            open_order_count += 1
+            side = str(raw.get("side") or "").lower()
+            remaining = _open_order_remaining_amount(raw)
+            if side == "sell":
+                _add_reserve(reserves, base, remaining)
+            elif side == "buy":
+                price = _open_order_price(raw)
+                _add_reserve(
+                    reserves,
+                    quote,
+                    remaining * price if remaining is not None and price is not None else None,
+                )
+    return {
+        "currencies": dict(sorted(reserves.items())),
+        "open_order_count": open_order_count,
+        "warnings": warnings,
+    }
+
+
+def _apply_open_order_reserves_to_balance(
+    currencies: list[dict[str, Any]],
+    reserves: dict[str, float],
+) -> list[dict[str, Any]]:
+    rows = {
+        str(row.get("currency") or "").upper(): dict(row)
+        for row in currencies
+        if row.get("currency")
+    }
+    for currency, reserved in reserves.items():
+        currency = str(currency or "").upper()
+        if not currency or reserved <= 0:
+            continue
+        row = rows.setdefault(
+            currency,
+            {"currency": currency, "free": None, "used": None, "total": None},
+        )
+        raw_free = _number_or_none(row.get("free"))
+        raw_used = _number_or_none(row.get("used"))
+        raw_total = _number_or_none(row.get("total"))
+        if raw_total is None and (raw_free is not None or raw_used is not None):
+            raw_total = float(raw_free or 0.0) + float(raw_used or 0.0)
+        adjusted_used = max(float(raw_used or 0.0), float(reserved))
+        raw_total_matches_free = (
+            raw_total is not None
+            and raw_free is not None
+            and abs(float(raw_total) - float(raw_free)) <= 1e-9
+        )
+        reserve_is_hidden_from_exchange_used = float(raw_used or 0.0) <= 1e-9
+        if raw_total_matches_free and reserve_is_hidden_from_exchange_used:
+            adjusted_free = float(raw_free or 0.0)
+            adjusted_total = adjusted_free + adjusted_used
+            reserve_adjustment = "added_to_total"
+        else:
+            adjusted_total = max(float(raw_total or 0.0), adjusted_used)
+            adjusted_free = max(0.0, adjusted_total - adjusted_used)
+            reserve_adjustment = "within_total"
+        row["open_order_reserved"] = float(reserved)
+        row["open_order_reserve_adjustment"] = reserve_adjustment
+        row["exchange_free"] = raw_free
+        row["exchange_used"] = raw_used
+        row["exchange_total"] = raw_total
+        row["used"] = adjusted_used
+        row["total"] = adjusted_total
+        row["free"] = adjusted_free
+
+    return sorted(rows.values(), key=lambda row: str(row.get("currency") or ""))
 
 
 async def _fetch_exchange_balance_payload(
@@ -3371,6 +5073,10 @@ async def _fetch_exchange_balance_payload(
         },
     }
 
+    if not symbols:
+        account["status"] = "idle"
+        account["balance"]["skipped_reason"] = "no configured symbols"
+        return account
     if not auth["configured"]:
         account["status"] = "warning"
         account["warnings"].append("API env vars are not configured")
@@ -3400,9 +5106,20 @@ async def _fetch_exchange_balance_payload(
         _balance_currencies(symbols),
         include_zero=False,
     )
+    reserve_payload = await _fetch_open_order_reserves(manager, exchange, symbols)
+    reserve_warnings = reserve_payload.get("warnings") or []
+    if reserve_warnings:
+        account["warnings"].extend(reserve_warnings)
+        if account["status"] == "ok":
+            account["status"] = "warning"
+    currencies = _apply_open_order_reserves_to_balance(
+        currencies,
+        reserve_payload.get("currencies", {}),
+    )
     account["balance"] = {
         "checked": True,
         "currencies": currencies,
+        "open_order_reserves": reserve_payload,
     }
     return account
 
@@ -3423,9 +5140,10 @@ def _aggregate_account_balance_totals(
                     "free": 0.0,
                     "used": 0.0,
                     "total": 0.0,
+                    "open_order_reserved": 0.0,
                 },
             )
-            for field in ("free", "used", "total"):
+            for field in ("free", "used", "total", "open_order_reserved"):
                 value = row.get(field)
                 if value is not None:
                     total_row[field] += float(value)
@@ -3549,8 +5267,11 @@ async def _fetch_exchange_order_activity(
         "recent_trades": [],
     }
     if not symbols:
-        account["status"] = "warning"
-        account["warnings"].append("no configured symbols")
+        account["status"] = "idle"
+        account["skipped_reason"] = "no configured symbols"
+        account["open_order_count"] = 0
+        account["closed_order_count"] = 0
+        account["recent_trade_count"] = 0
         return account
     if not auth["configured"]:
         account["status"] = "warning"
@@ -3618,253 +5339,350 @@ def _sort_activity_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def _symbol_base_quote(symbol: str) -> tuple[str, str]:
-    base, _, quote = symbol.partition("/")
-    quote = quote.partition(":")[0]
-    return base.upper(), quote.upper()
+def _activity_order_key(exchange: str, symbol: str, order_id: str) -> str:
+    return f"{exchange}|{symbol}|{order_id}" if exchange and symbol and order_id else ""
 
 
-def _source_for_strategy(strategy: str, event_type: str = "") -> str:
-    key = (strategy or event_type or "").lower()
-    if key == "market_maker":
-        return "market_maker"
-    if key in {"slow_execution", "auto_buy_sell", "slow_execution_cancel"}:
-        return "auto_buy_sell"
-    if key in {"arbitrage", "spot_spread", "spot-spread", "cash_and_carry"}:
-        return "arbitrage"
-    if key.startswith("manual"):
-        return "manual"
-    return "unattributed"
-
-
-def _pnl_source_row(source: str) -> dict[str, Any]:
-    return {
-        "source": source,
-        "label": PNL_SOURCE_LABELS.get(source, source),
-        "trade_count": 0,
-        "notional_common": 0.0,
-        "fees_common": 0.0,
-        "realized_pnl": 0.0,
-    }
-
-
-def _attribution_keys(
-    exchange: str,
-    symbol: str,
-    order_id: str,
-) -> list[str]:
+def _activity_lookup_keys(row: dict[str, Any], order_field: str = "id") -> list[str]:
+    order_id = str(row.get(order_field) or "")
     if not order_id:
         return []
+    exchange = str(row.get("exchange") or "")
+    symbol = str(row.get("symbol") or "")
     keys = []
-    if exchange and symbol:
-        keys.append(f"{exchange}|{symbol}|{order_id}")
+    composite = _activity_order_key(exchange, symbol, order_id)
+    if composite:
+        keys.append(composite)
     keys.append(order_id)
     return keys
 
 
-def build_order_attribution_map(entries: Iterable[Any]) -> dict[str, dict[str, Any]]:
-    attribution: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        source = _source_for_strategy(
-            getattr(entry, "strategy", ""),
-            getattr(entry, "event_type", ""),
-        )
-        row = {
-            "source": source,
-            "source_label": PNL_SOURCE_LABELS.get(source, source),
-            "strategy": getattr(entry, "strategy", ""),
-            "event_type": getattr(entry, "event_type", ""),
-            "event_id": getattr(entry, "event_id", ""),
-            "mode": getattr(entry, "mode", ""),
-            "logged_at": getattr(entry, "logged_at", None),
-        }
-        exchange = getattr(entry, "exchange", "")
-        symbol = getattr(entry, "symbol", "")
-        for order_id in getattr(entry, "placed_order_ids", []) or []:
-            for key in _attribution_keys(exchange, symbol, str(order_id)):
-                attribution.setdefault(key, row)
-    return attribution
-
-
-def _trade_attribution(
-    trade: dict[str, Any],
-    attribution: dict[str, dict[str, Any]],
+def _tracked_order_row(
+    *,
+    strategy: str,
+    exchange: str,
+    symbol: str,
+    order_id: str,
+    source_id: str = "",
+    expected_open: bool = True,
 ) -> dict[str, Any] | None:
-    for key in _attribution_keys(
-        str(trade.get("exchange") or ""),
-        str(trade.get("symbol") or ""),
-        str(trade.get("order_id") or ""),
-    ):
-        if key in attribution:
-            return attribution[key]
-    return None
-
-
-def _mark_prices_by_asset(
-    cfg: BotConfig,
-    books: dict[tuple[str, str], OrderBookSnapshot],
-    quote_rates: dict[str, float],
-) -> dict[str, float]:
-    marks: dict[str, list[float]] = {}
-    for market in cfg.spot_markets:
-        book = books.get((market.exchange, market.symbol))
-        rate = quote_rates.get(market.quote_currency)
-        if book is None or rate is None or not book.bids or not book.asks:
-            continue
-        bid = book.bids[0].price
-        ask = book.asks[0].price
-        if bid <= 0 or ask <= 0 or bid >= ask:
-            continue
-        marks.setdefault(market.asset.upper(), []).append((bid + ask) / 2 * rate)
+    order_id = str(order_id or "")
+    if not order_id:
+        return None
     return {
-        asset: sum(values) / len(values)
-        for asset, values in marks.items()
-        if values
+        "strategy": strategy,
+        "exchange": str(exchange or ""),
+        "symbol": str(symbol or ""),
+        "order_id": order_id,
+        "source_id": source_id,
+        "expected_open": expected_open,
+        "key": _activity_order_key(str(exchange or ""), str(symbol or ""), order_id),
     }
 
 
-def _fee_common_value(
-    fee: dict[str, Any] | None,
+def _tracked_orders_from_local_state(
     *,
-    quote_rates: dict[str, float],
-    mark_prices: dict[str, float],
-) -> tuple[float | None, str | None]:
-    if not fee:
-        return 0.0, None
-    cost = _number_or_none(fee.get("cost"))
-    if cost is None:
-        return 0.0, None
-    currency = str(fee.get("currency") or "").upper()
-    if not currency:
-        return cost, None
-    rate = quote_rates.get(currency)
-    if rate is not None:
-        return cost * rate, None
-    mark = mark_prices.get(currency)
-    if mark is not None:
-        return cost * mark, None
-    return None, currency
+    market_maker_runtime: dict[str, Any] | None = None,
+    auto_buy_sell_tasks: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    tracked: list[dict[str, Any]] = []
+    runtime = market_maker_runtime or {}
+    mm_exchange = str(runtime.get("open_order_exchange") or "")
+    mm_symbol = str(runtime.get("open_order_symbol") or "")
+    for order_id in runtime.get("open_order_ids", []) or []:
+        row = _tracked_order_row(
+            strategy="market_maker",
+            exchange=mm_exchange,
+            symbol=mm_symbol,
+            order_id=str(order_id),
+            source_id="market_maker_runtime",
+            expected_open=True,
+        )
+        if row is not None:
+            tracked.append(row)
+
+    for task in (auto_buy_sell_tasks or {}).get("tasks", []) or []:
+        if not isinstance(task, dict):
+            continue
+        config = task.get("config") if isinstance(task.get("config"), dict) else {}
+        exchange = str(config.get("exchange") or "")
+        symbol = str(config.get("symbol") or "")
+        task_id = str(task.get("id") or "")
+        open_order_ids = {str(order_id) for order_id in task.get("open_order_ids", []) or [] if order_id}
+        placed_order_ids = {str(order_id) for order_id in task.get("placed_order_ids", []) or [] if order_id}
+        for order_id in sorted(open_order_ids | placed_order_ids):
+            row = _tracked_order_row(
+                strategy="auto_buy_sell",
+                exchange=exchange,
+                symbol=symbol,
+                order_id=order_id,
+                source_id=task_id,
+                expected_open=order_id in open_order_ids,
+            )
+            if row is not None:
+                tracked.append(row)
+    return tracked
 
 
-def enrich_recent_trades_with_pnl(
-    cfg: BotConfig,
-    trades: Iterable[dict[str, Any]],
+def _lookup_activity_rows(
+    rows: Iterable[dict[str, Any]],
     *,
-    quote_rates: dict[str, float],
-    books: dict[tuple[str, str], OrderBookSnapshot],
-    attribution: dict[str, dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    attribution = attribution or {}
-    average_prices = _configured_average_entry_prices(cfg)
-    mark_prices = _mark_prices_by_asset(cfg, books, quote_rates)
-    source_rows = {
-        source: _pnl_source_row(source)
-        for source in PNL_SOURCE_LABELS
+    order_field: str = "id",
+) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for key in _activity_lookup_keys(row, order_field=order_field):
+            lookup.setdefault(key, row)
+    return lookup
+
+
+def _reconciliation_issue(
+    *,
+    level: str,
+    issue_type: str,
+    message: str,
+    strategy: str = "",
+    exchange: str = "",
+    symbol: str = "",
+    order_id: str = "",
+    source_id: str = "",
+) -> dict[str, Any]:
+    return {
+        "level": level,
+        "type": issue_type,
+        "strategy": strategy,
+        "exchange": exchange,
+        "symbol": symbol,
+        "order_id": order_id,
+        "source_id": source_id,
+        "message": message,
     }
-    missing_cost_basis: set[str] = set()
-    missing_quote_rates: set[str] = set()
-    missing_fee_rates: set[str] = set()
-    enriched: list[dict[str, Any]] = []
 
-    for trade in trades:
-        row = dict(trade)
-        match = _trade_attribution(row, attribution)
-        source = match["source"] if match is not None else "unattributed"
-        base, quote = _symbol_base_quote(str(row.get("symbol") or ""))
-        side = str(row.get("side") or "").lower()
-        price = _number_or_none(row.get("price"))
-        amount = _number_or_none(row.get("amount"))
-        cost = _number_or_none(row.get("cost"))
-        if cost is None and price is not None and amount is not None:
-            cost = price * amount
-            row["cost"] = cost
 
-        quote_rate = quote_rates.get(quote) if quote else None
-        if quote and quote_rate is None:
-            missing_quote_rates.add(quote)
-        notional_common = (
-            cost * quote_rate
-            if cost is not None and quote_rate is not None
-            else None
+RECONCILIATION_AUTO_STOP_TYPES = {
+    "order_activity_error",
+}
+
+
+def _reconciliation_auto_stop_reasons(
+    issues: Iterable[dict[str, Any]],
+) -> list[str]:
+    reasons: list[str] = []
+    seen: set[str] = set()
+    for issue in issues:
+        issue_type = str(issue.get("type") or "")
+        if issue_type not in RECONCILIATION_AUTO_STOP_TYPES:
+            continue
+        exchange = str(issue.get("exchange") or "")
+        symbol = str(issue.get("symbol") or "")
+        order_id = str(issue.get("order_id") or "")
+        message = str(issue.get("message") or issue_type)
+        detail = " ".join(item for item in [exchange, symbol, order_id] if item)
+        reason = f"{issue_type}: {detail or message}"
+        if reason not in seen:
+            seen.add(reason)
+            reasons.append(reason)
+    return reasons
+
+
+def _monitor_auto_stop_decision(
+    *,
+    auto_stop_enabled: bool,
+    auto_stop_consecutive_errors: int,
+    daily_loss_stop: bool,
+    reconciliation_stop: bool,
+    consecutive_problem_cycles: int,
+) -> tuple[bool, str | None]:
+    if not auto_stop_enabled:
+        return False, None
+    if daily_loss_stop:
+        return True, "daily loss limit breached"
+    if not reconciliation_stop:
+        return False, None
+    threshold = max(1, auto_stop_consecutive_errors)
+    if consecutive_problem_cycles < threshold:
+        return False, None
+    return (
+        True,
+        "critical reconciliation issue after "
+        f"{consecutive_problem_cycles} problem cycle(s)",
+    )
+
+
+def _monitor_reconciliation_warmup_active(
+    *,
+    process_uptime_seconds: float,
+    program_age_seconds: float,
+    warmup_seconds: float = RECONCILIATION_AUTO_STOP_WARMUP_SECONDS,
+) -> bool:
+    if warmup_seconds <= 0:
+        return False
+    if 0.0 <= process_uptime_seconds < warmup_seconds:
+        return True
+    return 0.0 <= program_age_seconds < warmup_seconds
+
+
+def build_order_reconciliation_payload(
+    order_activity: dict[str, Any],
+    *,
+    market_maker_runtime: dict[str, Any] | None = None,
+    auto_buy_sell_tasks: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    open_orders = order_activity.get("open_orders", []) or []
+    closed_orders = order_activity.get("closed_orders", []) or []
+    recent_trades = order_activity.get("recent_trades", []) or []
+    open_lookup = _lookup_activity_rows(open_orders)
+    closed_lookup = _lookup_activity_rows(closed_orders)
+    trade_lookup = _lookup_activity_rows(recent_trades, order_field="order_id")
+    tracked_orders = _tracked_orders_from_local_state(
+        market_maker_runtime=market_maker_runtime,
+        auto_buy_sell_tasks=auto_buy_sell_tasks,
+    )
+    tracked_keys: set[str] = set()
+    tracked_ids: set[str] = set()
+    issues: list[dict[str, Any]] = []
+    matched_open_count = 0
+    matched_fill_count = 0
+
+    for tracked in tracked_orders:
+        order_id = tracked["order_id"]
+        tracked_ids.add(order_id)
+        if tracked.get("key"):
+            tracked_keys.add(tracked["key"])
+        lookup_keys = [key for key in (tracked.get("key"), order_id) if key]
+        is_open = any(key in open_lookup for key in lookup_keys)
+        has_fill = any(key in trade_lookup for key in lookup_keys)
+        is_closed = any(key in closed_lookup for key in lookup_keys)
+        if is_open:
+            matched_open_count += 1
+            continue
+        if has_fill:
+            matched_fill_count += 1
+            if tracked.get("expected_open"):
+                issues.append(
+                    _reconciliation_issue(
+                        level="warning",
+                        issue_type="tracked_order_filled_not_cleared",
+                        strategy=tracked["strategy"],
+                        exchange=tracked["exchange"],
+                        symbol=tracked["symbol"],
+                        order_id=order_id,
+                        source_id=tracked.get("source_id", ""),
+                        message="Local state still expects this order open, but a recent fill exists.",
+                    )
+                )
+            continue
+        if is_closed:
+            if tracked.get("expected_open"):
+                issues.append(
+                    _reconciliation_issue(
+                        level="warning",
+                        issue_type="tracked_order_closed_not_cleared",
+                        strategy=tracked["strategy"],
+                        exchange=tracked["exchange"],
+                        symbol=tracked["symbol"],
+                        order_id=order_id,
+                        source_id=tracked.get("source_id", ""),
+                        message="Local state still expects this order open, but exchange reports it closed.",
+                    )
+                )
+            continue
+        if tracked.get("expected_open"):
+            issues.append(
+                _reconciliation_issue(
+                    level="warning",
+                    issue_type="tracked_order_missing",
+                    strategy=tracked["strategy"],
+                    exchange=tracked["exchange"],
+                    symbol=tracked["symbol"],
+                    order_id=order_id,
+                    source_id=tracked.get("source_id", ""),
+                    message="Local state tracks this open order, but it is not in exchange open orders or recent fills.",
+                )
+            )
+
+    untracked_open_count = 0
+    for order in open_orders:
+        order_id = str(order.get("id") or "")
+        if not order_id:
+            continue
+        keys = set(_activity_lookup_keys(order))
+        attribution = order.get("attribution") if isinstance(order.get("attribution"), dict) else None
+        if keys & tracked_keys or order_id in tracked_ids:
+            continue
+        untracked_open_count += 1
+        issues.append(
+            _reconciliation_issue(
+                level="warning" if attribution else "info",
+                issue_type="unmanaged_strategy_order" if attribution else "untracked_open_order",
+                strategy=str((attribution or {}).get("strategy") or ""),
+                exchange=str(order.get("exchange") or ""),
+                symbol=str(order.get("symbol") or ""),
+                order_id=order_id,
+                source_id=str((attribution or {}).get("event_id") or ""),
+                message=(
+                    "Exchange has an attributed open order that is not in the current strategy runtime."
+                    if attribution
+                    else "Exchange has an open order that is not attributed to a local strategy."
+                ),
+            )
         )
-        fee_common, missing_fee_currency = _fee_common_value(
-            row.get("fee"),
-            quote_rates=quote_rates,
-            mark_prices=mark_prices,
+
+    unattributed_fill_count = 0
+    for trade in recent_trades:
+        if str(trade.get("source") or "") != "unattributed":
+            continue
+        unattributed_fill_count += 1
+        issues.append(
+            _reconciliation_issue(
+                level="info",
+                issue_type="unattributed_fill",
+                exchange=str(trade.get("exchange") or ""),
+                symbol=str(trade.get("symbol") or ""),
+                order_id=str(trade.get("order_id") or ""),
+                message="Recent fill is not linked to a local strategy event.",
+            )
         )
-        if missing_fee_currency:
-            missing_fee_rates.add(missing_fee_currency)
 
-        realized_pnl: float | None = None
-        fee_for_pnl = fee_common or 0.0
-        if (
-            side == "sell"
-            and price is not None
-            and amount is not None
-            and quote_rate is not None
-        ):
-            average_entry = average_prices.get(base, 0.0)
-            if average_entry > 0:
-                realized_pnl = (
-                    price * quote_rate - average_entry
-                ) * amount - fee_for_pnl
-            else:
-                missing_cost_basis.add(base or row.get("symbol") or "")
-                realized_pnl = -fee_for_pnl
-        elif fee_common is not None:
-            realized_pnl = -fee_common
-
-        source_row = source_rows.setdefault(source, _pnl_source_row(source))
-        source_row["trade_count"] += 1
-        if notional_common is not None:
-            source_row["notional_common"] += notional_common
-        if fee_common is not None:
-            source_row["fees_common"] += fee_common
-        if realized_pnl is not None:
-            source_row["realized_pnl"] += realized_pnl
-
-        row.update(
-            {
-                "source": source,
-                "source_label": PNL_SOURCE_LABELS.get(source, source),
-                "attribution": match,
-                "base_currency": base,
-                "quote_currency": quote,
-                "notional_common": notional_common,
-                "fee_common": fee_common,
-                "realized_pnl_common": realized_pnl,
-            }
+    if order_activity.get("status") == "error":
+        issues.insert(
+            0,
+            _reconciliation_issue(
+                level="error",
+                issue_type="order_activity_error",
+                message="Order activity contains account errors; reconciliation is incomplete.",
+            ),
         )
-        enriched.append(row)
 
-    active_sources = {
-        source: row
-        for source, row in source_rows.items()
-        if row["trade_count"] > 0 or abs(row["realized_pnl"]) >= 1e-12
+    status = "ok"
+    if any(issue["level"] == "error" for issue in issues):
+        status = "error"
+    elif any(issue["level"] == "warning" for issue in issues):
+        status = "warning"
+    auto_stop_reasons = _reconciliation_auto_stop_reasons(issues)
+    level_counts = {
+        "error": sum(1 for issue in issues if issue.get("level") == "error"),
+        "warning": sum(1 for issue in issues if issue.get("level") == "warning"),
+        "info": sum(1 for issue in issues if issue.get("level") == "info"),
     }
-    total_realized = sum(row["realized_pnl"] for row in active_sources.values())
-    total_fees = sum(row["fees_common"] for row in active_sources.values())
-    total_notional = sum(row["notional_common"] for row in active_sources.values())
-    summary = {
-        "currency": cfg.common_quote_currency,
-        "window": "recent_fills",
-        "trade_count": len(enriched),
-        "attributed_trade_count": sum(
-            1 for row in enriched if row["source"] != "unattributed"
-        ),
-        "unattributed_trade_count": sum(
-            1 for row in enriched if row["source"] == "unattributed"
-        ),
-        "total_realized_pnl": total_realized,
-        "total_fees": total_fees,
-        "total_notional": total_notional,
-        "sources": active_sources,
-        "missing_cost_basis": sorted(item for item in missing_cost_basis if item),
-        "missing_quote_rates": sorted(missing_quote_rates),
-        "missing_fee_rates": sorted(missing_fee_rates),
-        "observed_at": time.time(),
+    actionable_issue_count = level_counts["error"] + level_counts["warning"]
+    return {
+        "status": status,
+        "tracked_order_count": len(tracked_orders),
+        "matched_open_count": matched_open_count,
+        "matched_fill_count": matched_fill_count,
+        "untracked_open_count": untracked_open_count,
+        "unattributed_fill_count": unattributed_fill_count,
+        "issue_count": actionable_issue_count,
+        "notice_count": level_counts["info"],
+        "total_item_count": len(issues),
+        "level_counts": level_counts,
+        "critical_issue_count": len(auto_stop_reasons),
+        "auto_stop_recommended": bool(auto_stop_reasons),
+        "auto_stop_reasons": auto_stop_reasons[:10],
+        "issues": issues[:50],
+        "checked_at": time.time(),
     }
-    return enriched, summary
 
 
 async def fetch_order_activity_payload(
@@ -3875,6 +5693,8 @@ async def fetch_order_activity_payload(
     limit: int = ORDER_ACTIVITY_LIMIT,
     quote_rates: dict[str, float] | None = None,
     books: dict[tuple[str, str], OrderBookSnapshot] | None = None,
+    market_maker_runtime: dict[str, Any] | None = None,
+    auto_buy_sell_tasks: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     quote_rates = cfg.quote_rates if quote_rates is None else quote_rates
     books = {} if books is None else books
@@ -3970,9 +5790,11 @@ async def fetch_order_activity_payload(
     checked_accounts = sum(
         1
         for account in accounts
-        if account.get("open_order_count") is not None and not account.get("errors")
+        if account.get("status") != "idle"
+        and account.get("open_order_count") is not None
+        and not account.get("errors")
     )
-    return {
+    base_payload = {
         "status": _activity_status(accounts),
         "accounts": accounts,
         "open_orders": open_orders,
@@ -3989,6 +5811,14 @@ async def fetch_order_activity_payload(
         "last_finished": time.time(),
         "errors": errors,
         "warnings": warnings,
+    }
+    base_payload["reconciliation"] = build_order_reconciliation_payload(
+        base_payload,
+        market_maker_runtime=market_maker_runtime,
+        auto_buy_sell_tasks=auto_buy_sell_tasks,
+    )
+    return {
+        **base_payload,
     }
 
 
@@ -4187,127 +6017,6 @@ async def cancel_bulk_orders_payload(
     }
 
 
-def _configured_average_entry_prices(cfg: BotConfig) -> dict[str, float]:
-    prices: dict[str, float] = {}
-    if cfg.portfolio.asset:
-        prices[cfg.portfolio.asset.upper()] = cfg.portfolio.average_entry_price
-    for position in cfg.portfolio.positions:
-        prices[position.asset.upper()] = position.average_entry_price
-    return prices
-
-
-def _configured_position_assets(cfg: BotConfig) -> set[str]:
-    assets = {market.asset.upper() for market in cfg.spot_markets}
-    if cfg.portfolio.asset:
-        assets.add(cfg.portfolio.asset.upper())
-    assets.update(position.asset.upper() for position in cfg.portfolio.positions)
-    return assets
-
-
-def _account_balance_totals_by_currency(
-    account_balances: dict[str, Any],
-) -> dict[str, float]:
-    totals: dict[str, float] = {}
-    for row in account_balances.get("totals", []):
-        currency = str(row.get("currency", "")).upper()
-        if not currency:
-            continue
-        value = row.get("total")
-        if value is not None:
-            totals[currency] = float(value)
-    return totals
-
-
-def _apply_order_activity_pnl(
-    payload: dict[str, Any],
-    order_activity: dict[str, Any] | None,
-) -> dict[str, Any]:
-    sources = {
-        str(source): float(value or 0.0)
-        for source, value in (payload.get("sources") or {}).items()
-    }
-    for source in (
-        "market_maker",
-        "arbitrage",
-        "auto_buy_sell",
-        "manual",
-        "unattributed",
-        "price_move",
-    ):
-        sources.setdefault(source, 0.0)
-    payload["sources"] = sources
-
-    summary = (order_activity or {}).get("daily_pnl")
-    if not isinstance(summary, dict) or not summary.get("enabled"):
-        summary = (order_activity or {}).get("pnl_summary")
-    if not isinstance(summary, dict):
-        return payload
-
-    for source, row in (summary.get("sources") or {}).items():
-        if not isinstance(row, dict):
-            continue
-        realized_pnl = _number_or_none(row.get("realized_pnl"))
-        if realized_pnl is None:
-            continue
-        source_key = str(source)
-        sources[source_key] = sources.get(source_key, 0.0) + realized_pnl
-
-    payload["sources"] = sources
-    payload["total_pnl"] = sum(sources.values())
-    payload["fill_pnl_summary"] = summary
-    payload["fill_pnl_window"] = summary.get("window") or "daily"
-    payload["fill_pnl_day"] = summary.get("day")
-    payload["fill_pnl_observed_at"] = summary.get("observed_at") or summary.get(
-        "updated_at"
-    )
-    return payload
-
-
-def build_synced_portfolio_pnl(
-    cfg: BotConfig,
-    books: dict[tuple[str, str], OrderBookSnapshot],
-    quote_rates: dict[str, float],
-    account_balances: dict[str, Any],
-    order_activity: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if int(account_balances.get("checked_account_count", 0) or 0) <= 0:
-        payload = build_portfolio_pnl(cfg, books, quote_rates)
-        payload["balance_source"] = "configured"
-        return _apply_order_activity_pnl(payload, order_activity)
-
-    totals_by_currency = _account_balance_totals_by_currency(account_balances)
-    position_assets = _configured_position_assets(cfg)
-    average_prices = _configured_average_entry_prices(cfg)
-    positions = [
-        AssetPosition(
-            asset=asset,
-            position_base=totals_by_currency.get(asset, 0.0),
-            average_entry_price=average_prices.get(asset, 0.0),
-        )
-        for asset in sorted(position_assets)
-    ]
-    cash_balances = {
-        currency: amount
-        for currency, amount in sorted(totals_by_currency.items())
-        if currency not in position_assets
-    }
-    live_portfolio = replace(
-        cfg.portfolio,
-        enabled=True,
-        positions=positions,
-        cash_balances=cash_balances,
-    )
-    payload = build_portfolio_pnl(
-        replace(cfg, portfolio=live_portfolio),
-        books,
-        quote_rates,
-    )
-    payload["balance_source"] = "live_accounts"
-    payload["balance_status"] = account_balances.get("status")
-    payload["balance_observed_at"] = account_balances.get("last_finished")
-    return _apply_order_activity_pnl(payload, order_activity)
-
-
 async def fetch_account_balances_payload(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -4343,377 +6052,251 @@ async def fetch_account_balances_payload(
     }
 
 
-def _slow_execution_overrides_from_payload(
-    payload: dict[str, Any],
-    allowed_exchanges: set[str] | None = None,
-    symbols_by_exchange: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
-    overrides: dict[str, Any] = {}
-    symbols_by_exchange = symbols_by_exchange or {}
-    if "enabled" in payload:
-        if not isinstance(payload["enabled"], bool):
-            raise ValueError("enabled must be a boolean")
-        overrides["enabled"] = payload["enabled"]
-
-    if "exchange" in payload:
-        exchange = str(payload["exchange"]).strip()
-        if not exchange:
-            raise ValueError("exchange is required")
-        if allowed_exchanges is not None and exchange not in allowed_exchanges:
-            raise ValueError(f"unknown exchange account: {exchange}")
-        overrides["exchange"] = exchange
-
-    if "symbol" in payload:
-        symbol = str(payload["symbol"]).strip()
-        if not symbol:
-            raise ValueError("symbol is required")
-        selected_exchange = overrides.get("exchange")
-        if selected_exchange and symbols_by_exchange.get(selected_exchange):
-            if symbol not in symbols_by_exchange[selected_exchange]:
-                raise ValueError(f"symbol is not configured for account: {symbol}")
-        overrides["symbol"] = symbol
-    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
-        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
-
-    if "side" in payload:
-        side = str(payload["side"]).lower()
-        if side not in {"buy", "sell"}:
-            raise ValueError("side must be buy or sell")
-        overrides["side"] = side
-
-    numeric_fields = {
-        "total_base",
-        "total_quote",
-        "slice_base_min",
-        "slice_base_max",
-        "interval_seconds",
-        "order_ttl_seconds",
-        "start_price",
-        "stop_price",
-    }
-    for field in numeric_fields:
-        if field not in payload:
-            continue
-        value = float(payload[field])
-        if value < 0:
-            raise ValueError(f"{field} must be non-negative")
-        overrides[field] = value
-
-    if "randomize_slice" in payload:
-        if not isinstance(payload["randomize_slice"], bool):
-            raise ValueError("randomize_slice must be a boolean")
-        overrides["randomize_slice"] = payload["randomize_slice"]
-
-    if "interval_seconds" in overrides and overrides["interval_seconds"] <= 0:
-        raise ValueError("interval_seconds must be positive")
-
-    overrides["slice_base"] = 0.0
-    overrides["slice_quote"] = 0.0
-    return overrides
+def default_runtime_store_path(cfg: BotConfig) -> str:
+    return str(Path(cfg.trade_log.path).with_name("web_runtime_overrides.json"))
 
 
-def _market_maker_overrides_from_payload(
-    payload: dict[str, Any],
-    allowed_exchanges: set[str] | None = None,
-    symbols_by_exchange: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-    overrides: dict[str, Any] = {}
-    symbols_by_exchange = symbols_by_exchange or {}
-
-    for field in {"enabled", "live_enabled", "post_only", "cancel_existing_orders"}:
-        if field in payload:
-            if not isinstance(payload[field], bool):
-                raise ValueError(f"{field} must be a boolean")
-            overrides[field] = payload[field]
-
-    if "exchange" in payload:
-        exchange = str(payload["exchange"]).strip()
-        if not exchange:
-            raise ValueError("exchange is required")
-        if allowed_exchanges is not None and exchange not in allowed_exchanges:
-            raise ValueError(f"unknown exchange account: {exchange}")
-        overrides["exchange"] = exchange
-
-    if "symbol" in payload:
-        symbol = str(payload["symbol"]).strip()
-        if not symbol:
-            raise ValueError("symbol is required")
-        selected_exchange = overrides.get("exchange")
-        if selected_exchange and symbols_by_exchange.get(selected_exchange):
-            if symbol not in symbols_by_exchange[selected_exchange]:
-                raise ValueError(f"symbol is not configured for account: {symbol}")
-        overrides["symbol"] = symbol
-    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
-        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
-
-    if "depth_shape" in payload:
-        depth_shape = str(payload["depth_shape"]).strip().lower()
-        if depth_shape not in {"flat", "linear"}:
-            raise ValueError("depth_shape must be flat or linear")
-        overrides["depth_shape"] = depth_shape
-
-    if "levels" in payload:
-        overrides["levels"] = _non_negative_int(payload, "levels")
-        if overrides["levels"] <= 0:
-            raise ValueError("levels must be positive")
-
-    positive_float_fields = {
-        "price_band_pct",
-        "quote_per_level",
-        "poll_seconds",
-    }
-    for field in positive_float_fields:
-        if field in payload:
-            overrides[field] = _non_negative_float(payload, field)
-            if overrides[field] <= 0:
-                raise ValueError(f"{field} must be positive")
-
-    non_negative_float_fields = {
-        "min_order_quote",
-        "min_distance_bps",
-        "reprice_threshold_bps",
-    }
-    for field in non_negative_float_fields:
-        if field in payload:
-            overrides[field] = _non_negative_float(payload, field)
-
-    return overrides
+def default_web_audit_path(cfg: BotConfig) -> str:
+    return str(Path(cfg.trade_log.path).with_name("web_audit_events.jsonl"))
 
 
-def spot_market_to_dict(market: SpotMarketConfig) -> dict[str, Any]:
-    return {
-        "asset": market.asset,
-        "exchange": market.exchange,
-        "symbol": market.symbol,
-        "quote_currency": market.quote_currency,
-    }
+def _sanitize_audit_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            if any(
+                marker in key_lower
+                for marker in ("api_key", "secret", "password", "token", "cookie")
+            ):
+                clean[key_text] = "[redacted]"
+            else:
+                clean[key_text] = _sanitize_audit_payload(item)
+        return clean
+    if isinstance(value, list):
+        return [_sanitize_audit_payload(item) for item in value[:100]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
-def spot_markets_to_list(markets: Iterable[SpotMarketConfig]) -> list[dict[str, Any]]:
-    return [spot_market_to_dict(market) for market in markets]
+def _audit_event_id(event: dict[str, Any]) -> str:
+    payload = json.dumps(event, ensure_ascii=True, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def cash_and_carry_pair_to_dict(pair: CashAndCarryPair) -> dict[str, Any]:
-    return {
-        "spot_symbol": pair.spot_symbol,
-        "derivative_symbol": pair.derivative_symbol,
-    }
-
-
-def cash_and_carry_pairs_to_list(
-    pairs: Iterable[CashAndCarryPair],
-) -> list[dict[str, Any]]:
-    return [cash_and_carry_pair_to_dict(pair) for pair in pairs]
-
-
-def exchange_configs_to_list(
-    exchanges: Iterable[ExchangeConfig],
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "key": exchange.key,
-            "label": exchange.label or exchange.key,
-            "id": exchange.id,
-            "market_type": exchange.market_type,
-        }
-        for exchange in exchanges
-    ]
-
-
-def _spot_markets_from_payload(
-    payload: dict[str, Any],
+def read_recent_web_audit_events(
+    cfg: BotConfig,
     *,
-    allowed_exchanges: set[str],
-) -> list[SpotMarketConfig]:
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-    raw_markets = payload.get("spot_markets")
-    if raw_markets is None:
-        raw_markets = payload.get("markets")
-    if not isinstance(raw_markets, list):
-        raise ValueError("spot_markets must be a list")
-
-    markets: list[SpotMarketConfig] = []
-    seen: set[tuple[str, str]] = set()
-    for index, item in enumerate(raw_markets, start=1):
-        if not isinstance(item, dict):
-            raise ValueError(f"spot_markets[{index}] must be an object")
-        asset = str(item.get("asset", "")).strip().upper()
-        exchange = str(item.get("exchange", "")).strip()
-        symbol = str(item.get("symbol", "")).strip().upper()
-        quote_currency = str(item.get("quote_currency", "")).strip().upper()
-        if not asset:
-            raise ValueError(f"spot_markets[{index}].asset is required")
-        if not exchange:
-            raise ValueError(f"spot_markets[{index}].exchange is required")
-        if exchange not in allowed_exchanges:
-            raise ValueError(f"unknown exchange account: {exchange}")
-        if not symbol or "/" not in symbol:
-            raise ValueError(f"spot_markets[{index}].symbol must look like BASE/QUOTE")
-        inferred_quote = symbol.split("/", 1)[1].upper()
-        if not quote_currency:
-            quote_currency = inferred_quote
-        if quote_currency != inferred_quote:
-            raise ValueError(
-                f"spot_markets[{index}].quote_currency must match symbol quote"
-            )
-        key = (exchange, symbol)
-        if key in seen:
-            raise ValueError(f"duplicate spot market: {exchange} {symbol}")
-        seen.add(key)
-        markets.append(
-            SpotMarketConfig(
-                asset=asset,
-                exchange=exchange,
-                symbol=symbol,
-                quote_currency=quote_currency,
-            )
-        )
-    return markets
-
-
-def _cash_and_carry_pairs_from_payload(
-    payload: dict[str, Any],
-) -> list[CashAndCarryPair]:
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-    raw_pairs = payload.get("cash_and_carry_pairs")
-    if raw_pairs is None:
-        raw_pairs = payload.get("pairs")
-    if not isinstance(raw_pairs, list):
-        raise ValueError("cash_and_carry_pairs must be a list")
-
-    pairs: list[CashAndCarryPair] = []
-    seen: set[tuple[str, str]] = set()
-    for index, item in enumerate(raw_pairs, start=1):
-        if not isinstance(item, dict):
-            raise ValueError(f"cash_and_carry_pairs[{index}] must be an object")
-        spot_symbol = str(item.get("spot_symbol", "")).strip().upper()
-        derivative_symbol = str(item.get("derivative_symbol", "")).strip().upper()
-        if not spot_symbol or "/" not in spot_symbol:
-            raise ValueError(
-                f"cash_and_carry_pairs[{index}].spot_symbol must look like BASE/QUOTE"
-            )
-        if not derivative_symbol or "/" not in derivative_symbol:
-            raise ValueError(
-                f"cash_and_carry_pairs[{index}].derivative_symbol must look like BASE/QUOTE"
-            )
-        spot_base, _ = _symbol_base_quote(spot_symbol)
-        derivative_base, _ = _symbol_base_quote(derivative_symbol)
-        if spot_base != derivative_base:
-            raise ValueError(
-                f"cash_and_carry_pairs[{index}] spot and contract base must match"
-            )
-        key = (spot_symbol, derivative_symbol)
-        if key in seen:
-            raise ValueError(
-                f"duplicate cash & carry pair: {spot_symbol} {derivative_symbol}"
-            )
-        seen.add(key)
-        pairs.append(
-            CashAndCarryPair(
-                spot_symbol=spot_symbol,
-                derivative_symbol=derivative_symbol,
-            )
-        )
-    return pairs
-
-
-def _non_negative_float(payload: dict[str, Any], field: str) -> float:
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    path = Path(default_web_audit_path(cfg))
+    if limit <= 0 or not path.exists():
+        return []
     try:
-        value = float(payload[field])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be a number") from exc
-    if value < 0:
-        raise ValueError(f"{field} must be non-negative")
-    return value
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in reversed(lines[-max(limit * 3, limit) :]):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+        if len(events) >= limit:
+            break
+    return events
 
 
-def _non_negative_int(payload: dict[str, Any], field: str) -> int:
-    value = _non_negative_float(payload, field)
-    if not value.is_integer():
-        raise ValueError(f"{field} must be an integer")
-    return int(value)
-
-
-def _bool_map_from_payload(
-    payload: dict[str, Any],
-    field: str,
+def write_web_audit_event(
+    cfg: BotConfig,
+    request: web.Request,
     *,
-    allowed_keys: set[str],
-    label: str,
-) -> dict[str, bool] | None:
-    if field not in payload:
-        return None
-    raw = payload[field]
-    if not isinstance(raw, dict):
-        raise ValueError(f"{field} must be an object")
-    clean: dict[str, bool] = {}
-    for key, value in raw.items():
-        clean_key = str(key).strip()
-        if clean_key not in allowed_keys:
-            raise ValueError(f"unknown {label}: {clean_key}")
-        if not isinstance(value, bool):
-            raise ValueError(f"{field}.{clean_key} must be a boolean")
-        clean[clean_key] = value
-    return clean
-
-
-def _risk_overrides_from_payload(
-    payload: dict[str, Any],
-    *,
-    allowed_accounts: set[str],
-    allowed_strategies: set[str],
+    action: str,
+    status: str = "ok",
+    target: str = "",
+    detail: str = "",
+    payload: dict[str, Any] | None = None,
+    error: str | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-
-    overrides: dict[str, Any] = {}
-    if "allow_live_trading" in payload:
-        if not isinstance(payload["allow_live_trading"], bool):
-            raise ValueError("allow_live_trading must be a boolean")
-        overrides["allow_live_trading"] = payload["allow_live_trading"]
-
-    account_enabled = _bool_map_from_payload(
-        payload,
-        "account_enabled",
-        allowed_keys=allowed_accounts,
-        label="exchange account",
+    return write_system_web_audit_event(
+        cfg,
+        action=action,
+        status=status,
+        target=target,
+        detail=detail,
+        payload=payload,
+        error=error,
+        actor_ip=_client_ip(request, cfg),
+        path=request.path,
+        method=request.method,
+        user_agent=str(request.headers.get("User-Agent", ""))[:160],
     )
-    if account_enabled is not None:
-        overrides["account_enabled"] = account_enabled
 
-    strategy_enabled = _bool_map_from_payload(
-        payload,
-        "strategy_enabled",
-        allowed_keys=allowed_strategies,
-        label="strategy",
-    )
-    if strategy_enabled is not None:
-        overrides["strategy_enabled"] = strategy_enabled
 
-    float_fields = {
-        "max_order_quote",
-        "max_exposure_quote",
-        "max_daily_loss_quote",
-        "min_seconds_between_cancels",
-        "max_order_book_age_seconds",
+def write_system_web_audit_event(
+    cfg: BotConfig,
+    *,
+    action: str,
+    status: str = "ok",
+    target: str = "",
+    detail: str = "",
+    payload: dict[str, Any] | None = None,
+    error: str | None = None,
+    actor_ip: str = "system",
+    path: str = "system",
+    method: str = "SYSTEM",
+    user_agent: str = "system",
+) -> dict[str, Any]:
+    event = {
+        "logged_at": time.time(),
+        "action": action,
+        "status": status,
+        "target": target,
+        "detail": detail,
+        "actor_ip": actor_ip,
+        "path": path,
+        "method": method,
+        "user_agent": user_agent[:160],
+        "payload": _sanitize_audit_payload(payload or {}),
     }
-    for field in float_fields:
-        if field in payload:
-            overrides[field] = _non_negative_float(payload, field)
+    if error:
+        event["error"] = error
+    event["event_id"] = _audit_event_id(event)
+    path = Path(default_web_audit_path(cfg))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=True, sort_keys=True))
+            handle.write("\n")
+    except OSError as exc:
+        return {
+            **event,
+            "status": "error",
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    return event
 
-    int_fields = {
-        "max_open_orders",
-        "max_cancels_per_cycle",
+
+def _dataclass_overrides(raw: Any, model: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {field.name for field in fields(model)}
+    return {key: value for key, value in raw.items() if key in allowed}
+
+
+def _load_runtime_overrides(path: Path, cfg: BotConfig) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"loaded": False, "path": str(path), "data": {}}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "loaded": False,
+            "path": str(path),
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "data": {},
+        }
+    if not isinstance(raw, dict):
+        return {
+            "loaded": False,
+            "path": str(path),
+            "error": "runtime override store must be a JSON object",
+            "data": {},
+        }
+
+    data: dict[str, Any] = {
+        "risk_overrides": _dataclass_overrides(
+            raw.get("risk_overrides"),
+            cfg.risk,
+        ),
+        "market_maker_overrides": _dataclass_overrides(
+            raw.get("market_maker_overrides"),
+            cfg.market_maker,
+        ),
+        "slow_execution_overrides": _dataclass_overrides(
+            raw.get("slow_execution_overrides"),
+            cfg.slow_execution,
+        ),
+        "strategy_paused": {
+            key: bool(value)
+            for key, value in (raw.get("strategy_paused") or {}).items()
+            if key in STRATEGY_IDS
+        },
     }
-    for field in int_fields:
-        if field in payload:
-            overrides[field] = _non_negative_int(payload, field)
+    program = raw.get("program")
+    if isinstance(program, dict):
+        program_state: dict[str, Any] = {}
+        if isinstance(program.get("running"), bool):
+            program_state["running"] = program["running"]
+        if isinstance(program.get("auto_stopped"), bool):
+            program_state["auto_stopped"] = program["auto_stopped"]
+        if isinstance(program.get("updated_at"), (int, float)):
+            program_state["updated_at"] = float(program["updated_at"])
+        if isinstance(program.get("stopped_at"), (int, float)):
+            program_state["stopped_at"] = float(program["stopped_at"])
+        if program.get("stop_reason") is None or isinstance(
+            program.get("stop_reason"),
+            str,
+        ):
+            program_state["stop_reason"] = program.get("stop_reason")
+        if program_state:
+            data["program"] = program_state
 
-    return overrides
+    allowed_spot_exchanges = {exchange.key for exchange in cfg.spot_exchanges}
+    if raw.get("spot_markets") is not None:
+        try:
+            data["spot_markets"] = spot_markets_to_list(
+                _spot_markets_from_payload(
+                    {"spot_markets": raw.get("spot_markets")},
+                    allowed_exchanges=allowed_spot_exchanges,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            return {
+                "loaded": False,
+                "path": str(path),
+                "error": f"invalid spot_markets in runtime store: {exc}",
+                "data": {},
+            }
+    if raw.get("cash_and_carry_pairs") is not None:
+        try:
+            data["cash_and_carry_pairs"] = cash_and_carry_pairs_to_list(
+                _cash_and_carry_pairs_from_payload(
+                    {"cash_and_carry_pairs": raw.get("cash_and_carry_pairs")}
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            return {
+                "loaded": False,
+                "path": str(path),
+                "error": f"invalid cash_and_carry_pairs in runtime store: {exc}",
+                "data": {},
+            }
+
+    return {
+        "loaded": True,
+        "path": str(path),
+        "updated_at": raw.get("updated_at"),
+        "data": data,
+    }
+
+
+def _save_runtime_overrides(path: Path, payload: dict[str, Any]) -> str | None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        return f"{exc.__class__.__name__}: {exc}"
+    return None
 
 
 def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any]:
@@ -4795,6 +6378,23 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "open_order_count": 0,
             "closed_order_count": 0,
             "recent_trade_count": 0,
+            "reconciliation": {
+                "status": "starting",
+                "tracked_order_count": 0,
+                "matched_open_count": 0,
+                "matched_fill_count": 0,
+                "untracked_open_count": 0,
+                "unattributed_fill_count": 0,
+                "issue_count": 0,
+                "notice_count": 0,
+                "total_item_count": 0,
+                "level_counts": {"error": 0, "warning": 0, "info": 0},
+                "critical_issue_count": 0,
+                "auto_stop_recommended": False,
+                "auto_stop_reasons": [],
+                "issues": [],
+                "checked_at": None,
+            },
             "checked_account_count": 0,
             "total_account_count": len(_all_account_exchanges(cfg)),
             "last_finished": None,
@@ -4802,11 +6402,28 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "warnings": [],
         },
         "trading_console": build_trading_console_payload(cfg),
+        "readiness": build_readiness_payload(cfg),
+        "runtime_store": {
+            "enabled": False,
+            "path": "",
+            "loaded": False,
+            "saved_at": None,
+            "error": None,
+        },
         "onchain": {
             "status": "disabled",
             "label": cfg.onchain_monitor.label,
             "mint": cfg.onchain_monitor.token_mint,
             "holders": [],
+            "history": {
+                "enabled": cfg.onchain_monitor.enabled,
+                "path": cfg.onchain_monitor.history_path,
+                "baseline_at": None,
+                "updated_at": None,
+                "event_count": 0,
+                "new_event_count": 0,
+                "recent_events": [],
+            },
             "last_finished": None,
             "error": None,
         },
@@ -4819,7 +6436,33 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 _all_account_exchanges(cfg),
                 _market_maker_symbols_by_exchange(cfg),
             ),
+            "quote_conversion": market_maker_quote_conversion(
+                cfg,
+                cfg.market_maker.symbol,
+            )
+            if cfg.market_maker.symbol
+            else {
+                "quote_currency": "",
+                "common_quote_currency": cfg.common_quote_currency,
+                "quote_to_common_rate": None,
+                "available": False,
+            },
+            "safety": build_market_maker_safety_payload(
+                cfg,
+                None,
+                (
+                    market_maker_quote_conversion(cfg, cfg.market_maker.symbol)
+                    if cfg.market_maker.symbol
+                    else {
+                        "quote_currency": "",
+                        "common_quote_currency": cfg.common_quote_currency,
+                        "quote_to_common_rate": None,
+                        "available": False,
+                    }
+                ),
+            ),
             "runtime": {},
+            "quality": {},
             "error": None,
         },
         "slow_execution": {
@@ -4840,6 +6483,15 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "updated_at": time.time(),
             },
             "error": None,
+        },
+        "spot_arbitrage": {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "risk": None,
+            "execution": None,
+            "error": None,
+            "cooldown_seconds": SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS,
         },
         "portfolio": {
             "status": "disabled",
@@ -4882,31 +6534,455 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
         "program": {
             "running": True,
             "updated_at": time.time(),
+            "auto_stopped": False,
+            "stop_reason": None,
+            "stopped_at": None,
         },
         "operations": build_operations_payload(cfg),
         "warnings": ["Waiting for first scan"],
     }
 
 
+def _copy_payload_keys(
+    payload: dict[str, Any] | None,
+    keys: Iterable[str],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _compact_config_payload(config: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    if full:
+        return config
+    return _copy_payload_keys(
+        config,
+        (
+            "poll_seconds",
+            "notional_quote",
+            "min_profit_quote",
+            "min_profit_bps",
+            "common_quote_currency",
+        ),
+    )
+
+
+def _compact_plan_payload(
+    plan: dict[str, Any] | None,
+    *,
+    include_orders: bool,
+) -> dict[str, Any] | None:
+    if not isinstance(plan, dict):
+        return None
+    if include_orders:
+        return plan
+    return {key: value for key, value in plan.items() if key != "orders"}
+
+
+def _compact_market_maker_runtime(
+    runtime: dict[str, Any] | None,
+    *,
+    include_orders: bool,
+) -> dict[str, Any]:
+    if not isinstance(runtime, dict):
+        return {}
+    result = dict(runtime)
+    if isinstance(result.get("last_plan"), dict):
+        result["last_plan"] = _compact_plan_payload(
+            result["last_plan"],
+            include_orders=include_orders,
+        )
+    return result
+
+
+def _compact_market_maker_payload(
+    market_maker: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return market_maker
+    result = _copy_payload_keys(
+        market_maker,
+        (
+            "status",
+            "mode",
+            "market_data",
+            "quote_conversion",
+            "exchange_features",
+            "error",
+        ),
+    )
+    result["runtime"] = _compact_market_maker_runtime(
+        market_maker.get("runtime"),
+        include_orders=False,
+    )
+    plan = market_maker.get("plan")
+    if not isinstance(plan, dict):
+        runtime_plan = result.get("runtime", {}).get("last_plan")
+        plan = runtime_plan if isinstance(runtime_plan, dict) else None
+    result["plan"] = _compact_plan_payload(plan, include_orders=False)
+    return result
+
+
+def _compact_slow_execution_payload(
+    slow_execution: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    def compact_task_config(config: dict[str, Any] | None) -> dict[str, Any]:
+        return _copy_payload_keys(
+            config,
+            (
+                "exchange",
+                "symbol",
+                "side",
+                "total_base",
+                "total_quote",
+                "unlimited_total",
+            ),
+        )
+
+    def compact_task(task: dict[str, Any]) -> dict[str, Any]:
+        compact = _copy_payload_keys(
+            task,
+            (
+                "id",
+                "status",
+                "last_error",
+                "last_status",
+                "filled_base",
+                "filled_quote",
+                "remaining_base",
+                "remaining_quote",
+                "progress_label",
+                "progress_mode",
+                "progress_pct",
+                "open_order_count",
+                "last_cycle_at",
+                "next_run_at",
+                "last_fill_at",
+                "created_at",
+                "started_at",
+                "updated_at",
+                "finished_at",
+            ),
+        )
+        compact["config"] = compact_task_config(task.get("config"))
+        return compact
+
+    def compact_tasks(task_payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(task_payload, dict):
+            return {}
+        result = _copy_payload_keys(
+            task_payload,
+            ("status", "path", "task_count", "active_count", "updated_at", "error"),
+        )
+        result["tasks"] = [
+            compact_task(task)
+            for task in task_payload.get("tasks", [])
+            if isinstance(task, dict)
+        ]
+        return result
+
+    if full:
+        result = dict(slow_execution)
+    else:
+        result = _copy_payload_keys(
+            slow_execution,
+            ("status", "mode", "plan", "tasks", "error"),
+        )
+    if "tasks" in result:
+        result["tasks"] = compact_tasks(result.get("tasks"))
+    return result
+
+
+def _compact_order_activity_payload(
+    order_activity: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return order_activity
+    return _copy_payload_keys(
+        order_activity,
+        (
+            "status",
+            "open_order_count",
+            "closed_order_count",
+            "recent_trade_count",
+            "pnl_summary",
+            "daily_pnl",
+            "reconciliation",
+            "checked_account_count",
+            "total_account_count",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_account_balances_payload(
+    account_balances: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return account_balances
+    return _copy_payload_keys(
+        account_balances,
+        (
+            "status",
+            "checked_account_count",
+            "total_account_count",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_onchain_payload(
+    onchain: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return onchain
+    history = onchain.get("history") if isinstance(onchain, dict) else {}
+    compact = _copy_payload_keys(
+        onchain,
+        ("status", "label", "mint", "last_finished", "error"),
+    )
+    if isinstance(history, dict):
+        compact["history"] = _copy_payload_keys(
+            history,
+            ("enabled", "path", "baseline_at", "updated_at", "event_count"),
+        )
+    return compact
+
+
+def _compact_operations_payload(
+    operations: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return operations
+    return _copy_payload_keys(operations, ("risk",))
+
+
+def _state_payload_for_view(
+    payload: dict[str, Any],
+    view: str | None = None,
+) -> dict[str, Any]:
+    if view not in STATE_VIEW_IDS:
+        return payload
+
+    is_status = view == "status"
+    is_settings = view == "settings"
+    is_records = view == "records"
+
+    result: dict[str, Any] = {
+        "status": payload.get("status"),
+        "config": _compact_config_payload(
+            payload.get("config", {}),
+            full=is_settings,
+        ),
+        "scan": payload.get("scan", {}),
+        "opportunities": payload.get("opportunities", []),
+        "portfolio": payload.get("portfolio", {}),
+        "program": payload.get("program", {}),
+        "warnings": payload.get("warnings", []),
+        "market_maker": _compact_market_maker_payload(
+            payload.get("market_maker", {}),
+            full=is_settings,
+        ),
+        "slow_execution": _compact_slow_execution_payload(
+            payload.get("slow_execution", {}),
+            full=is_settings,
+        ),
+        "spot_arbitrage": payload.get("spot_arbitrage", {}),
+        "operations": _compact_operations_payload(
+            payload.get("operations", {}),
+            full=is_records,
+        ),
+        "order_activity": _compact_order_activity_payload(
+            payload.get("order_activity", {}),
+            full=is_records,
+        ),
+        "onchain": _compact_onchain_payload(
+            payload.get("onchain", {}),
+            full=is_status or is_records,
+        ),
+    }
+
+    if is_status:
+        result.update(
+            {
+                "markets": payload.get("markets", []),
+                "quote_rates": payload.get("quote_rates", {}),
+                "account_balances": _compact_account_balances_payload(
+                    payload.get("account_balances", {}),
+                    full=True,
+                ),
+                "readiness": payload.get("readiness", {}),
+                "runtime_store": payload.get("runtime_store", {}),
+            }
+        )
+    elif is_settings:
+        result["trading_console"] = payload.get("trading_console", {})
+    elif is_records:
+        result["trading_console"] = payload.get("trading_console", {})
+
+    return result
+
+
 class MonitorState:
-    def __init__(self, cfg: BotConfig, poll_seconds: float) -> None:
+    def __init__(
+        self,
+        cfg: BotConfig,
+        poll_seconds: float,
+        *,
+        runtime_store_path: str | None = None,
+    ) -> None:
         self._lock = asyncio.Lock()
         self._program_running = True
         self._program_updated_at = time.time()
-        self._risk_overrides: dict[str, Any] = {}
-        self._market_maker_overrides: dict[str, Any] = {}
-        self._slow_execution_overrides: dict[str, Any] = {}
-        self._spot_markets_override: list[SpotMarketConfig] | None = None
-        self._cash_and_carry_pairs_override: list[CashAndCarryPair] | None = None
+        self._auto_stopped = False
+        self._auto_stop_reason: str | None = None
+        self._auto_stopped_at: float | None = None
+        self._runtime_store_path = Path(runtime_store_path) if runtime_store_path else None
+        self._runtime_store_loaded = False
+        self._runtime_store_updated_at: float | None = None
+        self._runtime_store_saved_at: float | None = None
+        self._runtime_store_error: str | None = None
+        store_data: dict[str, Any] = {}
+        if self._runtime_store_path is not None:
+            loaded = _load_runtime_overrides(self._runtime_store_path, cfg)
+            self._runtime_store_loaded = bool(loaded.get("loaded"))
+            self._runtime_store_updated_at = (
+                float(loaded["updated_at"]) if loaded.get("updated_at") else None
+            )
+            self._runtime_store_error = loaded.get("error")
+            store_data = loaded.get("data", {})
+        program = store_data.get("program") if isinstance(store_data, dict) else {}
+        if isinstance(program, dict):
+            self._program_running = bool(program.get("running", True))
+            if isinstance(program.get("updated_at"), (int, float)):
+                self._program_updated_at = float(program["updated_at"])
+            self._auto_stopped = bool(program.get("auto_stopped", False))
+            self._auto_stop_reason = (
+                str(program["stop_reason"])
+                if isinstance(program.get("stop_reason"), str)
+                else None
+            )
+            self._auto_stopped_at = (
+                float(program["stopped_at"])
+                if isinstance(program.get("stopped_at"), (int, float))
+                else None
+            )
+            if self._auto_stopped:
+                self._program_running = False
+        self._risk_overrides: dict[str, Any] = dict(
+            store_data.get("risk_overrides", {})
+        )
+        self._market_maker_overrides: dict[str, Any] = dict(
+            store_data.get("market_maker_overrides", {})
+        )
+        self._slow_execution_overrides: dict[str, Any] = dict(
+            store_data.get("slow_execution_overrides", {})
+        )
+        self._spot_markets_override: list[SpotMarketConfig] | None = (
+            _spot_markets_from_payload(
+                {"spot_markets": store_data["spot_markets"]},
+                allowed_exchanges={exchange.key for exchange in cfg.spot_exchanges},
+            )
+            if "spot_markets" in store_data
+            else None
+        )
+        self._cash_and_carry_pairs_override: list[CashAndCarryPair] | None = (
+            _cash_and_carry_pairs_from_payload(
+                {"cash_and_carry_pairs": store_data["cash_and_carry_pairs"]}
+            )
+            if "cash_and_carry_pairs" in store_data
+            else None
+        )
         self._strategy_paused: dict[str, bool] = {
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
-        self._payload = _build_initial_payload(cfg, poll_seconds)
+        self._strategy_paused.update(store_data.get("strategy_paused", {}))
+        runtime_cfg = self._runtime_config_unlocked(cfg)
+        self._payload = _build_initial_payload(runtime_cfg, poll_seconds)
+        if not self._program_running:
+            if self._auto_stopped:
+                self._payload["status"] = "auto_stopped"
+                self._payload["warnings"] = [
+                    self._auto_stop_reason or "Program auto-stopped"
+                ]
+            else:
+                self._payload["status"] = "paused"
+                self._payload["warnings"] = ["Program paused"]
+        self._payload["program"] = self._program_payload_unlocked()
+        self._payload["runtime_store"] = self._runtime_store_status_unlocked()
         self._market_maker_runtime: dict[str, Any] = self._payload["market_maker"][
             "runtime"
         ]
         self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
+
+    def _runtime_store_status_unlocked(self) -> dict[str, Any]:
+        return {
+            "enabled": self._runtime_store_path is not None,
+            "path": str(self._runtime_store_path or ""),
+            "loaded": self._runtime_store_loaded,
+            "updated_at": self._runtime_store_updated_at,
+            "saved_at": self._runtime_store_saved_at,
+            "error": self._runtime_store_error,
+        }
+
+    def _runtime_store_payload_unlocked(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "version": 1,
+            "updated_at": time.time(),
+            "risk_overrides": self._risk_overrides,
+            "market_maker_overrides": self._market_maker_overrides,
+            "slow_execution_overrides": self._slow_execution_overrides,
+            "strategy_paused": self._strategy_paused,
+            "program": self._program_payload_unlocked(),
+        }
+        if self._spot_markets_override is not None:
+            payload["spot_markets"] = spot_markets_to_list(
+                self._spot_markets_override
+            )
+        if self._cash_and_carry_pairs_override is not None:
+            payload["cash_and_carry_pairs"] = cash_and_carry_pairs_to_list(
+                self._cash_and_carry_pairs_override
+            )
+        return payload
+
+    def _save_runtime_store_unlocked(self) -> None:
+        if self._runtime_store_path is None:
+            return
+        payload = self._runtime_store_payload_unlocked()
+        error = _save_runtime_overrides(self._runtime_store_path, payload)
+        self._runtime_store_error = error
+        if error is None:
+            self._runtime_store_loaded = True
+            self._runtime_store_updated_at = float(payload["updated_at"])
+            self._runtime_store_saved_at = time.time()
+        if "runtime_store" in self._payload:
+            self._payload["runtime_store"] = self._runtime_store_status_unlocked()
+
+    def _program_payload_unlocked(self) -> dict[str, Any]:
+        return {
+            "running": self._program_running,
+            "updated_at": self._program_updated_at,
+            "auto_stopped": self._auto_stopped,
+            "stop_reason": self._auto_stop_reason,
+            "stopped_at": self._auto_stopped_at,
+        }
 
     def _runtime_config_unlocked(self, cfg: BotConfig) -> BotConfig:
         return replace(
@@ -4932,13 +7008,22 @@ class MonitorState:
             ),
         )
 
-    async def get(self) -> dict[str, Any]:
+    async def get(self, view: str | None = None) -> dict[str, Any]:
         async with self._lock:
-            return json.loads(json.dumps(self._payload))
+            payload = _state_payload_for_view(self._payload, view)
+            return json.loads(json.dumps(payload))
+
+    async def portfolio_payload(self) -> dict[str, Any]:
+        async with self._lock:
+            return json.loads(json.dumps(self._payload.get("portfolio", {})))
 
     async def is_running(self) -> bool:
         async with self._lock:
             return self._program_running
+
+    async def program_updated_at(self) -> float:
+        async with self._lock:
+            return self._program_updated_at
 
     async def slow_execution_config(
         self,
@@ -4978,6 +7063,7 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
+            self._save_runtime_store_unlocked()
             return json.loads(
                 json.dumps(
                     {
@@ -5019,6 +7105,7 @@ class MonitorState:
                         runtime_cfg.spot_exchanges,
                         _spot_symbols_by_exchange(runtime_cfg),
                     )
+            self._save_runtime_store_unlocked()
 
     async def set_spot_markets(
         self,
@@ -5053,6 +7140,7 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
+            self._save_runtime_store_unlocked()
             return json.loads(
                 json.dumps(
                     {
@@ -5092,6 +7180,7 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
+            self._save_runtime_store_unlocked()
             return json.loads(
                 json.dumps(
                     {
@@ -5111,6 +7200,12 @@ class MonitorState:
         cfg: BotConfig,
     ) -> dict[str, Any]:
         async with self._lock:
+            current_risk = self._runtime_config_unlocked(cfg).risk
+            for field in ("account_enabled", "strategy_enabled"):
+                if field in overrides:
+                    merged = dict(getattr(current_risk, field))
+                    merged.update(overrides[field])
+                    overrides[field] = merged
             self._risk_overrides.update(overrides)
             runtime_cfg = self._runtime_config_unlocked(cfg)
             self._payload["operations"] = build_operations_payload(runtime_cfg)
@@ -5120,6 +7215,7 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
+            self._save_runtime_store_unlocked()
             return json.loads(
                 json.dumps(
                     {
@@ -5152,36 +7248,109 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
+            self._save_runtime_store_unlocked()
             return json.loads(json.dumps(self._payload["trading_console"]))
 
     async def set_running(self, running: bool) -> dict[str, Any]:
         async with self._lock:
             self._program_running = running
             self._program_updated_at = time.time()
-            self._payload["program"] = {
-                "running": self._program_running,
-                "updated_at": self._program_updated_at,
-            }
             if running:
+                self._auto_stopped = False
+                self._auto_stop_reason = None
+                self._auto_stopped_at = None
                 self._payload["status"] = "starting"
                 self._payload["warnings"] = ["Resuming scans"]
             else:
+                self._auto_stopped = False
+                self._auto_stop_reason = None
+                self._auto_stopped_at = None
                 self._payload["status"] = "paused"
                 self._payload["warnings"] = ["Program paused"]
+            self._payload["program"] = self._program_payload_unlocked()
+            self._save_runtime_store_unlocked()
+            return json.loads(json.dumps(self._payload))
+
+    async def set_auto_stopped(
+        self,
+        *,
+        reason: str,
+        warnings: list[str] | None = None,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._program_running = False
+            self._program_updated_at = time.time()
+            self._auto_stopped = True
+            self._auto_stop_reason = reason
+            self._auto_stopped_at = self._program_updated_at
+            self._payload["status"] = "auto_stopped"
+            self._payload["program"] = self._program_payload_unlocked()
+            self._payload["warnings"] = list(warnings or [reason])
+            self._save_runtime_store_unlocked()
             return json.loads(json.dumps(self._payload))
 
     async def set_paused(self) -> None:
         async with self._lock:
+            self._payload["program"] = self._program_payload_unlocked()
+            if self._auto_stopped:
+                self._payload["status"] = "auto_stopped"
+                if self._auto_stop_reason:
+                    self._payload["warnings"] = [self._auto_stop_reason]
+                return
             self._payload["status"] = "paused"
-            self._payload["program"] = {
-                "running": self._program_running,
-                "updated_at": self._program_updated_at,
-            }
             self._payload["warnings"] = ["Program paused"]
 
     async def set_order_activity(self, order_activity: dict[str, Any]) -> None:
         async with self._lock:
             self._payload["order_activity"] = order_activity
+
+    async def set_readonly_health(
+        self,
+        *,
+        cfg: BotConfig,
+        exec_cfg: SlowExecutionConfig,
+        account_balances: dict[str, Any],
+        order_activity: dict[str, Any],
+        warnings: list[str] | None = None,
+    ) -> None:
+        async with self._lock:
+            warning_messages = list(warnings or [])
+            trading_console = build_trading_console_payload(
+                cfg,
+                exec_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=order_activity,
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._payload["account_balances"] = account_balances
+            self._payload["order_activity"] = order_activity
+            self._payload["trading_console"] = trading_console
+            self._payload["readiness"] = build_readiness_payload(
+                cfg,
+                account_balances=account_balances,
+                order_activity=order_activity,
+                trading_console=trading_console,
+                market_maker=self._payload.get("market_maker", {}),
+                slow_execution=self._payload.get("slow_execution", {}),
+                markets=self._payload.get("markets", []),
+                warnings=warning_messages,
+            )
+            self._payload["program"] = self._program_payload_unlocked()
+            self._payload["runtime_store"] = self._runtime_store_status_unlocked()
+            self._payload["operations"] = build_operations_payload(cfg)
+            if self._auto_stopped:
+                self._payload["status"] = "auto_stopped"
+                self._payload["warnings"] = [
+                    item
+                    for item in [
+                        self._auto_stop_reason or "Program auto-stopped",
+                        *warning_messages,
+                    ]
+                    if item
+                ]
+            elif not self._program_running:
+                self._payload["status"] = "paused"
+                self._payload["warnings"] = ["Program paused", *warning_messages]
 
     async def set_market_maker_runtime(self, runtime: dict[str, Any]) -> None:
         async with self._lock:
@@ -5227,6 +7396,7 @@ class MonitorState:
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
         slow_execution: dict[str, Any],
+        spot_arbitrage: dict[str, Any],
         trading_console: dict[str, Any],
         portfolio: dict[str, Any],
     ) -> None:
@@ -5246,6 +7416,11 @@ class MonitorState:
                 market_maker["status"] = self._market_maker_runtime["status"]
             if self._market_maker_runtime.get("last_error"):
                 market_maker["error"] = self._market_maker_runtime["last_error"]
+            market_maker["quality"] = build_market_maker_quality_payload(
+                order_activity,
+                market_maker,
+                portfolio,
+            )
             self._payload = {
                 "status": status,
                 "config": {
@@ -5278,12 +7453,21 @@ class MonitorState:
                 "onchain": onchain,
                 "market_maker": market_maker,
                 "slow_execution": slow_execution,
+                "spot_arbitrage": spot_arbitrage,
                 "trading_console": trading_console,
+                "readiness": build_readiness_payload(
+                    cfg,
+                    account_balances=account_balances,
+                    order_activity=order_activity,
+                    trading_console=trading_console,
+                    market_maker=market_maker,
+                    slow_execution=slow_execution,
+                    markets=markets,
+                    warnings=warnings,
+                ),
                 "portfolio": portfolio,
-                "program": {
-                    "running": self._program_running,
-                    "updated_at": self._program_updated_at,
-                },
+                "program": self._program_payload_unlocked(),
+                "runtime_store": self._runtime_store_status_unlocked(),
                 "operations": build_operations_payload(cfg),
                 "warnings": warnings,
             }
@@ -5326,10 +7510,8 @@ class MonitorState:
                         "last_finished": time.time(),
                     },
                     "warnings": [error],
-                    "program": {
-                        "running": self._program_running,
-                        "updated_at": self._program_updated_at,
-                    },
+                    "readiness": build_readiness_payload(cfg, warnings=[error]),
+                    "program": self._program_payload_unlocked(),
                     "operations": build_operations_payload(cfg),
                 }
             )
@@ -5341,6 +7523,131 @@ def _missing_market_warnings(rows: Iterable[dict[str, Any]]) -> list[str]:
         for row in rows
         if row["status"] != "ok"
     ]
+
+
+def build_market_maker_safety_payload(
+    cfg: BotConfig,
+    plan: MarketMakerPlan | None,
+    conversion: dict[str, Any],
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    limits = {
+        "max_order_quote": cfg.risk.max_order_quote,
+        "max_cycle_quote": cfg.risk.max_cycle_quote,
+        "max_orders_per_cycle": cfg.risk.max_orders_per_cycle,
+        "max_open_orders": cfg.risk.max_open_orders,
+        "max_cancels_per_cycle": cfg.risk.max_cancels_per_cycle,
+        "min_seconds_between_cancels": cfg.risk.min_seconds_between_cancels,
+        "max_daily_loss_quote": cfg.risk.max_daily_loss_quote,
+        "max_exposure_quote": cfg.risk.max_exposure_quote,
+        "min_order_book_depth_quote": cfg.risk.min_order_book_depth_quote,
+        "max_slippage_bps": cfg.risk.max_slippage_bps,
+        "max_order_book_age_seconds": cfg.risk.max_order_book_age_seconds,
+        "max_order_book_gap_bps": cfg.risk.max_order_book_gap_bps,
+        "max_price_jump_bps": cfg.risk.max_price_jump_bps,
+    }
+    base_payload: dict[str, Any] = {
+        "approved": False,
+        "level": "blocked" if error else "disabled",
+        "currency": cfg.common_quote_currency,
+        "quote_conversion": conversion,
+        "limits": limits,
+        "order_count": 0,
+        "buy_order_count": 0,
+        "sell_order_count": 0,
+        "total_quote_notional": 0.0,
+        "max_order_quote_notional": 0.0,
+        "min_order_quote_notional": 0.0,
+        "reasons": [error] if error else [],
+        "warnings": [],
+        "risk": None,
+    }
+    if plan is None:
+        return base_payload
+
+    quote_rate = conversion.get("quote_to_common_rate")
+    quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
+    quote_values = [
+        order.quote_notional * quote_rate_for_risk for order in plan.orders
+    ]
+    risk_orders = [
+        RiskOrder(
+            strategy="market_maker",
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            side=order.side,
+            amount=order.amount,
+            price=order.price * quote_rate_for_risk,
+            quote_notional=order.quote_notional * quote_rate_for_risk,
+            distance_bps=order.distance_bps,
+        )
+        for order in plan.orders
+    ]
+    market = RiskMarketContext(
+        exchange=plan.exchange,
+        symbol=plan.symbol,
+        best_bid=plan.best_bid * quote_rate_for_risk,
+        best_ask=plan.best_ask * quote_rate_for_risk,
+        mid_price=plan.mid_price * quote_rate_for_risk,
+        bid_depth_quote=plan.bid_depth_quote * quote_rate_for_risk,
+        ask_depth_quote=plan.ask_depth_quote * quote_rate_for_risk,
+        max_level_gap_bps=plan.max_level_gap_bps,
+        order_book_timestamp_ms=plan.order_book_timestamp_ms,
+        order_book_received_at=plan.order_book_received_at,
+    )
+    risk = evaluate_order_batch(
+        cfg.risk,
+        risk_orders,
+        strategy="market_maker",
+        live=True,
+        existing_spread_bps=plan.existing_spread_bps,
+        plan_observed_at=plan.observed_at,
+        market=market,
+        current_positions_base=portfolio_positions_base(cfg.portfolio),
+        daily_pnl_quote=current_daily_pnl_quote(cfg),
+        existing_open_order_count=0,
+        post_only=cfg.market_maker.post_only,
+    )
+    risk_payload = risk.to_dict()
+    reasons = list(risk_payload.get("reasons", []))
+    warnings = list(risk_payload.get("warnings", []))
+    if quote_rate is None:
+        reasons.append(
+            f"missing quote rate for {conversion.get('quote_currency') or '?'} -> "
+            f"{cfg.common_quote_currency}"
+        )
+    approved = len(reasons) == 0
+    return {
+        **base_payload,
+        "approved": approved,
+        "level": "ok" if approved else "blocked",
+        "order_count": len(plan.orders),
+        "buy_order_count": sum(1 for order in plan.orders if order.side == "buy"),
+        "sell_order_count": sum(1 for order in plan.orders if order.side == "sell"),
+        "total_quote_notional": sum(quote_values),
+        "max_order_quote_notional": max(quote_values) if quote_values else 0.0,
+        "min_order_quote_notional": min(quote_values) if quote_values else 0.0,
+        "reasons": reasons,
+        "warnings": warnings,
+        "risk": {
+            **risk_payload,
+            "approved": approved,
+            "level": "ok" if approved else "blocked",
+            "reasons": reasons,
+            "warnings": warnings,
+            "currency": cfg.common_quote_currency,
+            "quote_conversion": conversion,
+        },
+        "market": {
+            "existing_spread_bps": plan.existing_spread_bps,
+            "bid_depth_quote": plan.bid_depth_quote * quote_rate_for_risk,
+            "ask_depth_quote": plan.ask_depth_quote * quote_rate_for_risk,
+            "max_level_gap_bps": plan.max_level_gap_bps,
+            "order_book_timestamp_ms": plan.order_book_timestamp_ms,
+            "order_book_received_at": plan.order_book_received_at,
+        },
+    }
 
 
 def build_market_maker_payload(
@@ -5383,6 +7690,7 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
+            "safety": build_market_maker_safety_payload(cfg, None, conversion),
             "market_data": None,
             "runtime": {},
             "error": None,
@@ -5398,13 +7706,26 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
+            "safety": build_market_maker_safety_payload(
+                cfg,
+                None,
+                conversion,
+                error=f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
+            ),
             "market_data": None,
             "runtime": {},
             "error": f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
         }
 
     try:
-        plan = build_symmetric_market_maker_plan(book, maker_cfg)
+        inventory_base = portfolio_positions_base(cfg.portfolio).get(
+            _base_currency_from_symbol(maker_cfg.symbol),
+        )
+        plan = build_symmetric_market_maker_plan(
+            book,
+            maker_cfg,
+            inventory_base=inventory_base,
+        )
     except ValueError as exc:
         return {
             "status": "error",
@@ -5414,11 +7735,18 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
+            "safety": build_market_maker_safety_payload(
+                cfg,
+                None,
+                conversion,
+                error=str(exc),
+            ),
             "market_data": order_book_market_data(book),
             "runtime": {},
             "error": str(exc),
         }
 
+    safety = build_market_maker_safety_payload(cfg, plan, conversion)
     return {
         "status": "planned",
         "mode": "dry_run",
@@ -5427,6 +7755,7 @@ def build_market_maker_payload(
         "accounts": accounts,
         "quote_conversion": conversion,
         "exchange_features": exchange_features,
+        "safety": safety,
         "market_data": order_book_market_data(book),
         "runtime": {},
         "error": None,
@@ -5487,45 +7816,53 @@ def build_slow_execution_payload(
 async def fetch_onchain_payload(
     cfg: BotConfig,
     client: SolanaTokenClient | None,
-    previous_amounts: dict[str, float],
-) -> tuple[dict[str, Any], dict[str, float]]:
+) -> dict[str, Any]:
     onchain_cfg = cfg.onchain_monitor
     if not onchain_cfg.enabled:
-        return (
-            {
-                "status": "disabled",
-                "label": onchain_cfg.label,
-                "mint": onchain_cfg.token_mint,
-                "holders": [],
-                "last_finished": None,
-                "error": None,
+        return {
+            "status": "disabled",
+            "label": onchain_cfg.label,
+            "mint": onchain_cfg.token_mint,
+            "holders": [],
+            "history": {
+                "enabled": False,
+                "path": onchain_cfg.history_path,
+                "event_count": 0,
+                "recent_events": [],
             },
-            previous_amounts,
-        )
+            "last_finished": None,
+            "error": None,
+        }
     if onchain_cfg.network.lower() != "solana":
-        return (
-            {
-                "status": "error",
-                "label": onchain_cfg.label,
-                "mint": onchain_cfg.token_mint,
-                "holders": [],
-                "last_finished": time.time(),
-                "error": f"Unsupported network: {onchain_cfg.network}",
+        return {
+            "status": "error",
+            "label": onchain_cfg.label,
+            "mint": onchain_cfg.token_mint,
+            "holders": [],
+            "history": {
+                "enabled": False,
+                "path": onchain_cfg.history_path,
+                "event_count": 0,
+                "recent_events": [],
             },
-            previous_amounts,
-        )
+            "last_finished": time.time(),
+            "error": f"Unsupported network: {onchain_cfg.network}",
+        }
     if client is None:
-        return (
-            {
-                "status": "error",
-                "label": onchain_cfg.label,
-                "mint": onchain_cfg.token_mint,
-                "holders": [],
-                "last_finished": time.time(),
-                "error": "Solana client is not configured",
+        return {
+            "status": "error",
+            "label": onchain_cfg.label,
+            "mint": onchain_cfg.token_mint,
+            "holders": [],
+            "history": {
+                "enabled": False,
+                "path": onchain_cfg.history_path,
+                "event_count": 0,
+                "recent_events": [],
             },
-            previous_amounts,
-        )
+            "last_finished": time.time(),
+            "error": "Solana client is not configured",
+        }
 
     data = await fetch_top_token_owners(
         client,
@@ -5533,31 +7870,109 @@ async def fetch_onchain_payload(
         top_n=onchain_cfg.top_n,
     )
     holders = data["holders"]
-    next_amounts = {item["owner"]: item["amount"] for item in holders}
     labels = onchain_cfg.address_labels
     for holder in holders:
-        previous = previous_amounts.get(holder["owner"])
-        holder["delta_amount"] = (
-            None if previous is None else holder["amount"] - previous
-        )
         label = labels.get(holder["owner"])
         holder["label"] = label or "Unknown"
         holder["is_labeled"] = label is not None
 
-    return (
-        {
-            "status": "running",
-            "label": onchain_cfg.label,
-            "mint": onchain_cfg.token_mint,
-            "supply": data["supply"],
-            "decimals": data["decimals"],
-            "holders": holders,
-            "source_account_count": data["source_account_count"],
-            "last_finished": time.time(),
-            "error": None,
-        },
-        next_amounts,
+    observed_at = time.time()
+    history = update_holder_history(
+        path=onchain_cfg.history_path,
+        mint=onchain_cfg.token_mint,
+        label=onchain_cfg.label,
+        holders=holders,
+        address_labels=labels,
+        observed_at=observed_at,
     )
+    return {
+        "status": "running",
+        "label": onchain_cfg.label,
+        "mint": onchain_cfg.token_mint,
+        "supply": data["supply"],
+        "decimals": data["decimals"],
+        "holders": holders,
+        "history": history,
+        "source_account_count": data["source_account_count"],
+        "last_finished": observed_at,
+        "error": None,
+    }
+
+
+def _cached_onchain_payload(
+    cfg: BotConfig,
+    *,
+    status: str = "cached",
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    onchain_cfg = cfg.onchain_monitor
+    if not onchain_cfg.enabled:
+        return None
+    snapshot = load_cached_holder_snapshot(
+        path=onchain_cfg.history_path,
+        mint=onchain_cfg.token_mint,
+        label=onchain_cfg.label,
+        address_labels=onchain_cfg.address_labels,
+        top_n=onchain_cfg.top_n,
+    )
+    if snapshot is None:
+        return None
+    return {
+        **snapshot,
+        "status": status,
+        "error": error,
+        "stale": status != "running",
+    }
+
+
+def _onchain_error_payload(
+    cfg: BotConfig,
+    previous_payload: dict[str, Any],
+    exc: Exception,
+) -> dict[str, Any]:
+    error = str(exc)
+    cached = _cached_onchain_payload(cfg, status="error", error=error)
+    if cached is not None:
+        return cached
+    return {
+        **previous_payload,
+        "status": "error",
+        "label": cfg.onchain_monitor.label,
+        "mint": cfg.onchain_monitor.token_mint,
+        "holders": previous_payload.get("holders", []),
+        "history": previous_payload.get(
+            "history",
+            {
+                "enabled": True,
+                "path": cfg.onchain_monitor.history_path,
+                "event_count": 0,
+                "recent_events": [],
+            },
+        ),
+        "last_finished": previous_payload.get("last_finished") or time.time(),
+        "error": error,
+        "stale": bool(previous_payload.get("holders")),
+    }
+
+
+def _global_scan_health_warnings(
+    *,
+    onchain_payload: dict[str, Any] | None = None,
+    account_balances_payload: dict[str, Any] | None = None,
+    order_activity_payload: dict[str, Any] | None = None,
+) -> list[str]:
+    warnings: list[str] = []
+    # On-chain holder monitoring is informational and can be rate-limited by
+    # public RPC providers. Keep its error inside the On-chain panel without
+    # degrading the trading dashboard's global status.
+    _ = onchain_payload
+    if (account_balances_payload or {}).get("status") == "error":
+        errors = (account_balances_payload or {}).get("errors") or ["unavailable"]
+        warnings.append(f"Account balances: {errors[0]}")
+    if (order_activity_payload or {}).get("status") == "error":
+        errors = (order_activity_payload or {}).get("errors") or ["unavailable"]
+        warnings.append(f"Orders: {errors[0]}")
+    return warnings
 
 
 def _parse_daily_report_time(value: str) -> tuple[int, int]:
@@ -5643,7 +8058,10 @@ async def monitor_loop(
         if cfg.onchain_monitor.enabled
         else None
     )
-    onchain_payload = _build_initial_payload(cfg, poll_seconds)["onchain"]
+    onchain_payload = (
+        _cached_onchain_payload(cfg)
+        or _build_initial_payload(cfg, poll_seconds)["onchain"]
+    )
     account_balances_payload = _build_initial_payload(cfg, poll_seconds)[
         "account_balances"
     ]
@@ -5657,19 +8075,118 @@ async def monitor_loop(
     slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
         "slow_execution"
     ]
+    spot_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
+        "spot_arbitrage"
+    ]
     portfolio_payload = _build_initial_payload(cfg, poll_seconds)["portfolio"]
     alert_service = AlertService(cfg.alerts)
-    previous_onchain_amounts: dict[str, float] = {}
     next_onchain_scan = 0.0
     next_balance_scan = 0.0
     next_order_activity_scan = 0.0
     consecutive_problem_cycles = 0
     last_daily_report_day: str | None = None
+    last_spot_arbitrage_execution_at = 0.0
     scan_count = 0
+    loop_started_monotonic = time.monotonic()
     try:
         while True:
             if not await state.is_running():
-                await state.set_paused()
+                now = time.monotonic()
+                if now >= next_balance_scan or now >= next_order_activity_scan:
+                    runtime_cfg = await state.runtime_config(cfg)
+                    runtime_slow_execution = runtime_cfg.slow_execution
+                    readonly_warnings: list[str] = []
+                    if now >= next_balance_scan:
+                        try:
+                            account_balances_payload = await fetch_account_balances_payload(
+                                runtime_cfg,
+                                manager,
+                                runtime_slow_execution,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            account_balances_payload = {
+                                "status": "error",
+                                "accounts": [],
+                                "totals": [],
+                                "checked_account_count": 0,
+                                "total_account_count": len(
+                                    _all_account_exchanges(runtime_cfg)
+                                ),
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
+                        next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
+                    if now >= next_order_activity_scan:
+                        try:
+                            auto_tasks_snapshot = await state.auto_buy_sell_tasks()
+                            market_maker_runtime_snapshot = (
+                                await state.market_maker_runtime()
+                            )
+                            order_activity_payload = await fetch_order_activity_payload(
+                                runtime_cfg,
+                                manager,
+                                runtime_slow_execution,
+                                quote_rates=runtime_cfg.quote_rates,
+                                books={},
+                                market_maker_runtime=market_maker_runtime_snapshot,
+                                auto_buy_sell_tasks=auto_tasks_snapshot,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            order_activity_payload = _build_initial_payload(
+                                runtime_cfg,
+                                poll_seconds,
+                            )["order_activity"]
+                            order_activity_payload.update(
+                                {
+                                    "status": "error",
+                                    "last_finished": time.time(),
+                                    "errors": [str(exc)],
+                                }
+                            )
+                            order_activity_payload["reconciliation"] = {
+                                **order_activity_payload.get("reconciliation", {}),
+                                "status": "error",
+                                "issue_count": 1,
+                                "notice_count": 0,
+                                "total_item_count": 1,
+                                "level_counts": {"error": 1, "warning": 0, "info": 0},
+                                "critical_issue_count": 1,
+                                "auto_stop_recommended": True,
+                                "auto_stop_reasons": [
+                                    f"order_activity_error: {str(exc)}"
+                                ],
+                                "issues": [
+                                    {
+                                        "level": "error",
+                                        "type": "order_activity_error",
+                                        "strategy": "",
+                                        "exchange": "",
+                                        "symbol": "",
+                                        "order_id": "",
+                                        "source_id": "",
+                                        "message": str(exc),
+                                    }
+                                ],
+                                "checked_at": time.time(),
+                            }
+                        next_order_activity_scan = (
+                            now + ORDER_ACTIVITY_POLL_SECONDS
+                        )
+                    if account_balances_payload.get("status") == "error":
+                        errors = account_balances_payload.get("errors") or ["unavailable"]
+                        readonly_warnings.append(f"Account balances: {errors[0]}")
+                    if order_activity_payload.get("status") == "error":
+                        errors = order_activity_payload.get("errors") or ["unavailable"]
+                        readonly_warnings.append(f"Orders: {errors[0]}")
+                    await state.set_readonly_health(
+                        cfg=runtime_cfg,
+                        exec_cfg=runtime_slow_execution,
+                        account_balances=account_balances_payload,
+                        order_activity=order_activity_payload,
+                        warnings=readonly_warnings,
+                    )
+                else:
+                    await state.set_paused()
                 await asyncio.sleep(0.5)
                 continue
 
@@ -5681,6 +8198,15 @@ async def monitor_loop(
                 runtime_cfg = await state.runtime_config(cfg)
                 runtime_slow_execution = runtime_cfg.slow_execution
                 strategy_pauses = await state.strategy_pauses()
+                spot_arbitrage_payload = {
+                    "status": "disabled",
+                    "mode": "dry_run",
+                    "plan": None,
+                    "risk": None,
+                    "execution": None,
+                    "error": None,
+                    "cooldown_seconds": SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS,
+                }
                 portfolio_books: dict[tuple[str, str], OrderBookSnapshot] = {}
                 if strategy in {"all", "spot-spread"} and runtime_cfg.spot_markets:
                     symbols_by_exchange = _symbols_for_configured_spot_markets(
@@ -5798,6 +8324,56 @@ async def monitor_loop(
                         books,
                         quote_rates,
                     )
+                    spot_live_allowed = (
+                        runtime_cfg.risk.enabled
+                        and runtime_cfg.risk.trading_enabled
+                        and runtime_cfg.risk.allow_live_trading
+                        and runtime_cfg.risk.strategy_enabled.get("spot_spread", True)
+                    )
+                    if strategy_pauses.get("spot_spread", False):
+                        spot_arbitrage_payload = {
+                            **spot_arbitrage_payload,
+                            "status": "paused",
+                            "mode": "paused",
+                        }
+                    elif not opportunities:
+                        spot_arbitrage_payload = {
+                            **spot_arbitrage_payload,
+                            "status": "no_opportunity",
+                            "mode": "live" if spot_live_allowed else "dry_run",
+                        }
+                    elif not spot_live_allowed:
+                        spot_arbitrage_payload = {
+                            **spot_arbitrage_payload,
+                            "status": "live_disabled",
+                            "mode": "dry_run",
+                            "opportunity": opportunities[0].to_dict(),
+                        }
+                    else:
+                        cooldown_remaining = (
+                            SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS
+                            - (time.monotonic() - last_spot_arbitrage_execution_at)
+                        )
+                        if cooldown_remaining > 0:
+                            spot_arbitrage_payload = {
+                                **spot_arbitrage_payload,
+                                "status": "cooldown",
+                                "mode": "live",
+                                "opportunity": opportunities[0].to_dict(),
+                                "cooldown_remaining_seconds": cooldown_remaining,
+                            }
+                        else:
+                            spot_arbitrage_payload = await run_spot_arbitrage_execution_cycle(
+                                runtime_cfg,
+                                manager,
+                                opportunities=opportunities,
+                                books=books,
+                                quote_rates=quote_rates,
+                                live=True,
+                            )
+                            write_trade_event(runtime_cfg.trade_log, spot_arbitrage_payload)
+                            if spot_arbitrage_payload.get("status") != "no_opportunity":
+                                last_spot_arbitrage_execution_at = time.monotonic()
                 else:
                     opportunities = await scan_with_manager(
                         runtime_cfg,
@@ -5825,6 +8401,10 @@ async def monitor_loop(
                             _spot_symbols_by_exchange(runtime_cfg),
                         ),
                         "error": None,
+                    }
+                    spot_arbitrage_payload = {
+                        **spot_arbitrage_payload,
+                        "status": "disabled",
                     }
                     portfolio_payload = _build_initial_payload(
                         runtime_cfg,
@@ -5855,12 +8435,16 @@ async def monitor_loop(
 
                 if now >= next_order_activity_scan:
                     try:
+                        auto_tasks_snapshot = await state.auto_buy_sell_tasks()
+                        market_maker_runtime_snapshot = await state.market_maker_runtime()
                         order_activity_payload = await fetch_order_activity_payload(
                             runtime_cfg,
                             manager,
                             runtime_slow_execution,
                             quote_rates=quote_rates,
                             books=portfolio_books,
+                            market_maker_runtime=market_maker_runtime_snapshot,
+                            auto_buy_sell_tasks=auto_tasks_snapshot,
                         )
                     except Exception as exc:  # noqa: BLE001
                         order_activity_payload = {
@@ -5905,6 +8489,36 @@ async def monitor_loop(
                             "open_order_count": 0,
                             "closed_order_count": 0,
                             "recent_trade_count": 0,
+                            "reconciliation": {
+                                "status": "error",
+                                "tracked_order_count": 0,
+                                "matched_open_count": 0,
+                                "matched_fill_count": 0,
+                                "untracked_open_count": 0,
+                                "unattributed_fill_count": 0,
+                                "issue_count": 1,
+                                "notice_count": 0,
+                                "total_item_count": 1,
+                                "level_counts": {"error": 1, "warning": 0, "info": 0},
+                                "critical_issue_count": 1,
+                                "auto_stop_recommended": True,
+                                "auto_stop_reasons": [
+                                    f"order_activity_error: {str(exc)}"
+                                ],
+                                "issues": [
+                                    {
+                                        "level": "error",
+                                        "type": "order_activity_error",
+                                        "strategy": "",
+                                        "exchange": "",
+                                        "symbol": "",
+                                        "order_id": "",
+                                        "source_id": "",
+                                        "message": str(exc),
+                                    }
+                                ],
+                                "checked_at": time.time(),
+                            },
                             "checked_account_count": 0,
                             "total_account_count": len(
                                 _all_account_exchanges(runtime_cfg)
@@ -5934,34 +8548,67 @@ async def monitor_loop(
 
                 if runtime_cfg.onchain_monitor.enabled and now >= next_onchain_scan:
                     try:
-                        onchain_payload, previous_onchain_amounts = (
-                            await fetch_onchain_payload(
-                                runtime_cfg,
-                                solana_client,
-                                previous_onchain_amounts,
-                            )
+                        onchain_payload = await fetch_onchain_payload(
+                            runtime_cfg,
+                            solana_client,
                         )
                     except Exception as exc:  # noqa: BLE001
-                        onchain_payload = {
-                            "status": "error",
-                            "label": runtime_cfg.onchain_monitor.label,
-                            "mint": runtime_cfg.onchain_monitor.token_mint,
-                            "holders": [],
-                            "last_finished": time.time(),
-                            "error": str(exc),
-                        }
+                        onchain_payload = _onchain_error_payload(
+                            runtime_cfg,
+                            onchain_payload,
+                            exc,
+                        )
                     next_onchain_scan = (
                         now + max(1.0, runtime_cfg.onchain_monitor.poll_seconds)
                     )
 
-                if onchain_payload.get("status") == "error":
-                    warnings = [*warnings, f"On-chain: {onchain_payload.get('error')}"]
-                if account_balances_payload.get("status") == "error":
-                    errors = account_balances_payload.get("errors") or ["unavailable"]
-                    warnings = [*warnings, f"Account balances: {errors[0]}"]
-                if order_activity_payload.get("status") == "error":
-                    errors = order_activity_payload.get("errors") or ["unavailable"]
-                    warnings = [*warnings, f"Orders: {errors[0]}"]
+                warnings = [
+                    *warnings,
+                    *_global_scan_health_warnings(
+                        onchain_payload=onchain_payload,
+                        account_balances_payload=account_balances_payload,
+                        order_activity_payload=order_activity_payload,
+                    ),
+                ]
+                reconciliation_payload = (
+                    order_activity_payload.get("reconciliation")
+                    if isinstance(order_activity_payload.get("reconciliation"), dict)
+                    else {}
+                )
+                reconciliation_stop_requested = bool(
+                    reconciliation_payload.get("auto_stop_recommended")
+                )
+                reconciliation_reasons = [
+                    str(reason)
+                    for reason in reconciliation_payload.get("auto_stop_reasons", [])
+                    if reason
+                ]
+                program_updated_at = await state.program_updated_at()
+                reconciliation_warmup_active = (
+                    reconciliation_stop_requested
+                    and _monitor_reconciliation_warmup_active(
+                        process_uptime_seconds=(
+                            monotonic_started - loop_started_monotonic
+                        ),
+                        program_age_seconds=started_at - program_updated_at,
+                    )
+                )
+                reconciliation_stop = (
+                    reconciliation_stop_requested and not reconciliation_warmup_active
+                )
+                if reconciliation_warmup_active:
+                    reconciliation_payload["auto_stop_warmup_active"] = True
+                    reconciliation_payload["auto_stop_suppressed"] = True
+                    reconciliation_payload["auto_stop_warmup_seconds"] = (
+                        RECONCILIATION_AUTO_STOP_WARMUP_SECONDS
+                    )
+                if reconciliation_stop:
+                    warnings = [
+                        *warnings,
+                        "Reconciliation: " + reconciliation_reasons[0]
+                        if reconciliation_reasons
+                        else "Reconciliation has critical order state issues",
+                    ]
                 if market_maker_payload.get("status") == "error":
                     warnings = [
                         *warnings,
@@ -5972,6 +8619,24 @@ async def monitor_loop(
                         *warnings,
                         f"Auto Buy/Sell: {slow_execution_payload.get('error')}",
                     ]
+                if spot_arbitrage_payload.get("status") in {
+                    "blocked_by_plan",
+                    "blocked_by_validation",
+                    "blocked_by_balance",
+                    "execution_error",
+                }:
+                    reason = ""
+                    risk_payload = spot_arbitrage_payload.get("risk")
+                    if isinstance(risk_payload, dict):
+                        reasons = risk_payload.get("reasons")
+                        if isinstance(reasons, list) and reasons:
+                            reason = str(reasons[0])
+                    errors = spot_arbitrage_payload.get("errors")
+                    if not reason and isinstance(errors, list) and errors:
+                        reason = str(errors[0])
+                    if not reason:
+                        reason = str(spot_arbitrage_payload.get("status"))
+                    warnings = [*warnings, f"Spot arbitrage: {reason}"]
                 daily_loss_stop = False
                 if runtime_cfg.risk.max_daily_loss_quote > 0:
                     daily_pnl_quote = current_daily_pnl_quote(runtime_cfg)
@@ -5988,13 +8653,14 @@ async def monitor_loop(
                 consecutive_problem_cycles = (
                     consecutive_problem_cycles + 1 if warnings else 0
                 )
-                auto_stop_triggered = (
-                    runtime_cfg.alerts.auto_stop_enabled
-                    and (
-                        daily_loss_stop
-                        or consecutive_problem_cycles
-                        >= max(1, runtime_cfg.alerts.auto_stop_consecutive_errors)
-                    )
+                auto_stop_triggered, auto_stop_reason = _monitor_auto_stop_decision(
+                    auto_stop_enabled=runtime_cfg.alerts.auto_stop_enabled,
+                    auto_stop_consecutive_errors=(
+                        runtime_cfg.alerts.auto_stop_consecutive_errors
+                    ),
+                    daily_loss_stop=daily_loss_stop,
+                    reconciliation_stop=reconciliation_stop,
+                    consecutive_problem_cycles=consecutive_problem_cycles,
                 )
                 if auto_stop_triggered:
                     warnings = [
@@ -6024,6 +8690,7 @@ async def monitor_loop(
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
                     slow_execution=slow_execution_payload,
+                    spot_arbitrage=spot_arbitrage_payload,
                     trading_console=trading_console_payload,
                     portfolio=portfolio_payload,
                 )
@@ -6067,7 +8734,30 @@ async def monitor_loop(
                     )
                     last_daily_report_day = report_day
                 if auto_stop_triggered:
-                    await state.set_running(False)
+                    await state.set_auto_stopped(
+                        reason=auto_stop_reason,
+                        warnings=warnings,
+                    )
+                    write_system_web_audit_event(
+                        runtime_cfg,
+                        action="auto_stop",
+                        target="program",
+                        detail=auto_stop_reason,
+                        payload={
+                            "scan_count": scan_count,
+                            "warnings": warnings,
+                            "daily_loss_stop": daily_loss_stop,
+                            "reconciliation_stop_requested": (
+                                reconciliation_stop_requested
+                            ),
+                            "reconciliation_stop": reconciliation_stop,
+                            "reconciliation_warmup_active": (
+                                reconciliation_warmup_active
+                            ),
+                            "reconciliation_reasons": reconciliation_reasons,
+                            "consecutive_problem_cycles": consecutive_problem_cycles,
+                        },
+                    )
                     await alert_service.send(
                         level="critical",
                         title="Crypto arbitrage auto-stopped",
@@ -6105,7 +8795,25 @@ async def monitor_loop(
                     and consecutive_problem_cycles
                     >= max(1, runtime_cfg.alerts.auto_stop_consecutive_errors)
                 ):
-                    await state.set_running(False)
+                    auto_stop_reason = (
+                        f"monitor exception after {consecutive_problem_cycles} "
+                        f"consecutive error cycle(s)"
+                    )
+                    await state.set_auto_stopped(
+                        reason=auto_stop_reason,
+                        warnings=[f"{auto_stop_reason}: {exc}"],
+                    )
+                    write_system_web_audit_event(
+                        runtime_cfg,
+                        action="auto_stop",
+                        target="program",
+                        detail=auto_stop_reason,
+                        payload={
+                            "scan_count": scan_count,
+                            "error": str(exc),
+                            "consecutive_problem_cycles": consecutive_problem_cycles,
+                        },
+                    )
                     await alert_service.send(
                         level="critical",
                         title="Crypto arbitrage auto-stopped",
@@ -6170,16 +8878,21 @@ def _raw_client_order_id(raw: dict[str, Any]) -> str:
     return ""
 
 
-async def _tracked_market_maker_order_ids(
+async def _market_maker_open_order_snapshot(
     cfg: BotConfig,
     manager: ExchangeManager,
     current_ids: list[str],
-) -> list[str]:
+) -> dict[str, Any]:
     maker_cfg = cfg.market_maker
-    tracked = {order_id for order_id in current_ids if order_id}
-    prefix = maker_cfg.client_order_prefix
-    if not maker_cfg.exchange or not maker_cfg.symbol or not prefix:
-        return sorted(tracked)
+    fallback_ids = sorted({order_id for order_id in current_ids if order_id})
+    if not maker_cfg.exchange or not maker_cfg.symbol:
+        return {
+            "source": "memory",
+            "order_ids": fallback_ids,
+            "open_orders": [],
+            "open_order_count": len(fallback_ids),
+            "error": None,
+        }
     exchange = next(
         (
             item
@@ -6189,19 +8902,103 @@ async def _tracked_market_maker_order_ids(
         None,
     )
     if exchange is None:
-        return sorted(tracked)
+        return {
+            "source": "memory",
+            "order_ids": fallback_ids,
+            "open_orders": [],
+            "open_order_count": len(fallback_ids),
+            "error": f"market maker exchange is not configured: {maker_cfg.exchange}",
+        }
     try:
         open_orders = await manager.fetch_open_orders(exchange, symbol=maker_cfg.symbol)
-    except Exception:
-        return sorted(tracked)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "source": "memory",
+            "order_ids": fallback_ids,
+            "open_orders": [],
+            "open_order_count": len(fallback_ids),
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    order_ids: set[str] = set()
     for order in open_orders:
         if not isinstance(order, dict):
             continue
-        client_order_id = _raw_client_order_id(order)
         order_id = _raw_order_id(order)
-        if order_id and client_order_id.startswith(prefix):
-            tracked.add(order_id)
-    return sorted(tracked)
+        if order_id:
+            order_ids.add(order_id)
+    return {
+        "source": "exchange",
+        "order_ids": sorted(order_ids),
+        "open_orders": [order for order in open_orders if isinstance(order, dict)],
+        "open_order_count": len(open_orders),
+        "error": None,
+    }
+
+
+def _market_maker_order_sync_delta(
+    previous_order_ids: list[str],
+    open_order_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    previous_ids = {str(order_id) for order_id in previous_order_ids if order_id}
+    snapshot_ids = {
+        str(order_id)
+        for order_id in open_order_snapshot.get("order_ids", []) or []
+        if order_id
+    }
+    source = str(open_order_snapshot.get("source") or "memory")
+    exchange_confirmed = source == "exchange" and not open_order_snapshot.get("error")
+    missing_tracked_ids = sorted(previous_ids - snapshot_ids) if exchange_confirmed else []
+    new_exchange_ids = sorted(snapshot_ids - previous_ids) if exchange_confirmed else []
+    changed = bool(
+        exchange_confirmed
+        and previous_ids
+        and (missing_tracked_ids or new_exchange_ids)
+    )
+    return {
+        "source": source,
+        "exchange_confirmed": exchange_confirmed,
+        "tracked_before_sync": sorted(previous_ids),
+        "exchange_order_ids": sorted(snapshot_ids),
+        "missing_tracked_order_ids": missing_tracked_ids,
+        "new_exchange_order_ids": new_exchange_ids,
+        "changed": changed,
+        "checked_at": time.time(),
+    }
+
+
+def _market_maker_force_replace_reason(
+    open_order_ids: list[str],
+    previous_plan: dict[str, Any] | None,
+    *,
+    order_sync: dict[str, Any] | None = None,
+) -> str | None:
+    if order_sync and order_sync.get("changed"):
+        return "exchange open orders differ from tracked MM ids; assuming fill/cancel drift"
+    if not open_order_ids or not previous_plan:
+        return None
+    previous_orders = previous_plan.get("orders")
+    if not isinstance(previous_orders, list):
+        return None
+    if len(open_order_ids) != len(previous_orders):
+        return "open order count differs from previous MM plan; assuming fill/cancel drift"
+    return None
+
+
+def _market_maker_should_force_replace(
+    open_order_ids: list[str],
+    previous_plan: dict[str, Any] | None,
+    *,
+    order_sync: dict[str, Any] | None = None,
+) -> bool:
+    return (
+        _market_maker_force_replace_reason(
+            open_order_ids,
+            previous_plan,
+            order_sync=order_sync,
+        )
+        is not None
+    )
+
 
 
 def _market_maker_gate_status(
@@ -6303,6 +9100,7 @@ async def market_maker_task_loop(
         "cycle_count": 0,
         "last_error": None,
         "market_data": None,
+        "open_order_sync": None,
         "updated_at": time.time(),
     }
     try:
@@ -6350,11 +9148,37 @@ async def market_maker_task_loop(
                     previous_plan = None
                     previous_mid_price = None
 
+                open_order_sync: dict[str, Any] | None = None
                 if live_allowed or open_order_ids:
-                    open_order_ids = await _tracked_market_maker_order_ids(
+                    tracked_before_sync = list(open_order_ids)
+                    open_order_snapshot = await _market_maker_open_order_snapshot(
                         runtime_cfg,
                         manager,
                         open_order_ids,
+                    )
+                    open_order_sync = _market_maker_order_sync_delta(
+                        tracked_before_sync,
+                        open_order_snapshot,
+                    )
+                    open_order_ids = [
+                        str(order_id)
+                        for order_id in open_order_snapshot.get("order_ids", [])
+                        if order_id
+                    ]
+                    if open_order_ids:
+                        open_order_exchange = maker_cfg.exchange
+                        open_order_symbol = maker_cfg.symbol
+                else:
+                    open_order_snapshot = {
+                        "source": "memory",
+                        "order_ids": open_order_ids,
+                        "open_orders": [],
+                        "open_order_count": len(open_order_ids),
+                        "error": None,
+                    }
+                    open_order_sync = _market_maker_order_sync_delta(
+                        open_order_ids,
+                        open_order_snapshot,
                     )
                 if not live_allowed:
                     cancel_payload = None
@@ -6382,6 +9206,9 @@ async def market_maker_task_loop(
                         "open_order_exchange": open_order_exchange,
                         "open_order_symbol": open_order_symbol,
                         "open_order_count": len(open_order_ids),
+                        "open_order_source": open_order_snapshot.get("source"),
+                        "open_order_sync_error": open_order_snapshot.get("error"),
+                        "open_order_sync": open_order_sync,
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,
                         "cycle_count": cycle_count,
@@ -6392,6 +9219,32 @@ async def market_maker_task_loop(
                     }
                     await state.set_market_maker_runtime(runtime)
                 else:
+                    if open_order_snapshot.get("error"):
+                        cycle_count += 1
+                        runtime = {
+                            "status": "open_order_sync_error",
+                            "mode": "live",
+                            "reason": "could not confirm current open orders",
+                            "config": market_maker_config_to_dict(maker_cfg),
+                            "open_order_ids": open_order_ids,
+                            "open_order_exchange": open_order_exchange,
+                            "open_order_symbol": open_order_symbol,
+                            "open_order_count": len(open_order_ids),
+                            "open_order_source": open_order_snapshot.get("source"),
+                            "open_order_sync_error": open_order_snapshot.get("error"),
+                            "open_order_sync": open_order_sync,
+                            "placed_count": placed_count,
+                            "canceled_count": canceled_count,
+                            "cycle_count": cycle_count,
+                            "last_error": open_order_snapshot.get("error"),
+                            "market_data": None,
+                            "updated_at": time.time(),
+                        }
+                        await state.set_market_maker_runtime(runtime)
+                        sleep_for = max(0.0, interval - (time.monotonic() - started))
+                        if sleep_for > 0:
+                            await asyncio.sleep(sleep_for)
+                        continue
                     cycle_count += 1
                     order_book, market_data_status = (
                         await _cached_market_maker_order_book(
@@ -6399,17 +9252,36 @@ async def market_maker_task_loop(
                             orderbook_cache,
                         )
                     )
+                    previous_plan_for_cycle = previous_plan
+                    force_replace_reason = _market_maker_force_replace_reason(
+                        open_order_ids,
+                        previous_plan,
+                        order_sync=open_order_sync,
+                    )
+                    force_replace = force_replace_reason is not None
+                    if force_replace:
+                        previous_plan_for_cycle = None
+                    portfolio_snapshot = await state.portfolio_payload()
+                    inventory_base = _portfolio_position_for_symbol(
+                        portfolio_snapshot,
+                        maker_cfg.symbol,
+                        cfg=runtime_cfg,
+                    )
                     payload = await run_market_maker_cycle(
                         runtime_cfg,
                         manager,
                         live=True,
                         replace_existing=False,
                         replace_order_ids=open_order_ids,
-                        previous_plan=previous_plan,
+                        previous_plan=previous_plan_for_cycle,
+                        existing_open_orders=open_order_snapshot.get("open_orders"),
                         previous_mid_price=previous_mid_price,
                         last_cancel_at=last_cancel_at,
                         order_book=order_book,
+                        inventory_base=inventory_base,
                     )
+                    if force_replace:
+                        payload["force_replace_reason"] = force_replace_reason
                     market_data = (
                         payload.get("market_data")
                         if isinstance(payload.get("market_data"), dict)
@@ -6431,7 +9303,7 @@ async def market_maker_task_loop(
                     if plan_payload and isinstance(
                         plan_payload.get("mid_price"),
                         (int, float),
-                    ):
+                    ) and payload.get("status") in {"placed", "unchanged"}:
                         previous_plan = plan_payload
                         previous_mid_price = float(plan_payload["mid_price"])
                     execution = (
@@ -6447,10 +9319,17 @@ async def market_maker_task_loop(
                         str(order_id)
                         for order_id in execution.get("placed_order_ids", [])
                         if order_id
+                    ] or [
+                        str(order_id)
+                        for order_id in execution.get("remaining_open_order_ids", [])
+                        if order_id
                     ] or open_order_ids
                     if open_order_ids:
                         open_order_exchange = maker_cfg.exchange
                         open_order_symbol = maker_cfg.symbol
+                    elif payload.get("status") == "placed":
+                        open_order_exchange = ""
+                        open_order_symbol = ""
                     runtime = {
                         "status": payload.get("status", "unknown"),
                         "mode": "live",
@@ -6460,6 +9339,11 @@ async def market_maker_task_loop(
                         "open_order_exchange": open_order_exchange,
                         "open_order_symbol": open_order_symbol,
                         "open_order_count": len(open_order_ids),
+                        "open_order_source": open_order_snapshot.get("source"),
+                        "open_order_sync_error": open_order_snapshot.get("error"),
+                        "open_order_sync": open_order_sync,
+                        "force_replace": force_replace,
+                        "force_replace_reason": force_replace_reason,
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,
                         "cycle_count": cycle_count,
@@ -6671,11 +9555,13 @@ async def index(_: web.Request) -> web.Response:
 
 async def api_state(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
-    return web.json_response(await state.get())
+    view = request.query.get("view")
+    return web.json_response(await state.get(view=view))
 
 
 async def api_control(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
     try:
         payload = await request.json()
     except json.JSONDecodeError:
@@ -6685,7 +9571,16 @@ async def api_control(request: web.Request) -> web.Response:
     if not isinstance(running, bool):
         return web.json_response({"error": "running must be a boolean"}, status=400)
 
-    return web.json_response(await state.set_running(running))
+    result = await state.set_running(running)
+    write_web_audit_event(
+        cfg,
+        request,
+        action="program_control",
+        target="program",
+        detail="resume scans" if running else "pause scans",
+        payload={"running": running},
+    )
+    return web.json_response(result)
 
 
 async def api_slow_execution(request: web.Request) -> web.Response:
@@ -6711,6 +9606,14 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     await state.set_slow_execution_overrides(overrides, cfg=cfg)
     current_config = await state.slow_execution_config(cfg.slow_execution)
     runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="auto_buy_sell_config",
+        target=f"{current_config.exchange} {current_config.symbol}".strip(),
+        detail="updated Auto Buy/Sell defaults",
+        payload=overrides,
+    )
     return web.json_response(
         {
             "ok": True,
@@ -6742,6 +9645,15 @@ async def api_market_maker(request: web.Request) -> web.Response:
 
     update = await state.set_market_maker_overrides(overrides, cfg=cfg)
     current_config = await state.market_maker_config(cfg.market_maker)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="market_maker_config",
+        target=f"{current_config.exchange} {current_config.symbol}".strip(),
+        detail="updated Market Maker config",
+        payload=overrides,
+    )
     return web.json_response(
         {
             "ok": True,
@@ -6763,7 +9675,17 @@ async def api_markets(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    return web.json_response(await state.set_spot_markets(markets, cfg=cfg))
+    result = await state.set_spot_markets(markets, cfg=cfg)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="markets_config",
+        target="spot_markets",
+        detail=f"set {len(markets)} spot market(s)",
+        payload={"spot_markets": spot_markets_to_list(markets)},
+    )
+    return web.json_response(result)
 
 
 async def api_cash_and_carry_pairs(request: web.Request) -> web.Response:
@@ -6775,7 +9697,17 @@ async def api_cash_and_carry_pairs(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    return web.json_response(await state.set_cash_and_carry_pairs(pairs, cfg=cfg))
+    result = await state.set_cash_and_carry_pairs(pairs, cfg=cfg)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="cash_and_carry_config",
+        target="cash_and_carry_pairs",
+        detail=f"set {len(pairs)} pair(s)",
+        payload={"cash_and_carry_pairs": cash_and_carry_pairs_to_list(pairs)},
+    )
+    return web.json_response(result)
 
 
 async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
@@ -6802,6 +9734,10 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
+    try:
+        task = await tasks.create_task(task_config)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     await state.set_slow_execution_overrides(
         {
             **overrides,
@@ -6809,9 +9745,17 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         },
         cfg=cfg,
     )
-    task = await tasks.create_task(task_config)
     snapshot = await tasks.snapshot()
     await state.set_auto_buy_sell_tasks(snapshot)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="auto_buy_sell_task_create",
+        target=f"{task_config.exchange} {task_config.symbol}",
+        detail=f"created task {task.get('id', '')}",
+        payload={"task_id": task.get("id"), "config": slow_execution_config_to_dict(task_config)},
+    )
     return web.json_response(
         {
             "ok": True,
@@ -6824,19 +9768,40 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
 
 async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     task_id = request.match_info.get("task_id", "")
     try:
         payload = await request.json()
         action = str(payload.get("action", "")).strip().lower()
-        if action not in {"pause", "resume"}:
-            raise ValueError("action must be pause or resume")
-        task = await tasks.set_paused(task_id, action == "pause")
+        if action not in {"pause", "resume", "stop"}:
+            raise ValueError("action must be pause, resume, or stop")
+        if action == "stop":
+            manager = ExchangeManager()
+            runtime_cfg = await state.runtime_config(cfg)
+            cancel_open_orders = bool(payload.get("cancel_open_orders", True))
+            task = await tasks.stop_task(
+                task_id,
+                runtime_cfg,
+                manager,
+                cancel_open_orders=cancel_open_orders,
+            )
+        else:
+            task = await tasks.set_paused(task_id, action == "pause")
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
     snapshot = await tasks.snapshot()
     await state.set_auto_buy_sell_tasks(snapshot)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="auto_buy_sell_task_control",
+        target=task_id,
+        detail=f"{action} task",
+        payload={"task_id": task_id, "action": action},
+    )
     return web.json_response(
         {
             "ok": True,
@@ -6846,12 +9811,43 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
     )
 
 
+async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
+    try:
+        payload = await request.json()
+        if not bool(payload.get("terminal_only", True)):
+            raise ValueError("only terminal task cleanup is supported")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    result = await tasks.clear_terminal_tasks()
+    await state.set_auto_buy_sell_tasks(result["tasks"])
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="auto_buy_sell_task_cleanup",
+        target="terminal_tasks",
+        detail=f"removed {result['removed_count']} terminal task(s)",
+        payload={
+            "removed_count": result["removed_count"],
+            "removed_task_ids": result["removed_task_ids"],
+        },
+    )
+    return web.json_response({"ok": True, **result})
+
+
 async def api_risk(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
         payload = await request.json()
-        allowed_accounts = {exchange.key for exchange in _all_account_exchanges(cfg)}
+        runtime_cfg = await state.runtime_config(cfg)
+        allowed_accounts = {
+            exchange.key for exchange in _all_account_exchanges(runtime_cfg)
+        }
         overrides = _risk_overrides_from_payload(
             payload,
             allowed_accounts=allowed_accounts,
@@ -6861,6 +9857,15 @@ async def api_risk(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
     update = await state.set_risk_overrides(overrides, cfg=cfg)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="risk_config",
+        target="risk",
+        detail="updated risk controls",
+        payload=overrides,
+    )
     return web.json_response({"ok": True, **update})
 
 
@@ -6963,6 +9968,15 @@ async def api_strategy_control(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="strategy_control",
+        target=strategy_id,
+        detail="paused strategy" if paused else "resumed strategy",
+        payload={"strategy": strategy_id, "paused": paused},
+    )
     return web.json_response(
         {
             "ok": True,
@@ -6984,7 +9998,11 @@ def create_app(
 ) -> web.Application:
     interval = cfg.poll_seconds if poll_seconds is None else poll_seconds
     app = web.Application(middlewares=[build_security_middleware(cfg)])
-    state = MonitorState(cfg, interval)
+    state = MonitorState(
+        cfg,
+        interval,
+        runtime_store_path=default_runtime_store_path(cfg),
+    )
     auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
     app["monitor_state"] = state
     app["config"] = cfg
@@ -7026,6 +10044,10 @@ def create_app(
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_post("/api/auto-buy-sell/tasks", api_create_auto_buy_sell_task)
+    app.router.add_post(
+        "/api/auto-buy-sell/tasks/cleanup",
+        api_cleanup_auto_buy_sell_tasks,
+    )
     app.router.add_post(
         "/api/auto-buy-sell/tasks/{task_id}/control",
         api_control_auto_buy_sell_task,

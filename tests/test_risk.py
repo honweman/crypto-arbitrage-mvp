@@ -264,6 +264,32 @@ class RiskTest(unittest.TestCase):
                 order_book_timestamp_ms=int((time.time() - 5) * 1000),
             ),
         )
+        fresh_received_decision = evaluate_order_batch(
+            RiskConfig(
+                allow_live_trading=True,
+                max_order_book_age_seconds=1.0,
+            ),
+            [self._order()],
+            strategy="slow_execution",
+            live=True,
+            market=self._market(
+                order_book_timestamp_ms=int((time.time() - 5) * 1000),
+                order_book_received_at=time.time(),
+            ),
+        )
+        stale_received_decision = evaluate_order_batch(
+            RiskConfig(
+                allow_live_trading=True,
+                max_order_book_age_seconds=1.0,
+            ),
+            [self._order()],
+            strategy="slow_execution",
+            live=True,
+            market=self._market(
+                order_book_timestamp_ms=int(time.time() * 1000),
+                order_book_received_at=time.time() - 5,
+            ),
+        )
         slippage_decision = evaluate_order_batch(
             RiskConfig(
                 allow_live_trading=True,
@@ -289,6 +315,10 @@ class RiskTest(unittest.TestCase):
         self.assertTrue(any("price jump" in reason for reason in jump_decision.reasons))
         self.assertTrue(
             any("order book age" in reason for reason in stale_decision.reasons)
+        )
+        self.assertTrue(fresh_received_decision.approved)
+        self.assertTrue(
+            any("order book age" in reason for reason in stale_received_decision.reasons)
         )
         self.assertTrue(
             any("slippage" in reason for reason in slippage_decision.reasons)

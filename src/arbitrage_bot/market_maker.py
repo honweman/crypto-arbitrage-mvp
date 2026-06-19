@@ -38,6 +38,12 @@ def quote_currency(symbol: str) -> str:
     return symbol.split("/", 1)[1].split(":", 1)[0].upper()
 
 
+def base_currency(symbol: str) -> str:
+    if "/" not in symbol:
+        return ""
+    return symbol.split("/", 1)[0].upper()
+
+
 def quote_to_common_rate(cfg: BotConfig, symbol: str) -> float | None:
     quote = quote_currency(symbol)
     if not quote:
@@ -75,6 +81,7 @@ def _scaled_market_context(
         ask_depth_quote=plan.ask_depth_quote * quote_rate,
         max_level_gap_bps=plan.max_level_gap_bps,
         order_book_timestamp_ms=plan.order_book_timestamp_ms,
+        order_book_received_at=plan.order_book_received_at,
     )
 
 
@@ -119,6 +126,65 @@ def _plan_reprice_bps(
         )
         max_change_bps = max(max_change_bps, price_change_bps)
     return max_change_bps
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _previous_plan_from_open_orders(
+    current_plan: MarketMakerPlan,
+    open_orders: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not open_orders or len(open_orders) != len(current_plan.orders):
+        return None
+    current_by_side = {
+        side: sorted(
+            [order for order in current_plan.orders if order.side == side],
+            key=lambda order: order.level,
+        )
+        for side in ("buy", "sell")
+    }
+    open_by_side: dict[str, list[dict[str, Any]]] = {"buy": [], "sell": []}
+    for raw in open_orders:
+        if not isinstance(raw, dict):
+            return None
+        side = str(raw.get("side") or "").lower()
+        price = _number_or_none(raw.get("price"))
+        if side not in open_by_side or price is None or price <= 0:
+            return None
+        open_by_side[side].append({"side": side, "price": price})
+
+    previous_orders: list[dict[str, Any]] = []
+    for side in ("buy", "sell"):
+        expected = current_by_side[side]
+        observed = sorted(
+            open_by_side[side],
+            key=lambda row: row["price"],
+            reverse=(side == "buy"),
+        )
+        if len(expected) != len(observed):
+            return None
+        for expected_order, observed_order in zip(expected, observed):
+            previous_orders.append(
+                {
+                    "side": side,
+                    "level": expected_order.level,
+                    "price": observed_order["price"],
+                    "quote_notional": expected_order.quote_notional,
+                }
+            )
+
+    return {
+        "exchange": current_plan.exchange,
+        "symbol": current_plan.symbol,
+        "orders": previous_orders,
+    }
 
 
 async def build_plan(
@@ -194,14 +260,62 @@ async def place_plan(
     exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
     canceled: list[dict[str, Any]] = []
     cancel_errors: list[dict[str, str]] = []
+    cancel_attempted = False
     if replace_order_ids:
+        cancel_attempted = True
         cancel_payload = await cancel_order_ids(cfg, manager, replace_order_ids)
         canceled = cancel_payload["canceled"]
         cancel_errors = cancel_payload["errors"]
     elif replace_existing or maker_cfg.cancel_existing_orders:
-        canceled = await manager.cancel_open_orders(exchange_cfg, symbol=maker_cfg.symbol)
+        cancel_attempted = True
+        try:
+            canceled = await manager.cancel_open_orders(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cancel_errors.append(
+                {"order_id": "all_open_orders", "error": f"{exc.__class__.__name__}: {exc}"}
+            )
 
-    placed = []
+    if cancel_attempted:
+        remaining_open_orders: list[Any] = []
+        try:
+            remaining_open_orders = await manager.fetch_open_orders(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cancel_errors = [
+                *cancel_errors,
+                {
+                    "order_id": "open_order_confirmation",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                },
+            ]
+        remaining_open_order_ids = [
+            str(order.get("id") or order.get("order") or "")
+            for order in remaining_open_orders
+            if isinstance(order, dict) and (order.get("id") or order.get("order"))
+        ]
+        confirmation_failed = any(
+            item.get("order_id") == "open_order_confirmation"
+            for item in cancel_errors
+        )
+        if confirmation_failed or remaining_open_order_ids:
+            return {
+                "canceled_count": len(canceled),
+                "cancel_errors": cancel_errors,
+                "placed_count": 0,
+                "placed_order_ids": [],
+                "used_batch_create": False,
+                "cancel_retry_required": True,
+                "remaining_open_order_ids": remaining_open_order_ids,
+                "reason": "open orders must be fully canceled before placing a new MM ladder",
+            }
+
+    placed: list[Any] = []
+    create_errors: list[dict[str, Any]] = []
     timestamp_ms = int(time.time() * 1000)
     prepared_orders = prepared_orders or []
     client_order_ids = [
@@ -239,12 +353,39 @@ async def place_plan(
         except NotImplementedError:
             pass
         except Exception as exc:  # noqa: BLE001
+            remaining_open_order_ids: list[str] = []
+            confirmation_errors: list[dict[str, str]] = []
+            try:
+                remaining_open_orders = await manager.fetch_open_orders(
+                    exchange_cfg,
+                    symbol=maker_cfg.symbol,
+                )
+                remaining_open_order_ids = [
+                    str(order.get("id") or order.get("order") or "")
+                    for order in remaining_open_orders
+                    if isinstance(order, dict) and (order.get("id") or order.get("order"))
+                ]
+            except Exception as confirm_exc:  # noqa: BLE001
+                confirmation_errors.append(
+                    {
+                        "scope": "post_batch_create_open_orders",
+                        "error": f"{confirm_exc.__class__.__name__}: {confirm_exc}",
+                    }
+                )
             return {
                 "canceled_count": len(canceled),
                 "cancel_errors": cancel_errors,
                 "placed_count": 0,
                 "placed_order_ids": [],
-                "create_errors": [{"scope": "batch", "error": str(exc)}],
+                "create_errors": [
+                    {
+                        "scope": "batch",
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    },
+                    *confirmation_errors,
+                ],
+                "create_result_uncertain": True,
+                "remaining_open_order_ids": remaining_open_order_ids,
                 "used_batch_create": True,
             }
 
@@ -256,32 +397,49 @@ async def place_plan(
             if index <= len(prepared_orders)
             else None
         )
-        if prepared is not None and prepared_creator is not None:
-            raw = await prepared_creator(
-                exchange_cfg,
-                symbol=maker_cfg.symbol,
-                side=order.side,
-                prepared=prepared,
-                post_only=maker_cfg.post_only,
-                client_order_id=client_order_id,
+        try:
+            if prepared is not None and prepared_creator is not None:
+                raw = await prepared_creator(
+                    exchange_cfg,
+                    symbol=maker_cfg.symbol,
+                    side=order.side,
+                    prepared=prepared,
+                    post_only=maker_cfg.post_only,
+                    client_order_id=client_order_id,
+                )
+            else:
+                raw = await manager.create_limit_order(
+                    exchange_cfg,
+                    symbol=maker_cfg.symbol,
+                    side=order.side,
+                    amount=order.amount,
+                    price=order.price,
+                    post_only=maker_cfg.post_only,
+                    client_order_id=client_order_id,
+                )
+            placed.append(raw)
+        except Exception as exc:  # noqa: BLE001
+            create_errors.append(
+                {
+                    "scope": "order",
+                    "index": index,
+                    "side": order.side,
+                    "level": order.level,
+                    "price": order.price,
+                    "amount": order.amount,
+                    "client_order_id": client_order_id,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
             )
-        else:
-            raw = await manager.create_limit_order(
-                exchange_cfg,
-                symbol=maker_cfg.symbol,
-                side=order.side,
-                amount=order.amount,
-                price=order.price,
-                post_only=maker_cfg.post_only,
-                client_order_id=client_order_id,
-            )
-        placed.append(raw)
+            break
 
     return {
         "canceled_count": len(canceled),
         "cancel_errors": cancel_errors,
         "placed_count": len(placed),
         "placed_order_ids": [item.get("id") for item in placed if isinstance(item, dict)],
+        "create_errors": create_errors,
+        "partial_create": bool(create_errors and placed),
         "used_batch_create": False,
     }
 
@@ -446,12 +604,18 @@ async def run_cycle(
     replace_existing: bool,
     replace_order_ids: list[str] | None = None,
     previous_plan: dict[str, Any] | None = None,
+    existing_open_orders: list[dict[str, Any]] | None = None,
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
     order_book: OrderBookSnapshot | None = None,
+    inventory_base: float | None = None,
 ) -> dict[str, Any]:
     book = await load_plan_order_book(cfg, manager, order_book=order_book)
-    plan = build_symmetric_market_maker_plan(book, cfg.market_maker)
+    plan = build_symmetric_market_maker_plan(
+        book,
+        cfg.market_maker,
+        inventory_base=inventory_base,
+    )
     payload: dict[str, Any] = {
         "type": "market_maker",
         "mode": "live" if live else "dry_run",
@@ -539,8 +703,18 @@ async def run_cycle(
         if not payload["risk"]["approved"]:
             payload["status"] = "blocked_by_risk"
             return payload
-        reprice_bps = _plan_reprice_bps(previous_plan, plan)
+        previous_plan_for_reprice = previous_plan
+        adopted_existing_open_orders = False
+        if previous_plan_for_reprice is None and replace_order_ids:
+            previous_plan_for_reprice = _previous_plan_from_open_orders(
+                plan,
+                existing_open_orders,
+            )
+            adopted_existing_open_orders = previous_plan_for_reprice is not None
+        reprice_bps = _plan_reprice_bps(previous_plan_for_reprice, plan)
         payload["reprice_bps"] = reprice_bps
+        if adopted_existing_open_orders:
+            payload["adopted_existing_open_orders"] = True
         if (
             cfg.market_maker.reprice_threshold_bps > 0
             and reprice_bps is not None
@@ -572,7 +746,12 @@ async def run_cycle(
             prepared_orders=validation.get("orders"),
         )
         payload["execution"] = execution
-        payload["status"] = "execution_error" if execution.get("create_errors") else "placed"
+        if execution.get("cancel_retry_required"):
+            payload["status"] = "cancel_retry"
+        else:
+            payload["status"] = (
+                "execution_error" if execution.get("create_errors") else "placed"
+            )
 
     return payload
 

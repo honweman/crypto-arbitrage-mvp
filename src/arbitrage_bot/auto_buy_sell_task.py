@@ -23,7 +23,23 @@ RUNNING_TASK_STATUSES = {
     "blocked_by_risk",
     "error",
 }
-TERMINAL_TASK_STATUSES = {"complete", "stopped_by_price", "below_min_order_quote"}
+TERMINAL_TASK_STATUSES = {
+    "complete",
+    "stopped",
+    "stopped_by_price",
+    "below_min_order_quote",
+}
+TASK_DUPLICATE_FIELDS = (
+    "exchange",
+    "symbol",
+    "side",
+    "start_price",
+    "stop_price",
+    "price_mode",
+    "price_offset_bps",
+    "unlimited_total",
+    "slice_mode",
+)
 
 
 def default_task_store_path(cfg: BotConfig) -> str:
@@ -51,26 +67,46 @@ def validate_task_config(cfg: SlowExecutionConfig) -> None:
         raise ValueError("total_base and total_quote must be non-negative")
     if cfg.start_price < 0 or cfg.stop_price < 0:
         raise ValueError("start_price and stop_price must be non-negative")
-    if cfg.total_base <= 0 and cfg.total_quote <= 0:
+    if cfg.price_mode not in {"taker", "maker"}:
+        raise ValueError("price_mode must be taker or maker")
+    if cfg.price_offset_bps < 0:
+        raise ValueError("price_offset_bps must be non-negative")
+    if cfg.slice_mode not in {"configured", "top_level"}:
+        raise ValueError("slice_mode must be configured or top_level")
+    if not cfg.unlimited_total and cfg.total_base <= 0 and cfg.total_quote <= 0:
         raise ValueError("total_base or total_quote must be positive")
     if cfg.interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
     if cfg.order_ttl_seconds < 0:
         raise ValueError("order_ttl_seconds must be non-negative")
-    slice_sources = [
-        cfg.slice_base > 0,
-        cfg.slice_quote > 0,
-        cfg.slice_base_min > 0 or cfg.slice_base_max > 0,
-    ]
-    if sum(1 for item in slice_sources if item) != 1:
-        raise ValueError(
-            "configure exactly one of slice_base, slice_quote, or slice range"
-        )
-    if cfg.slice_base_min > 0 or cfg.slice_base_max > 0:
-        if cfg.slice_base_min <= 0 or cfg.slice_base_max <= 0:
-            raise ValueError("slice range min and max must both be positive")
-        if cfg.slice_base_max < cfg.slice_base_min:
-            raise ValueError("slice range max must be greater than or equal to min")
+    if cfg.slice_mode == "configured":
+        slice_sources = [
+            cfg.slice_base > 0,
+            cfg.slice_quote > 0,
+            cfg.slice_base_min > 0 or cfg.slice_base_max > 0,
+        ]
+        if sum(1 for item in slice_sources if item) != 1:
+            raise ValueError(
+                "configure exactly one of slice_base, slice_quote, or slice range"
+            )
+        if cfg.slice_base_min > 0 or cfg.slice_base_max > 0:
+            if cfg.slice_base_min <= 0 or cfg.slice_base_max <= 0:
+                raise ValueError("slice range min and max must both be positive")
+            if cfg.slice_base_max < cfg.slice_base_min:
+                raise ValueError("slice range max must be greater than or equal to min")
+
+
+def _signature_value(value: Any) -> Any:
+    if isinstance(value, float):
+        return round(value, 12)
+    return value
+
+
+def _task_duplicate_signature(cfg: SlowExecutionConfig) -> tuple[Any, ...]:
+    return tuple(
+        _signature_value(getattr(cfg, field_name))
+        for field_name in TASK_DUPLICATE_FIELDS
+    )
 
 
 def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
@@ -139,24 +175,35 @@ class AutoBuySellTask:
 
     def to_dict(self) -> dict[str, Any]:
         cfg = self.exec_cfg
-        base_target_enabled = cfg.total_base > 0
-        quote_target_enabled = cfg.total_quote > 0
+        unlimited_total = cfg.unlimited_total
+        base_target_enabled = not unlimited_total and cfg.total_base > 0
+        quote_target_enabled = not unlimited_total and cfg.total_quote > 0
         remaining_base = (
             max(0.0, cfg.total_base - self.filled_base)
             if base_target_enabled
+            else None
+            if unlimited_total
             else 0.0
         )
         remaining_quote = (
             max(0.0, cfg.total_quote - self.filled_quote)
             if quote_target_enabled
+            else None
+            if unlimited_total
             else 0.0
         )
-        progress_mode = "quote" if quote_target_enabled else "base"
+        progress_mode = (
+            "unlimited"
+            if unlimited_total
+            else "quote"
+            if quote_target_enabled
+            else "base"
+        )
         progress_value = self.filled_quote if quote_target_enabled else self.filled_base
         progress_total = cfg.total_quote if quote_target_enabled else cfg.total_base
         progress_pct = (
             min(100.0, max(0.0, progress_value / progress_total * 100))
-            if progress_total > 0
+            if progress_total > 0 and not unlimited_total
             else 0.0
         )
         return {
@@ -231,6 +278,11 @@ class AutoBuySellTaskService:
             next_run_at=0.0,
         )
         async with self._lock:
+            duplicate = self._find_duplicate_unlocked(cfg)
+            if duplicate is not None:
+                raise ValueError(
+                    f"duplicate active Auto Buy/Sell task: {duplicate.id}"
+                )
             self._tasks.append(task)
             self.store.save(self._tasks)
             return task.to_dict()
@@ -250,6 +302,74 @@ class AutoBuySellTaskService:
             task.updated_at = time.time()
             self.store.save(self._tasks)
             return task.to_dict()
+
+    async def stop_task(
+        self,
+        task_id: str,
+        cfg: BotConfig,
+        manager: ExchangeManager,
+        *,
+        cancel_open_orders: bool = True,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            task = self._get_task_unlocked(task_id)
+            task_cfg = task.exec_cfg
+            open_order_ids = list(task.open_order_ids)
+            if task.status in TERMINAL_TASK_STATUSES:
+                return task.to_dict()
+
+        cancel_payload: dict[str, Any] | None = None
+        if cancel_open_orders and open_order_ids:
+            cancel_payload = await cancel_order_ids(
+                replace(cfg, slow_execution=task_cfg),
+                manager,
+                open_order_ids,
+            )
+            cancel_payload["task_id"] = task_id
+            write_trade_event(cfg.trade_log, cancel_payload)
+
+        async with self._lock:
+            task = self._get_task_unlocked(task_id)
+            now = time.time()
+            if cancel_payload is not None:
+                failed_ids = {
+                    str(row.get("order_id"))
+                    for row in cancel_payload.get("errors", [])
+                    if row.get("order_id")
+                }
+                task.open_order_ids = [
+                    order_id for order_id in task.open_order_ids if order_id in failed_ids
+                ]
+                task.canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+                task.last_execution = {
+                    "canceled_count": cancel_payload.get("canceled_count", 0),
+                    "cancel_requested_order_ids": open_order_ids,
+                    "remaining_open_order_ids": list(task.open_order_ids),
+                    "errors": cancel_payload.get("errors", []),
+                }
+            task.status = "stopped"
+            task.last_status = "stopped"
+            task.finished_at = now
+            task.updated_at = now
+            task.next_run_at = 0.0
+            self.store.save(self._tasks)
+            return task.to_dict()
+
+    async def clear_terminal_tasks(self) -> dict[str, Any]:
+        async with self._lock:
+            removed = [
+                task.id for task in self._tasks if task.status in TERMINAL_TASK_STATUSES
+            ]
+            self._tasks = [
+                task for task in self._tasks if task.status not in TERMINAL_TASK_STATUSES
+            ]
+            self.store.save(self._tasks)
+            snapshot = self._snapshot_unlocked()
+        return {
+            "removed_count": len(removed),
+            "removed_task_ids": removed,
+            "tasks": snapshot,
+        }
 
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
@@ -298,6 +418,18 @@ class AutoBuySellTaskService:
             if task.id == task_id:
                 return task
         raise ValueError(f"unknown Auto Buy/Sell task: {task_id}")
+
+    def _find_duplicate_unlocked(
+        self,
+        cfg: SlowExecutionConfig,
+    ) -> AutoBuySellTask | None:
+        signature = _task_duplicate_signature(cfg)
+        for task in self._tasks:
+            if task.status in TERMINAL_TASK_STATUSES:
+                continue
+            if _task_duplicate_signature(task.exec_cfg) == signature:
+                return task
+        return None
 
     def _snapshot_unlocked(self) -> dict[str, Any]:
         task_rows = [task.to_dict() for task in self._tasks]

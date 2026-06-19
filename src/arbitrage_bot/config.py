@@ -60,6 +60,7 @@ class OnchainMonitorConfig:
     label: str = "Token"
     top_n: int = 20
     poll_seconds: float = 60.0
+    history_path: str = "data/onchain_holder_changes.json"
     address_labels: dict[str, str] = field(default_factory=dict)
 
 
@@ -80,6 +81,10 @@ class MarketMakerConfig:
     post_only: bool = True
     cancel_existing_orders: bool = False
     client_order_prefix: str = "crypto-arb-mm"
+    inventory_control_enabled: bool = False
+    inventory_target_base: float = 0.0
+    inventory_band_base: float = 0.0
+    inventory_max_deviation_base: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,8 @@ class SlowExecutionConfig:
     side: str = "sell"
     total_base: float = 0.0
     total_quote: float = 0.0
+    unlimited_total: bool = False
+    slice_mode: str = "configured"
     slice_base: float = 0.0
     slice_base_min: float = 0.0
     slice_base_max: float = 0.0
@@ -99,6 +106,8 @@ class SlowExecutionConfig:
     order_ttl_seconds: float = 0.0
     start_price: float = 0.0
     stop_price: float = 0.0
+    price_mode: str = "taker"
+    price_offset_bps: float = 0.0
     min_order_quote: float = 0.0
     post_only: bool = False
     cancel_existing_orders: bool = False
@@ -336,6 +345,10 @@ def load_config(path: str | Path) -> BotConfig:
             label=onchain_raw.get("label", "Token"),
             top_n=int(onchain_raw.get("top_n", 20)),
             poll_seconds=float(onchain_raw.get("poll_seconds", 60.0)),
+            history_path=onchain_raw.get(
+                "history_path",
+                "data/onchain_holder_changes.json",
+            ),
             address_labels={
                 str(address): str(label)
                 for address, label in onchain_raw.get("address_labels", {}).items()
@@ -364,6 +377,18 @@ def load_config(path: str | Path) -> BotConfig:
                 "client_order_prefix",
                 "crypto-arb-mm",
             ),
+            inventory_control_enabled=bool(
+                market_maker_raw.get("inventory_control_enabled", False)
+            ),
+            inventory_target_base=float(
+                market_maker_raw.get("inventory_target_base", 0.0)
+            ),
+            inventory_band_base=float(
+                market_maker_raw.get("inventory_band_base", 0.0)
+            ),
+            inventory_max_deviation_base=float(
+                market_maker_raw.get("inventory_max_deviation_base", 0.0)
+            ),
         ),
         slow_execution=SlowExecutionConfig(
             enabled=bool(slow_execution_raw.get("enabled", False)),
@@ -372,6 +397,8 @@ def load_config(path: str | Path) -> BotConfig:
             side=slow_execution_raw.get("side", "sell").lower(),
             total_base=float(slow_execution_raw.get("total_base", 0.0)),
             total_quote=float(slow_execution_raw.get("total_quote", 0.0)),
+            unlimited_total=bool(slow_execution_raw.get("unlimited_total", False)),
+            slice_mode=slow_execution_raw.get("slice_mode", "configured").lower(),
             slice_base=float(slow_execution_raw.get("slice_base", 0.0)),
             slice_base_min=float(slow_execution_raw.get("slice_base_min", 0.0)),
             slice_base_max=float(slow_execution_raw.get("slice_base_max", 0.0)),
@@ -387,6 +414,8 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             start_price=float(slow_execution_raw.get("start_price", 0.0)),
             stop_price=float(slow_execution_raw.get("stop_price", 0.0)),
+            price_mode=slow_execution_raw.get("price_mode", "taker").lower(),
+            price_offset_bps=float(slow_execution_raw.get("price_offset_bps", 0.0)),
             min_order_quote=float(slow_execution_raw.get("min_order_quote", 0.0)),
             post_only=bool(slow_execution_raw.get("post_only", False)),
             cancel_existing_orders=bool(

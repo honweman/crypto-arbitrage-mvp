@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.config import (
@@ -20,24 +23,37 @@ from arbitrage_bot.config import (
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
-from arbitrage_bot.trade_log import normalize_trade_event
+from arbitrage_bot.trade_log import (
+    _read_recent_event_lines,
+    normalize_trade_event,
+    write_trade_event,
+)
 from arbitrage_bot.web import (
     HTML,
     MonitorState,
+    _market_maker_force_replace_reason,
+    _monitor_auto_stop_decision,
+    _monitor_reconciliation_warmup_active,
+    _market_maker_order_sync_delta,
     _market_maker_overrides_from_payload,
     _cash_and_carry_pairs_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
     _spot_markets_from_payload,
     _daily_report_due,
+    _global_scan_health_warnings,
     _ip_allowed,
     _make_session_token,
     _session_valid,
     build_daily_report_message,
+    default_web_audit_path,
     build_order_attribution_map,
+    build_order_reconciliation_payload,
     build_market_maker_payload,
+    build_market_maker_quality_payload,
     build_market_rows,
     build_operations_payload,
+    build_readiness_payload,
     build_slow_execution_payload,
     build_synced_portfolio_pnl,
     build_trading_console_payload,
@@ -46,7 +62,9 @@ from arbitrage_bot.web import (
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
     fetch_order_activity_payload,
+    read_recent_web_audit_events,
     slow_execution_accounts,
+    write_web_audit_event,
 )
 
 
@@ -94,6 +112,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("/api/auto-buy-sell", HTML)
         self.assertIn("/api/auto-buy-sell/tasks", HTML)
         self.assertIn('id="slow-create-task"', HTML)
+        self.assertIn('id="slow-clear-terminal"', HTML)
         self.assertIn('id="slow-tasks"', HTML)
         self.assertIn('id="slow-start-price"', HTML)
         self.assertNotIn("Slow Execution", HTML)
@@ -102,6 +121,28 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Crypto Trading Dashboard", HTML)
         self.assertIn("Multi-asset arbitrage", HTML)
         self.assertNotIn("ACS Arbitrage Monitor", HTML)
+
+    def test_page_has_status_settings_and_records_views(self) -> None:
+        self.assertIn('data-view-tab="status"', HTML)
+        self.assertIn('data-view-tab="settings"', HTML)
+        self.assertIn('data-view-tab="records"', HTML)
+        self.assertIn('href="#status"', HTML)
+        self.assertIn('href="#settings"', HTML)
+        self.assertIn('href="#records"', HTML)
+        self.assertIn('const PAGE_IDS = new Set(["status", "settings", "records"])', HTML)
+        self.assertIn('if (hashPage === "monitor") return "status";', HTML)
+        self.assertIn('if (hashPage === "control") return "settings";', HTML)
+        self.assertIn("/api/state?view=", HTML)
+        self.assertIn("pageStateCache", HTML)
+
+    def test_page_softens_initial_state_fetch_failure(self) -> None:
+        self.assertIn("let refreshHadSuccess = false", HTML)
+        self.assertIn("let refreshInFlight = false", HTML)
+        self.assertIn("STATE_FETCH_TIMEOUT_MS", HTML)
+        self.assertIn("AbortController", HTML)
+        self.assertIn('if (res.status === 401)', HTML)
+        self.assertIn('setHeaderStatus("degraded", "Retrying")', HTML)
+        self.assertNotIn('status.className = "pill error";', HTML)
 
     def test_page_includes_market_config_controls(self) -> None:
         self.assertIn("Markets", HTML)
@@ -121,11 +162,38 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
 
+    def test_page_position_summary_includes_asset_price(self) -> None:
+        self.assertIn('id="portfolio-position-detail"', HTML)
+        self.assertIn("function formatPositionPrice", HTML)
+        self.assertIn("formatPositionValue", HTML)
+        self.assertIn("price $", HTML)
+
+    def test_page_includes_readiness_panel(self) -> None:
+        self.assertIn("Readiness", HTML)
+        self.assertIn('id="readiness-status"', HTML)
+        self.assertIn('id="readiness-actions"', HTML)
+        self.assertIn('id="readiness-accounts"', HTML)
+        self.assertIn('id="readiness-strategies"', HTML)
+
+    def test_page_uses_collapsible_sections(self) -> None:
+        self.assertIn('class="compact-section', HTML)
+        self.assertIn("function setupCompactSections()", HTML)
+        self.assertIn("section-open", HTML)
+        self.assertIn('aria-expanded', HTML)
+
+    def test_page_includes_persisted_onchain_change_log(self) -> None:
+        self.assertIn("Holder Change Log", HTML)
+        self.assertIn("Since Online", HTML)
+        self.assertIn('id="holder-changes"', HTML)
+        self.assertIn('id="onchain-history-meta"', HTML)
+
     def test_page_includes_orders_and_fills(self) -> None:
         self.assertIn("Orders & Fills", HTML)
         self.assertIn("/api/orders/cancel", HTML)
         self.assertIn('id="open-orders"', HTML)
         self.assertIn('id="recent-fills"', HTML)
+        self.assertIn('id="order-reconciliation"', HTML)
+        self.assertIn("Reconciliation OK", HTML)
 
     def test_page_includes_live_trading_console(self) -> None:
         self.assertIn("Live Trading Console", HTML)
@@ -140,6 +208,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="mm-form"', HTML)
         self.assertIn('id="mm-live-enabled"', HTML)
         self.assertIn('id="mm-accounts"', HTML)
+        self.assertIn('id="mm-safety-status"', HTML)
+        self.assertIn('id="mm-safety-budget"', HTML)
+        self.assertIn('id="mm-inventory-enabled"', HTML)
+        self.assertIn('id="mm-inventory-target"', HTML)
+        self.assertIn('id="mm-quality-inventory"', HTML)
+        self.assertIn('id="mm-quality-fills"', HTML)
+        self.assertIn('id="mm-quality-spread"', HTML)
 
     def test_page_includes_risk_controls(self) -> None:
         self.assertIn("Risk Controls", HTML)
@@ -148,7 +223,16 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="risk-accounts"', HTML)
         self.assertIn('id="risk-strategies"', HTML)
         self.assertIn('id="risk-max-order"', HTML)
+        self.assertIn('id="risk-max-cycle"', HTML)
+        self.assertIn('id="risk-max-orders-cycle"', HTML)
         self.assertIn('id="risk-max-exposure"', HTML)
+        self.assertIn('id="risk-min-book-depth"', HTML)
+        self.assertIn('id="risk-max-slippage"', HTML)
+
+    def test_page_includes_audit_trail(self) -> None:
+        self.assertIn("Audit Trail", HTML)
+        self.assertIn('id="audit-events"', HTML)
+        self.assertIn('id="audit-meta"', HTML)
 
     def test_spot_markets_payload_sanitizes_new_market(self) -> None:
         markets = _spot_markets_from_payload(
@@ -339,6 +423,177 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(strategies["slow_execution"]["exchange"], "coinbase-spot")
         self.assertEqual(strategies["slow_execution"]["symbol"], "ACS/USDC")
 
+    def test_readiness_payload_reports_account_blockers(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                live_enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                ),
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                ),
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    api_key_env="BYBIT_API_KEY",
+                    secret_env="BYBIT_SECRET",
+                ),
+            ],
+            risk=RiskConfig(
+                allow_live_trading=True,
+                allow_market_maker=True,
+                account_enabled={"bybit-spot": False},
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"BYBIT_API_KEY": "key", "BYBIT_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = build_readiness_payload(
+                cfg,
+                account_balances={
+                    "status": "ok",
+                    "accounts": [
+                        {
+                            "exchange": "coinbase-spot",
+                            "status": "warning",
+                            "warnings": [
+                                "one or more configured API env vars are not set"
+                            ],
+                            "balance": {
+                                "skipped_reason": "api env vars missing",
+                            },
+                        },
+                        {"exchange": "bybit-spot", "status": "ok"},
+                    ],
+                },
+                order_activity={
+                    "status": "ok",
+                    "accounts": [
+                        {"exchange": "coinbase-spot", "status": "warning"},
+                        {"exchange": "bybit-spot", "status": "ok"},
+                    ],
+                    "reconciliation": {"status": "ok", "issue_count": 0},
+                },
+                trading_console=build_trading_console_payload(cfg),
+            )
+
+        accounts = {row["key"]: row for row in payload["accounts"]}
+        strategies = {row["id"]: row for row in payload["strategies"]}
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(accounts["coinbase-spot"]["status"], "blocked")
+        self.assertIn(
+            "one or more API env vars are not set",
+            accounts["coinbase-spot"]["reasons"],
+        )
+        self.assertEqual(
+            [
+                reason
+                for reason in accounts["coinbase-spot"]["reasons"]
+                if "api env" in reason.lower()
+            ],
+            ["one or more API env vars are not set"],
+        )
+        self.assertEqual(accounts["bybit-spot"]["status"], "blocked")
+        self.assertIn("account disabled by risk", accounts["bybit-spot"]["reasons"])
+        self.assertEqual(strategies["market_maker"]["status"], "blocked")
+        self.assertIn(
+            "account disabled by risk",
+            strategies["market_maker"]["reasons"],
+        )
+        actions = {row["action"] for row in payload["next_actions"]}
+        self.assertIn("Configure API environment variables", actions)
+        self.assertIn("Enable account in Risk Controls", actions)
+        self.assertEqual(payload["summary"]["action_count"], len(payload["next_actions"]))
+
+    def test_readiness_payload_reports_checking_before_health_cache_is_ready(self) -> None:
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                )
+            ],
+            risk=RiskConfig(allow_live_trading=True),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"COINBASE_API_KEY": "key", "COINBASE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = build_readiness_payload(
+                cfg,
+                account_balances={"status": "starting", "accounts": []},
+                order_activity={
+                    "status": "starting",
+                    "accounts": [],
+                    "reconciliation": {"status": "starting", "issue_count": 0},
+                },
+                trading_console=build_trading_console_payload(cfg),
+            )
+
+        self.assertEqual(payload["status"], "checking")
+        self.assertEqual(payload["accounts"][0]["status"], "checking")
+        self.assertEqual(payload["summary"]["checking_accounts"], 1)
+
+    def test_readiness_payload_ignores_reconciliation_notices(self) -> None:
+        cfg = make_config(risk=RiskConfig(allow_live_trading=True))
+
+        payload = build_readiness_payload(
+            cfg,
+            account_balances={"status": "ok", "accounts": []},
+            order_activity={
+                "status": "ok",
+                "accounts": [],
+                "reconciliation": {
+                    "status": "ok",
+                    "issue_count": 0,
+                    "notice_count": 20,
+                },
+            },
+            trading_console=build_trading_console_payload(cfg),
+        )
+
+        actions = {row["action"] for row in payload["next_actions"]}
+        self.assertNotIn("Review order/fill attribution", actions)
+        self.assertEqual(
+            payload["order_checks"]["reconciliation_notice_count"],
+            20,
+        )
+
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
             SpotMarketConfig(
@@ -388,6 +643,94 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["status"], "planned")
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(len(payload["plan"]["orders"]), 20)
+        self.assertEqual(payload["safety"]["order_count"], 20)
+        self.assertAlmostEqual(payload["safety"]["total_quote_notional"], 20.0)
+        self.assertEqual(payload["safety"]["limits"]["max_cycle_quote"], 25.0)
+        self.assertIn("risk.allow_live_trading is false", payload["safety"]["reasons"])
+
+    def test_build_market_maker_quality_payload_summarizes_recent_fills(self) -> None:
+        payload = build_market_maker_quality_payload(
+            {
+                "recent_trades": [
+                    {
+                        "source": "market_maker",
+                        "side": "buy",
+                        "amount": 100.0,
+                        "notional_common": 9.0,
+                        "fee_common": 0.01,
+                        "realized_pnl_common": -0.01,
+                    },
+                    {
+                        "source": "market_maker",
+                        "side": "sell",
+                        "amount": 100.0,
+                        "notional_common": 11.0,
+                        "fee_common": 0.01,
+                        "realized_pnl_common": 1.99,
+                    },
+                    {
+                        "source": "slow_execution",
+                        "side": "sell",
+                        "amount": 100.0,
+                        "notional_common": 12.0,
+                    },
+                ]
+            },
+            {
+                "plan": {
+                    "symbol": "ACS/USDC",
+                    "mid_price": 0.1,
+                    "inventory_base": 1_200.0,
+                    "inventory_target_base": 1_000.0,
+                    "inventory_deviation_base": 200.0,
+                    "inventory_buy_multiplier": 0.5,
+                    "inventory_sell_multiplier": 1.5,
+                    "inventory_control_active": True,
+                }
+            },
+        )
+
+        self.assertEqual(payload["trade_count"], 2)
+        self.assertEqual(payload["buy"]["trade_count"], 1)
+        self.assertEqual(payload["sell"]["trade_count"], 1)
+        self.assertAlmostEqual(payload["buy"]["average_price"], 0.09)
+        self.assertAlmostEqual(payload["sell"]["average_price"], 0.11)
+        self.assertAlmostEqual(payload["realized_spread_bps"], 2000.0)
+        self.assertAlmostEqual(payload["total_fees"], 0.02)
+        self.assertAlmostEqual(payload["realized_pnl"], 1.98)
+        self.assertAlmostEqual(payload["inventory"]["base"], 1_200.0)
+        self.assertTrue(payload["inventory"]["active"])
+
+    def test_build_market_maker_quality_payload_falls_back_to_daily_pnl(self) -> None:
+        payload = build_market_maker_quality_payload(
+            {
+                "recent_trades": [],
+                "daily_pnl": {
+                    "enabled": True,
+                    "day": "2026-06-19",
+                    "currency": "USD",
+                    "updated_at": 1234.0,
+                    "sources": {
+                        "market_maker": {
+                            "trade_count": 5,
+                            "notional_common": 1200.0,
+                            "fees_common": 1.5,
+                            "realized_pnl": 8.25,
+                        }
+                    },
+                },
+            },
+            {"plan": {"symbol": "ACS/USDC", "mid_price": 0.1}},
+        )
+
+        self.assertEqual(payload["window"], "daily_pnl")
+        self.assertEqual(payload["recent_trade_count"], 0)
+        self.assertEqual(payload["trade_count"], 5)
+        self.assertAlmostEqual(payload["total_notional"], 1200.0)
+        self.assertAlmostEqual(payload["total_fees"], 1.5)
+        self.assertAlmostEqual(payload["realized_pnl"], 8.25)
+        self.assertEqual(payload["daily"]["day"], "2026-06-19")
+        self.assertEqual(payload["daily"]["currency"], "USD")
 
     def test_build_slow_execution_payload_returns_best_bid_sell_order(self) -> None:
         cfg = make_config(
@@ -523,6 +866,10 @@ class WebMonitorTest(unittest.TestCase):
                 "order_ttl_seconds": "2",
                 "start_price": "0.02",
                 "stop_price": "0.01",
+                "price_mode": "maker",
+                "price_offset_bps": "1",
+                "unlimited_total": True,
+                "slice_mode": "top_level",
             },
             allowed_exchanges={"bybit-spot"},
             symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
@@ -535,6 +882,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["total_quote"], 5.0)
         self.assertEqual(overrides["start_price"], 0.02)
         self.assertEqual(overrides["stop_price"], 0.01)
+        self.assertEqual(overrides["price_mode"], "maker")
+        self.assertEqual(overrides["price_offset_bps"], 1.0)
+        self.assertTrue(overrides["unlimited_total"])
+        self.assertEqual(overrides["slice_mode"], "top_level")
         self.assertEqual(overrides["slice_base"], 0.0)
         self.assertEqual(overrides["slice_quote"], 0.0)
         self.assertEqual(overrides["slice_base_min"], 10.0)
@@ -580,6 +931,10 @@ class WebMonitorTest(unittest.TestCase):
                 "min_distance_bps": "20",
                 "reprice_threshold_bps": "2.5",
                 "poll_seconds": "1",
+                "inventory_control_enabled": True,
+                "inventory_target_base": "100000",
+                "inventory_band_base": "5000",
+                "inventory_max_deviation_base": "20000",
                 "post_only": True,
             },
             allowed_exchanges={"bybit-spot"},
@@ -598,6 +953,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["min_distance_bps"], 20.0)
         self.assertEqual(overrides["reprice_threshold_bps"], 2.5)
         self.assertEqual(overrides["poll_seconds"], 1.0)
+        self.assertTrue(overrides["inventory_control_enabled"])
+        self.assertEqual(overrides["inventory_target_base"], 100000.0)
+        self.assertEqual(overrides["inventory_band_base"], 5000.0)
+        self.assertEqual(overrides["inventory_max_deviation_base"], 20000.0)
         self.assertTrue(overrides["post_only"])
 
     def test_market_maker_update_payload_rejects_wrong_symbol(self) -> None:
@@ -623,12 +982,18 @@ class WebMonitorTest(unittest.TestCase):
                 "account_enabled": {"coinbase-spot": True, "bybit-spot": False},
                 "strategy_enabled": {"market_maker": True, "slow_execution": False},
                 "max_order_quote": "5.5",
+                "max_cycle_quote": "25",
                 "max_exposure_quote": "250",
                 "max_daily_loss_quote": "10",
+                "max_orders_per_cycle": "8",
                 "max_open_orders": "12",
                 "max_cancels_per_cycle": "4",
                 "min_seconds_between_cancels": "1.5",
+                "min_order_book_depth_quote": "100",
+                "max_slippage_bps": "12.5",
                 "max_order_book_age_seconds": "60",
+                "max_order_book_gap_bps": "250",
+                "max_price_jump_bps": "80",
             },
             allowed_accounts={"coinbase-spot", "bybit-spot"},
             allowed_strategies={"market_maker", "slow_execution"},
@@ -638,12 +1003,18 @@ class WebMonitorTest(unittest.TestCase):
         self.assertFalse(overrides["account_enabled"]["bybit-spot"])
         self.assertFalse(overrides["strategy_enabled"]["slow_execution"])
         self.assertEqual(overrides["max_order_quote"], 5.5)
+        self.assertEqual(overrides["max_cycle_quote"], 25.0)
         self.assertEqual(overrides["max_exposure_quote"], 250.0)
         self.assertEqual(overrides["max_daily_loss_quote"], 10.0)
+        self.assertEqual(overrides["max_orders_per_cycle"], 8)
         self.assertEqual(overrides["max_open_orders"], 12)
         self.assertEqual(overrides["max_cancels_per_cycle"], 4)
         self.assertEqual(overrides["min_seconds_between_cancels"], 1.5)
+        self.assertEqual(overrides["min_order_book_depth_quote"], 100.0)
+        self.assertEqual(overrides["max_slippage_bps"], 12.5)
         self.assertEqual(overrides["max_order_book_age_seconds"], 60.0)
+        self.assertEqual(overrides["max_order_book_gap_bps"], 250.0)
+        self.assertEqual(overrides["max_price_jump_bps"], 80.0)
 
     def test_risk_update_payload_rejects_unknown_account(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown exchange account"):
@@ -726,15 +1097,140 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Auto Buy/Sell tasks: 1 active / 1 total", message)
 
     def test_operations_payload_includes_risk_and_recent_events(self) -> None:
-        payload = build_operations_payload(make_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = build_operations_payload(
+                make_config(
+                    trade_log=TradeLogConfig(
+                        enabled=False,
+                        path=os.path.join(tmp, "trade_events.jsonl"),
+                    )
+                )
+            )
 
         self.assertIn("risk", payload)
         self.assertIn("trade_log", payload)
+        self.assertIn("web_audit", payload)
         self.assertIn("alerts", payload)
         self.assertFalse(payload["risk"]["allow_live_trading"])
         self.assertEqual(payload["trade_log"]["recent_events"], [])
         self.assertEqual(payload["trade_log"]["recent_entries"], [])
         self.assertEqual(payload["trade_log"]["summary"]["event_count"], 0)
+        self.assertEqual(payload["web_audit"]["recent_events"], [])
+
+    def test_operations_payload_compacts_trade_log_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                trade_log=TradeLogConfig(
+                    enabled=True,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                    max_recent_events=10,
+                )
+            )
+            write_trade_event(
+                cfg.trade_log,
+                {
+                    "type": "market_maker",
+                    "strategy": "market_maker",
+                    "mode": "live",
+                    "status": "placed",
+                    "plan": {
+                        "exchange": "coinbase",
+                        "symbol": "ACS/USDC",
+                        "orders": [
+                            {
+                                "side": "buy",
+                                "price": 0.00012,
+                                "amount": 1000,
+                                "debug_blob": "x" * 200_000,
+                            }
+                        ],
+                    },
+                    "risk": {
+                        "level": "ok",
+                        "approved": True,
+                        "order_count": 1,
+                        "total_quote_notional": 1.0,
+                    },
+                    "execution": {
+                        "placed_count": 1,
+                        "canceled_count": 0,
+                        "placed_order_ids": ["order-mm-1"],
+                        "raw_response": {"debug_blob": "y" * 200_000},
+                    },
+                    "market_data": {"debug_blob": "z" * 200_000},
+                },
+            )
+
+            operations = build_operations_payload(cfg)
+
+        row = operations["trade_log"]["recent_entries"][0]
+        self.assertEqual(row["strategy"], "market_maker")
+        self.assertEqual(row["exchange"], "coinbase")
+        self.assertEqual(row["symbol"], "ACS/USDC")
+        self.assertEqual(row["side"], "buy")
+        self.assertNotIn("raw", row)
+        self.assertNotIn("placed_order_ids", row)
+        self.assertEqual(operations["trade_log"]["recent_events"], [row])
+        self.assertLess(len(json.dumps(operations["trade_log"])), 5000)
+
+    def test_trade_log_tail_reader_returns_recent_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "trade_events.jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                for index in range(20):
+                    handle.write(
+                        json.dumps(
+                            {
+                                "type": "market_maker",
+                                "status": f"event-{index}",
+                                "payload": "x" * 5000,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    handle.write("\n")
+
+            lines = _read_recent_event_lines(Path(path), 3)
+
+        statuses = [json.loads(line)["status"] for line in lines]
+        self.assertEqual(statuses, ["event-17", "event-18", "event-19"])
+
+    def test_web_audit_events_round_trip_and_redact_sensitive_values(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/risk"
+            method = "POST"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                trade_log=TradeLogConfig(
+                    enabled=True,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                )
+            )
+            event = write_web_audit_event(
+                cfg,
+                FakeRequest(),  # type: ignore[arg-type]
+                action="risk_config",
+                target="risk",
+                detail="updated risk controls",
+                payload={
+                    "allow_live_trading": True,
+                    "api_key": "secret-value",
+                },
+            )
+            events = read_recent_web_audit_events(cfg)
+            operations = build_operations_payload(cfg)
+
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(events[0]["action"], "risk_config")
+        self.assertEqual(events[0]["payload"]["api_key"], "[redacted]")
+        self.assertTrue(default_web_audit_path(cfg).endswith("web_audit_events.jsonl"))
+        self.assertEqual(
+            operations["web_audit"]["recent_events"][0]["event_id"],
+            events[0]["event_id"],
+        )
 
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(
@@ -1066,6 +1562,319 @@ class WebMonitorTest(unittest.TestCase):
         self.assertAlmostEqual(payload["total_pnl"], 3.74)
         self.assertEqual(payload["fill_pnl_window"], "recent_fills")
 
+    def test_order_reconciliation_detects_mismatches(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "status": "ok",
+                "open_orders": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbol": "ACS/USDC",
+                        "id": "manual-open-1",
+                    }
+                ],
+                "closed_orders": [],
+                "recent_trades": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbol": "ACS/USDC",
+                        "order_id": "auto-local-1",
+                        "source": "auto_buy_sell",
+                    },
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbol": "ACS/USDC",
+                        "order_id": "manual-fill-1",
+                        "source": "unattributed",
+                    },
+                ],
+            },
+            market_maker_runtime={
+                "open_order_exchange": "coinbase-spot",
+                "open_order_symbol": "ACS/USDC",
+                "open_order_ids": ["mm-local-1"],
+            },
+            auto_buy_sell_tasks={
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "config": {
+                            "exchange": "coinbase-spot",
+                            "symbol": "ACS/USDC",
+                        },
+                        "open_order_ids": ["auto-local-1"],
+                        "placed_order_ids": ["auto-local-1"],
+                    }
+                ]
+            },
+        )
+
+        issue_types = {issue["type"] for issue in payload["issues"]}
+        self.assertEqual(payload["status"], "warning")
+        self.assertEqual(payload["tracked_order_count"], 2)
+        self.assertEqual(payload["matched_fill_count"], 1)
+        self.assertEqual(payload["untracked_open_count"], 1)
+        self.assertEqual(payload["unattributed_fill_count"], 1)
+        self.assertEqual(payload["issue_count"], 2)
+        self.assertEqual(payload["notice_count"], 2)
+        self.assertEqual(payload["total_item_count"], 4)
+        self.assertEqual(payload["critical_issue_count"], 0)
+        self.assertFalse(payload["auto_stop_recommended"])
+        self.assertEqual(payload["level_counts"]["warning"], 2)
+        self.assertEqual(payload["level_counts"]["info"], 2)
+        self.assertIn("tracked_order_missing", issue_types)
+        self.assertIn("tracked_order_filled_not_cleared", issue_types)
+        self.assertIn("untracked_open_order", issue_types)
+        self.assertIn("unattributed_fill", issue_types)
+
+    def test_order_reconciliation_auto_stop_for_activity_errors_only(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "status": "error",
+                "open_orders": [],
+                "closed_orders": [],
+                "recent_trades": [],
+            }
+        )
+
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["issue_count"], 1)
+        self.assertEqual(payload["notice_count"], 0)
+        self.assertEqual(payload["total_item_count"], 1)
+        self.assertEqual(payload["critical_issue_count"], 1)
+        self.assertTrue(payload["auto_stop_recommended"])
+        self.assertIn("order_activity_error", payload["auto_stop_reasons"][0])
+
+    def test_order_reconciliation_does_not_auto_stop_for_info_only_items(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "status": "ok",
+                "open_orders": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbol": "ACS/USDC",
+                        "id": "manual-open-1",
+                    }
+                ],
+                "closed_orders": [],
+                "recent_trades": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbol": "ACS/USDC",
+                        "order_id": "manual-fill-1",
+                        "source": "unattributed",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["issue_count"], 0)
+        self.assertEqual(payload["notice_count"], 2)
+        self.assertEqual(payload["total_item_count"], 2)
+        self.assertEqual(payload["critical_issue_count"], 0)
+        self.assertFalse(payload["auto_stop_recommended"])
+        self.assertEqual(payload["level_counts"]["info"], 2)
+
+    def test_order_reconciliation_does_not_auto_stop_for_unmanaged_attributed_orders(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "status": "ok",
+                "open_orders": [
+                    {
+                        "exchange": "upbit-spot",
+                        "symbol": "ACS/USDT",
+                        "id": "mm-existing-1",
+                        "attribution": {
+                            "strategy": "market_maker",
+                            "event_id": "previous-run",
+                        },
+                    }
+                ],
+                "closed_orders": [],
+                "recent_trades": [],
+            }
+        )
+
+        issue_types = {issue["type"] for issue in payload["issues"]}
+        self.assertEqual(payload["status"], "warning")
+        self.assertIn("unmanaged_strategy_order", issue_types)
+        self.assertEqual(payload["issue_count"], 1)
+        self.assertEqual(payload["notice_count"], 0)
+        self.assertEqual(payload["critical_issue_count"], 0)
+        self.assertFalse(payload["auto_stop_recommended"])
+
+    def test_market_maker_sync_delta_detects_missing_tracked_orders(self) -> None:
+        delta = _market_maker_order_sync_delta(
+            ["mm-1", "mm-2", "mm-3"],
+            {
+                "source": "exchange",
+                "order_ids": ["mm-1", "mm-3", "manual-1"],
+                "error": None,
+            },
+        )
+
+        self.assertTrue(delta["exchange_confirmed"])
+        self.assertTrue(delta["changed"])
+        self.assertEqual(delta["missing_tracked_order_ids"], ["mm-2"])
+        self.assertEqual(delta["new_exchange_order_ids"], ["manual-1"])
+
+    def test_market_maker_force_replace_on_sync_id_mismatch(self) -> None:
+        previous_plan = {
+            "orders": [
+                {"side": "buy", "level": 1},
+                {"side": "sell", "level": 1},
+            ]
+        }
+        delta = _market_maker_order_sync_delta(
+            ["mm-1", "mm-2"],
+            {
+                "source": "exchange",
+                "order_ids": ["mm-1", "manual-1"],
+                "error": None,
+            },
+        )
+
+        reason = _market_maker_force_replace_reason(
+            ["mm-1", "manual-1"],
+            previous_plan,
+            order_sync=delta,
+        )
+
+        self.assertEqual(
+            reason,
+            "exchange open orders differ from tracked MM ids; assuming fill/cancel drift",
+        )
+
+    def test_market_maker_force_replace_on_open_order_count_mismatch(self) -> None:
+        previous_plan = {
+            "orders": [
+                {"side": "buy", "level": 1},
+                {"side": "sell", "level": 1},
+            ]
+        }
+
+        reason = _market_maker_force_replace_reason(
+            ["mm-1"],
+            previous_plan,
+            order_sync={
+                "source": "exchange",
+                "exchange_confirmed": True,
+                "changed": False,
+            },
+        )
+
+        self.assertEqual(
+            reason,
+            "open order count differs from previous MM plan; assuming fill/cancel drift",
+        )
+
+    def test_auto_stop_decision_stops_immediately_for_daily_loss(self) -> None:
+        triggered, reason = _monitor_auto_stop_decision(
+            auto_stop_enabled=True,
+            auto_stop_consecutive_errors=3,
+            daily_loss_stop=True,
+            reconciliation_stop=False,
+            consecutive_problem_cycles=1,
+        )
+
+        self.assertTrue(triggered)
+        self.assertEqual(reason, "daily loss limit breached")
+
+    def test_auto_stop_decision_debounces_reconciliation_issues(self) -> None:
+        triggered, reason = _monitor_auto_stop_decision(
+            auto_stop_enabled=True,
+            auto_stop_consecutive_errors=3,
+            daily_loss_stop=False,
+            reconciliation_stop=True,
+            consecutive_problem_cycles=1,
+        )
+
+        self.assertFalse(triggered)
+        self.assertIsNone(reason)
+
+    def test_auto_stop_decision_ignores_generic_degraded_warnings(self) -> None:
+        triggered, reason = _monitor_auto_stop_decision(
+            auto_stop_enabled=True,
+            auto_stop_consecutive_errors=3,
+            daily_loss_stop=False,
+            reconciliation_stop=False,
+            consecutive_problem_cycles=99,
+        )
+
+        self.assertFalse(triggered)
+        self.assertIsNone(reason)
+
+    def test_global_scan_health_warnings_ignore_onchain_errors(self) -> None:
+        warnings = _global_scan_health_warnings(
+            onchain_payload={
+                "status": "error",
+                "error": "Rate limit exceeded",
+            },
+            account_balances_payload={"status": "ok", "errors": []},
+            order_activity_payload={"status": "ok", "errors": []},
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            _global_scan_health_warnings(
+                account_balances_payload={
+                    "status": "error",
+                    "errors": ["balance failed"],
+                },
+                order_activity_payload={
+                    "status": "error",
+                    "errors": ["orders failed"],
+                },
+            ),
+            ["Account balances: balance failed", "Orders: orders failed"],
+        )
+
+    def test_auto_stop_decision_stops_on_repeated_reconciliation_issues(self) -> None:
+        triggered, reason = _monitor_auto_stop_decision(
+            auto_stop_enabled=True,
+            auto_stop_consecutive_errors=3,
+            daily_loss_stop=False,
+            reconciliation_stop=True,
+            consecutive_problem_cycles=3,
+        )
+
+        self.assertTrue(triggered)
+        self.assertEqual(
+            reason,
+            "critical reconciliation issue after 3 problem cycle(s)",
+        )
+
+    def test_reconciliation_warmup_active_after_process_start_or_resume(self) -> None:
+        self.assertTrue(
+            _monitor_reconciliation_warmup_active(
+                process_uptime_seconds=2.0,
+                program_age_seconds=120.0,
+                warmup_seconds=15.0,
+            )
+        )
+        self.assertTrue(
+            _monitor_reconciliation_warmup_active(
+                process_uptime_seconds=120.0,
+                program_age_seconds=2.0,
+                warmup_seconds=15.0,
+            )
+        )
+        self.assertFalse(
+            _monitor_reconciliation_warmup_active(
+                process_uptime_seconds=20.0,
+                program_age_seconds=20.0,
+                warmup_seconds=15.0,
+            )
+        )
+        self.assertFalse(
+            _monitor_reconciliation_warmup_active(
+                process_uptime_seconds=0.0,
+                program_age_seconds=0.0,
+                warmup_seconds=0.0,
+            )
+        )
+
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_order_activity_payload_summarizes_orders_and_fills(self) -> None:
@@ -1172,6 +1981,41 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["open_orders"][0]["id"], "order-open-1")
         self.assertEqual(payload["recent_trades"][0]["order_id"], "order-closed-1")
         self.assertEqual(payload["recent_trades"][0]["fee"]["currency"], "USDC")
+
+    async def test_fetch_order_activity_payload_treats_unused_accounts_as_idle(self) -> None:
+        class FakeOrderManager:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def fetch_open_orders(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+            ) -> list[dict[str, object]]:
+                self.calls += 1
+                return []
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    market_type="spot",
+                    api_key_env="BYBIT_API_KEY",
+                    secret_env="BYBIT_SECRET",
+                )
+            ],
+        )
+        manager = FakeOrderManager()
+
+        with patch.dict(os.environ, {}, clear=True):
+            payload = await fetch_order_activity_payload(cfg, manager)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["accounts"][0]["status"], "idle")
+        self.assertEqual(payload["checked_account_count"], 0)
+        self.assertEqual(manager.calls, 0)
 
     async def test_cancel_order_payload_validates_and_cancels_configured_symbol(self) -> None:
         class FakeCancelManager:
@@ -1434,7 +2278,85 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(totals["USDT"]["free"], 20.0)
         self.assertEqual(payload["accounts"][0]["status"], "ok")
 
-    async def test_fetch_account_balances_skips_missing_api_env(self) -> None:
+    async def test_fetch_account_balances_adjusts_for_open_order_reserves(self) -> None:
+        class FakeBalanceManager:
+            async def fetch_balance(self, _: ExchangeConfig) -> dict[str, object]:
+                return {
+                    "free": {"ACS": 10_000.0, "USDC": 5_000.0},
+                    "used": {"ACS": 0.0, "USDC": 0.0},
+                    "total": {"ACS": 10_000.0, "USDC": 5_000.0},
+                }
+
+            async def fetch_open_orders(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "id": "buy-1",
+                        "symbol": symbol,
+                        "side": "buy",
+                        "price": 0.00014,
+                        "amount": 10_000_000.0,
+                        "remaining": 10_000_000.0,
+                    },
+                    {
+                        "id": "sell-1",
+                        "symbol": symbol,
+                        "side": "sell",
+                        "price": 0.00015,
+                        "amount": 1_000.0,
+                        "remaining": 900.0,
+                    },
+                ]
+
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    market_type="spot",
+                    api_key_env="COINBASE_API_KEY",
+                    secret_env="COINBASE_SECRET",
+                )
+            ],
+        )
+
+        with patch.dict(
+            os.environ,
+            {"COINBASE_API_KEY": "key", "COINBASE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await fetch_account_balances_payload(cfg, FakeBalanceManager())
+
+        balances = {
+            row["currency"]: row
+            for row in payload["accounts"][0]["balance"]["currencies"]
+        }
+        self.assertAlmostEqual(balances["USDC"]["open_order_reserved"], 1400.0)
+        self.assertAlmostEqual(balances["USDC"]["used"], 1400.0)
+        self.assertAlmostEqual(balances["USDC"]["free"], 5000.0)
+        self.assertAlmostEqual(balances["USDC"]["total"], 6400.0)
+        self.assertEqual(
+            balances["USDC"]["open_order_reserve_adjustment"],
+            "added_to_total",
+        )
+        self.assertAlmostEqual(balances["ACS"]["open_order_reserved"], 900.0)
+        self.assertAlmostEqual(balances["ACS"]["used"], 900.0)
+        self.assertAlmostEqual(balances["ACS"]["free"], 10000.0)
+        self.assertAlmostEqual(balances["ACS"]["total"], 10900.0)
+
+    async def test_fetch_account_balances_treats_unused_accounts_as_idle(self) -> None:
         class FakeBalanceManager:
             def __init__(self) -> None:
                 self.calls = 0
@@ -1444,6 +2366,48 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 return {}
 
         cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    market_type="spot",
+                    api_key_env="BYBIT_API_KEY",
+                    secret_env="BYBIT_SECRET",
+                )
+            ],
+        )
+        manager = FakeBalanceManager()
+
+        with patch.dict(os.environ, {}, clear=True):
+            payload = await fetch_account_balances_payload(cfg, manager)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["checked_account_count"], 0)
+        self.assertEqual(manager.calls, 0)
+        self.assertEqual(payload["accounts"][0]["status"], "idle")
+        self.assertEqual(
+            payload["accounts"][0]["balance"]["skipped_reason"],
+            "no configured symbols",
+        )
+
+    async def test_fetch_account_balances_warns_when_used_account_missing_api_env(self) -> None:
+        class FakeBalanceManager:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def fetch_balance(self, _: ExchangeConfig) -> dict[str, object]:
+                self.calls += 1
+                return {}
+
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                )
+            ],
             spot_exchanges=[
                 ExchangeConfig(
                     id="bybit",
@@ -1479,6 +2443,134 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await state.is_running())
         self.assertEqual(resumed["status"], "starting")
         self.assertTrue(resumed["program"]["running"])
+
+    async def test_auto_stop_state_survives_paused_poll_until_resume(self) -> None:
+        state = MonitorState(make_config(), 1.0)
+
+        stopped = await state.set_auto_stopped(
+            reason="daily loss limit breached",
+            warnings=["Daily loss exceeded"],
+        )
+        await state.set_paused()
+        still_stopped = await state.get()
+        resumed = await state.set_running(True)
+
+        self.assertFalse(stopped["program"]["running"])
+        self.assertTrue(stopped["program"]["auto_stopped"])
+        self.assertEqual(stopped["status"], "auto_stopped")
+        self.assertEqual(still_stopped["status"], "auto_stopped")
+        self.assertEqual(
+            still_stopped["program"]["stop_reason"],
+            "daily loss limit breached",
+        )
+        self.assertTrue(resumed["program"]["running"])
+        self.assertFalse(resumed["program"]["auto_stopped"])
+        self.assertIsNone(resumed["program"]["stop_reason"])
+
+    async def test_state_view_payloads_trim_hidden_page_data(self) -> None:
+        state = MonitorState(make_config(), 1.0)
+
+        full = await state.get()
+        status = await state.get(view="status")
+        settings = await state.get(view="settings")
+        records = await state.get(view="records")
+
+        self.assertIn("account_balances", full)
+        self.assertIn("trading_console", full)
+        self.assertIn("recent_opportunities", full)
+
+        self.assertIn("account_balances", status)
+        self.assertIn("readiness", status)
+        self.assertNotIn("trading_console", status)
+        self.assertNotIn("recent_opportunities", status)
+
+        self.assertIn("trading_console", settings)
+        self.assertIn("config", settings["market_maker"])
+        self.assertIn("spot_markets", settings["config"])
+        self.assertNotIn("account_balances", settings)
+        self.assertNotIn("readiness", settings)
+        self.assertIn("risk", settings["operations"])
+        self.assertNotIn("trade_log", settings["operations"])
+
+        self.assertIn("trading_console", records)
+        self.assertIn("order_activity", records)
+        self.assertIn("trade_log", records["operations"])
+        self.assertNotIn("account_balances", records)
+        self.assertNotIn("readiness", records)
+
+    async def test_state_view_payloads_compact_auto_buy_sell_task_history(self) -> None:
+        state = MonitorState(make_config(), 1.0)
+        await state.set_auto_buy_sell_tasks(
+            {
+                "status": "ok",
+                "path": "/tmp/tasks.json",
+                "task_count": 1,
+                "active_count": 1,
+                "updated_at": 123.0,
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "status": "running",
+                        "config": {
+                            "exchange": "coinbase-spot",
+                            "symbol": "ACS/USDC",
+                            "side": "buy",
+                            "total_quote": 10.0,
+                            "price_mode": "taker",
+                        },
+                        "filled_quote": 1.5,
+                        "remaining_quote": 8.5,
+                        "progress_pct": 15.0,
+                        "open_order_count": 1,
+                        "placed_order_ids": [f"order-{i}" for i in range(100)],
+                        "known_trade_ids": [f"trade-{i}" for i in range(100)],
+                        "order_created_at": {f"order-{i}": 123.0 for i in range(100)},
+                    }
+                ],
+            }
+        )
+
+        full_task = (await state.get())["slow_execution"]["tasks"]["tasks"][0]
+        view_task = (await state.get(view="settings"))["slow_execution"]["tasks"][
+            "tasks"
+        ][0]
+
+        self.assertIn("placed_order_ids", full_task)
+        self.assertIn("known_trade_ids", full_task)
+        self.assertNotIn("placed_order_ids", view_task)
+        self.assertNotIn("known_trade_ids", view_task)
+        self.assertNotIn("order_created_at", view_task)
+        self.assertEqual(view_task["config"]["exchange"], "coinbase-spot")
+        self.assertNotIn("price_mode", view_task["config"])
+
+    async def test_program_state_persists_in_runtime_store(self) -> None:
+        cfg = make_config()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = os.path.join(tmp, "web_runtime_overrides.json")
+            paused_state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            await paused_state.set_running(False)
+            restored_paused = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            paused_payload = await restored_paused.get()
+
+            stopped_state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            await stopped_state.set_auto_stopped(
+                reason="repeated degraded cycles: 3",
+                warnings=["Auto-stop triggered"],
+            )
+            restored_stopped = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            stopped_payload = await restored_stopped.get()
+
+        self.assertFalse(await restored_paused.is_running())
+        self.assertEqual(paused_payload["status"], "paused")
+        self.assertFalse(paused_payload["program"]["running"])
+        self.assertFalse(await restored_stopped.is_running())
+        self.assertEqual(stopped_payload["status"], "auto_stopped")
+        self.assertTrue(stopped_payload["program"]["auto_stopped"])
+        self.assertEqual(
+            stopped_payload["program"]["stop_reason"],
+            "repeated degraded cycles: 3",
+        )
 
     async def test_market_update_changes_runtime_spot_markets(self) -> None:
         cfg = make_config(
@@ -1603,6 +2695,38 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(accounts["bybit-spot"]["enabled"])
         self.assertEqual(payload["operations"]["risk"]["max_order_quote"], 1.25)
 
+    async def test_risk_update_merges_partial_account_and_strategy_maps(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+            risk=RiskConfig(
+                account_enabled={"bybit-spot": True, "coinbase-spot": True},
+                strategy_enabled={
+                    "market_maker": True,
+                    "slow_execution": False,
+                    "spot_spread": True,
+                },
+            ),
+        )
+        state = MonitorState(cfg, 1.0)
+
+        await state.set_risk_overrides(
+            {
+                "account_enabled": {"bybit-spot": False},
+                "strategy_enabled": {"slow_execution": True},
+            },
+            cfg=cfg,
+        )
+        runtime_risk = await state.risk_config(cfg.risk)
+
+        self.assertFalse(runtime_risk.account_enabled["bybit-spot"])
+        self.assertTrue(runtime_risk.account_enabled["coinbase-spot"])
+        self.assertTrue(runtime_risk.strategy_enabled["market_maker"])
+        self.assertTrue(runtime_risk.strategy_enabled["slow_execution"])
+        self.assertTrue(runtime_risk.strategy_enabled["spot_spread"])
+
     async def test_market_maker_update_updates_runtime_config_and_console(self) -> None:
         cfg = make_config(
             market_maker=MarketMakerConfig(
@@ -1633,6 +2757,75 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["config"]["quote_per_level"], 2.0)
         strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
         self.assertTrue(strategies["market_maker"]["live"])
+
+    async def test_runtime_overrides_persist_across_state_restart(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                live_enabled=False,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+            risk=RiskConfig(allow_live_trading=False),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = os.path.join(tmp, "web_runtime_overrides.json")
+            state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            await state.set_risk_overrides(
+                {
+                    "allow_live_trading": True,
+                    "max_order_quote": 1.25,
+                    "account_enabled": {"bybit-spot": False},
+                },
+                cfg=cfg,
+            )
+            await state.set_market_maker_overrides(
+                {"live_enabled": True, "levels": 4},
+                cfg=cfg,
+            )
+            await state.set_slow_execution_overrides(
+                {
+                    "enabled": True,
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                },
+                cfg=cfg,
+            )
+            await state.set_spot_markets(
+                [
+                    SpotMarketConfig(
+                        asset="BTC",
+                        exchange="bybit-spot",
+                        symbol="BTC/USDT",
+                        quote_currency="USDT",
+                    )
+                ],
+                cfg=cfg,
+            )
+            await state.set_strategy_paused("market_maker", True, cfg=cfg)
+
+            restored = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            restored_cfg = await restored.runtime_config(cfg)
+            pauses = await restored.strategy_pauses()
+            payload = await restored.get()
+
+        self.assertTrue(restored_cfg.risk.allow_live_trading)
+        self.assertEqual(restored_cfg.risk.max_order_quote, 1.25)
+        self.assertFalse(restored_cfg.risk.account_enabled["bybit-spot"])
+        self.assertTrue(restored_cfg.market_maker.live_enabled)
+        self.assertEqual(restored_cfg.market_maker.levels, 4)
+        self.assertTrue(restored_cfg.slow_execution.enabled)
+        self.assertEqual(restored_cfg.slow_execution.exchange, "coinbase-spot")
+        self.assertEqual(restored_cfg.spot_markets[0].symbol, "BTC/USDT")
+        self.assertTrue(pauses["market_maker"])
+        self.assertTrue(payload["runtime_store"]["loaded"])
+        self.assertIsNone(payload["runtime_store"]["error"])
 
 if __name__ == "__main__":
     unittest.main()

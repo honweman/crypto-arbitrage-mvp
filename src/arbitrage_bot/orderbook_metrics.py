@@ -24,6 +24,7 @@ def order_book_metric_snapshot(book: OrderBookSnapshot) -> dict[str, float | int
             "ask_depth_quote": 0.0,
             "max_level_gap_bps": 0.0,
             "order_book_timestamp_ms": book.timestamp_ms,
+            "order_book_received_at": book.received_at,
         }
 
     mid_price = (book.bids[0].price + book.asks[0].price) / 2
@@ -35,4 +36,5 @@ def order_book_metric_snapshot(book: OrderBookSnapshot) -> dict[str, float | int
             _side_max_gap_bps(book.asks, mid_price),
         ),
         "order_book_timestamp_ms": book.timestamp_ms,
+        "order_book_received_at": book.received_at,
     }

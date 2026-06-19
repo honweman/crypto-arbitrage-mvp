@@ -1,0 +1,484 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import asdict
+from typing import Any
+
+from .config import (
+    BotConfig,
+    CashAndCarryPair,
+    ExchangeConfig,
+    MarketMakerConfig,
+    RiskConfig,
+    SlowExecutionConfig,
+    SpotMarketConfig,
+)
+
+
+def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def market_maker_config_to_dict(cfg: MarketMakerConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def risk_config_to_dict(cfg: RiskConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def _spot_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for market in cfg.spot_markets:
+        symbols.setdefault(market.exchange, set()).add(market.symbol)
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _market_maker_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {
+        exchange: set(items)
+        for exchange, items in _spot_symbols_by_exchange(cfg).items()
+    }
+    for pair in cfg.cash_and_carry_pairs:
+        for exchange in cfg.spot_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
+        for exchange in cfg.derivative_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
+    if cfg.market_maker.exchange and cfg.market_maker.symbol:
+        symbols.setdefault(cfg.market_maker.exchange, set()).add(
+            cfg.market_maker.symbol
+        )
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def slow_execution_accounts(
+    exchanges: Iterable[ExchangeConfig],
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    symbols_by_exchange = symbols_by_exchange or {}
+    rows = []
+    for exchange in exchanges:
+        symbols = symbols_by_exchange.get(exchange.key, [])
+        rows.append(
+            {
+                "key": exchange.key,
+                "label": exchange.key,
+                "id": exchange.id,
+                "market_type": exchange.market_type,
+                "symbol": symbols[0] if symbols else "",
+                "symbols": symbols,
+            }
+        )
+    return rows
+
+
+def _slow_execution_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    symbols_by_exchange = symbols_by_exchange or {}
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            raise ValueError("enabled must be a boolean")
+        overrides["enabled"] = payload["enabled"]
+
+    if "exchange" in payload:
+        exchange = str(payload["exchange"]).strip()
+        if not exchange:
+            raise ValueError("exchange is required")
+        if allowed_exchanges is not None and exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        overrides["exchange"] = exchange
+
+    if "symbol" in payload:
+        symbol = str(payload["symbol"]).strip()
+        if not symbol:
+            raise ValueError("symbol is required")
+        selected_exchange = overrides.get("exchange")
+        if selected_exchange and symbols_by_exchange.get(selected_exchange):
+            if symbol not in symbols_by_exchange[selected_exchange]:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        overrides["symbol"] = symbol
+    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
+        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
+
+    if "side" in payload:
+        side = str(payload["side"]).lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        overrides["side"] = side
+
+    if "price_mode" in payload:
+        price_mode = str(payload["price_mode"]).lower()
+        if price_mode not in {"taker", "maker"}:
+            raise ValueError("price_mode must be taker or maker")
+        overrides["price_mode"] = price_mode
+
+    if "slice_mode" in payload:
+        slice_mode = str(payload["slice_mode"]).lower()
+        if slice_mode not in {"configured", "top_level"}:
+            raise ValueError("slice_mode must be configured or top_level")
+        overrides["slice_mode"] = slice_mode
+
+    if "unlimited_total" in payload:
+        if not isinstance(payload["unlimited_total"], bool):
+            raise ValueError("unlimited_total must be a boolean")
+        overrides["unlimited_total"] = payload["unlimited_total"]
+
+    numeric_fields = {
+        "total_base",
+        "total_quote",
+        "slice_base_min",
+        "slice_base_max",
+        "interval_seconds",
+        "order_ttl_seconds",
+        "start_price",
+        "stop_price",
+        "price_offset_bps",
+    }
+    for field in numeric_fields:
+        if field not in payload:
+            continue
+        value = float(payload[field])
+        if value < 0:
+            raise ValueError(f"{field} must be non-negative")
+        overrides[field] = value
+
+    if "randomize_slice" in payload:
+        if not isinstance(payload["randomize_slice"], bool):
+            raise ValueError("randomize_slice must be a boolean")
+        overrides["randomize_slice"] = payload["randomize_slice"]
+
+    if "interval_seconds" in overrides and overrides["interval_seconds"] <= 0:
+        raise ValueError("interval_seconds must be positive")
+
+    overrides["slice_base"] = 0.0
+    overrides["slice_quote"] = 0.0
+    return overrides
+
+
+def _market_maker_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    overrides: dict[str, Any] = {}
+    symbols_by_exchange = symbols_by_exchange or {}
+
+    for field in {
+        "enabled",
+        "live_enabled",
+        "post_only",
+        "cancel_existing_orders",
+        "inventory_control_enabled",
+    }:
+        if field in payload:
+            if not isinstance(payload[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+            overrides[field] = payload[field]
+
+    if "exchange" in payload:
+        exchange = str(payload["exchange"]).strip()
+        if not exchange:
+            raise ValueError("exchange is required")
+        if allowed_exchanges is not None and exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        overrides["exchange"] = exchange
+
+    if "symbol" in payload:
+        symbol = str(payload["symbol"]).strip()
+        if not symbol:
+            raise ValueError("symbol is required")
+        selected_exchange = overrides.get("exchange")
+        if selected_exchange and symbols_by_exchange.get(selected_exchange):
+            if symbol not in symbols_by_exchange[selected_exchange]:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        overrides["symbol"] = symbol
+    elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
+        overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
+
+    if "depth_shape" in payload:
+        depth_shape = str(payload["depth_shape"]).strip().lower()
+        if depth_shape not in {"flat", "linear"}:
+            raise ValueError("depth_shape must be flat or linear")
+        overrides["depth_shape"] = depth_shape
+
+    if "levels" in payload:
+        overrides["levels"] = _non_negative_int(payload, "levels")
+        if overrides["levels"] <= 0:
+            raise ValueError("levels must be positive")
+
+    positive_float_fields = {
+        "price_band_pct",
+        "quote_per_level",
+        "poll_seconds",
+    }
+    for field in positive_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+            if overrides[field] <= 0:
+                raise ValueError(f"{field} must be positive")
+
+    non_negative_float_fields = {
+        "min_order_quote",
+        "min_distance_bps",
+        "reprice_threshold_bps",
+        "inventory_target_base",
+        "inventory_band_base",
+        "inventory_max_deviation_base",
+    }
+    for field in non_negative_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    return overrides
+
+
+def spot_market_to_dict(market: SpotMarketConfig) -> dict[str, Any]:
+    return {
+        "asset": market.asset,
+        "exchange": market.exchange,
+        "symbol": market.symbol,
+        "quote_currency": market.quote_currency,
+    }
+
+
+def spot_markets_to_list(markets: Iterable[SpotMarketConfig]) -> list[dict[str, Any]]:
+    return [spot_market_to_dict(market) for market in markets]
+
+
+def cash_and_carry_pair_to_dict(pair: CashAndCarryPair) -> dict[str, Any]:
+    return {
+        "spot_symbol": pair.spot_symbol,
+        "derivative_symbol": pair.derivative_symbol,
+    }
+
+
+def cash_and_carry_pairs_to_list(
+    pairs: Iterable[CashAndCarryPair],
+) -> list[dict[str, Any]]:
+    return [cash_and_carry_pair_to_dict(pair) for pair in pairs]
+
+
+def exchange_configs_to_list(
+    exchanges: Iterable[ExchangeConfig],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": exchange.key,
+            "label": exchange.label or exchange.key,
+            "id": exchange.id,
+            "market_type": exchange.market_type,
+        }
+        for exchange in exchanges
+    ]
+
+
+def _spot_markets_from_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_exchanges: set[str],
+) -> list[SpotMarketConfig]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    raw_markets = payload.get("spot_markets")
+    if raw_markets is None:
+        raw_markets = payload.get("markets")
+    if not isinstance(raw_markets, list):
+        raise ValueError("spot_markets must be a list")
+
+    markets: list[SpotMarketConfig] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(raw_markets, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"spot_markets[{index}] must be an object")
+        asset = str(item.get("asset", "")).strip().upper()
+        exchange = str(item.get("exchange", "")).strip()
+        symbol = str(item.get("symbol", "")).strip().upper()
+        quote_currency = str(item.get("quote_currency", "")).strip().upper()
+        if not asset:
+            raise ValueError(f"spot_markets[{index}].asset is required")
+        if not exchange:
+            raise ValueError(f"spot_markets[{index}].exchange is required")
+        if exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        if not symbol or "/" not in symbol:
+            raise ValueError(f"spot_markets[{index}].symbol must look like BASE/QUOTE")
+        inferred_quote = symbol.split("/", 1)[1].upper()
+        if not quote_currency:
+            quote_currency = inferred_quote
+        if quote_currency != inferred_quote:
+            raise ValueError(
+                f"spot_markets[{index}].quote_currency must match symbol quote"
+            )
+        key = (exchange, symbol)
+        if key in seen:
+            raise ValueError(f"duplicate spot market: {exchange} {symbol}")
+        seen.add(key)
+        markets.append(
+            SpotMarketConfig(
+                asset=asset,
+                exchange=exchange,
+                symbol=symbol,
+                quote_currency=quote_currency,
+            )
+        )
+    return markets
+
+
+def _cash_and_carry_pairs_from_payload(
+    payload: dict[str, Any],
+) -> list[CashAndCarryPair]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    raw_pairs = payload.get("cash_and_carry_pairs")
+    if raw_pairs is None:
+        raw_pairs = payload.get("pairs")
+    if not isinstance(raw_pairs, list):
+        raise ValueError("cash_and_carry_pairs must be a list")
+
+    pairs: list[CashAndCarryPair] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(raw_pairs, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"cash_and_carry_pairs[{index}] must be an object")
+        spot_symbol = str(item.get("spot_symbol", "")).strip().upper()
+        derivative_symbol = str(item.get("derivative_symbol", "")).strip().upper()
+        if not spot_symbol or "/" not in spot_symbol:
+            raise ValueError(
+                f"cash_and_carry_pairs[{index}].spot_symbol must look like BASE/QUOTE"
+            )
+        if not derivative_symbol or "/" not in derivative_symbol:
+            raise ValueError(
+                f"cash_and_carry_pairs[{index}].derivative_symbol must look like BASE/QUOTE"
+            )
+        spot_base, _ = _symbol_base_quote(spot_symbol)
+        derivative_base, _ = _symbol_base_quote(derivative_symbol)
+        if spot_base != derivative_base:
+            raise ValueError(
+                f"cash_and_carry_pairs[{index}] spot and contract base must match"
+            )
+        key = (spot_symbol, derivative_symbol)
+        if key in seen:
+            raise ValueError(
+                f"duplicate cash & carry pair: {spot_symbol} {derivative_symbol}"
+            )
+        seen.add(key)
+        pairs.append(
+            CashAndCarryPair(
+                spot_symbol=spot_symbol,
+                derivative_symbol=derivative_symbol,
+            )
+        )
+    return pairs
+
+
+def _symbol_base_quote(symbol: str) -> tuple[str, str]:
+    base, _, quote = symbol.partition("/")
+    quote = quote.partition(":")[0]
+    return base.upper(), quote.upper()
+
+
+def _non_negative_float(payload: dict[str, Any], field: str) -> float:
+    try:
+        value = float(payload[field])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if value < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return value
+
+
+def _non_negative_int(payload: dict[str, Any], field: str) -> int:
+    value = _non_negative_float(payload, field)
+    if not value.is_integer():
+        raise ValueError(f"{field} must be an integer")
+    return int(value)
+
+
+def _bool_map_from_payload(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    allowed_keys: set[str],
+    label: str,
+) -> dict[str, bool] | None:
+    if field not in payload:
+        return None
+    raw = payload[field]
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field} must be an object")
+    clean: dict[str, bool] = {}
+    for key, value in raw.items():
+        clean_key = str(key).strip()
+        if clean_key not in allowed_keys:
+            raise ValueError(f"unknown {label}: {clean_key}")
+        if not isinstance(value, bool):
+            raise ValueError(f"{field}.{clean_key} must be a boolean")
+        clean[clean_key] = value
+    return clean
+
+
+def _risk_overrides_from_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_accounts: set[str],
+    allowed_strategies: set[str],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+
+    overrides: dict[str, Any] = {}
+    if "allow_live_trading" in payload:
+        if not isinstance(payload["allow_live_trading"], bool):
+            raise ValueError("allow_live_trading must be a boolean")
+        overrides["allow_live_trading"] = payload["allow_live_trading"]
+
+    account_enabled = _bool_map_from_payload(
+        payload,
+        "account_enabled",
+        allowed_keys=allowed_accounts,
+        label="exchange account",
+    )
+    if account_enabled is not None:
+        overrides["account_enabled"] = account_enabled
+
+    strategy_enabled = _bool_map_from_payload(
+        payload,
+        "strategy_enabled",
+        allowed_keys=allowed_strategies,
+        label="strategy",
+    )
+    if strategy_enabled is not None:
+        overrides["strategy_enabled"] = strategy_enabled
+
+    float_fields = {
+        "max_order_quote",
+        "max_cycle_quote",
+        "max_exposure_quote",
+        "max_daily_loss_quote",
+        "min_seconds_between_cancels",
+        "min_order_book_depth_quote",
+        "max_slippage_bps",
+        "max_order_book_age_seconds",
+        "max_order_book_gap_bps",
+        "max_price_jump_bps",
+    }
+    for field in float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    int_fields = {
+        "max_orders_per_cycle",
+        "max_open_orders",
+        "max_cancels_per_cycle",
+    }
+    for field in int_fields:
+        if field in payload:
+            overrides[field] = _non_negative_int(payload, field)
+
+    return overrides

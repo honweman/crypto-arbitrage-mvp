@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import unittest
 from typing import Optional
 
@@ -109,7 +111,88 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted_base, 0.0)
         self.assertNotIn("execution", payload)
 
-    def _cfg(self, *, risk: Optional[RiskConfig] = None) -> BotConfig:
+    async def test_live_cycle_converts_krw_notional_for_risk(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bithumb-spot",
+                    symbol="ACS/KRW",
+                    bids=[BookLevel(price=0.31, amount=100_000)],
+                    asks=[BookLevel(price=0.311, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": "bithumb-spot",
+                    "symbol": "ACS/KRW",
+                    "side": "sell",
+                    "status": "ok",
+                    "requested_amount": 100_000.0,
+                    "requested_price": 0.31,
+                    "amount": 100_000.0,
+                    "price": 0.31,
+                    "cost": 31_000.0,
+                    "limits": {},
+                    "precision": {},
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_limit_order(self, *_: object, **__: object) -> dict[str, object]:
+                return {"id": "krw-order"}
+
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                quote_rates={"USD": 1.0, "KRW": 0.001},
+                slow_execution=SlowExecutionConfig(
+                    enabled=True,
+                    exchange="bithumb-spot",
+                    symbol="ACS/KRW",
+                    side="sell",
+                    total_base=100_000.0,
+                    slice_base=100_000.0,
+                ),
+                spot_exchanges=[ExchangeConfig(id="bithumb", label="bithumb-spot")],
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_order_quote=100.0,
+                    max_cycle_quote=100.0,
+                    max_open_orders=50,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertTrue(payload["risk"]["approved"])
+        self.assertEqual(payload["risk"]["currency"], "USD")
+        self.assertEqual(payload["quote_conversion"]["quote_currency"], "KRW")
+        self.assertAlmostEqual(payload["risk"]["total_quote_notional"], 31.0)
+        self.assertAlmostEqual(submitted_base, 100_000.0)
+
+    def _cfg(
+        self,
+        *,
+        risk: Optional[RiskConfig] = None,
+        quote_rates: dict[str, float] | None = None,
+        slow_execution: SlowExecutionConfig | None = None,
+        spot_exchanges: list[ExchangeConfig] | None = None,
+    ) -> BotConfig:
         return BotConfig(
             poll_seconds=1.0,
             order_book_depth=20,
@@ -118,11 +201,11 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
             min_profit_bps=1.0,
             min_basis_bps=15.0,
             common_quote_currency="USD",
-            quote_rates={"USD": 1.0},
+            quote_rates=quote_rates or {"USD": 1.0, "USDT": 1.0},
             quote_rate_sources=[],
             onchain_monitor=OnchainMonitorConfig(),
             market_maker=MarketMakerConfig(),
-            slow_execution=SlowExecutionConfig(
+            slow_execution=slow_execution or SlowExecutionConfig(
                 enabled=True,
                 exchange="bybit-spot",
                 symbol="ACS/USDT",
@@ -134,7 +217,9 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
             spot_symbols=[],
             spot_markets=[],
             cash_and_carry_pairs=[],
-            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            spot_exchanges=spot_exchanges or [
+                ExchangeConfig(id="bybit", label="bybit-spot")
+            ],
             derivative_exchanges=[],
             risk=risk or RiskConfig(allow_live_trading=False),
         )

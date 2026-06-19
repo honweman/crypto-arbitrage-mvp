@@ -138,6 +138,46 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded[0].id, task["id"])
         self.assertEqual(loaded[0].status, "running")
 
+    async def test_create_task_rejects_duplicate_active_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg(start_price=0.1, stop_price=0.05))
+
+            with self.assertRaisesRegex(ValueError, "duplicate active"):
+                await service.create_task(
+                    self._slow_cfg(start_price=0.1, stop_price=0.05)
+                )
+
+    async def test_stop_task_cancels_open_orders_and_marks_stopped(self) -> None:
+        manager = FakeTaskManager()
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            task = await service.create_task(self._slow_cfg(order_ttl_seconds=30.0))
+            await service.run_due_tasks(cfg, manager)
+
+            stopped = await service.stop_task(task["id"], cfg, manager)
+
+        self.assertEqual(stopped["status"], "stopped")
+        self.assertEqual(stopped["last_status"], "stopped")
+        self.assertEqual(stopped["open_order_ids"], [])
+        self.assertEqual(stopped["open_order_count"], 0)
+        self.assertEqual(stopped["canceled_count"], 1)
+        self.assertEqual(manager.canceled, 1)
+
+    async def test_clear_terminal_tasks_keeps_active_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            stopped = await service.create_task(self._slow_cfg(start_price=0.1))
+            active = await service.create_task(self._slow_cfg(start_price=0.2))
+            service._tasks[0].status = "stopped"
+
+            result = await service.clear_terminal_tasks()
+
+        self.assertEqual(result["removed_task_ids"], [stopped["id"]])
+        self.assertEqual(result["tasks"]["task_count"], 1)
+        self.assertEqual(result["tasks"]["tasks"][0]["id"], active["id"])
+
     async def test_task_progress_uses_fills_not_submitted_amount(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
@@ -379,6 +419,24 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "configure exactly one"):
             validate_task_config(self._slow_cfg(slice_base=1.0, slice_base_min=1.0))
 
+    def test_validate_task_config_allows_unlimited_top_level_slice(self) -> None:
+        validate_task_config(
+            SlowExecutionConfig(
+                enabled=True,
+                exchange="bithumb-spot",
+                symbol="ACS/KRW",
+                side="sell",
+                unlimited_total=True,
+                slice_mode="top_level",
+                interval_seconds=10.0,
+                order_ttl_seconds=10.0,
+                start_price=0.31,
+                stop_price=0.3,
+                price_mode="maker",
+                price_offset_bps=1.0,
+            )
+        )
+
     def _slow_cfg(
         self,
         *,
@@ -424,7 +482,7 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             min_profit_bps=1.0,
             min_basis_bps=15.0,
             common_quote_currency="USD",
-            quote_rates={"USD": 1.0},
+            quote_rates={"USD": 1.0, "USDT": 1.0},
             quote_rate_sources=[],
             onchain_monitor=OnchainMonitorConfig(),
             market_maker=MarketMakerConfig(),

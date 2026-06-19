@@ -46,6 +46,7 @@ class RiskMarketContext:
     ask_depth_quote: float = 0.0
     max_level_gap_bps: float = 0.0
     order_book_timestamp_ms: int | None = None
+    order_book_received_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -321,7 +322,17 @@ def evaluate_order_batch(
                     f"price jump {jump_bps:.2f} bps exceeds "
                     f"max_price_jump_bps {cfg.max_price_jump_bps:.2f}"
                 )
-        if market.order_book_timestamp_ms is None:
+        if market.order_book_received_at is not None:
+            age_seconds = time() - market.order_book_received_at
+            if (
+                cfg.max_order_book_age_seconds > 0
+                and age_seconds > cfg.max_order_book_age_seconds
+            ):
+                reasons.append(
+                    f"order book age {age_seconds:.2f}s exceeds "
+                    f"max_order_book_age_seconds {cfg.max_order_book_age_seconds:.2f}s"
+                )
+        elif market.order_book_timestamp_ms is None:
             if cfg.require_order_book_timestamp:
                 reasons.append("order book timestamp is required")
         elif cfg.max_order_book_age_seconds > 0:

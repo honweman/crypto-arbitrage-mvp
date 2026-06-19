@@ -84,6 +84,32 @@ def _event_id(event: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _read_recent_event_lines(
+    path: Path,
+    limit: int,
+    *,
+    chunk_size: int = 64 * 1024,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> list[str]:
+    if limit <= 0:
+        return []
+
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        data = b""
+        while position > 0 and data.count(b"\n") <= limit and len(data) < max_bytes:
+            read_size = min(chunk_size, position, max_bytes - len(data))
+            position -= read_size
+            handle.seek(position)
+            data = handle.read(read_size) + data
+
+    lines = data.decode("utf-8", "ignore").splitlines()
+    if position > 0 and lines:
+        lines = lines[1:]
+    return lines[-limit:]
+
+
 def _first_order_side(plan: dict[str, Any]) -> str:
     order = plan.get("order")
     if isinstance(order, dict):
@@ -151,9 +177,9 @@ def read_recent_trade_events(
     if not path.exists():
         return []
 
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _read_recent_event_lines(path, cfg.max_recent_events)
     events: list[dict[str, Any]] = []
-    for line in lines[-cfg.max_recent_events :]:
+    for line in lines:
         if not line.strip():
             continue
         try:

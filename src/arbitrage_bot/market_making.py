@@ -46,6 +46,13 @@ class MarketMakerPlan:
     ask_depth_quote: float = 0.0
     max_level_gap_bps: float = 0.0
     order_book_timestamp_ms: int | None = None
+    order_book_received_at: float | None = None
+    inventory_base: float | None = None
+    inventory_target_base: float = 0.0
+    inventory_deviation_base: float | None = None
+    inventory_buy_multiplier: float = 1.0
+    inventory_sell_multiplier: float = 1.0
+    inventory_control_active: bool = False
     orders: list[MarketMakerOrder] = field(default_factory=list)
     observed_at: float = field(default_factory=time)
 
@@ -66,6 +73,13 @@ class MarketMakerPlan:
             "ask_depth_quote": self.ask_depth_quote,
             "max_level_gap_bps": self.max_level_gap_bps,
             "order_book_timestamp_ms": self.order_book_timestamp_ms,
+            "order_book_received_at": self.order_book_received_at,
+            "inventory_base": self.inventory_base,
+            "inventory_target_base": self.inventory_target_base,
+            "inventory_deviation_base": self.inventory_deviation_base,
+            "inventory_buy_multiplier": self.inventory_buy_multiplier,
+            "inventory_sell_multiplier": self.inventory_sell_multiplier,
+            "inventory_control_active": self.inventory_control_active,
             "orders": [order.to_dict() for order in self.orders],
             "observed_at": self.observed_at,
         }
@@ -74,6 +88,8 @@ class MarketMakerPlan:
 def build_symmetric_market_maker_plan(
     book: OrderBookSnapshot,
     cfg: MarketMakerConfig,
+    *,
+    inventory_base: float | None = None,
 ) -> MarketMakerPlan:
     if cfg.levels <= 0:
         raise ValueError("market maker levels must be positive")
@@ -107,15 +123,19 @@ def build_symmetric_market_maker_plan(
         min_order_quote=cfg.min_order_quote,
         depth_shape=depth_shape,
     )
+    inventory = _inventory_quote_multipliers(cfg, inventory_base)
     orders: list[MarketMakerOrder] = []
 
     for level in active_levels:
         distance_pct = step_pct * level
         distance_bps = distance_pct * 10_000
-        quote_notional = quote_by_level[level]
         bid_price = mid_price * (1 - distance_pct)
         ask_price = mid_price * (1 + distance_pct)
-        for side, price in (("buy", bid_price), ("sell", ask_price)):
+        for side, price, multiplier in (
+            ("buy", bid_price, inventory["buy_multiplier"]),
+            ("sell", ask_price, inventory["sell_multiplier"]),
+        ):
+            quote_notional = quote_by_level[level] * multiplier
             if quote_notional < cfg.min_order_quote:
                 continue
             orders.append(
@@ -151,8 +171,63 @@ def build_symmetric_market_maker_plan(
             if metrics["order_book_timestamp_ms"] is not None
             else None
         ),
+        order_book_received_at=(
+            float(metrics["order_book_received_at"])
+            if metrics["order_book_received_at"] is not None
+            else None
+        ),
+        inventory_base=inventory["inventory_base"],
+        inventory_target_base=inventory["target_base"],
+        inventory_deviation_base=inventory["deviation_base"],
+        inventory_buy_multiplier=inventory["buy_multiplier"],
+        inventory_sell_multiplier=inventory["sell_multiplier"],
+        inventory_control_active=inventory["active"],
         orders=orders,
     )
+
+
+def _inventory_quote_multipliers(
+    cfg: MarketMakerConfig,
+    inventory_base: float | None,
+) -> dict[str, float | bool | None]:
+    target_base = float(cfg.inventory_target_base or 0.0)
+    if not cfg.inventory_control_enabled or inventory_base is None:
+        return {
+            "active": False,
+            "inventory_base": inventory_base,
+            "target_base": target_base,
+            "deviation_base": None if inventory_base is None else inventory_base - target_base,
+            "buy_multiplier": 1.0,
+            "sell_multiplier": 1.0,
+        }
+
+    deviation_base = float(inventory_base) - target_base
+    band_base = max(0.0, float(cfg.inventory_band_base or 0.0))
+    max_deviation_base = max(0.0, float(cfg.inventory_max_deviation_base or 0.0))
+    distance_base = abs(deviation_base)
+    if distance_base <= band_base:
+        skew_ratio = 0.0
+    elif max_deviation_base > band_base:
+        skew_ratio = min(1.0, (distance_base - band_base) / (max_deviation_base - band_base))
+    else:
+        skew_ratio = 1.0
+
+    buy_multiplier = 1.0
+    sell_multiplier = 1.0
+    if deviation_base > 0:
+        buy_multiplier = max(0.0, 1.0 - skew_ratio)
+        sell_multiplier = 1.0 + skew_ratio
+    elif deviation_base < 0:
+        buy_multiplier = 1.0 + skew_ratio
+        sell_multiplier = max(0.0, 1.0 - skew_ratio)
+    return {
+        "active": skew_ratio > 0,
+        "inventory_base": float(inventory_base),
+        "target_base": target_base,
+        "deviation_base": deviation_base,
+        "buy_multiplier": buy_multiplier,
+        "sell_multiplier": sell_multiplier,
+    }
 
 
 def _quote_notional_by_level(

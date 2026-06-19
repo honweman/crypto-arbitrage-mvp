@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import importlib
+import json
 import os
 import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any
+from urllib.parse import quote
+from uuid import uuid4
 
 from .config import ExchangeConfig
 from .models import OrderBookSnapshot, Side
@@ -26,6 +34,11 @@ WEBSOCKET_PROXY_ENV_OPTIONS = (
     ("wss_proxy_env", "wssProxy"),
     ("ws_socks_proxy_env", "wsSocksProxy"),
 )
+
+CCXT_TOP_LEVEL_OPTION_KEYS = {
+    "hostname",
+    "urls",
+}
 
 
 @dataclass(frozen=True)
@@ -49,8 +62,8 @@ class LimitOrderFeatures:
 LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
     "bithumb": LimitOrderFeatures(
         post_only=False,
-        client_order_id=False,
-        recover_by_client_order_id=False,
+        client_order_id=True,
+        recover_by_client_order_id=True,
     ),
     "bybit": LimitOrderFeatures(
         post_only=True,
@@ -101,7 +114,7 @@ def limit_order_capability_errors(
     errors = []
     if post_only and not features.post_only:
         errors.append(
-            f"{cfg.key} limit orders do not support post-only through ccxt; "
+            f"{cfg.key} limit orders do not support post-only through the configured API; "
             "set market_maker.post_only=false and risk.require_post_only=false "
             "only if you accept taker-fill risk"
         )
@@ -151,6 +164,61 @@ def _credential_from_env(env_name: str | None) -> str | None:
     return value.replace("\\n", "\n")
 
 
+def _symbol_quote_currency(symbol: str) -> str:
+    if "/" not in symbol:
+        return ""
+    return symbol.split("/", 1)[1].split(":", 1)[0].upper()
+
+
+def _upbit_usdt_tick_size(price: float) -> Decimal:
+    value = Decimal(str(price))
+    if value >= Decimal("10"):
+        return Decimal("0.01")
+    if value >= Decimal("1"):
+        return Decimal("0.001")
+    if value >= Decimal("0.1"):
+        return Decimal("0.0001")
+    if value >= Decimal("0.01"):
+        return Decimal("0.00001")
+    if value >= Decimal("0.001"):
+        return Decimal("0.000001")
+    if value >= Decimal("0.0001"):
+        return Decimal("0.0000001")
+    return Decimal("0.00000001")
+
+
+def _upbit_tick_size(symbol: str, price: float) -> Decimal | None:
+    quote_currency = _symbol_quote_currency(symbol)
+    if quote_currency == "USDT":
+        return _upbit_usdt_tick_size(price)
+    if quote_currency == "BTC":
+        return Decimal("0.00000001")
+    return None
+
+
+def _round_price_to_tick(price: float, tick_size: Decimal, side: Side) -> float:
+    value = Decimal(str(price))
+    rounding = ROUND_FLOOR if side == "buy" else ROUND_CEILING
+    ticks = (value / tick_size).to_integral_value(rounding=rounding)
+    rounded = ticks * tick_size
+    return float(rounded)
+
+
+def _limit_price_to_exchange_tick(
+    cfg: ExchangeConfig,
+    *,
+    symbol: str,
+    side: Side,
+    price: float,
+) -> float:
+    if cfg.id != "upbit":
+        return price
+    tick_size = _upbit_tick_size(symbol, price)
+    if tick_size is None:
+        return price
+    return _round_price_to_tick(price, tick_size, side)
+
+
 def _market_from_loaded_markets(
     client: Any,
     markets: Any,
@@ -166,6 +234,369 @@ def _market_from_loaded_markets(
     return market if isinstance(market, dict) else None
 
 
+class BithumbV2Error(RuntimeError):
+    pass
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _jwt_hs256(payload: dict[str, Any], secret: str) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    signing_input = ".".join(
+        [
+            _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+            _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+        ]
+    )
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        signing_input.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"{signing_input}.{_b64url(signature)}"
+
+
+def _api_value(value: Any) -> str:
+    if isinstance(value, float):
+        return format(value, ".15f").rstrip("0").rstrip(".") or "0"
+    return str(value)
+
+
+def _bithumb_query_string(params: dict[str, Any] | None) -> str:
+    if not params:
+        return ""
+    pairs: list[str] = []
+    for key, value in params.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                pairs.append(f"{key}[]={_api_value(item)}")
+        else:
+            pairs.append(f"{key}={_api_value(value)}")
+    return "&".join(pairs)
+
+
+def _bithumb_url_query(query: str) -> str:
+    if not query:
+        return ""
+    pairs = []
+    for part in query.split("&"):
+        if "=" not in part:
+            pairs.append(quote(part, safe="[]-_.~"))
+            continue
+        key, value = part.split("=", 1)
+        pairs.append(f"{quote(key, safe='[]-_.~')}={quote(value, safe='-_.~')}")
+    return "&".join(pairs)
+
+
+def _bithumb_market_code(symbol: str) -> str:
+    if "/" not in symbol:
+        return symbol
+    base, quote_currency = symbol.split("/", 1)
+    quote_currency = quote_currency.split(":", 1)[0]
+    return f"{quote_currency.upper()}-{base.upper()}"
+
+
+def _symbol_from_bithumb_market(market: str, fallback: str) -> str:
+    if "-" not in market:
+        return fallback
+    quote_currency, base = market.split("-", 1)
+    return f"{base.upper()}/{quote_currency.upper()}"
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _timestamp_from_iso(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized).timestamp() * 1000
+    except ValueError:
+        return None
+
+
+def _bithumb_side(side: Any) -> str:
+    raw = str(side or "").lower()
+    if raw == "bid":
+        return "buy"
+    if raw == "ask":
+        return "sell"
+    return raw
+
+
+def _bithumb_status(state: Any) -> str:
+    raw = str(state or "").lower()
+    if raw in {"wait", "watch"}:
+        return "open"
+    if raw == "done":
+        return "closed"
+    if raw == "cancel":
+        return "canceled"
+    return raw
+
+
+def _normalize_bithumb_v2_order(raw: dict[str, Any], fallback_symbol: str) -> dict[str, Any]:
+    market = str(raw.get("market") or "")
+    symbol = _symbol_from_bithumb_market(market, fallback_symbol)
+    price = _number_or_none(raw.get("price"))
+    amount = _number_or_none(raw.get("volume"))
+    filled = _number_or_none(raw.get("executed_volume"))
+    remaining = _number_or_none(raw.get("remaining_volume"))
+    cost = (
+        _number_or_none(raw.get("executed_funds"))
+        or _number_or_none(raw.get("paid_amount"))
+        or _number_or_none(raw.get("trades_amount"))
+    )
+    if cost is None and price is not None and filled is not None:
+        cost = price * filled
+    timestamp = _timestamp_from_iso(
+        raw.get("created_at") or raw.get("createdAt") or raw.get("datetime")
+    )
+    order_id = raw.get("order_id") or raw.get("uuid") or raw.get("id")
+    client_order_id = (
+        raw.get("client_order_id")
+        or raw.get("clientOrderId")
+        or raw.get("clientOrderID")
+    )
+    return {
+        "id": str(order_id or ""),
+        "clientOrderId": str(client_order_id or ""),
+        "clientOrderID": str(client_order_id or ""),
+        "symbol": symbol,
+        "side": _bithumb_side(raw.get("side")),
+        "type": str(raw.get("order_type") or raw.get("ord_type") or ""),
+        "status": _bithumb_status(raw.get("state") or raw.get("status")),
+        "price": price,
+        "average": _number_or_none(raw.get("average_price") or raw.get("avg_price")),
+        "amount": amount,
+        "filled": filled,
+        "remaining": remaining,
+        "cost": cost,
+        "timestamp": timestamp,
+        "datetime": raw.get("created_at") or raw.get("datetime"),
+        "fee": {
+            "cost": _number_or_none(raw.get("paid_fee")),
+            "currency": "",
+        }
+        if raw.get("paid_fee") is not None
+        else None,
+        "info": raw,
+    }
+
+
+class BithumbV2Client:
+    def __init__(
+        self,
+        cfg: ExchangeConfig,
+        public_client: Any,
+        *,
+        api_key: str | None,
+        secret: str | None,
+    ) -> None:
+        self.cfg = cfg
+        self.public_client = public_client
+        self.apiKey = api_key
+        self.secret = secret
+        self.base_url = str(cfg.options.get("api_url") or "https://api.bithumb.com").rstrip("/")
+        self.has = dict(getattr(public_client, "has", {}) or {})
+        self.has.update(
+            {
+                "fetchBalance": True,
+                "fetchOpenOrders": True,
+                "fetchClosedOrders": True,
+                "fetchMyTrades": False,
+                "createOrder": True,
+                "cancelOrder": True,
+            }
+        )
+        self._session: Any | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.public_client, name)
+
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+        close = getattr(self.public_client, "close", None)
+        if close is not None:
+            await close()
+
+    async def _http_session(self) -> Any:
+        if self._session is None:
+            aiohttp = importlib.import_module("aiohttp")
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    def _authorization(self, query: str = "") -> str:
+        if not self.apiKey or not self.secret:
+            raise BithumbV2Error("Bithumb v2 API key/secret are not configured")
+        payload: dict[str, Any] = {
+            "access_key": self.apiKey,
+            "nonce": str(uuid4()),
+            "timestamp": int(time.time() * 1000),
+        }
+        if query:
+            payload["query_hash"] = hashlib.sha512(query.encode("utf-8")).hexdigest()
+            payload["query_hash_alg"] = "SHA512"
+        return f"Bearer {_jwt_hs256(payload, self.secret)}"
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
+        query_params = params if json_body is None else json_body
+        query = _bithumb_query_string(query_params)
+        url = f"{self.base_url}{path}"
+        if params:
+            url = f"{url}?{_bithumb_url_query(query)}"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": self._authorization(query),
+        }
+        if json_body is not None:
+            headers["Content-Type"] = "application/json; charset=utf-8"
+
+        session = await self._http_session()
+        async with session.request(method, url, headers=headers, json=json_body) as response:
+            text = await response.text()
+            try:
+                payload = json.loads(text) if text else None
+            except json.JSONDecodeError:
+                payload = text
+            if response.status >= 400:
+                raise BithumbV2Error(
+                    f"HTTP {response.status} {method} {path}: {payload}"
+                )
+            return payload
+
+    async def fetch_balance(self) -> dict[str, Any]:
+        payload = await self._request("GET", "/v1/accounts")
+        rows = payload if isinstance(payload, list) else []
+        result: dict[str, Any] = {"info": payload, "free": {}, "used": {}, "total": {}}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            currency = str(row.get("currency") or "").upper()
+            if not currency:
+                continue
+            free = _number_or_none(row.get("balance")) or 0.0
+            used = _number_or_none(row.get("locked")) or 0.0
+            total = free + used
+            result["free"][currency] = free
+            result["used"][currency] = used
+            result["total"][currency] = total
+            result[currency] = {
+                "free": free,
+                "used": used,
+                "total": total,
+            }
+        return result
+
+    async def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        params = {
+            "market": _bithumb_market_code(symbol),
+            "state": "wait",
+            "limit": 100,
+            "order_by": "desc",
+        }
+        payload = await self._request("GET", "/v1/orders", params=params)
+        rows = payload if isinstance(payload, list) else []
+        return [
+            _normalize_bithumb_v2_order(row, symbol)
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
+    async def fetch_closed_orders(
+        self,
+        symbol: str,
+        since: Any = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        params = {
+            "market": _bithumb_market_code(symbol),
+            "state": "done",
+            "limit": max(1, min(int(limit or 20), 100)),
+            "order_by": "desc",
+        }
+        payload = await self._request("GET", "/v1/orders", params=params)
+        rows = payload if isinstance(payload, list) else []
+        return [
+            _normalize_bithumb_v2_order(row, symbol)
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
+    async def fetch_my_trades(
+        self,
+        symbol: str,
+        since: Any = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def create_order(
+        self,
+        symbol: str,
+        order_type: str,
+        side: str,
+        amount: float,
+        price: float | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        params = dict(params or {})
+        side_api = "bid" if str(side).lower() == "buy" else "ask"
+        order_type_api = str(order_type or "limit").lower()
+        body: dict[str, Any] = {
+            "market": _bithumb_market_code(symbol),
+            "side": side_api,
+            "order_type": order_type_api,
+        }
+        if order_type_api == "limit":
+            body["price"] = _api_value(price)
+            body["volume"] = _api_value(amount)
+        elif order_type_api == "price":
+            body["price"] = _api_value(price if price is not None else amount)
+        elif order_type_api == "market":
+            body["volume"] = _api_value(amount)
+        else:
+            raise BithumbV2Error(f"unsupported Bithumb v2 order_type: {order_type}")
+        client_order_id = params.get("clientOrderId") or params.get("client_order_id")
+        if client_order_id:
+            body["client_order_id"] = str(client_order_id)[:36]
+        payload = await self._request("POST", "/v2/orders", json_body=body)
+        if isinstance(payload, dict):
+            return _normalize_bithumb_v2_order(payload, symbol)
+        return {"id": "", "symbol": symbol, "side": side, "type": order_type, "info": payload}
+
+    async def cancel_order(self, order_id: str, symbol: str | None = None) -> dict[str, Any]:
+        fallback_symbol = symbol or ""
+        payload = await self._request(
+            "DELETE",
+            "/v2/order",
+            params={"order_id": order_id},
+        )
+        if isinstance(payload, dict):
+            return _normalize_bithumb_v2_order(payload, fallback_symbol)
+        return {"id": order_id, "symbol": fallback_symbol, "status": "canceled", "info": payload}
+
+
 class ExchangeManager:
     def __init__(self) -> None:
         self._clients: dict[str, Any] = {}
@@ -173,10 +604,17 @@ class ExchangeManager:
     def _build_client(self, cfg: ExchangeConfig) -> Any:
         ccxt = importlib.import_module("ccxt.async_support")
         exchange_cls = getattr(ccxt, cfg.id)
+        exchange_options = dict(cfg.options)
+        top_level_options = {
+            key: exchange_options.pop(key)
+            for key in list(exchange_options)
+            if key in CCXT_TOP_LEVEL_OPTION_KEYS
+        }
 
         options: dict[str, Any] = {
             "enableRateLimit": True,
-            "options": dict(cfg.options),
+            "options": exchange_options,
+            **top_level_options,
         }
         options.update(_proxy_options_from_env(cfg))
         if cfg.market_type != "spot":
@@ -192,7 +630,21 @@ class ExchangeManager:
         if password:
             options["password"] = password
 
-        return exchange_cls(options)
+        client = exchange_cls(options)
+        if cfg.id == "bithumb" and str(cfg.options.get("private_api", "")).lower() in {
+            "v2",
+            "v2.0",
+            "v2.1",
+            "v2.1.5",
+        }:
+            return BithumbV2Client(
+                cfg,
+                client,
+                api_key=api_key,
+                secret=secret,
+            )
+
+        return client
 
     def client(self, cfg: ExchangeConfig) -> Any:
         if cfg.key not in self._clients:
@@ -464,7 +916,13 @@ class ExchangeManager:
         markets = await client.load_markets()
         market = _market_from_loaded_markets(client, markets, symbol)
         order_amount = float(client.amount_to_precision(symbol, amount))
-        order_price = float(client.price_to_precision(symbol, price))
+        exchange_price = _limit_price_to_exchange_tick(
+            cfg,
+            symbol=symbol,
+            side=side,
+            price=price,
+        )
+        order_price = float(client.price_to_precision(symbol, exchange_price))
         return validate_prepared_limit_order(
             exchange=cfg.key,
             symbol=symbol,
@@ -490,13 +948,20 @@ class ExchangeManager:
         for order in orders:
             amount = float(order["amount"])
             price = float(order["price"])
+            side = order["side"]
             order_amount = float(client.amount_to_precision(symbol, amount))
-            order_price = float(client.price_to_precision(symbol, price))
+            exchange_price = _limit_price_to_exchange_tick(
+                cfg,
+                symbol=symbol,
+                side=side,
+                price=price,
+            )
+            order_price = float(client.price_to_precision(symbol, exchange_price))
             rows.append(
                 validate_prepared_limit_order(
                     exchange=cfg.key,
                     symbol=symbol,
-                    side=order["side"],
+                    side=side,
                     requested_amount=amount,
                     requested_price=price,
                     amount=order_amount,
@@ -541,6 +1006,9 @@ class ExchangeManager:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        if capabilities.get("fetchClosedOrders") is False:
+            return []
         fetcher = getattr(client, "fetch_closed_orders", None)
         if fetcher is None:
             return []
@@ -554,6 +1022,9 @@ class ExchangeManager:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        if capabilities.get("fetchMyTrades") is False:
+            return []
         fetcher = getattr(client, "fetch_my_trades", None)
         if fetcher is None:
             return []

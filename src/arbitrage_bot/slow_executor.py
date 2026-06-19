@@ -28,6 +28,34 @@ def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
     raise ValueError(f"Auto Buy/Sell exchange is not configured: {key}")
 
 
+def _quote_currency(symbol: str) -> str:
+    if "/" not in symbol:
+        return ""
+    return symbol.split("/", 1)[1].split(":", 1)[0].upper()
+
+
+def _quote_to_common_rate(cfg: BotConfig, symbol: str) -> float | None:
+    quote = _quote_currency(symbol)
+    if not quote:
+        return None
+    if quote == cfg.common_quote_currency.upper():
+        return 1.0
+    if quote in cfg.quote_rates:
+        return float(cfg.quote_rates[quote])
+    return None
+
+
+def _quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]:
+    quote = _quote_currency(symbol)
+    rate = _quote_to_common_rate(cfg, symbol)
+    return {
+        "quote_currency": quote,
+        "common_quote_currency": cfg.common_quote_currency,
+        "quote_to_common_rate": rate,
+        "available": rate is not None,
+    }
+
+
 async def build_plan(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -219,6 +247,10 @@ async def run_cycle(
         or plan.status != "waiting_for_start_price",
         "next_submitted_quote": next_submitted_quote,
     }
+    conversion = _quote_conversion(cfg, plan.symbol)
+    payload["quote_conversion"] = conversion
+    quote_rate = conversion.get("quote_to_common_rate")
+    quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
     risk_orders = []
     if plan.order is not None:
         risk_orders.append(
@@ -228,8 +260,8 @@ async def run_cycle(
                 symbol=plan.symbol,
                 side=plan.order.side,
                 amount=plan.order.amount,
-                price=plan.order.price,
-                quote_notional=plan.order.quote_notional,
+                price=plan.order.price * quote_rate_for_risk,
+                quote_notional=plan.order.quote_notional * quote_rate_for_risk,
                 distance_bps=0.0,
             )
         )
@@ -261,13 +293,14 @@ async def run_cycle(
     market = RiskMarketContext(
         exchange=plan.exchange,
         symbol=plan.symbol,
-        best_bid=plan.best_bid,
-        best_ask=plan.best_ask,
-        mid_price=plan.mid_price,
-        bid_depth_quote=plan.bid_depth_quote,
-        ask_depth_quote=plan.ask_depth_quote,
+        best_bid=plan.best_bid * quote_rate_for_risk,
+        best_ask=plan.best_ask * quote_rate_for_risk,
+        mid_price=plan.mid_price * quote_rate_for_risk,
+        bid_depth_quote=plan.bid_depth_quote * quote_rate_for_risk,
+        ask_depth_quote=plan.ask_depth_quote * quote_rate_for_risk,
         max_level_gap_bps=plan.max_level_gap_bps,
         order_book_timestamp_ms=plan.order_book_timestamp_ms,
+        order_book_received_at=plan.order_book_received_at,
     )
     risk = evaluate_order_batch(
         cfg.risk,
@@ -287,9 +320,21 @@ async def run_cycle(
         post_only=cfg.slow_execution.post_only,
     )
     payload["risk"] = risk.to_dict()
+    payload["risk"]["currency"] = cfg.common_quote_currency
+    payload["risk"]["quote_conversion"] = conversion
+    if quote_rate is None:
+        payload["risk"]["approved"] = False
+        payload["risk"]["level"] = "blocked"
+        payload["risk"]["reasons"] = [
+            *list(payload["risk"].get("reasons", [])),
+            (
+                f"missing quote rate for {conversion['quote_currency']} -> "
+                f"{cfg.common_quote_currency}"
+            ),
+        ]
 
     if live and plan.order is not None:
-        if not risk.approved:
+        if not payload["risk"]["approved"]:
             payload["status"] = "blocked_by_risk"
             return payload, next_submitted_base
         validation = await validate_plan_order(cfg, manager, plan)

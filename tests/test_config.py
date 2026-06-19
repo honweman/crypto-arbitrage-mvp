@@ -12,6 +12,10 @@ class ConfigTest(unittest.TestCase):
 
         self.assertEqual(cfg.onchain_monitor.top_n, 20)
         self.assertEqual(
+            cfg.onchain_monitor.history_path,
+            "data/onchain_holder_changes.json",
+        )
+        self.assertEqual(
             cfg.onchain_monitor.address_labels[
                 "8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH"
             ],
@@ -31,18 +35,26 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.market_maker.price_band_pct, 10.0)
         self.assertEqual(cfg.market_maker.quote_per_level, 1.0)
         self.assertEqual(cfg.market_maker.poll_seconds, 1.0)
+        self.assertFalse(cfg.market_maker.inventory_control_enabled)
+        self.assertEqual(cfg.market_maker.inventory_target_base, 0.0)
+        self.assertEqual(cfg.market_maker.inventory_band_base, 0.0)
+        self.assertEqual(cfg.market_maker.inventory_max_deviation_base, 0.0)
         self.assertFalse(cfg.slow_execution.enabled)
         self.assertEqual(cfg.slow_execution.exchange, "bybit-spot")
         self.assertEqual(cfg.slow_execution.symbol, "ACS/USDT")
         self.assertEqual(cfg.slow_execution.side, "sell")
         self.assertEqual(cfg.slow_execution.interval_seconds, 60.0)
         self.assertEqual(cfg.slow_execution.total_quote, 0.0)
+        self.assertFalse(cfg.slow_execution.unlimited_total)
+        self.assertEqual(cfg.slow_execution.slice_mode, "configured")
         self.assertEqual(cfg.slow_execution.slice_base_min, 0.0)
         self.assertEqual(cfg.slow_execution.slice_base_max, 0.0)
         self.assertFalse(cfg.slow_execution.randomize_slice)
         self.assertEqual(cfg.slow_execution.order_ttl_seconds, 0.0)
         self.assertEqual(cfg.slow_execution.start_price, 0.0)
         self.assertEqual(cfg.slow_execution.stop_price, 0.0)
+        self.assertEqual(cfg.slow_execution.price_mode, "taker")
+        self.assertEqual(cfg.slow_execution.price_offset_bps, 0.0)
         self.assertFalse(cfg.slow_execution.post_only)
         self.assertTrue(cfg.portfolio.enabled)
         self.assertEqual(cfg.portfolio.positions[0].asset, "ACS")
@@ -102,6 +114,10 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(any(exchange.key == "upbit-spot" for exchange in cfg.spot_exchanges))
         spot_by_key = {exchange.key: exchange for exchange in cfg.spot_exchanges}
         derivative_by_key = {exchange.key: exchange for exchange in cfg.derivative_exchanges}
+        self.assertEqual(spot_by_key["bithumb-spot"].options["private_api"], "v2")
+        self.assertEqual(spot_by_key["upbit-spot"].api_key_env, "UPBIT_ID_API_KEY")
+        self.assertEqual(spot_by_key["upbit-spot"].secret_env, "UPBIT_ID_SECRET")
+        self.assertEqual(spot_by_key["upbit-spot"].options["hostname"], "id-api.upbit.com")
         self.assertEqual(spot_by_key["binance-spot"].id, "binance")
         self.assertEqual(spot_by_key["binance-spot"].options["defaultType"], "spot")
         self.assertEqual(derivative_by_key["binance-swap"].id, "binanceusdm")

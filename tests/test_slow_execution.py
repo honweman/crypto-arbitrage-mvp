@@ -35,6 +35,105 @@ class SlowExecutionTest(unittest.TestCase):
         self.assertAlmostEqual(plan.order.quote_notional, 180.0)
         self.assertAlmostEqual(plan.order.submitted_base_after, 6.0)
 
+    def test_maker_sell_order_uses_best_ask_plus_offset(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            bids=[BookLevel(price=0.31, amount=10_000_000.0)],
+            asks=[BookLevel(price=0.311, amount=10_000_000.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            side="sell",
+            total_base=1_000_000.0,
+            slice_base=100_000.0,
+            interval_seconds=10.0,
+            start_price=0.31,
+            stop_price=0.3,
+            price_mode="maker",
+            price_offset_bps=1.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+
+        self.assertEqual(plan.status, "planned")
+        self.assertEqual(plan.price_mode, "maker")
+        self.assertAlmostEqual(plan.trigger_price, 0.31)
+        self.assertIsNotNone(plan.order)
+        self.assertAlmostEqual(plan.order.price, 0.3110311)
+
+    def test_unlimited_top_level_sell_uses_best_ask_amount(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            bids=[BookLevel(price=0.31, amount=250_000.0)],
+            asks=[BookLevel(price=0.311, amount=123_456.0)],
+        )
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            side="sell",
+            unlimited_total=True,
+            slice_mode="top_level",
+            interval_seconds=10.0,
+            start_price=0.31,
+            stop_price=0.3,
+            price_mode="maker",
+            price_offset_bps=1.0,
+        )
+
+        plan = build_slow_execution_plan(book, cfg)
+        payload = plan.to_dict()
+
+        self.assertEqual(plan.status, "planned")
+        self.assertEqual(plan.progress_mode, "unlimited")
+        self.assertTrue(plan.unlimited_total)
+        self.assertEqual(plan.slice_mode, "top_level")
+        self.assertIsNotNone(plan.order)
+        self.assertAlmostEqual(plan.order.amount, 123_456.0)
+        self.assertIsNone(payload["remaining_base"])
+        self.assertIsNone(payload["remaining_quote"])
+
+    def test_maker_sell_start_and_stop_use_bid_not_offset_ask(self) -> None:
+        cfg = SlowExecutionConfig(
+            enabled=True,
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            side="sell",
+            total_base=1_000_000.0,
+            slice_base=100_000.0,
+            interval_seconds=10.0,
+            start_price=0.31,
+            stop_price=0.3,
+            price_mode="maker",
+            price_offset_bps=1.0,
+        )
+        waiting_book = OrderBookSnapshot(
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            bids=[BookLevel(price=0.3099, amount=10_000_000.0)],
+            asks=[BookLevel(price=0.31, amount=10_000_000.0)],
+        )
+        stopped_book = OrderBookSnapshot(
+            exchange="bithumb-spot",
+            symbol="ACS/KRW",
+            bids=[BookLevel(price=0.3, amount=10_000_000.0)],
+            asks=[BookLevel(price=0.301, amount=10_000_000.0)],
+        )
+
+        waiting = build_slow_execution_plan(waiting_book, cfg)
+        stopped = build_slow_execution_plan(
+            stopped_book,
+            cfg,
+            start_price_triggered=True,
+        )
+
+        self.assertEqual(waiting.status, "waiting_for_start_price")
+        self.assertEqual(stopped.status, "stopped_by_price")
+
     def test_buy_order_uses_best_ask_and_slice_quote_converts_at_order_price(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",

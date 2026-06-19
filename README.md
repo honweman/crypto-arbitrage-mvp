@@ -213,8 +213,9 @@ export BYBIT_SECRET="..."
 # or:
 export BITHUMB_API_KEY="..."
 export BITHUMB_SECRET="..."
-export UPBIT_API_KEY="..."
-export UPBIT_SECRET="..."
+# Upbit Indonesia / id.upbit.com
+export UPBIT_ID_API_KEY="..."
+export UPBIT_ID_SECRET="..."
 
 PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
   --config config.acs.json \
@@ -235,7 +236,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.market_maker \
 
 The market maker CLI clamps its effective loop interval to at least 1 second. Every-second live replacement can still hit exchange order-rate limits quickly because it may cancel and place up to 20 orders per cycle. The web background MM loop can use a WebSocket order book cache when the installed exchange client supports it; if not, it uses REST and reports `WS unsupported` in the MM status text.
 
-The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. This tool submits one buy or sell marketable limit order at the current execution-side top of book: buys use the best ask and sells use the best bid. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
+The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. By default this tool submits one buy or sell marketable limit order at the current execution-side top of book: buys use the best ask and sells use the best bid. Set `price_mode` to `maker` to quote on the passive side instead: buys use the best bid and sells use the best ask. Use `price_offset_bps` to move the order farther away from the book top, such as selling slightly above the best ask. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
 
 ```json
 "slow_execution": {
@@ -245,6 +246,8 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
   "side": "sell",
   "total_base": 100000.0,
   "total_quote": 0.0,
+  "unlimited_total": false,
+  "slice_mode": "configured",
   "slice_base": 0.0,
   "slice_base_min": 3000.0,
   "slice_base_max": 5000.0,
@@ -254,6 +257,8 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
   "order_ttl_seconds": 20.0,
   "start_price": 0.00015,
   "stop_price": 0.00012,
+  "price_mode": "taker",
+  "price_offset_bps": 0.0,
   "min_order_quote": 0.1,
   "post_only": false,
   "cancel_existing_orders": false,
@@ -261,11 +266,11 @@ The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_
 }
 ```
 
-Use `total_base` to cap the total base asset amount, such as ACS, or `total_quote` to cap the total quote currency amount, such as USDC, USDT, or KRW. If both are set, Auto Buy/Sell stops when either cap is reached. Progress is shown against `total_quote` when it is configured; otherwise it uses `total_base`.
+Use `total_base` to cap the total base asset amount, such as ACS, or `total_quote` to cap the total quote currency amount, such as USDC, USDT, or KRW. If both are set, Auto Buy/Sell stops when either cap is reached. Set `unlimited_total: true` only for intentionally open-ended tasks; the task will keep cycling until stopped by price, paused, blocked by risk, or manually stopped. Progress is shown against `total_quote` when it is configured; otherwise it uses `total_base`. Unlimited tasks show filled amount against `Unlimited`.
 
-Use exactly one per-order sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current execution-side price. Auto Buy/Sell uses a marketable limit price: buys at the current best ask and sells at the current best bid. Keep `slow_execution.post_only` false and `risk.require_post_only` false for this strategy if you want immediate taker-style execution.
+Use `slice_mode: "configured"` with exactly one per-order sizing mode: `slice_base`, `slice_quote`, or the `slice_base_min`/`slice_base_max` range. For example, a 3,000 to 5,000 ACS range with `randomize_slice: true` chooses a random amount in that range for each planned order. With `randomize_slice: false`, the range uses the minimum amount as the fixed slice. `slice_quote: 10` means each slice is about 10 USDT worth of ACS at the current execution-side price. Use `slice_mode: "top_level"` when each order should match the current top-of-book amount: sells use the best ask amount and buys use the best bid amount. Auto Buy/Sell `price_mode: "taker"` uses a marketable limit price: buys at the current best ask and sells at the current best bid. Keep `slow_execution.post_only` false and `risk.require_post_only` false for this strategy if you want immediate taker-style execution.
 
-The web page exposes runtime controls for the selected account, `enabled`, `side`, `total_base`, `total_quote`, the min/max base order size range, randomization, `interval_seconds`, `order_ttl_seconds`, `start_price`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
+The web page exposes runtime controls for the selected account, `enabled`, `side`, `price_mode`, `price_offset_bps`, `unlimited_total`, `slice_mode`, `total_base`, `total_quote`, the min/max base order size range, randomization, `interval_seconds`, `order_ttl_seconds`, `start_price`, and `stop_price`. The account checkbox list comes from `spot_exchanges`, so multiple accounts should be added as separate exchange entries with distinct `label` values. These page edits affect the running monitor immediately but do not write back to `config.acs.json`.
 
 The control page also exposes runtime market setup. `Markets` configures spot arbitrage symbols per account, while `Cash & Carry Pairs` configures spot-vs-contract symbols for basis scanning. For Binance USDT perpetuals and Bybit USDT perpetuals, ccxt symbols usually look like `BTC/USDT:USDT` or `ETH/USDT:USDT`; the spot side remains `BTC/USDT` or `ETH/USDT`. The ACS example config includes `binance-spot`, `binance-swap` (`binanceusdm`), and `bybit-swap`, but does not assume ACS is listed on those venues. Add only the symbols that actually exist on the target exchange.
 
@@ -522,7 +527,7 @@ Auto-stop pauses the program after repeated degraded/error cycles, or immediatel
 
 Do not commit API keys, proxy URLs, or IP allowlist secrets. Put those values in local shell env vars, Docker/Kubernetes secrets, or the cloud secret manager for each account runner.
 
-The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, and balance changes between Solana polling rounds.
+The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, cumulative balance changes since the first stored baseline, and a persisted holder change log. The change history is saved under `onchain_monitor.history_path`, so browser refreshes and service restarts do not reset the displayed wallet changes.
 
 ```json
 "onchain_monitor": {
@@ -533,6 +538,7 @@ The same monitor also tracks the ACS Solana token mint configured in `onchain_mo
   "label": "ACS",
   "top_n": 20,
   "poll_seconds": 60,
+  "history_path": "data/onchain_holder_changes.json",
   "address_labels": {
     "8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH": "Bithumb Hot Wallet 1",
     "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2": "Bybit Hot Wallet",
