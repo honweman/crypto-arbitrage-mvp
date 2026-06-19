@@ -52,6 +52,16 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
         symbols.setdefault(cfg.slow_execution.exchange, set()).add(
             cfg.slow_execution.symbol
         )
+    if cfg.spot_grid.exchange and cfg.spot_grid.symbol:
+        symbols.setdefault(cfg.spot_grid.exchange, set()).add(cfg.spot_grid.symbol)
+    if cfg.dca.exchange and cfg.dca.symbol:
+        symbols.setdefault(cfg.dca.exchange, set()).add(cfg.dca.symbol)
+    if cfg.execution_algo.exchange and cfg.execution_algo.symbol:
+        symbols.setdefault(cfg.execution_algo.exchange, set()).add(
+            cfg.execution_algo.symbol
+        )
+    if cfg.backtest.exchange and cfg.backtest.symbol:
+        symbols.setdefault(cfg.backtest.exchange, set()).add(cfg.backtest.symbol)
 
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 

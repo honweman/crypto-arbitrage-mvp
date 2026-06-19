@@ -274,6 +274,8 @@ The web page exposes runtime controls for the selected account, `enabled`, `side
 
 The Settings page also includes Spot Grid and DCA Bot panels. These modules currently produce dry-run order plans and run through the same risk gate used by the live trading console. Spot Grid supports pair/account, lower and upper price, grid count, arithmetic or geometric spacing, quote per grid, take profit, stop loss, auto rebuild intent, maximum position, maximum order count, minimum grid step, cancel retry count, and post-only mode. DCA Bot supports pair/account, side, trigger price, interval, quote per order, size multiplier, max orders, average entry, take profit, maximum position, maximum loss, maker/taker price mode, and offset bps. Live order placement for these two modules is intentionally not enabled until the execution loop and explicit live confirmation flow are added.
 
+The Settings page also includes TWAP/VWAP/POV and Backtest/Paper panels. TWAP/VWAP/POV currently generates a dry-run execution schedule with account, pair, side, algorithm, total base or quote target, slice count, duration, interval, POV participation rate, per-slice quote limits, start/stop prices, maker/taker pricing, offset bps, and max slippage. The next slice is passed through the same risk engine as live orders, but no live execution loop is enabled by default. Backtest/Paper runs a deterministic synthetic-path simulation for Spot Grid, DCA Bot, or TWAP/VWAP/POV and reports return, max drawdown, fees, slippage, fill rate, trades, and an equity curve. Treat these results as preflight research only; connect exchange historical candles or trades before using the output as production evidence.
+
 The control page also exposes runtime market setup. `Markets` configures spot arbitrage symbols per account, while `Cash & Carry Pairs` configures spot-vs-contract symbols for basis scanning. For Binance USDT perpetuals and Bybit USDT perpetuals, ccxt symbols usually look like `BTC/USDT:USDT` or `ETH/USDT:USDT`; the spot side remains `BTC/USDT` or `ETH/USDT`. The ACS example config includes `binance-spot`, `binance-swap` (`binanceusdm`), and `bybit-swap`, but does not assume ACS is listed on those venues. Add only the symbols that actually exist on the target exchange.
 
 For `start_price`, a sell schedule waits until the best bid is at or above the start price before placing the first marketable sell order. A buy schedule waits until the best ask is at or below the start price before placing the first marketable buy order. After an Auto Buy/Sell task has triggered, it keeps running until the configured amount is filled or `stop_price` is hit. For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
@@ -319,7 +321,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.account_check \
   --symbol ACS/USDT
 ```
 
-Without `--exchange`, it checks all configured exchange entries. Without `--symbol`, it uses symbols from `spot_markets`, `market_maker`, and Auto Buy/Sell.
+Without `--exchange`, it checks all configured exchange entries. Without `--symbol`, it uses symbols from `spot_markets`, `market_maker`, Auto Buy/Sell, Spot Grid, DCA Bot, TWAP/VWAP/POV, and Backtest/Paper.
 
 Useful variants:
 

@@ -247,6 +247,8 @@ function balanceStatusClass(status) {
       if (value === "auto_buy_sell" || value === "slow_execution") return "Auto Buy/Sell";
       if (value === "spot_grid") return "Spot Grid";
       if (value === "dca") return "DCA Bot";
+      if (value === "execution_algo") return "TWAP/VWAP/POV";
+      if (value === "backtest") return "Backtest/Paper";
       if (value === "manual") return "Manual";
       if (value === "unattributed") return "Unattributed";
       return value || "--";
@@ -1399,6 +1401,64 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderExecutionAlgo(executionAlgo) {
+      const body = document.getElementById("exec-schedule");
+      body.innerHTML = "";
+      const plan = executionAlgo?.plan;
+      const schedule = plan?.schedule || [];
+      if (!plan || schedule.length === 0) {
+        const tr = document.createElement("tr");
+        const status = executionAlgo?.error || executionAlgo?.status || "disabled";
+        tr.innerHTML = `<td colspan="7">${escapeHtml(status)}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const item of schedule.slice(0, 40)) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="num">${item.slice_index}</td>
+          <td class="${item.side === "buy" ? "side-buy" : "side-sell"}">${String(item.side || "").toUpperCase()}</td>
+          <td class="num">${Number(item.scheduled_at_seconds || 0).toFixed(0)}s</td>
+          <td class="num">${fmt.format(item.price)}</td>
+          <td class="num">${compact.format(item.amount)}</td>
+          <td class="num">${formatSymbolQuantity(item.quote_notional, plan.symbol, "quote")}</td>
+          <td>${item.status === "next" ? "Next" : escapeHtml(item.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderBacktest(backtest) {
+      const result = backtest?.result;
+      text("backtest-return", result ? `${Number(result.return_pct || 0).toFixed(2)}%` : "--");
+      text("backtest-drawdown", result ? `${Number(result.max_drawdown_pct || 0).toFixed(2)}%` : "--");
+      text("backtest-fees", result ? money.format(result.fee_quote || 0) : "--");
+      text("backtest-fill-rate", result ? `${(Number(result.fill_rate || 0) * 100).toFixed(1)}%` : "--");
+      const body = document.getElementById("backtest-points");
+      body.innerHTML = "";
+      const points = result?.points || [];
+      if (!result || points.length === 0) {
+        const tr = document.createElement("tr");
+        const status = backtest?.error || backtest?.status || "disabled";
+        tr.innerHTML = `<td colspan="6">${escapeHtml(status)}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const point of points.slice(-80)) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="num">${point.step}</td>
+          <td class="num">${fmt.format(point.price)}</td>
+          <td class="num">${money.format(point.equity)}</td>
+          <td class="num">${Number(point.drawdown_pct || 0).toFixed(2)}%</td>
+          <td class="num">${compact.format(point.base)}</td>
+          <td class="num">${money.format(point.cash)}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function formatDue(ts) {
       if (!ts) return "--";
       const seconds = ts - Date.now() / 1000;
@@ -1623,6 +1683,8 @@ function balanceStatusClass(status) {
       if (value === "market_maker") return "Market Maker";
       if (value === "spot_grid") return "Spot Grid";
       if (value === "dca") return "DCA Bot";
+      if (value === "execution_algo") return "TWAP/VWAP/POV";
+      if (value === "backtest") return "Backtest/Paper";
       if (value === "spot_spread") return "Spot Arbitrage";
       if (value === "cash_and_carry") return "Cash & Carry";
       return value || "--";
@@ -1718,6 +1780,10 @@ function balanceStatusClass(status) {
     let gridFormBusy = false;
     let dcaFormDirty = false;
     let dcaFormBusy = false;
+    let execFormDirty = false;
+    let execFormBusy = false;
+    let backtestFormDirty = false;
+    let backtestFormBusy = false;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -2316,6 +2382,140 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderExecutionAlgoConfig(config, accounts) {
+      if (!config || execFormDirty || execFormBusy) return;
+      document.getElementById("exec-enabled").checked = Boolean(config.enabled);
+      document.getElementById("exec-live-enabled").checked = Boolean(config.live_enabled);
+      renderStrategyAccounts("exec-accounts", "exec-account", accounts, config.exchange || "", () => {
+        execFormDirty = true;
+      });
+      document.getElementById("exec-side").value = config.side || "buy";
+      document.getElementById("exec-algo").value = config.algo || "twap";
+      setNumericField("exec-total-quote", config.total_quote || 0);
+      setNumericField("exec-total-base", config.total_base || 0);
+      setNumericField("exec-duration", config.duration_seconds || 3600);
+      setNumericField("exec-slices", config.slice_count || 1);
+      setNumericField("exec-interval", config.interval_seconds || 300);
+      setNumericField("exec-participation", config.participation_rate || 0);
+      setNumericField("exec-min-slice", config.min_slice_quote || 0);
+      setNumericField("exec-max-slice", config.max_slice_quote || 0);
+      setNumericField("exec-start-price", config.start_price || 0);
+      setNumericField("exec-stop-price", config.stop_price || 0);
+      setNumericField("exec-max-slippage", config.max_slippage_bps || 0);
+      document.getElementById("exec-price-mode").value = config.price_mode || "taker";
+      setNumericField("exec-offset-bps", config.price_offset_bps || 0);
+    }
+
+    function executionAlgoPayloadFromForm() {
+      return {
+        enabled: document.getElementById("exec-enabled").checked,
+        live_enabled: document.getElementById("exec-live-enabled").checked,
+        exchange: selectedStrategyAccount("exec-account"),
+        symbol: selectedStrategySymbol("exec-account"),
+        side: document.getElementById("exec-side").value,
+        algo: document.getElementById("exec-algo").value,
+        total_quote: numericValue("exec-total-quote"),
+        total_base: numericValue("exec-total-base"),
+        duration_seconds: numericValue("exec-duration"),
+        slice_count: numericValue("exec-slices"),
+        interval_seconds: numericValue("exec-interval"),
+        participation_rate: numericValue("exec-participation"),
+        min_slice_quote: numericValue("exec-min-slice"),
+        max_slice_quote: numericValue("exec-max-slice"),
+        start_price: numericValue("exec-start-price"),
+        stop_price: numericValue("exec-stop-price"),
+        max_slippage_bps: numericValue("exec-max-slippage"),
+        price_mode: document.getElementById("exec-price-mode").value,
+        price_offset_bps: numericValue("exec-offset-bps"),
+      };
+    }
+
+    async function applyExecutionAlgoConfig(event) {
+      event.preventDefault();
+      if (execFormBusy) return;
+      execFormBusy = true;
+      const button = document.getElementById("exec-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/execution-algo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(executionAlgoPayloadFromForm()),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "execution algo update failed");
+        execFormDirty = false;
+        await refresh();
+      } catch (error) {
+        text("exec-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        execFormBusy = false;
+      }
+    }
+
+    function renderBacktestConfig(config, accounts) {
+      if (!config || backtestFormDirty || backtestFormBusy) return;
+      document.getElementById("backtest-enabled").checked = Boolean(config.enabled);
+      renderStrategyAccounts("backtest-accounts", "backtest-account", accounts, config.exchange || "", () => {
+        backtestFormDirty = true;
+      });
+      document.getElementById("backtest-strategy").value = config.strategy || "spot_grid";
+      setNumericField("backtest-cash", config.initial_cash || 0);
+      setNumericField("backtest-base", config.initial_base || 0);
+      setNumericField("backtest-fee", config.fee_bps || 0);
+      setNumericField("backtest-slippage", config.slippage_bps || 0);
+      setNumericField("backtest-price-start", config.price_start || 0);
+      setNumericField("backtest-price-end", config.price_end || 0);
+      setNumericField("backtest-steps", config.step_count || 2);
+      setNumericField("backtest-volatility", config.volatility_bps || 0);
+      setNumericField("backtest-trend", config.trend_bps || 0);
+      setNumericField("backtest-max-points", config.max_recent_points || 80);
+    }
+
+    function backtestPayloadFromForm() {
+      return {
+        enabled: document.getElementById("backtest-enabled").checked,
+        exchange: selectedStrategyAccount("backtest-account"),
+        symbol: selectedStrategySymbol("backtest-account"),
+        strategy: document.getElementById("backtest-strategy").value,
+        initial_cash: numericValue("backtest-cash"),
+        initial_base: numericValue("backtest-base"),
+        fee_bps: numericValue("backtest-fee"),
+        slippage_bps: numericValue("backtest-slippage"),
+        price_start: numericValue("backtest-price-start"),
+        price_end: numericValue("backtest-price-end"),
+        step_count: numericValue("backtest-steps"),
+        volatility_bps: numericValue("backtest-volatility"),
+        trend_bps: numericValue("backtest-trend"),
+        max_recent_points: numericValue("backtest-max-points"),
+      };
+    }
+
+    async function applyBacktestConfig(event) {
+      event.preventDefault();
+      if (backtestFormBusy) return;
+      backtestFormBusy = true;
+      const button = document.getElementById("backtest-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/backtest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(backtestPayloadFromForm()),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "backtest update failed");
+        backtestFormDirty = false;
+        await refresh();
+      } catch (error) {
+        text("backtest-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        backtestFormBusy = false;
+      }
+    }
+
     async function createAutoBuySellTask() {
       if (slowFormBusy) return;
       slowFormBusy = true;
@@ -2468,6 +2668,23 @@ function balanceStatusClass(status) {
           : `${data.dca?.status || "disabled"}${dcaReason ? ` · ${dcaReason}` : ""}`
       );
 
+      const execPlan = data.execution_algo?.plan;
+      const execReason = (data.execution_algo?.safety?.reasons || [])[0] || data.execution_algo?.error || "";
+      text(
+        "exec-meta",
+        execPlan
+          ? `${data.execution_algo.mode || "dry_run"} · ${execPlan.exchange} ${execPlan.symbol} · ${String(execPlan.algo || "").toUpperCase()} ${String(execPlan.side || "").toUpperCase()} · ${formatSymbolQuantity(execPlan.total_quote || 0, execPlan.symbol, "quote")} · slices ${(execPlan.schedule || []).length}${execReason ? ` · ${execReason}` : ""}`
+          : `${data.execution_algo?.status || "disabled"}${execReason ? ` · ${execReason}` : ""}`
+      );
+
+      const backtestResult = data.backtest?.result;
+      text(
+        "backtest-meta",
+        backtestResult
+          ? `${displayStrategy(backtestResult.strategy)} · return ${Number(backtestResult.return_pct || 0).toFixed(2)}% · max DD ${Number(backtestResult.max_drawdown_pct || 0).toFixed(2)}% · trades ${backtestResult.trade_count || 0}`
+          : `${data.backtest?.status || "disabled"}${data.backtest?.error ? ` · ${data.backtest.error}` : ""}`
+      );
+
       renderPortfolio(data.portfolio);
       renderStrategySummaries(data);
     }
@@ -2494,6 +2711,10 @@ function balanceStatusClass(status) {
         renderSpotGrid(data.spot_grid);
         renderDcaConfig(data.dca?.config, data.dca?.accounts);
         renderDca(data.dca);
+        renderExecutionAlgoConfig(data.execution_algo?.config, data.execution_algo?.accounts);
+        renderExecutionAlgo(data.execution_algo);
+        renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
+        renderBacktest(data.backtest);
         return;
       }
       if (activePage === "records") {
@@ -2596,6 +2817,14 @@ function balanceStatusClass(status) {
       dcaFormDirty = true;
     });
     document.getElementById("dca-form").addEventListener("submit", applyDcaConfig);
+    document.getElementById("exec-form").addEventListener("input", () => {
+      execFormDirty = true;
+    });
+    document.getElementById("exec-form").addEventListener("submit", applyExecutionAlgoConfig);
+    document.getElementById("backtest-form").addEventListener("input", () => {
+      backtestFormDirty = true;
+    });
+    document.getElementById("backtest-form").addEventListener("submit", applyBacktestConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
     setInterval(refresh, 1000);

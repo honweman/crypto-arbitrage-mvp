@@ -11,9 +11,11 @@ from typing import Any
 from .render_payloads import state_payload_for_view
 
 from ..config import (
+    BacktestConfig,
     BotConfig,
     CashAndCarryPair,
     DcaConfig,
+    ExecutionAlgoConfig,
     MarketMakerConfig,
     RiskConfig,
     SlowExecutionConfig,
@@ -24,12 +26,15 @@ from ..models import Opportunity
 from ..portfolio_metrics import build_market_maker_quality_payload
 from ..web_config import (
     _cash_and_carry_pairs_from_payload,
+    _execution_symbols_by_exchange,
     _grid_symbols_by_exchange,
     _market_maker_symbols_by_exchange,
     _spot_markets_from_payload,
     _spot_symbols_by_exchange,
+    backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
     dca_config_to_dict,
+    execution_algo_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
     risk_config_to_dict,
@@ -110,6 +115,12 @@ class MonitorState:
         self._dca_overrides: dict[str, Any] = dict(
             store_data.get("dca_overrides", {})
         )
+        self._execution_algo_overrides: dict[str, Any] = dict(
+            store_data.get("execution_algo_overrides", {})
+        )
+        self._backtest_overrides: dict[str, Any] = dict(
+            store_data.get("backtest_overrides", {})
+        )
         self._spot_markets_override: list[SpotMarketConfig] | None = (
             _spot_markets_from_payload(
                 {"spot_markets": store_data["spot_markets"]},
@@ -167,6 +178,8 @@ class MonitorState:
             "slow_execution_overrides": self._slow_execution_overrides,
             "spot_grid_overrides": self._spot_grid_overrides,
             "dca_overrides": self._dca_overrides,
+            "execution_algo_overrides": self._execution_algo_overrides,
+            "backtest_overrides": self._backtest_overrides,
             "strategy_paused": self._strategy_paused,
             "program": self._program_payload_unlocked(),
         }
@@ -232,6 +245,14 @@ class MonitorState:
                 cfg.dca,
                 **self._dca_overrides,
             ),
+            execution_algo=replace(
+                cfg.execution_algo,
+                **self._execution_algo_overrides,
+            ),
+            backtest=replace(
+                cfg.backtest,
+                **self._backtest_overrides,
+            ),
         )
 
     async def get(self, view: str | None = None) -> dict[str, Any]:
@@ -278,6 +299,20 @@ class MonitorState:
     ) -> DcaConfig:
         async with self._lock:
             return replace(base_config, **self._dca_overrides)
+
+    async def execution_algo_config(
+        self,
+        base_config: ExecutionAlgoConfig,
+    ) -> ExecutionAlgoConfig:
+        async with self._lock:
+            return replace(base_config, **self._execution_algo_overrides)
+
+    async def backtest_config(
+        self,
+        base_config: BacktestConfig,
+    ) -> BacktestConfig:
+        async with self._lock:
+            return replace(base_config, **self._backtest_overrides)
 
     async def set_market_maker_overrides(
         self,
@@ -386,6 +421,78 @@ class MonitorState:
                 )
             )
 
+    async def set_execution_algo_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._execution_algo_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "execution_algo" in self._payload:
+                current_config = self._payload["execution_algo"].get("config", {})
+                current_config.update(overrides)
+                self._payload["execution_algo"]["config"] = current_config
+                self._payload["execution_algo"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _execution_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._save_runtime_store_unlocked()
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": execution_algo_config_to_dict(
+                            runtime_cfg.execution_algo
+                        ),
+                        "execution_algo": self._payload.get("execution_algo", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
+    async def set_backtest_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._backtest_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "backtest" in self._payload:
+                current_config = self._payload["backtest"].get("config", {})
+                current_config.update(overrides)
+                self._payload["backtest"]["config"] = current_config
+                self._payload["backtest"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _execution_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._save_runtime_store_unlocked()
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": backtest_config_to_dict(runtime_cfg.backtest),
+                        "backtest": self._payload.get("backtest", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
     async def risk_config(
         self,
         base_config: RiskConfig,
@@ -454,6 +561,16 @@ class MonitorState:
                     runtime_cfg.spot_exchanges,
                     _grid_symbols_by_exchange(runtime_cfg),
                 )
+            if "execution_algo" in self._payload:
+                self._payload["execution_algo"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _execution_symbols_by_exchange(runtime_cfg),
+                )
+            if "backtest" in self._payload:
+                self._payload["backtest"]["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _execution_symbols_by_exchange(runtime_cfg),
+                )
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -470,6 +587,8 @@ class MonitorState:
                         "slow_execution": self._payload.get("slow_execution", {}),
                         "spot_grid": self._payload.get("spot_grid", {}),
                         "dca": self._payload.get("dca", {}),
+                        "execution_algo": self._payload.get("execution_algo", {}),
+                        "backtest": self._payload.get("backtest", {}),
                         "trading_console": self._payload["trading_console"],
                     }
                 )
@@ -656,6 +775,8 @@ class MonitorState:
                 slow_execution=self._payload.get("slow_execution", {}),
                 spot_grid=self._payload.get("spot_grid", {}),
                 dca=self._payload.get("dca", {}),
+                execution_algo=self._payload.get("execution_algo", {}),
+                backtest=self._payload.get("backtest", {}),
                 markets=self._payload.get("markets", []),
                 warnings=warning_messages,
             )
@@ -722,6 +843,8 @@ class MonitorState:
         slow_execution: dict[str, Any],
         spot_grid: dict[str, Any],
         dca: dict[str, Any],
+        execution_algo: dict[str, Any],
+        backtest: dict[str, Any],
         spot_arbitrage: dict[str, Any],
         trading_console: dict[str, Any],
         portfolio: dict[str, Any],
@@ -781,6 +904,8 @@ class MonitorState:
                 "slow_execution": slow_execution,
                 "spot_grid": spot_grid,
                 "dca": dca,
+                "execution_algo": execution_algo,
+                "backtest": backtest,
                 "spot_arbitrage": spot_arbitrage,
                 "trading_console": trading_console,
                 "readiness": build_readiness_payload(
@@ -792,6 +917,8 @@ class MonitorState:
                     slow_execution=slow_execution,
                     spot_grid=spot_grid,
                     dca=dca,
+                    execution_algo=execution_algo,
+                    backtest=backtest,
                     markets=markets,
                     warnings=warnings,
                 ),

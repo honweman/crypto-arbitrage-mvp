@@ -43,6 +43,7 @@ from ..auto_buy_sell_task import (
     default_task_store_path,
     validate_task_config,
 )
+from ..backtesting import run_paper_backtest
 from ..config import (
     BotConfig,
     CashAndCarryPair,
@@ -54,6 +55,7 @@ from ..config import (
     load_config,
 )
 from ..exchanges import ExchangeManager, limit_order_features
+from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
 from ..main import (
@@ -116,8 +118,11 @@ from ..trade_log import (
     write_trade_event,
 )
 from ..web_config import (
+    _backtest_overrides_from_payload,
     _cash_and_carry_pairs_from_payload,
     _dca_overrides_from_payload,
+    _execution_algo_overrides_from_payload,
+    _execution_symbols_by_exchange,
     _grid_symbols_by_exchange,
     _market_maker_overrides_from_payload,
     _market_maker_symbols_by_exchange,
@@ -126,8 +131,10 @@ from ..web_config import (
     _spot_grid_overrides_from_payload,
     _spot_markets_from_payload,
     _spot_symbols_by_exchange,
+    backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
     dca_config_to_dict,
+    execution_algo_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
     risk_config_to_dict,
@@ -147,6 +154,8 @@ STRATEGY_IDS = {
     "slow_execution",
     "spot_grid",
     "dca",
+    "execution_algo",
+    "backtest",
     "spot_spread",
     "cash_and_carry",
 }
@@ -599,6 +608,25 @@ def build_trading_console_payload(
             live_ready=cfg.dca.live_enabled,
         ),
         strategy_row(
+            strategy_id="execution_algo",
+            label="TWAP/VWAP/POV",
+            configured=cfg.execution_algo.enabled,
+            exchange=cfg.execution_algo.exchange,
+            symbol=cfg.execution_algo.symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "execution_algo"),
+            live_ready=cfg.execution_algo.live_enabled,
+        ),
+        strategy_row(
+            strategy_id="backtest",
+            label="Backtest/Paper",
+            configured=cfg.backtest.enabled,
+            exchange=cfg.backtest.exchange,
+            symbol=cfg.backtest.symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "backtest"),
+            live_ready=False,
+            mode="research",
+        ),
+        strategy_row(
             strategy_id="spot_spread",
             label="Spot Arbitrage",
             configured=bool(cfg.spot_markets),
@@ -655,6 +683,14 @@ def _exchange_balance_symbols(
 
     if cfg.dca.exchange and cfg.dca.symbol:
         symbols.setdefault(cfg.dca.exchange, set()).add(cfg.dca.symbol)
+
+    if cfg.execution_algo.exchange and cfg.execution_algo.symbol:
+        symbols.setdefault(cfg.execution_algo.exchange, set()).add(
+            cfg.execution_algo.symbol
+        )
+
+    if cfg.backtest.exchange and cfg.backtest.symbol:
+        symbols.setdefault(cfg.backtest.exchange, set()).add(cfg.backtest.symbol)
 
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
@@ -747,6 +783,8 @@ def _readiness_strategy_reasons(
     slow_execution: dict[str, Any] | None,
     spot_grid: dict[str, Any] | None = None,
     dca: dict[str, Any] | None = None,
+    execution_algo: dict[str, Any] | None = None,
+    backtest: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     strategy_id = str(strategy.get("id") or "")
@@ -765,7 +803,7 @@ def _readiness_strategy_reasons(
         reasons.append("strategy disabled by risk")
     if not strategy.get("account_enabled", True):
         reasons.append("account disabled by risk")
-    if not strategy.get("live_ready", True):
+    if strategy_id != "backtest" and not strategy.get("live_ready", True):
         reasons.append("strategy live switch disabled")
 
     account = account_statuses.get(exchange)
@@ -786,6 +824,8 @@ def _readiness_strategy_reasons(
     strategy_payload = {
         "spot_grid": spot_grid,
         "dca": dca,
+        "execution_algo": execution_algo,
+        "backtest": backtest,
     }.get(strategy_id)
     if isinstance(strategy_payload, dict):
         if strategy_payload.get("status") == "error" and strategy_payload.get("error"):
@@ -812,6 +852,8 @@ def build_readiness_payload(
     slow_execution: dict[str, Any] | None = None,
     spot_grid: dict[str, Any] | None = None,
     dca: dict[str, Any] | None = None,
+    execution_algo: dict[str, Any] | None = None,
+    backtest: dict[str, Any] | None = None,
     markets: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -822,6 +864,8 @@ def build_readiness_payload(
     slow_execution = slow_execution or {}
     spot_grid = spot_grid or {}
     dca = dca or {}
+    execution_algo = execution_algo or {}
+    backtest = backtest or {}
     symbols_by_exchange = _exchange_balance_symbols(cfg)
     balance_by_exchange = _account_payload_by_exchange(account_balances)
     order_by_exchange = _account_payload_by_exchange(order_activity)
@@ -918,8 +962,12 @@ def build_readiness_payload(
             slow_execution=slow_execution,
             spot_grid=spot_grid,
             dca=dca,
+            execution_algo=execution_algo,
+            backtest=backtest,
         )
-        if strategy.get("live"):
+        if strategy.get("id") == "backtest" and strategy.get("configured"):
+            status = "research"
+        elif strategy.get("live"):
             status = "live"
         elif not strategy.get("configured"):
             status = "idle"
@@ -2153,6 +2201,14 @@ def _load_runtime_overrides(path: Path, cfg: BotConfig) -> dict[str, Any]:
             raw.get("dca_overrides"),
             cfg.dca,
         ),
+        "execution_algo_overrides": _dataclass_overrides(
+            raw.get("execution_algo_overrides"),
+            cfg.execution_algo,
+        ),
+        "backtest_overrides": _dataclass_overrides(
+            raw.get("backtest_overrides"),
+            cfg.backtest,
+        ),
         "strategy_paused": {
             key: bool(value)
             for key, value in (raw.get("strategy_paused") or {}).items()
@@ -2463,6 +2519,49 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 }
             ),
             "safety": None,
+            "error": None,
+        },
+        "execution_algo": {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "config": execution_algo_config_to_dict(cfg.execution_algo),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _execution_symbols_by_exchange(cfg),
+            ),
+            "quote_conversion": (
+                market_maker_quote_conversion(cfg, cfg.execution_algo.symbol)
+                if cfg.execution_algo.symbol
+                else {
+                    "quote_currency": "",
+                    "common_quote_currency": cfg.common_quote_currency,
+                    "quote_to_common_rate": None,
+                    "available": False,
+                }
+            ),
+            "safety": None,
+            "error": None,
+        },
+        "backtest": {
+            "status": "disabled",
+            "mode": "research",
+            "result": None,
+            "config": backtest_config_to_dict(cfg.backtest),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _execution_symbols_by_exchange(cfg),
+            ),
+            "quote_conversion": (
+                market_maker_quote_conversion(cfg, cfg.backtest.symbol)
+                if cfg.backtest.symbol
+                else {
+                    "quote_currency": "",
+                    "common_quote_currency": cfg.common_quote_currency,
+                    "quote_to_common_rate": None,
+                    "available": False,
+                }
+            ),
             "error": None,
         },
         "spot_arbitrage": {
@@ -3113,6 +3212,106 @@ def build_dca_safety_payload(
     }
 
 
+def build_execution_algo_safety_payload(
+    cfg: BotConfig,
+    plan: Any | None,
+    conversion: dict[str, Any],
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    base_payload = _strategy_safety_base(cfg, conversion, error=error)
+    if plan is None:
+        return base_payload
+
+    quote_rate = conversion.get("quote_to_common_rate")
+    quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
+    next_slice = plan.next_slice
+    risk_orders = [
+        RiskOrder(
+            strategy="execution_algo",
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            side=next_slice.side,
+            amount=next_slice.amount,
+            price=next_slice.price * quote_rate_for_risk,
+            quote_notional=next_slice.quote_notional * quote_rate_for_risk,
+        )
+    ] if next_slice is not None else []
+    risk = evaluate_order_batch(
+        cfg.risk,
+        risk_orders,
+        strategy="execution_algo",
+        live=True,
+        existing_spread_bps=(plan.best_ask - plan.best_bid) / plan.mid_price * 10_000,
+        plan_observed_at=plan.observed_at,
+        market=_converted_market_context(
+            exchange=plan.exchange,
+            symbol=plan.symbol,
+            best_bid=plan.best_bid,
+            best_ask=plan.best_ask,
+            mid_price=plan.mid_price,
+            bid_depth_quote=plan.bid_depth_quote,
+            ask_depth_quote=plan.ask_depth_quote,
+            max_level_gap_bps=plan.max_level_gap_bps,
+            order_book_timestamp_ms=plan.order_book_timestamp_ms,
+            order_book_received_at=plan.order_book_received_at,
+            quote_rate_for_risk=quote_rate_for_risk,
+        ),
+        current_positions_base=portfolio_positions_base(cfg.portfolio),
+        daily_pnl_quote=current_daily_pnl_quote(cfg),
+        existing_open_order_count=0,
+        post_only=plan.price_mode == "maker",
+    )
+    risk_payload = risk.to_dict()
+    reasons = list(risk_payload.get("reasons", []))
+    warnings = list(risk_payload.get("warnings", []))
+    if quote_rate is None:
+        reasons.append(
+            f"missing quote rate for {conversion.get('quote_currency') or '?'} -> "
+            f"{cfg.common_quote_currency}"
+        )
+    if plan.status not in {"ready", "waiting_for_start"}:
+        reasons.append(plan.reason)
+    if plan.max_slippage_bps > cfg.risk.max_slippage_bps:
+        warnings.append(
+            f"execution max_slippage_bps {plan.max_slippage_bps:.4f} exceeds "
+            f"risk.max_slippage_bps {cfg.risk.max_slippage_bps:.4f}"
+        )
+    approved = len(reasons) == 0
+    quote_values = [
+        item.quote_notional * quote_rate_for_risk for item in plan.schedule
+    ]
+    return {
+        **base_payload,
+        "approved": approved,
+        "level": "ok" if approved else "blocked",
+        "order_count": len(risk_orders),
+        "buy_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "buy"),
+        "sell_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "sell"),
+        "total_quote_notional": sum(quote_values),
+        "max_order_quote_notional": max(quote_values) if quote_values else 0.0,
+        "min_order_quote_notional": min(quote_values) if quote_values else 0.0,
+        "reasons": _dedupe_readiness_messages(reasons),
+        "warnings": warnings,
+        "risk": {
+            **risk_payload,
+            "approved": approved,
+            "level": "ok" if approved else "blocked",
+            "reasons": _dedupe_readiness_messages(reasons),
+            "warnings": warnings,
+            "currency": cfg.common_quote_currency,
+            "quote_conversion": conversion,
+        },
+        "market": {
+            "bid_depth_quote": plan.bid_depth_quote * quote_rate_for_risk,
+            "ask_depth_quote": plan.ask_depth_quote * quote_rate_for_risk,
+            "max_level_gap_bps": plan.max_level_gap_bps,
+            "order_book_timestamp_ms": plan.order_book_timestamp_ms,
+            "order_book_received_at": plan.order_book_received_at,
+        },
+    }
+
+
 def build_spot_grid_payload(
     cfg: BotConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
@@ -3239,6 +3438,136 @@ def build_dca_payload(
         "accounts": accounts,
         "quote_conversion": conversion,
         "safety": build_dca_safety_payload(cfg, plan, conversion),
+        "error": None,
+    }
+
+
+def build_execution_algo_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    exec_cfg = cfg.execution_algo
+    config_payload = execution_algo_config_to_dict(exec_cfg)
+    accounts = slow_execution_accounts(
+        cfg.spot_exchanges,
+        _execution_symbols_by_exchange(cfg),
+    )
+    conversion = _strategy_quote_conversion(cfg, exec_cfg.symbol)
+    if not exec_cfg.enabled:
+        return {
+            "status": "disabled",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_execution_algo_safety_payload(cfg, None, conversion),
+            "error": None,
+        }
+
+    book = books.get((exec_cfg.exchange, exec_cfg.symbol))
+    if book is None:
+        error = f"Missing {exec_cfg.exchange} {exec_cfg.symbol}"
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_execution_algo_safety_payload(
+                cfg,
+                None,
+                conversion,
+                error=error,
+            ),
+            "error": error,
+        }
+
+    try:
+        plan = build_execution_algo_plan(book, exec_cfg)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "mode": "dry_run",
+            "plan": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "safety": build_execution_algo_safety_payload(
+                cfg,
+                None,
+                conversion,
+                error=str(exc),
+            ),
+            "error": str(exc),
+        }
+
+    return {
+        "status": plan.status,
+        "mode": "dry_run",
+        "plan": plan.to_dict(),
+        "config": config_payload,
+        "accounts": accounts,
+        "quote_conversion": conversion,
+        "safety": build_execution_algo_safety_payload(cfg, plan, conversion),
+        "error": None,
+    }
+
+
+def build_backtest_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    backtest_cfg = cfg.backtest
+    config_payload = backtest_config_to_dict(backtest_cfg)
+    accounts = slow_execution_accounts(
+        cfg.spot_exchanges,
+        _execution_symbols_by_exchange(cfg),
+    )
+    conversion = _strategy_quote_conversion(cfg, backtest_cfg.symbol)
+    if not backtest_cfg.enabled:
+        return {
+            "status": "disabled",
+            "mode": "research",
+            "result": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "error": None,
+        }
+
+    current_mid = None
+    book = books.get((backtest_cfg.exchange, backtest_cfg.symbol))
+    if book is not None and book.bids and book.asks:
+        current_mid = (book.bids[0].price + book.asks[0].price) / 2
+
+    try:
+        result = run_paper_backtest(
+            backtest_cfg,
+            spot_grid=cfg.spot_grid,
+            dca=cfg.dca,
+            execution_algo=cfg.execution_algo,
+            current_mid=current_mid,
+        )
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "mode": "research",
+            "result": None,
+            "config": config_payload,
+            "accounts": accounts,
+            "quote_conversion": conversion,
+            "error": str(exc),
+        }
+
+    return {
+        "status": result.status,
+        "mode": "research",
+        "result": result.to_dict(),
+        "config": config_payload,
+        "accounts": accounts,
+        "quote_conversion": conversion,
         "error": None,
     }
 
@@ -4095,6 +4424,108 @@ async def api_dca(request: web.Request) -> web.Response:
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
                 _grid_symbols_by_exchange(runtime_cfg),
+            ),
+            **update,
+        }
+    )
+
+
+async def api_execution_algo(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _execution_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+        )
+        overrides = _execution_algo_overrides_from_payload(
+            payload,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        current_config = await state.execution_algo_config(
+            runtime_cfg.execution_algo
+        )
+        target_symbol = str(overrides.get("symbol") or current_config.symbol)
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(target_symbol)
+        ])
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    update = await state.set_execution_algo_overrides(overrides, cfg=cfg)
+    current_config = await state.execution_algo_config(cfg.execution_algo)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="execution_algo_config",
+        target=f"{current_config.exchange} {current_config.symbol}".strip(),
+        detail="updated TWAP/VWAP/POV config",
+        payload=overrides,
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "config": execution_algo_config_to_dict(current_config),
+            "accounts": slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                _execution_symbols_by_exchange(runtime_cfg),
+            ),
+            **update,
+        }
+    )
+
+
+async def api_backtest(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        runtime_cfg = await state.runtime_config(cfg)
+        symbols_by_exchange = _execution_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+        )
+        overrides = _backtest_overrides_from_payload(
+            payload,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        current_config = await state.backtest_config(runtime_cfg.backtest)
+        target_symbol = str(overrides.get("symbol") or current_config.symbol)
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(target_symbol)
+        ])
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    update = await state.set_backtest_overrides(overrides, cfg=cfg)
+    current_config = await state.backtest_config(cfg.backtest)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="backtest_config",
+        target=f"{current_config.exchange} {current_config.symbol}".strip(),
+        detail="updated backtest config",
+        payload=overrides,
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "config": backtest_config_to_dict(current_config),
+            "accounts": slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                _execution_symbols_by_exchange(runtime_cfg),
             ),
             **update,
         }

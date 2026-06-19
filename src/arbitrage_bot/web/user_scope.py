@@ -28,6 +28,10 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
         assets.add(_base_asset_from_symbol(cfg.spot_grid.symbol))
     if cfg.dca.symbol:
         assets.add(_base_asset_from_symbol(cfg.dca.symbol))
+    if cfg.execution_algo.symbol:
+        assets.add(_base_asset_from_symbol(cfg.execution_algo.symbol))
+    if cfg.backtest.symbol:
+        assets.add(_base_asset_from_symbol(cfg.backtest.symbol))
     return sorted(asset for asset in assets if asset)
 
 
@@ -454,6 +458,8 @@ def _filter_state_payload_for_user(
     filter_strategy_section(payload.get("slow_execution"))
     filter_strategy_section(payload.get("spot_grid"))
     filter_strategy_section(payload.get("dca"))
+    filter_strategy_section(payload.get("execution_algo"))
+    filter_strategy_section(payload.get("backtest"))
     filter_order_activity(payload.get("order_activity"))
     filter_account_balances(payload.get("account_balances"))
     filter_trading_console(payload.get("trading_console"))

@@ -12,10 +12,12 @@ from aiohttp import web
 from arbitrage_bot.config import (
     AlertConfig,
     AssetPosition,
+    BacktestConfig,
     BotConfig,
     CashAndCarryPair,
     DcaConfig,
     ExchangeConfig,
+    ExecutionAlgoConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
     PortfolioConfig,
@@ -47,7 +49,9 @@ from arbitrage_bot.web import (
     _market_maker_order_sync_delta,
     _market_maker_overrides_from_payload,
     _cash_and_carry_pairs_from_payload,
+    _backtest_overrides_from_payload,
     _dca_overrides_from_payload,
+    _execution_algo_overrides_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
     _spot_grid_overrides_from_payload,
@@ -68,11 +72,13 @@ from arbitrage_bot.web import (
     build_market_maker_payload,
     build_market_maker_quality_payload,
     build_market_rows,
+    build_backtest_payload,
     build_dca_payload,
     build_operations_payload,
     build_readiness_payload,
     build_slow_execution_payload,
     build_spot_grid_payload,
+    build_execution_algo_payload,
     build_synced_portfolio_pnl,
     build_trading_console_payload,
     cancel_bulk_orders_payload,
@@ -101,6 +107,8 @@ def make_config(
     slow_execution: SlowExecutionConfig | None = None,
     spot_grid: SpotGridConfig | None = None,
     dca: DcaConfig | None = None,
+    execution_algo: ExecutionAlgoConfig | None = None,
+    backtest: BacktestConfig | None = None,
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
     spot_exchanges: list[ExchangeConfig] | None = None,
@@ -127,6 +135,8 @@ def make_config(
         slow_execution=slow_execution or SlowExecutionConfig(),
         spot_grid=spot_grid or SpotGridConfig(),
         dca=dca or DcaConfig(),
+        execution_algo=execution_algo or ExecutionAlgoConfig(),
+        backtest=backtest or BacktestConfig(),
         portfolio=portfolio or PortfolioConfig(),
         spot_symbols=[],
         spot_markets=spot_markets or [],
@@ -285,6 +295,20 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="dca-average-entry"', HTML)
         self.assertIn('id="dca-orders"', HTML)
 
+    def test_page_includes_execution_algo_and_backtest_controls(self) -> None:
+        self.assertIn("TWAP / VWAP / POV", HTML)
+        self.assertIn("/api/execution-algo", HTML)
+        self.assertIn('id="exec-form"', HTML)
+        self.assertIn('id="exec-algo"', HTML)
+        self.assertIn('id="exec-total-quote"', HTML)
+        self.assertIn('id="exec-schedule"', HTML)
+        self.assertIn("Backtest / Paper", HTML)
+        self.assertIn("/api/backtest", HTML)
+        self.assertIn('id="backtest-form"', HTML)
+        self.assertIn('id="backtest-strategy"', HTML)
+        self.assertIn('id="backtest-return"', HTML)
+        self.assertIn('id="backtest-points"', HTML)
+
     def test_page_includes_risk_controls(self) -> None:
         self.assertIn("Risk Controls", HTML)
         self.assertIn("/api/risk", HTML)
@@ -432,6 +456,17 @@ class WebMonitorTest(unittest.TestCase):
                 exchange="coinbase-spot",
                 symbol="ACS/USDC",
             ),
+            execution_algo=ExecutionAlgoConfig(
+                enabled=True,
+                live_enabled=True,
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+            ),
+            backtest=BacktestConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
             spot_exchanges=[
                 ExchangeConfig(id="bybit", label="bybit-spot"),
                 ExchangeConfig(id="coinbase", label="coinbase-spot"),
@@ -440,7 +475,12 @@ class WebMonitorTest(unittest.TestCase):
                 allow_live_trading=True,
                 allow_market_maker=True,
                 allow_slow_execution=True,
-                strategy_enabled={"spot_grid": True, "dca": True},
+                strategy_enabled={
+                    "spot_grid": True,
+                    "dca": True,
+                    "execution_algo": True,
+                    "backtest": True,
+                },
             ),
         )
 
@@ -465,6 +505,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(strategies["spot_grid"]["live"])
         self.assertFalse(strategies["dca"]["live"])
         self.assertFalse(strategies["dca"]["live_ready"])
+        self.assertTrue(strategies["execution_algo"]["live"])
+        self.assertFalse(strategies["backtest"]["live"])
+        self.assertEqual(strategies["backtest"]["mode"], "research")
         self.assertEqual(accounts["coinbase-spot"]["open_order_count"], 2)
         self.assertEqual(payload["recent_trade_count"], 5)
 
@@ -956,6 +999,7 @@ class WebMonitorTest(unittest.TestCase):
             ),
             risk=RiskConfig(
                 allow_live_trading=True,
+                require_post_only=False,
                 max_order_quote=10.0,
                 max_cycle_quote=25.0,
                 max_open_orders=10,
@@ -995,6 +1039,7 @@ class WebMonitorTest(unittest.TestCase):
             ),
             risk=RiskConfig(
                 allow_live_trading=True,
+                require_post_only=False,
                 max_order_quote=10.0,
                 max_cycle_quote=25.0,
                 max_open_orders=10,
@@ -1018,6 +1063,74 @@ class WebMonitorTest(unittest.TestCase):
             [5.0, 10.0, 20.0],
         )
         self.assertTrue(payload["safety"]["approved"])
+
+    def test_build_execution_algo_payload_returns_plan_and_safety(self) -> None:
+        cfg = make_config(
+            execution_algo=ExecutionAlgoConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                side="buy",
+                algo="twap",
+                total_quote=12.0,
+                slice_count=3,
+                duration_seconds=900.0,
+                interval_seconds=300.0,
+                price_mode="taker",
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                require_post_only=False,
+                max_order_quote=10.0,
+                max_cycle_quote=25.0,
+                max_open_orders=10,
+            ),
+        )
+        books = {
+            ("bybit-spot", "ACS/USD"): OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                bids=[BookLevel(price=99.0, amount=100_000)],
+                asks=[BookLevel(price=101.0, amount=100_000)],
+            )
+        }
+
+        payload = build_execution_algo_payload(cfg, books)
+
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["plan"]["algo"], "twap")
+        self.assertEqual(len(payload["plan"]["schedule"]), 3)
+        self.assertEqual(payload["plan"]["next_slice"]["quote_notional"], 4.0)
+        self.assertTrue(payload["safety"]["approved"])
+
+    def test_build_backtest_payload_returns_result(self) -> None:
+        cfg = make_config(
+            spot_grid=SpotGridConfig(
+                enabled=True,
+                symbol="ACS/USD",
+                lower_price=90.0,
+                upper_price=110.0,
+                grid_count=4,
+                quote_per_grid=5.0,
+            ),
+            backtest=BacktestConfig(
+                enabled=True,
+                strategy="spot_grid",
+                exchange="bybit-spot",
+                symbol="ACS/USD",
+                initial_cash=100.0,
+                price_start=90.0,
+                price_end=110.0,
+                step_count=20,
+            ),
+        )
+
+        payload = build_backtest_payload(cfg, {})
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["mode"], "research")
+        self.assertEqual(payload["result"]["strategy"], "spot_grid")
+        self.assertIn("max_drawdown_pct", payload["result"])
 
     def test_slow_execution_update_payload_is_sanitized(self) -> None:
         overrides = _slow_execution_overrides_from_payload(
@@ -1154,11 +1267,78 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["price_mode"], "maker")
         self.assertEqual(overrides["price_offset_bps"], 2.0)
 
+    def test_execution_algo_update_payload_is_sanitized(self) -> None:
+        overrides = _execution_algo_overrides_from_payload(
+            {
+                "enabled": True,
+                "live_enabled": False,
+                "exchange": "bybit-spot",
+                "side": "buy",
+                "algo": "pov",
+                "total_quote": "25",
+                "total_base": "0",
+                "duration_seconds": "600",
+                "slice_count": "5",
+                "interval_seconds": "120",
+                "participation_rate": "0.05",
+                "volume_lookback_seconds": "300",
+                "min_slice_quote": "1",
+                "max_slice_quote": "10",
+                "price_mode": "taker",
+                "price_offset_bps": "1",
+                "start_price": "0.1",
+                "stop_price": "0.2",
+                "max_slippage_bps": "20",
+            },
+            allowed_exchanges={"bybit-spot"},
+            symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
+        )
+
+        self.assertTrue(overrides["enabled"])
+        self.assertEqual(overrides["exchange"], "bybit-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDT")
+        self.assertEqual(overrides["algo"], "pov")
+        self.assertEqual(overrides["slice_count"], 5)
+        self.assertEqual(overrides["participation_rate"], 0.05)
+        self.assertEqual(overrides["max_slippage_bps"], 20.0)
+
+    def test_backtest_update_payload_is_sanitized(self) -> None:
+        overrides = _backtest_overrides_from_payload(
+            {
+                "enabled": True,
+                "exchange": "bybit-spot",
+                "strategy": "execution_algo",
+                "initial_cash": "100",
+                "initial_base": "5",
+                "fee_bps": "10",
+                "slippage_bps": "2",
+                "price_start": "0.1",
+                "price_end": "0.2",
+                "step_count": "50",
+                "volatility_bps": "100",
+                "trend_bps": "-50",
+                "max_recent_points": "25",
+            },
+            allowed_exchanges={"bybit-spot"},
+            symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
+        )
+
+        self.assertTrue(overrides["enabled"])
+        self.assertEqual(overrides["exchange"], "bybit-spot")
+        self.assertEqual(overrides["symbol"], "ACS/USDT")
+        self.assertEqual(overrides["strategy"], "execution_algo")
+        self.assertEqual(overrides["step_count"], 50)
+        self.assertEqual(overrides["trend_bps"], -50.0)
+
     def test_grid_and_dca_update_payloads_reject_bad_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "spacing"):
             _spot_grid_overrides_from_payload({"spacing": "random"})
         with self.assertRaisesRegex(ValueError, "size_multiplier"):
             _dca_overrides_from_payload({"size_multiplier": "0.5"})
+        with self.assertRaisesRegex(ValueError, "participation_rate"):
+            _execution_algo_overrides_from_payload({"participation_rate": "1.5"})
+        with self.assertRaisesRegex(ValueError, "strategy"):
+            _backtest_overrides_from_payload({"strategy": "unknown"})
 
     def test_market_maker_update_payload_is_sanitized(self) -> None:
         overrides = _market_maker_overrides_from_payload(
@@ -3172,6 +3352,26 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 },
                 cfg=cfg,
             )
+            await state.set_execution_algo_overrides(
+                {
+                    "enabled": True,
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "algo": "vwap",
+                    "total_quote": 25.0,
+                },
+                cfg=cfg,
+            )
+            await state.set_backtest_overrides(
+                {
+                    "enabled": True,
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "strategy": "execution_algo",
+                    "step_count": 50,
+                },
+                cfg=cfg,
+            )
 
             restored = MonitorState(cfg, 1.0, runtime_store_path=store_path)
             runtime_cfg = await restored.runtime_config(cfg)
@@ -3181,8 +3381,14 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_cfg.spot_grid.grid_count, 12)
         self.assertTrue(runtime_cfg.dca.enabled)
         self.assertEqual(runtime_cfg.dca.max_orders, 6)
+        self.assertTrue(runtime_cfg.execution_algo.enabled)
+        self.assertEqual(runtime_cfg.execution_algo.algo, "vwap")
+        self.assertTrue(runtime_cfg.backtest.enabled)
+        self.assertEqual(runtime_cfg.backtest.strategy, "execution_algo")
         self.assertEqual(payload["spot_grid"]["config"]["symbol"], "ACS/USDT")
         self.assertEqual(payload["dca"]["config"]["quote_per_order"], 2.0)
+        self.assertEqual(payload["execution_algo"]["config"]["total_quote"], 25.0)
+        self.assertEqual(payload["backtest"]["config"]["step_count"], 50)
 
     async def test_cash_and_carry_update_changes_runtime_pairs(self) -> None:
         cfg = make_config(

@@ -161,6 +161,51 @@ class DcaConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionAlgoConfig:
+    enabled: bool = False
+    live_enabled: bool = False
+    exchange: str = ""
+    symbol: str = ""
+    side: str = "buy"
+    algo: str = "twap"
+    total_base: float = 0.0
+    total_quote: float = 0.0
+    duration_seconds: float = 3600.0
+    slice_count: int = 12
+    interval_seconds: float = 300.0
+    participation_rate: float = 0.05
+    volume_lookback_seconds: float = 300.0
+    min_slice_quote: float = 0.0
+    max_slice_quote: float = 0.0
+    price_mode: str = "taker"
+    price_offset_bps: float = 0.0
+    start_price: float = 0.0
+    stop_price: float = 0.0
+    max_slippage_bps: float = 50.0
+    client_order_prefix: str = "crypto-arb-exec"
+
+
+@dataclass(frozen=True)
+class BacktestConfig:
+    enabled: bool = False
+    strategy: str = "spot_grid"
+    exchange: str = ""
+    symbol: str = ""
+    initial_cash: float = 1000.0
+    initial_base: float = 0.0
+    fee_bps: float = 10.0
+    slippage_bps: float = 5.0
+    price_start: float = 0.0
+    price_end: float = 0.0
+    step_count: int = 200
+    volatility_bps: float = 50.0
+    trend_bps: float = 0.0
+    max_recent_points: int = 80
+    data_source: str = "synthetic"
+    history_path: str = ""
+
+
+@dataclass(frozen=True)
 class AssetPosition:
     asset: str
     position_base: float = 0.0
@@ -289,6 +334,8 @@ class BotConfig:
     derivative_exchanges: list[ExchangeConfig]
     spot_grid: SpotGridConfig = field(default_factory=SpotGridConfig)
     dca: DcaConfig = field(default_factory=DcaConfig)
+    execution_algo: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
+    backtest: BacktestConfig = field(default_factory=BacktestConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
     strategy_timeline: StrategyTimelineConfig = field(
@@ -402,6 +449,8 @@ def load_config(path: str | Path) -> BotConfig:
     slow_execution_raw = raw.get("slow_execution", {})
     spot_grid_raw = raw.get("spot_grid", {})
     dca_raw = raw.get("dca", {})
+    execution_algo_raw = raw.get("execution_algo", {})
+    backtest_raw = raw.get("backtest", {})
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
     trade_log_raw = raw.get("trade_log", {})
@@ -575,6 +624,66 @@ def load_config(path: str | Path) -> BotConfig:
                 "client_order_prefix",
                 "crypto-arb-dca",
             ),
+        ),
+        execution_algo=ExecutionAlgoConfig(
+            enabled=bool(execution_algo_raw.get("enabled", False)),
+            live_enabled=bool(execution_algo_raw.get("live_enabled", False)),
+            exchange=execution_algo_raw.get("exchange", ""),
+            symbol=execution_algo_raw.get("symbol", ""),
+            side=str(execution_algo_raw.get("side", "buy")).lower(),
+            algo=str(execution_algo_raw.get("algo", "twap")).lower(),
+            total_base=float(execution_algo_raw.get("total_base", 0.0)),
+            total_quote=float(execution_algo_raw.get("total_quote", 0.0)),
+            duration_seconds=float(
+                execution_algo_raw.get("duration_seconds", 3600.0)
+            ),
+            slice_count=int(execution_algo_raw.get("slice_count", 12)),
+            interval_seconds=float(
+                execution_algo_raw.get("interval_seconds", 300.0)
+            ),
+            participation_rate=float(
+                execution_algo_raw.get("participation_rate", 0.05)
+            ),
+            volume_lookback_seconds=float(
+                execution_algo_raw.get("volume_lookback_seconds", 300.0)
+            ),
+            min_slice_quote=float(
+                execution_algo_raw.get("min_slice_quote", 0.0)
+            ),
+            max_slice_quote=float(
+                execution_algo_raw.get("max_slice_quote", 0.0)
+            ),
+            price_mode=str(execution_algo_raw.get("price_mode", "taker")).lower(),
+            price_offset_bps=float(
+                execution_algo_raw.get("price_offset_bps", 0.0)
+            ),
+            start_price=float(execution_algo_raw.get("start_price", 0.0)),
+            stop_price=float(execution_algo_raw.get("stop_price", 0.0)),
+            max_slippage_bps=float(
+                execution_algo_raw.get("max_slippage_bps", 50.0)
+            ),
+            client_order_prefix=execution_algo_raw.get(
+                "client_order_prefix",
+                "crypto-arb-exec",
+            ),
+        ),
+        backtest=BacktestConfig(
+            enabled=bool(backtest_raw.get("enabled", False)),
+            strategy=str(backtest_raw.get("strategy", "spot_grid")).lower(),
+            exchange=backtest_raw.get("exchange", ""),
+            symbol=backtest_raw.get("symbol", ""),
+            initial_cash=float(backtest_raw.get("initial_cash", 1000.0)),
+            initial_base=float(backtest_raw.get("initial_base", 0.0)),
+            fee_bps=float(backtest_raw.get("fee_bps", 10.0)),
+            slippage_bps=float(backtest_raw.get("slippage_bps", 5.0)),
+            price_start=float(backtest_raw.get("price_start", 0.0)),
+            price_end=float(backtest_raw.get("price_end", 0.0)),
+            step_count=int(backtest_raw.get("step_count", 200)),
+            volatility_bps=float(backtest_raw.get("volatility_bps", 50.0)),
+            trend_bps=float(backtest_raw.get("trend_bps", 0.0)),
+            max_recent_points=int(backtest_raw.get("max_recent_points", 80)),
+            data_source=str(backtest_raw.get("data_source", "synthetic")).lower(),
+            history_path=backtest_raw.get("history_path", ""),
         ),
         portfolio=PortfolioConfig(
             enabled=bool(portfolio_raw.get("enabled", False)),

@@ -296,6 +296,27 @@ def state_payload_for_view(
             payload.get("dca", {}),
             full=is_settings,
         ),
+        "execution_algo": _compact_strategy_plan_payload(
+            payload.get("execution_algo", {}),
+            full=is_settings,
+        ),
+        "backtest": _copy_payload_keys(
+            payload.get("backtest", {}),
+            (
+                "status",
+                "mode",
+                "result",
+                "config",
+                "accounts",
+                "quote_conversion",
+                "error",
+            ),
+        )
+        if is_settings
+        else _copy_payload_keys(
+            payload.get("backtest", {}),
+            ("status", "mode", "result", "error"),
+        ),
         "spot_arbitrage": payload.get("spot_arbitrage", {}),
         "operations": _compact_operations_payload(
             payload.get("operations", {}),

@@ -13,7 +13,9 @@ def register_routes(app: web.Application) -> None:
         api_control,
         api_control_auto_buy_sell_task,
         api_create_auto_buy_sell_task,
+        api_backtest,
         api_dca,
+        api_execution_algo,
         api_health,
         api_market_maker,
         api_markets,
@@ -47,6 +49,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/market-maker", api_market_maker)
     app.router.add_post("/api/spot-grid", api_spot_grid)
     app.router.add_post("/api/dca", api_dca)
+    app.router.add_post("/api/execution-algo", api_execution_algo)
+    app.router.add_post("/api/backtest", api_backtest)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_post("/api/auto-buy-sell/tasks", api_create_auto_buy_sell_task)

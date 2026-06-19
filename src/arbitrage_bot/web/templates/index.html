@@ -967,6 +967,206 @@
 
     <section data-page="settings" class="compact-section">
       <div class="section-title">
+        <h2>TWAP / VWAP / POV</h2>
+        <span id="exec-meta" class="subtle"></span>
+      </div>
+      <form id="exec-form" class="control-panel">
+        <label class="check-field">
+          <input id="exec-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="exec-live-enabled" type="checkbox">
+          Live Ready
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="exec-accounts" class="account-options"></div>
+        </div>
+        <div class="field">
+          <label for="exec-side">Side</label>
+          <select id="exec-side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="exec-algo">Algo</label>
+          <select id="exec-algo">
+            <option value="twap">TWAP</option>
+            <option value="vwap">VWAP</option>
+            <option value="pov">POV</option>
+          </select>
+        </div>
+        <div class="form-divider">Target</div>
+        <div class="field">
+          <label for="exec-total-quote">Total Quote</label>
+          <input id="exec-total-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-total-base">Total Base</label>
+          <input id="exec-total-base" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-duration">Duration Sec</label>
+          <input id="exec-duration" type="number" min="1" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-slices">Slices</label>
+          <input id="exec-slices" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="exec-interval">Interval Sec</label>
+          <input id="exec-interval" type="number" min="1" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-participation">POV Rate</label>
+          <input id="exec-participation" type="number" min="0" max="1" step="any">
+        </div>
+        <div class="form-divider">Limits</div>
+        <div class="field">
+          <label for="exec-min-slice">Min Slice Quote</label>
+          <input id="exec-min-slice" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-max-slice">Max Slice Quote</label>
+          <input id="exec-max-slice" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-start-price">Start Price</label>
+          <input id="exec-start-price" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-stop-price">Stop Price</label>
+          <input id="exec-stop-price" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="exec-max-slippage">Max Slippage bps</label>
+          <input id="exec-max-slippage" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Pricing</div>
+        <div class="field">
+          <label for="exec-price-mode">Price Mode</label>
+          <select id="exec-price-mode">
+            <option value="taker">Taker Top</option>
+            <option value="maker">Maker Top</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="exec-offset-bps">Offset bps</label>
+          <input id="exec-offset-bps" type="number" min="0" step="any">
+        </div>
+        <button id="exec-apply" class="control-button" type="submit">Apply</button>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Slice</th>
+              <th>Side</th>
+              <th class="num">When</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Quote</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="exec-schedule"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Backtest / Paper</h2>
+        <span id="backtest-meta" class="subtle"></span>
+      </div>
+      <form id="backtest-form" class="control-panel">
+        <label class="check-field">
+          <input id="backtest-enabled" type="checkbox">
+          Enabled
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="backtest-accounts" class="account-options"></div>
+        </div>
+        <div class="field">
+          <label for="backtest-strategy">Strategy</label>
+          <select id="backtest-strategy">
+            <option value="spot_grid">Spot Grid</option>
+            <option value="dca">DCA Bot</option>
+            <option value="execution_algo">TWAP/VWAP/POV</option>
+          </select>
+        </div>
+        <div class="form-divider">Portfolio</div>
+        <div class="field">
+          <label for="backtest-cash">Initial Cash</label>
+          <input id="backtest-cash" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-base">Initial Base</label>
+          <input id="backtest-base" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-fee">Fee bps</label>
+          <input id="backtest-fee" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-slippage">Slippage bps</label>
+          <input id="backtest-slippage" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Synthetic Path</div>
+        <div class="field">
+          <label for="backtest-price-start">Start Price</label>
+          <input id="backtest-price-start" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-price-end">End Price</label>
+          <input id="backtest-price-end" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-steps">Steps</label>
+          <input id="backtest-steps" type="number" min="2" step="1">
+        </div>
+        <div class="field">
+          <label for="backtest-volatility">Volatility bps</label>
+          <input id="backtest-volatility" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-trend">Trend bps</label>
+          <input id="backtest-trend" type="number" step="any">
+        </div>
+        <div class="field">
+          <label for="backtest-max-points">Max Points</label>
+          <input id="backtest-max-points" type="number" min="1" step="1">
+        </div>
+        <button id="backtest-apply" class="control-button" type="submit">Apply</button>
+      </form>
+      <div class="mini-grid">
+        <div class="mini-card"><span>Return</span><strong id="backtest-return">--</strong></div>
+        <div class="mini-card"><span>Max DD</span><strong id="backtest-drawdown">--</strong></div>
+        <div class="mini-card"><span>Fees</span><strong id="backtest-fees">--</strong></div>
+        <div class="mini-card"><span>Fill Rate</span><strong id="backtest-fill-rate">--</strong></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Step</th>
+              <th class="num">Price</th>
+              <th class="num">Equity</th>
+              <th class="num">Drawdown</th>
+              <th class="num">Base</th>
+              <th class="num">Cash</th>
+            </tr>
+          </thead>
+          <tbody id="backtest-points"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
         <h2>Market Maker</h2>
         <span id="mm-meta" class="subtle"></span>
       </div>

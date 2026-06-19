@@ -6,9 +6,11 @@ from typing import Any
 
 from .config import (
     BotConfig,
+    BacktestConfig,
     CashAndCarryPair,
     DcaConfig,
     ExchangeConfig,
+    ExecutionAlgoConfig,
     MarketMakerConfig,
     RiskConfig,
     SlowExecutionConfig,
@@ -22,6 +24,14 @@ def spot_grid_config_to_dict(cfg: SpotGridConfig) -> dict[str, Any]:
 
 
 def dca_config_to_dict(cfg: DcaConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def execution_algo_config_to_dict(cfg: ExecutionAlgoConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def backtest_config_to_dict(cfg: BacktestConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
@@ -67,6 +77,17 @@ def _grid_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
         for exchange, items in _spot_symbols_by_exchange(cfg).items()
     }
     for strategy_cfg in (cfg.spot_grid, cfg.dca):
+        if strategy_cfg.exchange and strategy_cfg.symbol:
+            symbols.setdefault(strategy_cfg.exchange, set()).add(strategy_cfg.symbol)
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _execution_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {
+        exchange: set(items)
+        for exchange, items in _spot_symbols_by_exchange(cfg).items()
+    }
+    for strategy_cfg in (cfg.execution_algo, cfg.backtest):
         if strategy_cfg.exchange and strategy_cfg.symbol:
             symbols.setdefault(strategy_cfg.exchange, set()).add(strategy_cfg.symbol)
     return {exchange: sorted(items) for exchange, items in symbols.items()}
@@ -420,6 +441,149 @@ def _dca_overrides_from_payload(
     for field in non_negative_float_fields:
         if field in payload:
             overrides[field] = _non_negative_float(payload, field)
+
+    return overrides
+
+
+def _execution_algo_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    overrides = _account_symbol_overrides_from_payload(
+        payload,
+        allowed_exchanges=allowed_exchanges,
+        symbols_by_exchange=symbols_by_exchange,
+    )
+
+    for field in {"enabled", "live_enabled"}:
+        if field in payload:
+            if not isinstance(payload[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+            overrides[field] = payload[field]
+
+    if "side" in payload:
+        side = str(payload["side"]).strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        overrides["side"] = side
+
+    if "algo" in payload:
+        algo = str(payload["algo"]).strip().lower()
+        if algo not in {"twap", "vwap", "pov"}:
+            raise ValueError("algo must be twap, vwap, or pov")
+        overrides["algo"] = algo
+
+    if "price_mode" in payload:
+        price_mode = str(payload["price_mode"]).strip().lower()
+        if price_mode not in {"taker", "maker"}:
+            raise ValueError("price_mode must be taker or maker")
+        overrides["price_mode"] = price_mode
+
+    if "slice_count" in payload:
+        overrides["slice_count"] = _non_negative_int(payload, "slice_count")
+        if overrides["slice_count"] <= 0:
+            raise ValueError("slice_count must be positive")
+
+    positive_float_fields = {
+        "duration_seconds",
+        "interval_seconds",
+        "volume_lookback_seconds",
+    }
+    for field in positive_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+            if overrides[field] <= 0:
+                raise ValueError(f"{field} must be positive")
+
+    non_negative_float_fields = {
+        "total_base",
+        "total_quote",
+        "participation_rate",
+        "min_slice_quote",
+        "max_slice_quote",
+        "price_offset_bps",
+        "start_price",
+        "stop_price",
+        "max_slippage_bps",
+    }
+    for field in non_negative_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    if "participation_rate" in overrides and overrides["participation_rate"] > 1:
+        raise ValueError("participation_rate must be between 0 and 1")
+    min_slice = overrides.get("min_slice_quote")
+    max_slice = overrides.get("max_slice_quote")
+    if min_slice is not None and max_slice is not None and max_slice > 0:
+        if min_slice > max_slice:
+            raise ValueError("min_slice_quote must be less than or equal to max_slice_quote")
+
+    return overrides
+
+
+def _backtest_overrides_from_payload(
+    payload: dict[str, Any],
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    overrides = _account_symbol_overrides_from_payload(
+        payload,
+        allowed_exchanges=allowed_exchanges,
+        symbols_by_exchange=symbols_by_exchange,
+    )
+
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            raise ValueError("enabled must be a boolean")
+        overrides["enabled"] = payload["enabled"]
+
+    if "strategy" in payload:
+        strategy = str(payload["strategy"]).strip().lower()
+        if strategy not in {"spot_grid", "dca", "execution_algo"}:
+            raise ValueError("strategy must be spot_grid, dca, or execution_algo")
+        overrides["strategy"] = strategy
+
+    if "data_source" in payload:
+        data_source = str(payload["data_source"]).strip().lower()
+        if data_source not in {"synthetic"}:
+            raise ValueError("data_source must be synthetic")
+        overrides["data_source"] = data_source
+
+    if "step_count" in payload:
+        overrides["step_count"] = _non_negative_int(payload, "step_count")
+        if overrides["step_count"] < 2:
+            raise ValueError("step_count must be at least 2")
+
+    if "max_recent_points" in payload:
+        overrides["max_recent_points"] = _non_negative_int(
+            payload,
+            "max_recent_points",
+        )
+        if overrides["max_recent_points"] <= 0:
+            raise ValueError("max_recent_points must be positive")
+
+    non_negative_float_fields = {
+        "initial_cash",
+        "initial_base",
+        "fee_bps",
+        "slippage_bps",
+        "price_start",
+        "price_end",
+        "volatility_bps",
+    }
+    for field in non_negative_float_fields:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+    if "trend_bps" in payload:
+        try:
+            overrides["trend_bps"] = float(payload["trend_bps"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("trend_bps must be a number") from exc
 
     return overrides
 

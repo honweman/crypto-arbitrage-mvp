@@ -44,9 +44,12 @@ from ..strategy_timeline import (
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..trade_log import write_trade_event
 from ..web_config import (
+    _execution_symbols_by_exchange,
     _grid_symbols_by_exchange,
     _spot_symbols_by_exchange,
+    backtest_config_to_dict,
     dca_config_to_dict,
+    execution_algo_config_to_dict,
     market_maker_config_to_dict,
     slow_execution_accounts,
     slow_execution_config_to_dict,
@@ -67,7 +70,9 @@ from . import (
     _risk_strategy_enabled,
     build_market_maker_payload,
     build_market_rows,
+    build_backtest_payload,
     build_dca_payload,
+    build_execution_algo_payload,
     build_slow_execution_payload,
     build_spot_grid_payload,
     build_trading_console_payload,
@@ -180,6 +185,10 @@ async def monitor_loop(
     ]
     spot_grid_payload = _build_initial_payload(cfg, poll_seconds)["spot_grid"]
     dca_payload = _build_initial_payload(cfg, poll_seconds)["dca"]
+    execution_algo_payload = _build_initial_payload(cfg, poll_seconds)[
+        "execution_algo"
+    ]
+    backtest_payload = _build_initial_payload(cfg, poll_seconds)["backtest"]
     spot_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
         "spot_arbitrage"
     ]
@@ -334,6 +343,16 @@ async def monitor_loop(
                         and runtime_cfg.dca.symbol
                     )
                     or (
+                        runtime_cfg.execution_algo.enabled
+                        and runtime_cfg.execution_algo.exchange
+                        and runtime_cfg.execution_algo.symbol
+                    )
+                    or (
+                        runtime_cfg.backtest.enabled
+                        and runtime_cfg.backtest.exchange
+                        and runtime_cfg.backtest.symbol
+                    )
+                    or (
                         runtime_cfg.market_maker.enabled
                         and runtime_cfg.market_maker.exchange
                         and runtime_cfg.market_maker.symbol
@@ -370,6 +389,24 @@ async def monitor_loop(
                             runtime_cfg.dca.exchange,
                             set(),
                         ).add(runtime_cfg.dca.symbol)
+                    if (
+                        runtime_cfg.execution_algo.enabled
+                        and runtime_cfg.execution_algo.exchange
+                        and runtime_cfg.execution_algo.symbol
+                    ):
+                        symbols_by_exchange.setdefault(
+                            runtime_cfg.execution_algo.exchange,
+                            set(),
+                        ).add(runtime_cfg.execution_algo.symbol)
+                    if (
+                        runtime_cfg.backtest.enabled
+                        and runtime_cfg.backtest.exchange
+                        and runtime_cfg.backtest.symbol
+                    ):
+                        symbols_by_exchange.setdefault(
+                            runtime_cfg.backtest.exchange,
+                            set(),
+                        ).add(runtime_cfg.backtest.symbol)
                     spot_exchange_keys = {
                         exchange.key for exchange in runtime_cfg.spot_exchanges
                     }
@@ -494,6 +531,39 @@ async def monitor_loop(
                             runtime_cfg,
                             books,
                         )
+                    if strategy_pauses.get("execution_algo", False):
+                        execution_algo_payload = {
+                            "status": "paused",
+                            "mode": "paused",
+                            "plan": None,
+                            "config": execution_algo_config_to_dict(
+                                runtime_cfg.execution_algo
+                            ),
+                            "accounts": slow_execution_accounts(
+                                runtime_cfg.spot_exchanges,
+                                _execution_symbols_by_exchange(runtime_cfg),
+                            ),
+                            "error": None,
+                        }
+                    else:
+                        execution_algo_payload = build_execution_algo_payload(
+                            runtime_cfg,
+                            books,
+                        )
+                    if strategy_pauses.get("backtest", False):
+                        backtest_payload = {
+                            "status": "paused",
+                            "mode": "paused",
+                            "result": None,
+                            "config": backtest_config_to_dict(runtime_cfg.backtest),
+                            "accounts": slow_execution_accounts(
+                                runtime_cfg.spot_exchanges,
+                                _execution_symbols_by_exchange(runtime_cfg),
+                            ),
+                            "error": None,
+                        }
+                    else:
+                        backtest_payload = build_backtest_payload(runtime_cfg, books)
                     if strategy_pauses.get("slow_execution", False):
                         slow_execution_payload = {
                             "status": "paused",
@@ -632,6 +702,30 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _grid_symbols_by_exchange(runtime_cfg),
+                        ),
+                        "error": None,
+                    }
+                    execution_algo_payload = {
+                        "status": "disabled",
+                        "mode": "dry_run",
+                        "plan": None,
+                        "config": execution_algo_config_to_dict(
+                            runtime_cfg.execution_algo
+                        ),
+                        "accounts": slow_execution_accounts(
+                            runtime_cfg.spot_exchanges,
+                            _execution_symbols_by_exchange(runtime_cfg),
+                        ),
+                        "error": None,
+                    }
+                    backtest_payload = {
+                        "status": "disabled",
+                        "mode": "research",
+                        "result": None,
+                        "config": backtest_config_to_dict(runtime_cfg.backtest),
+                        "accounts": slow_execution_accounts(
+                            runtime_cfg.spot_exchanges,
+                            _execution_symbols_by_exchange(runtime_cfg),
                         ),
                         "error": None,
                     }
@@ -862,6 +956,16 @@ async def monitor_loop(
                         *warnings,
                         f"DCA Bot: {dca_payload.get('error')}",
                     ]
+                if execution_algo_payload.get("status") == "error":
+                    warnings = [
+                        *warnings,
+                        f"TWAP/VWAP/POV: {execution_algo_payload.get('error')}",
+                    ]
+                if backtest_payload.get("status") == "error":
+                    warnings = [
+                        *warnings,
+                        f"Backtest: {backtest_payload.get('error')}",
+                    ]
                 if spot_arbitrage_payload.get("status") in {
                     "blocked_by_plan",
                     "blocked_by_risk",
@@ -938,6 +1042,8 @@ async def monitor_loop(
                     slow_execution=slow_execution_payload,
                     spot_grid=spot_grid_payload,
                     dca=dca_payload,
+                    execution_algo=execution_algo_payload,
+                    backtest=backtest_payload,
                     spot_arbitrage=spot_arbitrage_payload,
                     trading_console=trading_console_payload,
                     portfolio=portfolio_payload,

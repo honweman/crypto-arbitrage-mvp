@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Any
+
+from .config import BacktestConfig, DcaConfig, ExecutionAlgoConfig, SpotGridConfig
+
+
+@dataclass(frozen=True)
+class PaperTrade:
+    step: int
+    strategy: str
+    side: str
+    price: float
+    amount: float
+    quote_notional: float
+    fee_quote: float
+    slippage_quote: float
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "strategy": self.strategy,
+            "side": self.side,
+            "price": self.price,
+            "amount": self.amount,
+            "quote_notional": self.quote_notional,
+            "fee_quote": self.fee_quote,
+            "slippage_quote": self.slippage_quote,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class EquityPoint:
+    step: int
+    price: float
+    cash: float
+    base: float
+    equity: float
+    drawdown_pct: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "price": self.price,
+            "cash": self.cash,
+            "base": self.base,
+            "equity": self.equity,
+            "drawdown_pct": self.drawdown_pct,
+        }
+
+
+@dataclass(frozen=True)
+class BacktestResult:
+    status: str
+    strategy: str
+    symbol: str
+    quote_currency: str
+    initial_equity: float
+    final_equity: float
+    total_return_quote: float
+    return_pct: float
+    max_drawdown_pct: float
+    fee_quote: float
+    slippage_quote: float
+    filled_quote: float
+    filled_base: float
+    fill_rate: float
+    trade_count: int
+    points: list[EquityPoint] = field(default_factory=list)
+    trades: list[PaperTrade] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "strategy": self.strategy,
+            "symbol": self.symbol,
+            "quote_currency": self.quote_currency,
+            "initial_equity": self.initial_equity,
+            "final_equity": self.final_equity,
+            "total_return_quote": self.total_return_quote,
+            "return_pct": self.return_pct,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "fee_quote": self.fee_quote,
+            "slippage_quote": self.slippage_quote,
+            "filled_quote": self.filled_quote,
+            "filled_base": self.filled_base,
+            "fill_rate": self.fill_rate,
+            "trade_count": self.trade_count,
+            "points": [point.to_dict() for point in self.points],
+            "trades": [trade.to_dict() for trade in self.trades],
+            "warnings": self.warnings,
+        }
+
+
+def quote_currency(symbol: str) -> str:
+    return symbol.split("/", 1)[1].partition(":")[0].upper() if "/" in symbol else ""
+
+
+def synthetic_price_series(
+    cfg: BacktestConfig,
+    *,
+    current_mid: float | None = None,
+) -> list[float]:
+    step_count = max(2, int(cfg.step_count))
+    start = cfg.price_start or current_mid or 1.0
+    end = cfg.price_end or start * (1 + cfg.trend_bps / 10_000)
+    amplitude = max(0.0, cfg.volatility_bps) / 10_000
+    prices = []
+    for index in range(step_count):
+        progress = index / max(1, step_count - 1)
+        trend_price = start + (end - start) * progress
+        wave = math.sin(progress * math.tau * 3) * amplitude
+        price = max(1e-12, trend_price * (1 + wave))
+        prices.append(price)
+    return prices
+
+
+def _mark_equity(cash: float, base: float, price: float) -> float:
+    return cash + base * price
+
+
+def _append_point(
+    points: list[EquityPoint],
+    *,
+    step: int,
+    price: float,
+    cash: float,
+    base: float,
+    peak_equity: float,
+) -> float:
+    equity = _mark_equity(cash, base, price)
+    peak = max(peak_equity, equity)
+    drawdown_pct = 0.0 if peak <= 0 else max(0.0, (peak - equity) / peak * 100)
+    points.append(
+        EquityPoint(
+            step=step,
+            price=price,
+            cash=cash,
+            base=base,
+            equity=equity,
+            drawdown_pct=drawdown_pct,
+        )
+    )
+    return peak
+
+
+def _trade(
+    *,
+    step: int,
+    strategy: str,
+    side: str,
+    price: float,
+    quote_notional: float,
+    fee_bps: float,
+    slippage_bps: float,
+    cash: float,
+    base: float,
+    reason: str,
+) -> tuple[float, float, PaperTrade | None]:
+    if quote_notional <= 0 or price <= 0:
+        return cash, base, None
+    slip = slippage_bps / 10_000
+    fee_quote = quote_notional * fee_bps / 10_000
+    slippage_quote = quote_notional * abs(slip)
+    if side == "buy":
+        execution_price = price * (1 + slip)
+        cost = quote_notional + fee_quote + slippage_quote
+        if cost > cash:
+            quote_notional = max(0.0, cash / (1 + fee_bps / 10_000 + abs(slip)))
+            fee_quote = quote_notional * fee_bps / 10_000
+            slippage_quote = quote_notional * abs(slip)
+            cost = quote_notional + fee_quote + slippage_quote
+        if quote_notional <= 0:
+            return cash, base, None
+        amount = quote_notional / execution_price
+        return (
+            cash - cost,
+            base + amount,
+            PaperTrade(
+                step=step,
+                strategy=strategy,
+                side=side,
+                price=execution_price,
+                amount=amount,
+                quote_notional=quote_notional,
+                fee_quote=fee_quote,
+                slippage_quote=slippage_quote,
+                reason=reason,
+            ),
+        )
+    execution_price = price * (1 - slip)
+    amount = min(base, quote_notional / max(execution_price, 1e-12))
+    quote_notional = amount * execution_price
+    if amount <= 0 or quote_notional <= 0:
+        return cash, base, None
+    fee_quote = quote_notional * fee_bps / 10_000
+    slippage_quote = quote_notional * abs(slip)
+    return (
+        cash + quote_notional - fee_quote - slippage_quote,
+        base - amount,
+        PaperTrade(
+            step=step,
+            strategy=strategy,
+            side=side,
+            price=execution_price,
+            amount=amount,
+            quote_notional=quote_notional,
+            fee_quote=fee_quote,
+            slippage_quote=slippage_quote,
+            reason=reason,
+        ),
+    )
+
+
+def _run_grid(
+    prices: list[float],
+    cfg: BacktestConfig,
+    strategy_cfg: SpotGridConfig,
+) -> tuple[list[EquityPoint], list[PaperTrade], float, float]:
+    cash = cfg.initial_cash
+    base = cfg.initial_base
+    points: list[EquityPoint] = []
+    trades: list[PaperTrade] = []
+    peak = _mark_equity(cash, base, prices[0])
+    lower = strategy_cfg.lower_price or min(prices)
+    upper = strategy_cfg.upper_price or max(prices)
+    grid_count = max(1, strategy_cfg.grid_count)
+    if upper <= lower:
+        upper = lower * 1.05
+    step_size = (upper - lower) / grid_count
+    levels = [lower + step_size * index for index in range(grid_count + 1)]
+    last_price = prices[0]
+    total_target = strategy_cfg.quote_per_grid * len(levels)
+    for step, price in enumerate(prices):
+        for level in levels:
+            side = ""
+            if last_price > level >= price:
+                side = "buy"
+            elif last_price < level <= price:
+                side = "sell"
+            if not side:
+                continue
+            cash, base, trade = _trade(
+                step=step,
+                strategy="spot_grid",
+                side=side,
+                price=level,
+                quote_notional=strategy_cfg.quote_per_grid,
+                fee_bps=cfg.fee_bps,
+                slippage_bps=cfg.slippage_bps,
+                cash=cash,
+                base=base,
+                reason=f"grid level {level:.8f} crossed",
+            )
+            if trade is not None:
+                trades.append(trade)
+        peak = _append_point(
+            points,
+            step=step,
+            price=price,
+            cash=cash,
+            base=base,
+            peak_equity=peak,
+        )
+        last_price = price
+    return points, trades, cash, base
+
+
+def _run_dca(
+    prices: list[float],
+    cfg: BacktestConfig,
+    strategy_cfg: DcaConfig,
+) -> tuple[list[EquityPoint], list[PaperTrade], float, float]:
+    cash = cfg.initial_cash
+    base = cfg.initial_base
+    points: list[EquityPoint] = []
+    trades: list[PaperTrade] = []
+    peak = _mark_equity(cash, base, prices[0])
+    side = strategy_cfg.side if strategy_cfg.side in {"buy", "sell"} else "buy"
+    max_orders = max(1, strategy_cfg.max_orders)
+    order_count = 0
+    for step, price in enumerate(prices):
+        trigger = strategy_cfg.trigger_price
+        triggered = trigger <= 0 or (
+            side == "buy" and price <= trigger
+        ) or (
+            side == "sell" and price >= trigger
+        )
+        if triggered and order_count < max_orders:
+            quote_notional = strategy_cfg.quote_per_order * (
+                strategy_cfg.size_multiplier ** order_count
+            )
+            cash, base, trade = _trade(
+                step=step,
+                strategy="dca",
+                side=side,
+                price=price,
+                quote_notional=quote_notional,
+                fee_bps=cfg.fee_bps,
+                slippage_bps=cfg.slippage_bps,
+                cash=cash,
+                base=base,
+                reason="DCA trigger",
+            )
+            if trade is not None:
+                trades.append(trade)
+                order_count += 1
+        peak = _append_point(
+            points,
+            step=step,
+            price=price,
+            cash=cash,
+            base=base,
+            peak_equity=peak,
+        )
+    return points, trades, cash, base
+
+
+def _run_execution_algo(
+    prices: list[float],
+    cfg: BacktestConfig,
+    strategy_cfg: ExecutionAlgoConfig,
+) -> tuple[list[EquityPoint], list[PaperTrade], float, float]:
+    cash = cfg.initial_cash
+    base = cfg.initial_base
+    points: list[EquityPoint] = []
+    trades: list[PaperTrade] = []
+    peak = _mark_equity(cash, base, prices[0])
+    side = strategy_cfg.side if strategy_cfg.side in {"buy", "sell"} else "buy"
+    slice_count = max(1, strategy_cfg.slice_count)
+    target_quote = strategy_cfg.total_quote or strategy_cfg.total_base * prices[0]
+    if target_quote <= 0:
+        target_quote = cfg.initial_cash
+    interval = max(1, len(prices) // slice_count)
+    for step, price in enumerate(prices):
+        if step % interval == 0 and len(trades) < slice_count:
+            remaining = max(0.0, target_quote - sum(t.quote_notional for t in trades))
+            quote_notional = min(remaining, target_quote / slice_count)
+            cash, base, trade = _trade(
+                step=step,
+                strategy="execution_algo",
+                side=side,
+                price=price,
+                quote_notional=quote_notional,
+                fee_bps=cfg.fee_bps,
+                slippage_bps=cfg.slippage_bps,
+                cash=cash,
+                base=base,
+                reason=f"{strategy_cfg.algo.upper()} slice",
+            )
+            if trade is not None:
+                trades.append(trade)
+        peak = _append_point(
+            points,
+            step=step,
+            price=price,
+            cash=cash,
+            base=base,
+            peak_equity=peak,
+        )
+    return points, trades, cash, base
+
+
+def run_paper_backtest(
+    cfg: BacktestConfig,
+    *,
+    spot_grid: SpotGridConfig | None = None,
+    dca: DcaConfig | None = None,
+    execution_algo: ExecutionAlgoConfig | None = None,
+    current_mid: float | None = None,
+) -> BacktestResult:
+    strategy = str(cfg.strategy or "spot_grid").lower()
+    if strategy not in {"spot_grid", "dca", "execution_algo"}:
+        raise ValueError("backtest.strategy must be spot_grid, dca, or execution_algo")
+    if cfg.initial_cash < 0 or cfg.initial_base < 0:
+        raise ValueError("backtest initial balances must be non-negative")
+    if cfg.fee_bps < 0 or cfg.slippage_bps < 0:
+        raise ValueError("backtest fee_bps and slippage_bps must be non-negative")
+
+    prices = synthetic_price_series(cfg, current_mid=current_mid)
+    symbol = cfg.symbol
+    if strategy == "spot_grid":
+        strategy_cfg = spot_grid or SpotGridConfig(symbol=symbol)
+        symbol = symbol or strategy_cfg.symbol
+        points, trades, cash, base = _run_grid(prices, cfg, strategy_cfg)
+    elif strategy == "dca":
+        strategy_cfg = dca or DcaConfig(symbol=symbol)
+        symbol = symbol or strategy_cfg.symbol
+        points, trades, cash, base = _run_dca(prices, cfg, strategy_cfg)
+    else:
+        strategy_cfg = execution_algo or ExecutionAlgoConfig(symbol=symbol)
+        symbol = symbol or strategy_cfg.symbol
+        points, trades, cash, base = _run_execution_algo(prices, cfg, strategy_cfg)
+
+    initial_equity = _mark_equity(cfg.initial_cash, cfg.initial_base, prices[0])
+    final_equity = _mark_equity(cash, base, prices[-1])
+    total_return = final_equity - initial_equity
+    filled_quote = sum(trade.quote_notional for trade in trades)
+    target_quote = (
+        cfg.initial_cash
+        if strategy == "execution_algo"
+        else max(filled_quote, sum(trade.quote_notional for trade in trades))
+    )
+    if strategy == "spot_grid" and spot_grid is not None:
+        target_quote = spot_grid.quote_per_grid * max(1, spot_grid.grid_count)
+    elif strategy == "dca" and dca is not None:
+        target_quote = sum(
+            dca.quote_per_order * (dca.size_multiplier**idx)
+            for idx in range(max(1, dca.max_orders))
+        )
+    elif strategy == "execution_algo" and execution_algo is not None:
+        target_quote = execution_algo.total_quote or execution_algo.total_base * prices[0]
+    target_quote = max(target_quote, filled_quote, 1e-12)
+    max_recent = max(1, cfg.max_recent_points)
+    return BacktestResult(
+        status="ok",
+        strategy=strategy,
+        symbol=symbol,
+        quote_currency=quote_currency(symbol),
+        initial_equity=initial_equity,
+        final_equity=final_equity,
+        total_return_quote=total_return,
+        return_pct=0.0 if initial_equity <= 0 else total_return / initial_equity * 100,
+        max_drawdown_pct=max((point.drawdown_pct for point in points), default=0.0),
+        fee_quote=sum(trade.fee_quote for trade in trades),
+        slippage_quote=sum(trade.slippage_quote for trade in trades),
+        filled_quote=filled_quote,
+        filled_base=sum(trade.amount for trade in trades),
+        fill_rate=min(1.0, filled_quote / target_quote),
+        trade_count=len(trades),
+        points=points[-max_recent:],
+        trades=trades[-max_recent:],
+        warnings=[
+            "synthetic price path; use exchange history before live deployment"
+        ],
+    )
