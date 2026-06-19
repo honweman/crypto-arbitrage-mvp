@@ -84,6 +84,7 @@ from arbitrage_bot.web import (
     cancel_bulk_orders_payload,
     cancel_order_payload,
     default_web_user_store_path,
+    default_strategy_center_path,
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
     fetch_order_activity_payload,
@@ -183,6 +184,18 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="profile-asset"', HTML)
         self.assertIn("/api/profile", HTML)
         self.assertIn("function renderAuthProfile", HTML)
+
+    def test_page_includes_strategy_center_controls(self) -> None:
+        self.assertIn("Strategy Center", HTML)
+        self.assertIn("User API Accounts", HTML)
+        self.assertIn("Funding Arbitrage", HTML)
+        self.assertIn("Signal Bot", HTML)
+        self.assertIn("/api/strategy-center", HTML)
+        self.assertIn("/api/signal/tradingview", HTML)
+        self.assertIn('id="strategy-center-form"', HTML)
+        self.assertIn('id="api-account-form"', HTML)
+        self.assertIn('id="funding-arb-form"', HTML)
+        self.assertIn('id="signal-bot-form"', HTML)
 
     def test_page_has_status_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)
@@ -1481,6 +1494,11 @@ class WebMonitorTest(unittest.TestCase):
         )
 
         self.assertEqual(default_web_user_store_path(cfg), "data/users/web_users.json")
+
+    def test_default_strategy_center_path_uses_config(self) -> None:
+        cfg = make_config()
+
+        self.assertEqual(default_strategy_center_path(cfg), "data/strategy_center.json")
 
     def test_registration_code_is_required_when_env_name_is_configured(self) -> None:
         self.assertTrue(_registration_code_required(make_config()))

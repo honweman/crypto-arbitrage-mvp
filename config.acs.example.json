@@ -169,6 +169,11 @@
     "data_source": "synthetic",
     "history_path": ""
   },
+  "strategy_center": {
+    "enabled": true,
+    "path": "data/strategy_center.json",
+    "max_recent_signals": 100
+  },
   "portfolio": {
     "enabled": true,
     "positions": [
@@ -202,7 +207,9 @@
       "execution_algo": true,
       "backtest": true,
       "spot_spread": true,
-      "cash_and_carry": true
+      "cash_and_carry": true,
+      "funding_arbitrage": true,
+      "signal_bot": true
     },
     "account_enabled": {
       "bithumb-spot": true,

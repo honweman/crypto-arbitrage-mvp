@@ -249,6 +249,8 @@ function balanceStatusClass(status) {
       if (value === "dca") return "DCA Bot";
       if (value === "execution_algo") return "TWAP/VWAP/POV";
       if (value === "backtest") return "Backtest/Paper";
+      if (value === "funding_arbitrage") return "Funding Arbitrage";
+      if (value === "signal_bot") return "Signal Bot";
       if (value === "manual") return "Manual";
       if (value === "unattributed") return "Unattributed";
       return value || "--";
@@ -1459,6 +1461,453 @@ function balanceStatusClass(status) {
       }
     }
 
+    function setFieldValue(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.value = value == null ? "" : String(value);
+    }
+
+    function setCheckedValue(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.checked = Boolean(value);
+    }
+
+    function parseJsonField(id) {
+      const value = document.getElementById(id).value.trim();
+      if (!value) return {};
+      const parsed = JSON.parse(value);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+        throw new Error(`${id} must be a JSON object`);
+      }
+      return parsed;
+    }
+
+    function setJsonField(id, value) {
+      document.getElementById(id).value = JSON.stringify(value || {}, null, 2);
+    }
+
+    function splitCsv(value) {
+      return String(value || "")
+        .split(/[,\s]+/)
+        .map((item) => item.trim().toUpperCase())
+        .filter(Boolean);
+    }
+
+    function renderStrategyForm(strategy) {
+      if (strategyCenterFormDirty || strategyCenterFormBusy) return;
+      const authEmail = lastState?.auth?.email || "";
+      setFieldValue("strategy-instance-id", strategy?.id || "");
+      setFieldValue("strategy-instance-name", strategy?.name || "");
+      setFieldValue("strategy-instance-type", strategy?.strategy_type || "market_maker");
+      setFieldValue("strategy-instance-owner", strategy?.owner_email || authEmail);
+      setFieldValue("strategy-instance-account", strategy?.account_id || "");
+      setFieldValue("strategy-instance-exchange", strategy?.exchange || "");
+      setFieldValue("strategy-instance-symbol", strategy?.symbol || "");
+      setFieldValue("strategy-instance-asset", strategy?.asset || "");
+      setCheckedValue("strategy-instance-enabled", strategy?.enabled);
+      setCheckedValue("strategy-instance-live", strategy?.live_enabled);
+      setJsonField("strategy-instance-params", strategy?.parameters || {});
+      setJsonField("strategy-instance-risk", strategy?.risk_overrides || {});
+    }
+
+    function fillStrategyForm(strategy) {
+      strategyCenterFormDirty = false;
+      strategyCenterFormBusy = false;
+      renderStrategyForm(strategy);
+    }
+
+    function renderStrategyInstances(center) {
+      const body = document.getElementById("strategy-instances");
+      body.innerHTML = "";
+      const strategies = center?.strategy_instances || [];
+      if (strategies.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="9">No strategy instances yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const strategy of strategies) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || shortId(strategy.id))}</td>
+          <td>${escapeHtml(displayStrategy(strategy.strategy_type))}</td>
+          <td>${escapeHtml(strategy.owner_email || "--")}</td>
+          <td>${escapeHtml(strategy.account_id || "--")}</td>
+          <td>${escapeHtml(strategy.exchange || "--")}<br><span class="subtle">${escapeHtml(strategy.symbol || strategy.asset || "--")}</span></td>
+          <td class="${strategy.enabled ? "ok" : "subtle"}">${strategy.live_enabled ? "live ready" : (strategy.status || (strategy.enabled ? "enabled" : "draft"))}</td>
+          <td class="num">${money.format(strategy.pnl_quote || 0)}</td>
+          <td class="num">${strategy.open_order_count || 0}</td>
+          <td class="strategy-action"></td>
+        `;
+        const actionCell = tr.querySelector(".strategy-action");
+        const editButton = document.createElement("button");
+        editButton.className = "control-button";
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => fillStrategyForm(strategy));
+        actionCell.appendChild(editButton);
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger-button";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteStrategyInstance(strategy.id, deleteButton));
+        actionCell.appendChild(deleteButton);
+        body.appendChild(tr);
+      }
+    }
+
+    function strategyPayloadFromForm() {
+      const id = document.getElementById("strategy-instance-id").value.trim();
+      const payload = {
+        name: document.getElementById("strategy-instance-name").value.trim(),
+        strategy_type: document.getElementById("strategy-instance-type").value,
+        owner_email: document.getElementById("strategy-instance-owner").value.trim(),
+        account_id: document.getElementById("strategy-instance-account").value.trim(),
+        exchange: document.getElementById("strategy-instance-exchange").value.trim(),
+        symbol: document.getElementById("strategy-instance-symbol").value.trim(),
+        asset: document.getElementById("strategy-instance-asset").value.trim().toUpperCase(),
+        enabled: document.getElementById("strategy-instance-enabled").checked,
+        live_enabled: document.getElementById("strategy-instance-live").checked,
+        parameters: parseJsonField("strategy-instance-params"),
+        risk_overrides: parseJsonField("strategy-instance-risk"),
+      };
+      if (id) payload.id = id;
+      return payload;
+    }
+
+    async function applyStrategyCenterConfig(event) {
+      event.preventDefault();
+      if (strategyCenterFormBusy) return;
+      strategyCenterFormBusy = true;
+      const button = document.getElementById("strategy-center-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/strategy-center", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "upsert_strategy", strategy: strategyPayloadFromForm() }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "strategy update failed");
+        strategyCenterFormDirty = false;
+        if (lastState) lastState.strategy_center = result.strategy_center;
+        renderStrategyCenter(result.strategy_center);
+      } catch (error) {
+        text("strategy-center-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        strategyCenterFormBusy = false;
+      }
+    }
+
+    async function deleteStrategyInstance(strategyId, button) {
+      if (!strategyId) return;
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/strategy-center", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete_strategy", strategy_id: strategyId }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "delete failed");
+        if (lastState) lastState.strategy_center = result.strategy_center;
+        renderStrategyCenter(result.strategy_center);
+      } catch (error) {
+        text("strategy-center-meta", `delete failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function renderApiAccountForm(account) {
+      if (apiAccountFormDirty || apiAccountFormBusy) return;
+      const authEmail = lastState?.auth?.email || "";
+      setFieldValue("api-account-id", account?.id || "");
+      setFieldValue("api-account-owner", account?.owner_email || authEmail);
+      setFieldValue("api-account-label", account?.label || "");
+      setFieldValue("api-account-exchange", account?.exchange || "");
+      setFieldValue("api-account-market-type", account?.market_type || "spot");
+      setFieldValue("api-account-assets", (account?.asset_scope || []).join(","));
+      setFieldValue("api-account-key-env", account?.api_key_env || "");
+      setFieldValue("api-account-secret-env", account?.secret_env || "");
+      setFieldValue("api-account-password-env", account?.password_env || "");
+      setFieldValue("api-account-proxy-env", account?.proxy_env || "");
+      setCheckedValue("api-account-enabled", account?.enabled);
+      setFieldValue("api-account-ip", account?.ip_label || "");
+    }
+
+    function fillApiAccountForm(account) {
+      apiAccountFormDirty = false;
+      apiAccountFormBusy = false;
+      renderApiAccountForm(account);
+    }
+
+    function renderApiAccounts(center) {
+      const body = document.getElementById("api-accounts");
+      body.innerHTML = "";
+      const accounts = center?.user_api_accounts || [];
+      text("api-accounts-meta", `${accounts.length} account refs · env names only`);
+      if (accounts.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">No user API account references yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const account of accounts) {
+        const auth = account.auth || {};
+        const missing = auth.missing_env || [];
+        const envStatus = missing.length ? `missing ${missing.length}` : (auth.configured ? "set" : "not set");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || shortId(account.id))}</td>
+          <td>${escapeHtml(account.owner_email || "--")}</td>
+          <td>${escapeHtml(account.exchange || "--")}<br><span class="subtle">${escapeHtml(account.market_type || "spot")}</span></td>
+          <td>${escapeHtml((account.asset_scope || []).join(", ") || "all")}</td>
+          <td class="${missing.length ? "missing" : "ok"}">${escapeHtml(envStatus)}</td>
+          <td>${escapeHtml(account.ip_label || "--")}</td>
+          <td class="strategy-action"></td>
+        `;
+        const actionCell = tr.querySelector(".strategy-action");
+        const editButton = document.createElement("button");
+        editButton.className = "control-button";
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => fillApiAccountForm(account));
+        actionCell.appendChild(editButton);
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger-button";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteApiAccount(account.id, deleteButton));
+        actionCell.appendChild(deleteButton);
+        body.appendChild(tr);
+      }
+    }
+
+    function apiAccountPayloadFromForm() {
+      const id = document.getElementById("api-account-id").value.trim();
+      const payload = {
+        owner_email: document.getElementById("api-account-owner").value.trim(),
+        label: document.getElementById("api-account-label").value.trim(),
+        exchange: document.getElementById("api-account-exchange").value.trim(),
+        market_type: document.getElementById("api-account-market-type").value,
+        asset_scope: splitCsv(document.getElementById("api-account-assets").value),
+        api_key_env: document.getElementById("api-account-key-env").value.trim(),
+        secret_env: document.getElementById("api-account-secret-env").value.trim(),
+        password_env: document.getElementById("api-account-password-env").value.trim(),
+        proxy_env: document.getElementById("api-account-proxy-env").value.trim(),
+        enabled: document.getElementById("api-account-enabled").checked,
+        ip_label: document.getElementById("api-account-ip").value.trim(),
+      };
+      if (id) payload.id = id;
+      return payload;
+    }
+
+    async function applyApiAccountConfig(event) {
+      event.preventDefault();
+      if (apiAccountFormBusy) return;
+      apiAccountFormBusy = true;
+      const button = document.getElementById("api-account-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/strategy-center", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "upsert_account", account: apiAccountPayloadFromForm() }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "api account update failed");
+        apiAccountFormDirty = false;
+        if (lastState) lastState.strategy_center = result.strategy_center;
+        renderStrategyCenter(result.strategy_center);
+      } catch (error) {
+        text("api-accounts-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        apiAccountFormBusy = false;
+      }
+    }
+
+    async function deleteApiAccount(accountId, button) {
+      if (!accountId) return;
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/strategy-center", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete_account", account_id: accountId }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "delete failed");
+        if (lastState) lastState.strategy_center = result.strategy_center;
+        renderStrategyCenter(result.strategy_center);
+      } catch (error) {
+        text("api-accounts-meta", `delete failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function renderFundingArbConfig(config) {
+      if (fundingArbFormDirty || fundingArbFormBusy) return;
+      const row = config || {};
+      setCheckedValue("funding-enabled", row.enabled);
+      setFieldValue("funding-pair-id", row.pair_id || "");
+      setFieldValue("funding-spot-exchange", row.spot_exchange || "");
+      setFieldValue("funding-spot-symbol", row.spot_symbol || "");
+      setFieldValue("funding-derivative-exchange", row.derivative_exchange || "");
+      setFieldValue("funding-derivative-symbol", row.derivative_symbol || "");
+      setNumericField("funding-predicted-bps", row.predicted_funding_rate_bps || 0);
+      setNumericField("funding-min-funding-bps", row.min_funding_bps || 0);
+      setNumericField("funding-min-entry-bps", row.min_entry_basis_bps || 0);
+      setNumericField("funding-take-profit-bps", row.take_profit_bps || 0);
+      setNumericField("funding-stop-loss-bps", row.stop_loss_bps || 0);
+      setNumericField("funding-margin-pct", row.max_margin_usage_pct || 0);
+      setNumericField("funding-liq-buffer-pct", row.min_liquidation_buffer_pct || 0);
+    }
+
+    function fundingArbPayloadFromForm() {
+      return {
+        enabled: document.getElementById("funding-enabled").checked,
+        pair_id: document.getElementById("funding-pair-id").value.trim(),
+        spot_exchange: document.getElementById("funding-spot-exchange").value.trim(),
+        spot_symbol: document.getElementById("funding-spot-symbol").value.trim(),
+        derivative_exchange: document.getElementById("funding-derivative-exchange").value.trim(),
+        derivative_symbol: document.getElementById("funding-derivative-symbol").value.trim(),
+        predicted_funding_rate_bps: numericValue("funding-predicted-bps"),
+        min_funding_bps: numericValue("funding-min-funding-bps"),
+        min_entry_basis_bps: numericValue("funding-min-entry-bps"),
+        take_profit_bps: numericValue("funding-take-profit-bps"),
+        stop_loss_bps: numericValue("funding-stop-loss-bps"),
+        max_margin_usage_pct: numericValue("funding-margin-pct"),
+        min_liquidation_buffer_pct: numericValue("funding-liq-buffer-pct"),
+      };
+    }
+
+    async function applyFundingArbConfig(event) {
+      event.preventDefault();
+      if (fundingArbFormBusy) return;
+      fundingArbFormBusy = true;
+      const button = document.getElementById("funding-arb-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/strategy-center", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "update_funding", funding_arbitrage: fundingArbPayloadFromForm() }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "funding update failed");
+        fundingArbFormDirty = false;
+        if (lastState) lastState.strategy_center = result.strategy_center;
+        renderStrategyCenter(result.strategy_center);
+      } catch (error) {
+        text("funding-arb-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        fundingArbFormBusy = false;
+      }
+    }
+
+    function renderSignalBotConfig(config) {
+      if (signalBotFormDirty || signalBotFormBusy) return;
+      const row = config || {};
+      setCheckedValue("signal-bot-enabled", row.enabled);
+      setCheckedValue("signal-bot-custom", row.allow_custom_webhook !== false);
+      setFieldValue("signal-bot-secret-env", row.webhook_secret_env || "SIGNAL_BOT_WEBHOOK_SECRET");
+      setFieldValue("signal-bot-default-strategy", row.default_strategy_id || "");
+      setNumericField("signal-bot-age", row.max_signal_age_seconds || 60);
+      setNumericField("signal-bot-dedupe", row.dedupe_seconds || 300);
+      text("signal-webhook-url", `${window.location.origin}/api/signal/tradingview`);
+    }
+
+    function signalBotPayloadFromForm() {
+      return {
+        enabled: document.getElementById("signal-bot-enabled").checked,
+        allow_custom_webhook: document.getElementById("signal-bot-custom").checked,
+        webhook_secret_env: document.getElementById("signal-bot-secret-env").value.trim(),
+        default_strategy_id: document.getElementById("signal-bot-default-strategy").value.trim(),
+        max_signal_age_seconds: numericValue("signal-bot-age"),
+        dedupe_seconds: numericValue("signal-bot-dedupe"),
+        allowed_sources: ["tradingview", "custom"],
+      };
+    }
+
+    async function applySignalBotConfig(event) {
+      event.preventDefault();
+      if (signalBotFormBusy) return;
+      signalBotFormBusy = true;
+      const button = document.getElementById("signal-bot-apply");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/strategy-center", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "update_signal_bot", signal_bot: signalBotPayloadFromForm() }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "signal bot update failed");
+        signalBotFormDirty = false;
+        if (lastState) lastState.strategy_center = result.strategy_center;
+        renderStrategyCenter(result.strategy_center);
+      } catch (error) {
+        text("signal-bot-meta", `update failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        signalBotFormBusy = false;
+      }
+    }
+
+    function renderSignalEvents(center) {
+      const body = document.getElementById("signal-events");
+      body.innerHTML = "";
+      const signals = center?.signals || [];
+      if (signals.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">No signals received yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const signal of signals.slice(0, 40)) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${formatTimestamp((signal.received_at || 0) * 1000)}</td>
+          <td>${escapeHtml(signal.source || "--")}</td>
+          <td title="${escapeHtml(signal.strategy_id || "")}">${escapeHtml(shortId(signal.strategy_id))}</td>
+          <td>${escapeHtml(signal.symbol || "--")}</td>
+          <td>${escapeHtml(signal.action || signal.side || "--")}</td>
+          <td class="${signal.status === "accepted" ? "ok" : signal.status === "blocked" ? "missing" : "subtle"}">${escapeHtml(signal.status || "--")}</td>
+          <td>${escapeHtml(signal.reason || signal.message || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderStrategyCenter(center) {
+      const summary = center?.summary || {};
+      text(
+        "strategy-center-meta",
+        `${center?.status || "disabled"} · ${summary.strategy_count || 0} strategies · ${summary.api_account_count || 0} accounts · ${summary.recent_signal_count || 0} signals`
+      );
+      const funding = center?.funding_arbitrage || {};
+      text(
+        "funding-arb-meta",
+        `${funding.enabled ? "enabled" : "disabled"} · ${funding.spot_symbol || "--"} / ${funding.derivative_symbol || "--"}`
+      );
+      const signalBot = center?.signal_bot || {};
+      text(
+        "signal-bot-meta",
+        `${signalBot.enabled ? "enabled" : "disabled"} · secret ${signalBot.webhook_secret_set ? "set" : "missing"}`
+      );
+      renderStrategyForm((center?.strategy_instances || [])[0] || null);
+      renderStrategyInstances(center);
+      renderApiAccountForm((center?.user_api_accounts || [])[0] || null);
+      renderApiAccounts(center);
+      renderFundingArbConfig(center?.funding_arbitrage);
+      renderSignalBotConfig(center?.signal_bot);
+      renderSignalEvents(center);
+    }
+
     function formatDue(ts) {
       if (!ts) return "--";
       const seconds = ts - Date.now() / 1000;
@@ -1687,6 +2136,8 @@ function balanceStatusClass(status) {
       if (value === "backtest") return "Backtest/Paper";
       if (value === "spot_spread") return "Spot Arbitrage";
       if (value === "cash_and_carry") return "Cash & Carry";
+      if (value === "funding_arbitrage") return "Funding Arbitrage";
+      if (value === "signal_bot") return "Signal Bot";
       return value || "--";
     }
 
@@ -1784,6 +2235,14 @@ function balanceStatusClass(status) {
     let execFormBusy = false;
     let backtestFormDirty = false;
     let backtestFormBusy = false;
+    let strategyCenterFormDirty = false;
+    let strategyCenterFormBusy = false;
+    let apiAccountFormDirty = false;
+    let apiAccountFormBusy = false;
+    let fundingArbFormDirty = false;
+    let fundingArbFormBusy = false;
+    let signalBotFormDirty = false;
+    let signalBotFormBusy = false;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -2715,6 +3174,7 @@ function balanceStatusClass(status) {
         renderExecutionAlgo(data.execution_algo);
         renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
         renderBacktest(data.backtest);
+        renderStrategyCenter(data.strategy_center);
         return;
       }
       if (activePage === "records") {
@@ -2825,6 +3285,22 @@ function balanceStatusClass(status) {
       backtestFormDirty = true;
     });
     document.getElementById("backtest-form").addEventListener("submit", applyBacktestConfig);
+    document.getElementById("strategy-center-form").addEventListener("input", () => {
+      strategyCenterFormDirty = true;
+    });
+    document.getElementById("strategy-center-form").addEventListener("submit", applyStrategyCenterConfig);
+    document.getElementById("api-account-form").addEventListener("input", () => {
+      apiAccountFormDirty = true;
+    });
+    document.getElementById("api-account-form").addEventListener("submit", applyApiAccountConfig);
+    document.getElementById("funding-arb-form").addEventListener("input", () => {
+      fundingArbFormDirty = true;
+    });
+    document.getElementById("funding-arb-form").addEventListener("submit", applyFundingArbConfig);
+    document.getElementById("signal-bot-form").addEventListener("input", () => {
+      signalBotFormDirty = true;
+    });
+    document.getElementById("signal-bot-form").addEventListener("submit", applySignalBotConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
     setInterval(refresh, 1000);

@@ -24,6 +24,8 @@ def register_routes(app: web.Application) -> None:
         api_slow_execution,
         api_spot_grid,
         api_state,
+        api_signal_webhook,
+        api_strategy_center,
         api_strategy_control,
         index,
         login_get,
@@ -51,6 +53,9 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/dca", api_dca)
     app.router.add_post("/api/execution-algo", api_execution_algo)
     app.router.add_post("/api/backtest", api_backtest)
+    app.router.add_post("/api/strategy-center", api_strategy_center)
+    app.router.add_post("/api/signal/{source}", api_signal_webhook)
+    app.router.add_post("/api/signal", api_signal_webhook)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
     app.router.add_post("/api/slow-execution", api_slow_execution)
     app.router.add_post("/api/auto-buy-sell/tasks", api_create_auto_buy_sell_task)

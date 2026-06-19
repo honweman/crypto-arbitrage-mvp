@@ -609,7 +609,8 @@ tbody tr:last-child td {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   min-height: 38px;
   padding: 7px 9px;
@@ -619,6 +620,36 @@ tbody tr:last-child td {
   color: var(--text);
   font: inherit;
   font-size: 13px;
+}
+
+.field textarea {
+  min-height: 92px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  line-height: 1.4;
+}
+
+.wide-field,
+.status-line {
+  grid-column: 1 / -1;
+}
+
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-line code {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .check-field {

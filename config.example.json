@@ -117,6 +117,11 @@
     "data_source": "synthetic",
     "history_path": ""
   },
+  "strategy_center": {
+    "enabled": true,
+    "path": "data/strategy_center.json",
+    "max_recent_signals": 100
+  },
   "portfolio": {
     "enabled": false,
     "asset": "BTC",

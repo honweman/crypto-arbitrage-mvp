@@ -258,6 +258,27 @@ def _compact_operations_payload(
     return _copy_payload_keys(operations, ("risk",))
 
 
+def _compact_strategy_center_payload(
+    strategy_center: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return strategy_center
+    return _copy_payload_keys(
+        strategy_center,
+        (
+            "status",
+            "updated_at",
+            "summary",
+            "funding_arbitrage",
+            "signal_bot",
+            "signals",
+            "error",
+        ),
+    )
+
+
 def state_payload_for_view(
     payload: dict[str, Any],
     view: str | None = None,
@@ -321,6 +342,10 @@ def state_payload_for_view(
         "operations": _compact_operations_payload(
             payload.get("operations", {}),
             full=is_records,
+        ),
+        "strategy_center": _compact_strategy_center_payload(
+            payload.get("strategy_center", {}),
+            full=is_settings,
         ),
         "order_activity": _compact_order_activity_payload(
             payload.get("order_activity", {}),

@@ -206,6 +206,13 @@ class BacktestConfig:
 
 
 @dataclass(frozen=True)
+class StrategyCenterConfig:
+    enabled: bool = True
+    path: str = "data/strategy_center.json"
+    max_recent_signals: int = 100
+
+
+@dataclass(frozen=True)
 class AssetPosition:
     asset: str
     position_base: float = 0.0
@@ -336,6 +343,7 @@ class BotConfig:
     dca: DcaConfig = field(default_factory=DcaConfig)
     execution_algo: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
+    strategy_center: StrategyCenterConfig = field(default_factory=StrategyCenterConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
     strategy_timeline: StrategyTimelineConfig = field(
@@ -451,6 +459,7 @@ def load_config(path: str | Path) -> BotConfig:
     dca_raw = raw.get("dca", {})
     execution_algo_raw = raw.get("execution_algo", {})
     backtest_raw = raw.get("backtest", {})
+    strategy_center_raw = raw.get("strategy_center", {})
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
     trade_log_raw = raw.get("trade_log", {})
@@ -684,6 +693,13 @@ def load_config(path: str | Path) -> BotConfig:
             max_recent_points=int(backtest_raw.get("max_recent_points", 80)),
             data_source=str(backtest_raw.get("data_source", "synthetic")).lower(),
             history_path=backtest_raw.get("history_path", ""),
+        ),
+        strategy_center=StrategyCenterConfig(
+            enabled=bool(strategy_center_raw.get("enabled", True)),
+            path=str(strategy_center_raw.get("path", "data/strategy_center.json")),
+            max_recent_signals=int(
+                strategy_center_raw.get("max_recent_signals", 100)
+            ),
         ),
         portfolio=PortfolioConfig(
             enabled=bool(portfolio_raw.get("enabled", False)),

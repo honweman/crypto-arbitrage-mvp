@@ -414,6 +414,54 @@ def _filter_state_payload_for_user(
             summary["used_accounts"] = len(readiness["accounts"])
             summary["configured_strategies"] = len(readiness["strategies"])
 
+    def filter_strategy_center(center: Any) -> None:
+        if not isinstance(center, dict):
+            return
+        owner = user.email
+        strategies = []
+        for row in center.get("strategy_instances", []) or []:
+            if not isinstance(row, dict):
+                continue
+            if user.role != "admin" and str(row.get("owner_email") or "").lower() != owner:
+                continue
+            if not in_scope(str(row.get("asset") or _base_asset_from_symbol(str(row.get("symbol") or "")))):
+                continue
+            strategies.append(row)
+        accounts = []
+        for row in center.get("user_api_accounts", []) or []:
+            if not isinstance(row, dict):
+                continue
+            if user.role != "admin" and str(row.get("owner_email") or "").lower() != owner:
+                continue
+            scope = [
+                str(asset or "").strip().upper()
+                for asset in row.get("asset_scope", []) or []
+            ]
+            if scope and not any(in_scope(asset) for asset in scope):
+                continue
+            accounts.append(row)
+        signals = [
+            row
+            for row in center.get("signals", []) or []
+            if isinstance(row, dict) and symbol_in_scope(str(row.get("symbol") or ""))
+        ]
+        center["strategy_instances"] = strategies
+        center["user_api_accounts"] = accounts
+        center["signals"] = signals
+        summary = center.get("summary")
+        if isinstance(summary, dict):
+            summary["strategy_count"] = len(strategies)
+            summary["enabled_count"] = sum(1 for row in strategies if row.get("enabled"))
+            summary["live_count"] = sum(1 for row in strategies if row.get("live_enabled"))
+            summary["api_account_count"] = len(accounts)
+            summary["recent_signal_count"] = len(signals)
+            summary["pnl_quote"] = sum(
+                float(row.get("pnl_quote") or 0.0) for row in strategies
+            )
+            summary["open_order_count"] = sum(
+                int(row.get("open_order_count") or 0) for row in strategies
+            )
+
     if isinstance(payload.get("markets"), list):
         payload["markets"] = [
             row
@@ -464,6 +512,7 @@ def _filter_state_payload_for_user(
     filter_account_balances(payload.get("account_balances"))
     filter_trading_console(payload.get("trading_console"))
     filter_readiness(payload.get("readiness"))
+    filter_strategy_center(payload.get("strategy_center"))
     payload["auth"] = user.public_dict(available_assets=available_assets)
     payload["auth"]["mode"] = "user"
     payload["auth"]["asset_scope"] = sorted(asset_scope)

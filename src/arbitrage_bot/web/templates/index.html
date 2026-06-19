@@ -459,6 +459,284 @@
       </form>
     </section>
 
+    <section data-page="settings" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Strategy Center</h2>
+        <span id="strategy-center-meta" class="subtle"></span>
+      </div>
+      <form id="strategy-center-form" class="control-panel">
+        <div class="field">
+          <label for="strategy-instance-id">ID</label>
+          <input id="strategy-instance-id" type="text" placeholder="auto">
+        </div>
+        <div class="field">
+          <label for="strategy-instance-name">Name</label>
+          <input id="strategy-instance-name" type="text" placeholder="ACS Coinbase MM">
+        </div>
+        <div class="field">
+          <label for="strategy-instance-type">Type</label>
+          <select id="strategy-instance-type">
+            <option value="market_maker">Market Maker</option>
+            <option value="auto_buy_sell">Auto Buy/Sell</option>
+            <option value="spot_grid">Spot Grid</option>
+            <option value="dca">DCA</option>
+            <option value="execution_algo">TWAP/VWAP/POV</option>
+            <option value="funding_arbitrage">Funding Arbitrage</option>
+            <option value="signal_bot">Signal Bot</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="strategy-instance-owner">Owner Email</label>
+          <input id="strategy-instance-owner" type="email" placeholder="user@example.com">
+        </div>
+        <div class="field">
+          <label for="strategy-instance-account">API Account</label>
+          <input id="strategy-instance-account" type="text" placeholder="account id">
+        </div>
+        <div class="field">
+          <label for="strategy-instance-exchange">Exchange</label>
+          <input id="strategy-instance-exchange" type="text" placeholder="coinbase-spot">
+        </div>
+        <div class="field">
+          <label for="strategy-instance-symbol">Symbol</label>
+          <input id="strategy-instance-symbol" type="text" placeholder="ACS/USDC">
+        </div>
+        <div class="field">
+          <label for="strategy-instance-asset">Asset</label>
+          <input id="strategy-instance-asset" type="text" placeholder="ACS">
+        </div>
+        <label class="check-field">
+          <input id="strategy-instance-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="strategy-instance-live" type="checkbox">
+          Live Ready
+        </label>
+        <div class="field wide-field">
+          <label for="strategy-instance-params">Parameters JSON</label>
+          <textarea id="strategy-instance-params" rows="4" spellcheck="false">{}</textarea>
+        </div>
+        <div class="field wide-field">
+          <label for="strategy-instance-risk">Risk JSON</label>
+          <textarea id="strategy-instance-risk" rows="4" spellcheck="false">{}</textarea>
+        </div>
+        <button id="strategy-center-apply" class="control-button" type="submit">Save Strategy</button>
+      </form>
+      <div class="table-wrap stacked-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Owner</th>
+              <th>Account</th>
+              <th>Market</th>
+              <th>Status</th>
+              <th class="num">P/L</th>
+              <th class="num">Orders</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="strategy-instances"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>User API Accounts</h2>
+        <span id="api-accounts-meta" class="subtle"></span>
+      </div>
+      <form id="api-account-form" class="control-panel">
+        <div class="field">
+          <label for="api-account-id">ID</label>
+          <input id="api-account-id" type="text" placeholder="auto">
+        </div>
+        <div class="field">
+          <label for="api-account-owner">Owner Email</label>
+          <input id="api-account-owner" type="email" placeholder="user@example.com">
+        </div>
+        <div class="field">
+          <label for="api-account-label">Label</label>
+          <input id="api-account-label" type="text" placeholder="Coinbase Main">
+        </div>
+        <div class="field">
+          <label for="api-account-exchange">Exchange</label>
+          <input id="api-account-exchange" type="text" placeholder="coinbase-spot">
+        </div>
+        <div class="field">
+          <label for="api-account-market-type">Market</label>
+          <select id="api-account-market-type">
+            <option value="spot">Spot</option>
+            <option value="swap">Swap</option>
+            <option value="future">Future</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="api-account-assets">Assets</label>
+          <input id="api-account-assets" type="text" placeholder="ACS,BTC">
+        </div>
+        <div class="field">
+          <label for="api-account-key-env">API Key Env</label>
+          <input id="api-account-key-env" type="text" placeholder="COINBASE_API_KEY">
+        </div>
+        <div class="field">
+          <label for="api-account-secret-env">Secret Env</label>
+          <input id="api-account-secret-env" type="text" placeholder="COINBASE_SECRET">
+        </div>
+        <div class="field">
+          <label for="api-account-password-env">Password Env</label>
+          <input id="api-account-password-env" type="text" placeholder="OPTIONAL">
+        </div>
+        <div class="field">
+          <label for="api-account-proxy-env">Proxy Env</label>
+          <input id="api-account-proxy-env" type="text" placeholder="ACCOUNT_PROXY_URL">
+        </div>
+        <label class="check-field">
+          <input id="api-account-enabled" type="checkbox">
+          Enabled
+        </label>
+        <div class="field">
+          <label for="api-account-ip">IP Label</label>
+          <input id="api-account-ip" type="text" placeholder="Alibaba HK 1">
+        </div>
+        <button id="api-account-apply" class="control-button" type="submit">Save Account</button>
+      </form>
+      <div class="table-wrap stacked-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Owner</th>
+              <th>Exchange</th>
+              <th>Assets</th>
+              <th>Env</th>
+              <th>IP</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="api-accounts"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Funding Arbitrage</h2>
+        <span id="funding-arb-meta" class="subtle"></span>
+      </div>
+      <form id="funding-arb-form" class="control-panel">
+        <label class="check-field">
+          <input id="funding-enabled" type="checkbox">
+          Enabled
+        </label>
+        <div class="field">
+          <label for="funding-pair-id">Pair ID</label>
+          <input id="funding-pair-id" type="text" placeholder="ACS hedge">
+        </div>
+        <div class="field">
+          <label for="funding-spot-exchange">Spot Exchange</label>
+          <input id="funding-spot-exchange" type="text" placeholder="binance-spot">
+        </div>
+        <div class="field">
+          <label for="funding-spot-symbol">Spot Symbol</label>
+          <input id="funding-spot-symbol" type="text" placeholder="BTC/USDT">
+        </div>
+        <div class="field">
+          <label for="funding-derivative-exchange">Perp Exchange</label>
+          <input id="funding-derivative-exchange" type="text" placeholder="binance-swap">
+        </div>
+        <div class="field">
+          <label for="funding-derivative-symbol">Perp Symbol</label>
+          <input id="funding-derivative-symbol" type="text" placeholder="BTC/USDT:USDT">
+        </div>
+        <div class="field">
+          <label for="funding-predicted-bps">Pred Funding bps</label>
+          <input id="funding-predicted-bps" type="number" step="any">
+        </div>
+        <div class="field">
+          <label for="funding-min-funding-bps">Min Funding bps</label>
+          <input id="funding-min-funding-bps" type="number" step="any">
+        </div>
+        <div class="field">
+          <label for="funding-min-entry-bps">Min Basis bps</label>
+          <input id="funding-min-entry-bps" type="number" step="any">
+        </div>
+        <div class="field">
+          <label for="funding-take-profit-bps">Take Profit bps</label>
+          <input id="funding-take-profit-bps" type="number" step="any">
+        </div>
+        <div class="field">
+          <label for="funding-stop-loss-bps">Stop Loss bps</label>
+          <input id="funding-stop-loss-bps" type="number" step="any">
+        </div>
+        <div class="field">
+          <label for="funding-margin-pct">Max Margin %</label>
+          <input id="funding-margin-pct" type="number" min="0" max="100" step="any">
+        </div>
+        <div class="field">
+          <label for="funding-liq-buffer-pct">Liq Buffer %</label>
+          <input id="funding-liq-buffer-pct" type="number" min="0" step="any">
+        </div>
+        <button id="funding-arb-apply" class="control-button" type="submit">Save Funding</button>
+      </form>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Signal Bot</h2>
+        <span id="signal-bot-meta" class="subtle"></span>
+      </div>
+      <form id="signal-bot-form" class="control-panel">
+        <label class="check-field">
+          <input id="signal-bot-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="signal-bot-custom" type="checkbox">
+          Custom Webhook
+        </label>
+        <div class="field">
+          <label for="signal-bot-secret-env">Secret Env</label>
+          <input id="signal-bot-secret-env" type="text" placeholder="SIGNAL_BOT_WEBHOOK_SECRET">
+        </div>
+        <div class="field">
+          <label for="signal-bot-default-strategy">Default Strategy</label>
+          <input id="signal-bot-default-strategy" type="text" placeholder="strategy id">
+        </div>
+        <div class="field">
+          <label for="signal-bot-age">Max Age Sec</label>
+          <input id="signal-bot-age" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="signal-bot-dedupe">Dedupe Sec</label>
+          <input id="signal-bot-dedupe" type="number" min="1" step="1">
+        </div>
+        <button id="signal-bot-apply" class="control-button" type="submit">Save Signal Bot</button>
+      </form>
+      <div class="status-line">
+        <span>Webhook</span>
+        <code id="signal-webhook-url">/api/signal/tradingview</code>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Source</th>
+              <th>Strategy</th>
+              <th>Symbol</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="signal-events"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section data-page="records" class="compact-section">
       <div class="section-title">
         <h2>Audit Trail</h2>
