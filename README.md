@@ -534,6 +534,11 @@ The same monitor also tracks the ACS Solana token mint configured in `onchain_mo
   "enabled": true,
   "network": "solana",
   "rpc_url": "https://solana-rpc.publicnode.com",
+  "rpc_url_env": "SOLANA_RPC_URLS",
+  "rpc_urls": [
+    "https://solana-rpc.publicnode.com",
+    "https://api.mainnet-beta.solana.com"
+  ],
   "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
   "label": "ACS",
   "top_n": 20,
@@ -549,7 +554,7 @@ The same monitor also tracks the ACS Solana token mint configured in `onchain_mo
 }
 ```
 
-Public Solana RPC endpoints can rate-limit holder calls. For production 24-hour monitoring, replace `onchain_monitor.rpc_url` with a dedicated Helius, QuickNode, Alchemy, or similar RPC URL.
+Public Solana RPC endpoints can rate-limit holder calls. For production 24-hour monitoring, set `SOLANA_RPC_URLS` to a dedicated Helius, QuickNode, Alchemy, or similar RPC URL. Multiple endpoints can be comma-separated; the monitor tries them in order and automatically falls back when one endpoint fails.
 
 That config treats USD as the common reporting currency and compares:
 

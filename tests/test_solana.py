@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 
 from arbitrage_bot.solana import (
+    SolanaRpcError,
+    SolanaTokenClient,
     aggregate_largest_token_accounts_by_owner,
     load_cached_holder_snapshot,
     update_holder_history,
@@ -180,6 +182,66 @@ class SolanaAggregationTest(unittest.TestCase):
                 snapshot["holders"][0]["cumulative_delta_amount"],
                 -25.0,
             )
+
+
+class SolanaClientTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rpc_falls_back_to_next_endpoint(self) -> None:
+        client = SolanaTokenClient(
+            [
+                "https://slow-rpc.example",
+                "https://fast-rpc.example",
+            ]
+        )
+        calls: list[str] = []
+
+        async def fake_rpc_once(
+            rpc_url: str,
+            payload: dict[str, object],
+        ) -> dict[str, object]:
+            calls.append(rpc_url)
+            if rpc_url == "https://slow-rpc.example":
+                raise TimeoutError("slow")
+            return {"ok": True, "method": payload["method"]}
+
+        client._rpc_once = fake_rpc_once  # type: ignore[method-assign]
+
+        result = await client.rpc("getTokenSupply", ["mint"])
+
+        self.assertEqual(result, {"ok": True, "method": "getTokenSupply"})
+        self.assertEqual(
+            calls,
+            [
+                "https://slow-rpc.example",
+                "https://fast-rpc.example",
+            ],
+        )
+        self.assertEqual(client.active_rpc_url, "https://fast-rpc.example")
+        self.assertEqual(client.rpc_url, "https://fast-rpc.example")
+
+    async def test_rpc_reports_each_failed_endpoint(self) -> None:
+        client = SolanaTokenClient(
+            [
+                "https://first-rpc.example",
+                "https://second-rpc.example",
+            ]
+        )
+
+        async def fake_rpc_once(
+            rpc_url: str,
+            payload: dict[str, object],
+        ) -> dict[str, object]:
+            if rpc_url == "https://first-rpc.example":
+                raise TimeoutError()
+            raise SolanaRpcError("HTTP 429")
+
+        client._rpc_once = fake_rpc_once  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(SolanaRpcError, "first-rpc.example") as ctx:
+            await client.rpc("getTokenSupply", ["mint"])
+        message = str(ctx.exception)
+        self.assertIn("TimeoutError", message)
+        self.assertIn("second-rpc.example", message)
+        self.assertIn("HTTP 429", message)
 
 
 if __name__ == "__main__":

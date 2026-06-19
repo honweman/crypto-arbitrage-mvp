@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from arbitrage_bot.config import load_config
 
@@ -11,6 +12,14 @@ class ConfigTest(unittest.TestCase):
         cfg = load_config(config_path)
 
         self.assertEqual(cfg.onchain_monitor.top_n, 20)
+        self.assertEqual(cfg.onchain_monitor.rpc_url_env, "SOLANA_RPC_URLS")
+        self.assertEqual(
+            cfg.onchain_monitor.rpc_urls,
+            [
+                "https://solana-rpc.publicnode.com",
+                "https://api.mainnet-beta.solana.com",
+            ],
+        )
         self.assertEqual(
             cfg.onchain_monitor.history_path,
             "data/onchain_holder_changes.json",
@@ -124,6 +133,29 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(derivative_by_key["binance-swap"].market_type, "swap")
         self.assertEqual(derivative_by_key["bybit-swap"].id, "bybit")
         self.assertEqual(derivative_by_key["bybit-swap"].options["defaultType"], "swap")
+
+    def test_onchain_rpc_env_overrides_configured_urls(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "config.acs.example.json"
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SOLANA_RPC_URLS": (
+                    "https://fast-rpc.example/one,"
+                    "https://fast-rpc.example/two"
+                )
+            },
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.onchain_monitor.rpc_url, "https://fast-rpc.example/one")
+        self.assertEqual(
+            cfg.onchain_monitor.rpc_urls[:2],
+            [
+                "https://fast-rpc.example/one",
+                "https://fast-rpc.example/two",
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,8 @@ class OnchainMonitorConfig:
     enabled: bool = False
     network: str = "solana"
     rpc_url: str = "https://solana-rpc.publicnode.com"
+    rpc_urls: list[str] = field(default_factory=list)
+    rpc_url_env: str | None = "SOLANA_RPC_URLS"
     token_mint: str = ""
     label: str = "Token"
     top_n: int = 20
@@ -294,9 +297,48 @@ def _float_dict(raw: Any) -> dict[str, float]:
     return {str(key).upper(): float(value) for key, value in (raw or {}).items()}
 
 
+def _normalize_rpc_urls(
+    *,
+    rpc_url: str | None,
+    rpc_urls: Any,
+    rpc_url_env: str | None,
+    default_url: str,
+) -> list[str]:
+    candidates: list[str] = []
+    if rpc_url_env:
+        env_value = os.environ.get(rpc_url_env)
+        if env_value:
+            candidates.extend(part.strip() for part in env_value.split(","))
+    if rpc_url:
+        candidates.append(rpc_url)
+    if isinstance(rpc_urls, str):
+        candidates.extend(part.strip() for part in rpc_urls.split(","))
+    elif isinstance(rpc_urls, list):
+        candidates.extend(str(item).strip() for item in rpc_urls)
+    candidates.append(default_url)
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw_url in candidates:
+        url = str(raw_url or "").strip()
+        if not url or "://" not in url or url in seen:
+            continue
+        urls.append(url)
+        seen.add(url)
+    return urls or [default_url]
+
+
 def load_config(path: str | Path) -> BotConfig:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     onchain_raw = raw.get("onchain_monitor", {})
+    default_solana_rpc = "https://solana-rpc.publicnode.com"
+    onchain_rpc_url_env = onchain_raw.get("rpc_url_env", "SOLANA_RPC_URLS")
+    onchain_rpc_urls = _normalize_rpc_urls(
+        rpc_url=onchain_raw.get("rpc_url", default_solana_rpc),
+        rpc_urls=onchain_raw.get("rpc_urls", []),
+        rpc_url_env=onchain_rpc_url_env,
+        default_url=default_solana_rpc,
+    )
     market_maker_raw = raw.get("market_maker", {})
     slow_execution_raw = raw.get("slow_execution", {})
     portfolio_raw = raw.get("portfolio", {})
@@ -337,10 +379,9 @@ def load_config(path: str | Path) -> BotConfig:
         onchain_monitor=OnchainMonitorConfig(
             enabled=bool(onchain_raw.get("enabled", False)),
             network=onchain_raw.get("network", "solana"),
-            rpc_url=onchain_raw.get(
-                "rpc_url",
-                "https://solana-rpc.publicnode.com",
-            ),
+            rpc_url=onchain_rpc_urls[0],
+            rpc_urls=onchain_rpc_urls,
+            rpc_url_env=onchain_rpc_url_env,
             token_mint=onchain_raw.get("token_mint", ""),
             label=onchain_raw.get("label", "Token"),
             top_n=int(onchain_raw.get("top_n", 20)),

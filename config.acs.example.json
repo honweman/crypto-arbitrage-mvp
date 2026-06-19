@@ -25,6 +25,11 @@
     "enabled": true,
     "network": "solana",
     "rpc_url": "https://solana-rpc.publicnode.com",
+    "rpc_url_env": "SOLANA_RPC_URLS",
+    "rpc_urls": [
+      "https://solana-rpc.publicnode.com",
+      "https://api.mainnet-beta.solana.com"
+    ],
     "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
     "label": "ACS",
     "top_n": 20,

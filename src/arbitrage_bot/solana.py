@@ -20,10 +20,14 @@ class SolanaRpcError(RuntimeError):
 
 
 class SolanaTokenClient:
-    def __init__(self, rpc_url: str) -> None:
-        self.rpc_url = rpc_url
+    def __init__(self, rpc_url: str | list[str], *, timeout_seconds: float = 15.0) -> None:
+        rpc_urls = [rpc_url] if isinstance(rpc_url, str) else list(rpc_url)
+        self.rpc_urls = _normalize_rpc_urls(rpc_urls)
+        self.rpc_url = self.rpc_urls[0]
+        self.timeout_seconds = timeout_seconds
         self._session: aiohttp.ClientSession | None = None
         self._request_id = 0
+        self._active_index = 0
 
     async def __aenter__(self) -> SolanaTokenClient:
         await self.start()
@@ -40,9 +44,25 @@ class SolanaTokenClient:
         if self._session is not None:
             await self._session.close()
 
-    async def rpc(self, method: str, params: list[Any]) -> Any:
+    @property
+    def active_rpc_url(self) -> str:
+        return self.rpc_urls[self._active_index]
+
+    async def _rpc_once(self, rpc_url: str, payload: dict[str, Any]) -> Any:
         await self.start()
         assert self._session is not None
+        async with self._session.post(
+            rpc_url,
+            json=payload,
+            timeout=self.timeout_seconds,
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json(content_type=None)
+        if "error" in data:
+            raise SolanaRpcError(str(data["error"]))
+        return data["result"]
+
+    async def rpc(self, method: str, params: list[Any]) -> Any:
         self._request_id += 1
         payload = {
             "jsonrpc": "2.0",
@@ -50,11 +70,22 @@ class SolanaTokenClient:
             "method": method,
             "params": params,
         }
-        async with self._session.post(self.rpc_url, json=payload, timeout=20) as resp:
-            data = await resp.json(content_type=None)
-        if "error" in data:
-            raise SolanaRpcError(str(data["error"]))
-        return data["result"]
+        failures: list[str] = []
+        for offset in range(len(self.rpc_urls)):
+            index = (self._active_index + offset) % len(self.rpc_urls)
+            rpc_url = self.rpc_urls[index]
+            try:
+                result = await self._rpc_once(rpc_url, payload)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{rpc_url}: {_format_rpc_exception(exc)}")
+                continue
+            self._active_index = index
+            self.rpc_url = rpc_url
+            return result
+        raise SolanaRpcError(
+            "all Solana RPC endpoints failed; "
+            f"failures: {'; '.join(failures)}"
+        )
 
     async def token_supply(self, mint: str) -> dict[str, Any]:
         result = await self.rpc("getTokenSupply", [mint])
@@ -109,6 +140,27 @@ class SolanaTokenClient:
             if value is not None:
                 results[address] = value
         return results
+
+
+def _normalize_rpc_urls(raw_urls: list[str]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw_url in raw_urls:
+        url = str(raw_url or "").strip()
+        if not url or "://" not in url or url in seen:
+            continue
+        urls.append(url)
+        seen.add(url)
+    if not urls:
+        raise ValueError("at least one Solana RPC URL is required")
+    return urls
+
+
+def _format_rpc_exception(exc: Exception) -> str:
+    message = str(exc).strip()
+    if message:
+        return f"{exc.__class__.__name__}: {message}"
+    return f"{exc.__class__.__name__}: {exc!r}"
 
 
 def _amount_from_ui_string(value: str | None) -> float:

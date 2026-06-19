@@ -6083,6 +6083,11 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "new_event_count": 0,
                 "recent_events": [],
             },
+            "rpc": {
+                "active_url": cfg.onchain_monitor.rpc_url,
+                "endpoint_count": len(cfg.onchain_monitor.rpc_urls or []),
+                "env": cfg.onchain_monitor.rpc_url_env,
+            },
             "last_finished": None,
             "error": None,
         },
@@ -7490,6 +7495,11 @@ async def fetch_onchain_payload(
                 "recent_events": [],
             },
             "last_finished": None,
+            "rpc": {
+                "active_url": onchain_cfg.rpc_url,
+                "endpoint_count": len(onchain_cfg.rpc_urls or []),
+                "env": onchain_cfg.rpc_url_env,
+            },
             "error": None,
         }
     if onchain_cfg.network.lower() != "solana":
@@ -7505,6 +7515,11 @@ async def fetch_onchain_payload(
                 "recent_events": [],
             },
             "last_finished": time.time(),
+            "rpc": {
+                "active_url": onchain_cfg.rpc_url,
+                "endpoint_count": len(onchain_cfg.rpc_urls or []),
+                "env": onchain_cfg.rpc_url_env,
+            },
             "error": f"Unsupported network: {onchain_cfg.network}",
         }
     if client is None:
@@ -7520,6 +7535,11 @@ async def fetch_onchain_payload(
                 "recent_events": [],
             },
             "last_finished": time.time(),
+            "rpc": {
+                "active_url": onchain_cfg.rpc_url,
+                "endpoint_count": len(onchain_cfg.rpc_urls or []),
+                "env": onchain_cfg.rpc_url_env,
+            },
             "error": "Solana client is not configured",
         }
 
@@ -7554,6 +7574,11 @@ async def fetch_onchain_payload(
         "history": history,
         "source_account_count": data["source_account_count"],
         "last_finished": observed_at,
+        "rpc": {
+            "active_url": client.active_rpc_url,
+            "endpoint_count": len(client.rpc_urls),
+            "env": onchain_cfg.rpc_url_env,
+        },
         "error": None,
     }
 
@@ -7580,6 +7605,11 @@ def _cached_onchain_payload(
         **snapshot,
         "status": status,
         "error": error,
+        "rpc": {
+            "active_url": onchain_cfg.rpc_url,
+            "endpoint_count": len(onchain_cfg.rpc_urls or []),
+            "env": onchain_cfg.rpc_url_env,
+        },
         "stale": status != "running",
     }
 
@@ -7713,7 +7743,7 @@ async def monitor_loop(
 ) -> None:
     manager = ExchangeManager()
     solana_client = (
-        SolanaTokenClient(cfg.onchain_monitor.rpc_url)
+        SolanaTokenClient(cfg.onchain_monitor.rpc_urls or cfg.onchain_monitor.rpc_url)
         if cfg.onchain_monitor.enabled
         else None
     )
