@@ -8,6 +8,11 @@ dependencies = [
   "ccxt>=4.4.0"
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0"
+]
+
 [project.scripts]
 crypto-arb = "arbitrage_bot.main:main"
 crypto-arb-web = "arbitrage_bot.web:main"
@@ -18,3 +23,6 @@ crypto-strategy-timeline = "arbitrage_bot.strategy_timeline:main"
 
 [tool.setuptools.package-data]
 "arbitrage_bot.web" = ["templates/*.html", "static/*.js", "static/*.css"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
