@@ -998,14 +998,50 @@ function balanceStatusClass(status) {
       const risk = ops?.risk || {};
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
+      const timeline = ops?.strategy_timeline || {};
       const audit = ops?.web_audit || {};
       const dailyPnl = ops?.daily_pnl || {};
       const summary = tradeLog.summary || {};
+      const timelineSummary = timeline.summary || {};
       const riskState = risk.enabled === false ? "off" : risk.trading_enabled === false ? "trading off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
       text(
         "risk-meta",
-        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · max/day $${money.format(risk.max_daily_loss_quote || 0)} · day P/L ${formatPnlValue(dailyPnl.total_realized_pnl || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${risk.max_slippage_bps || 0} bps · events ${summary.event_count || 0} · blocked ${summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
+        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · max/day $${money.format(risk.max_daily_loss_quote || 0)} · day P/L ${formatPnlValue(dailyPnl.total_realized_pnl || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${risk.max_slippage_bps || 0} bps · timeline ${timelineSummary.event_count || 0} · blocked ${timelineSummary.blocked_count || summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
       );
+
+      const timelineBody = document.getElementById("strategy-timeline");
+      timelineBody.innerHTML = "";
+      const timelineEvents = timeline.recent_entries || [];
+      if (timelineEvents.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="9">No strategy timeline events yet.</td>`;
+        timelineBody.appendChild(tr);
+      } else {
+        for (const event of timelineEvents.slice(0, 30)) {
+          const metrics = event.metrics || {};
+          const reason = event.reason || event.risk_triggers?.[0] || "--";
+          const latency = metrics.opportunity_to_submit_ms ?? metrics.opportunity_to_decision_ms ?? metrics.opportunity_age_ms;
+          const slippage = metrics.max_slippage_bps;
+          const statusClass = event.action === "blocked" || event.action === "execution_error" || event.action === "hedge_required"
+            ? "risk-blocked"
+            : event.action === "no_order" || event.action === "paused"
+              ? "risk-off"
+              : "risk-ok";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${formatAge(event.logged_at)}</td>
+            <td>${escapeHtml(displayStrategy(event.strategy || event.event_type || "--"))}</td>
+            <td class="${statusClass}">${escapeHtml(event.action || "--")}</td>
+            <td>${escapeHtml(event.status || "--")}</td>
+            <td>${escapeHtml((event.accounts || []).join(", ") || "--")}</td>
+            <td>${escapeHtml((event.symbols || []).join(", ") || "--")}</td>
+            <td class="num">${latency == null ? "--" : `${Number(latency).toFixed(0)} ms`}</td>
+            <td class="num">${slippage == null ? "--" : `${Number(slippage).toFixed(1)} bps`}</td>
+            <td title="${escapeHtml(reason)}">${escapeHtml(reason)}</td>
+          `;
+          timelineBody.appendChild(tr);
+        }
+      }
 
       const body = document.getElementById("events");
       body.innerHTML = "";

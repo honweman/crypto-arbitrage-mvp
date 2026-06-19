@@ -19,6 +19,7 @@ from arbitrage_bot.config import (
     RiskConfig,
     SlowExecutionConfig,
     SpotMarketConfig,
+    StrategyTimelineConfig,
     TradeLogConfig,
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
@@ -70,6 +71,7 @@ from arbitrage_bot.web import (
 from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
+from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 
 
 HTML = f"{INDEX_HTML}\n{APP_JS}"
@@ -86,6 +88,7 @@ def make_config(
     derivative_exchanges: list[ExchangeConfig] | None = None,
     risk: RiskConfig | None = None,
     trade_log: TradeLogConfig | None = None,
+    strategy_timeline: StrategyTimelineConfig | None = None,
     alerts: AlertConfig | None = None,
 ) -> BotConfig:
     return BotConfig(
@@ -109,6 +112,7 @@ def make_config(
         derivative_exchanges=derivative_exchanges or [],
         risk=risk or RiskConfig(),
         trade_log=trade_log or TradeLogConfig(enabled=False),
+        strategy_timeline=strategy_timeline or StrategyTimelineConfig(enabled=False),
         alerts=alerts or AlertConfig(),
     )
 
@@ -250,6 +254,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Audit Trail", HTML)
         self.assertIn('id="audit-events"', HTML)
         self.assertIn('id="audit-meta"', HTML)
+
+    def test_page_includes_strategy_timeline(self) -> None:
+        self.assertIn('id="strategy-timeline"', HTML)
+        self.assertIn("strategy_timeline", HTML)
+        self.assertIn("No strategy timeline events yet.", HTML)
 
     def test_spot_markets_payload_sanitizes_new_market(self) -> None:
         markets = _spot_markets_from_payload(
@@ -1120,18 +1129,25 @@ class WebMonitorTest(unittest.TestCase):
                     trade_log=TradeLogConfig(
                         enabled=False,
                         path=os.path.join(tmp, "trade_events.jsonl"),
-                    )
+                    ),
+                    strategy_timeline=StrategyTimelineConfig(
+                        enabled=False,
+                        path=os.path.join(tmp, "strategy_timeline.jsonl"),
+                    ),
                 )
             )
 
         self.assertIn("risk", payload)
         self.assertIn("trade_log", payload)
+        self.assertIn("strategy_timeline", payload)
         self.assertIn("web_audit", payload)
         self.assertIn("alerts", payload)
         self.assertFalse(payload["risk"]["allow_live_trading"])
         self.assertEqual(payload["trade_log"]["recent_events"], [])
         self.assertEqual(payload["trade_log"]["recent_entries"], [])
         self.assertEqual(payload["trade_log"]["summary"]["event_count"], 0)
+        self.assertEqual(payload["strategy_timeline"]["recent_events"], [])
+        self.assertEqual(payload["strategy_timeline"]["summary"]["event_count"], 0)
         self.assertEqual(payload["web_audit"]["recent_events"], [])
 
     def test_operations_payload_compacts_trade_log_events(self) -> None:
@@ -1189,6 +1205,54 @@ class WebMonitorTest(unittest.TestCase):
         self.assertNotIn("placed_order_ids", row)
         self.assertEqual(operations["trade_log"]["recent_events"], [row])
         self.assertLess(len(json.dumps(operations["trade_log"])), 5000)
+
+    def test_operations_payload_compacts_strategy_timeline_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                strategy_timeline=StrategyTimelineConfig(
+                    enabled=True,
+                    path=os.path.join(tmp, "strategy_timeline.jsonl"),
+                    max_recent_events=10,
+                )
+            )
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                {
+                    "type": "spot_spread_execution",
+                    "strategy": "spot_spread",
+                    "mode": "live",
+                    "status": "blocked_by_risk",
+                    "plan": {
+                        "exchange": "multi",
+                        "symbol": "ACS",
+                        "orders": [
+                            {
+                                "exchange": "coinbase-spot",
+                                "symbol": "ACS/USDC",
+                                "side": "buy",
+                                "slippage_bps": 12.5,
+                            }
+                        ],
+                    },
+                    "risk": {
+                        "level": "blocked",
+                        "approved": False,
+                        "reasons": ["risk.allow_live_trading is false"],
+                    },
+                    "timing": {"opportunity_age_ms": 88.0},
+                },
+                source="test",
+            )
+
+            operations = build_operations_payload(cfg)
+
+        row = operations["strategy_timeline"]["recent_entries"][0]
+        self.assertEqual(row["action"], "blocked")
+        self.assertEqual(row["accounts"], ["coinbase-spot"])
+        self.assertIn("ACS/USDC", row["symbols"])
+        self.assertEqual(row["reason"], "risk.allow_live_trading is false")
+        self.assertNotIn("raw", row)
+        self.assertEqual(operations["strategy_timeline"]["summary"]["blocked_count"], 1)
 
     def test_trade_log_tail_reader_returns_recent_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

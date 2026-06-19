@@ -86,6 +86,13 @@ from ..solana import (
     update_holder_history,
 )
 from ..spot_arbitrage_executor import run_spot_arbitrage_execution_cycle
+from ..strategy_timeline import (
+    read_recent_strategy_timeline_entries,
+    strategy_timeline_event_from_payload,
+    strategy_timeline_fingerprint,
+    summarize_strategy_timeline_entries,
+    write_strategy_timeline_from_payload,
+)
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..trade_log import (
     read_recent_trade_entries,
@@ -261,6 +268,27 @@ def _compact_trade_log_entry(entry: Any) -> dict[str, Any]:
     }
 
 
+def _compact_strategy_timeline_entry(entry: Any) -> dict[str, Any]:
+    row = entry.to_dict()
+    return {
+        "event_id": row.get("event_id", ""),
+        "logged_at": row.get("logged_at"),
+        "strategy": row.get("strategy", ""),
+        "mode": row.get("mode", ""),
+        "status": row.get("status", ""),
+        "action": row.get("action", ""),
+        "event_type": row.get("event_type", ""),
+        "accounts": row.get("accounts", []),
+        "symbols": row.get("symbols", []),
+        "reason": row.get("reason", ""),
+        "reasons": row.get("reasons", []),
+        "warnings": row.get("warnings", []),
+        "risk_triggers": row.get("risk_triggers", []),
+        "metrics": row.get("metrics", {}),
+        "source": row.get("source", ""),
+    }
+
+
 def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     try:
         recent_entries = read_recent_trade_entries(cfg.trade_log)
@@ -276,6 +304,24 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     trade_log_payload["recent_events"] = compact_entries
     trade_log_payload["summary"] = summarize_trade_entries(recent_entries)
     trade_log_payload["error"] = trade_log_error
+    try:
+        timeline_entries = read_recent_strategy_timeline_entries(
+            cfg.strategy_timeline
+        )
+        timeline_error = None
+    except OSError as exc:
+        timeline_entries = []
+        timeline_error = str(exc)
+    compact_timeline_entries = [
+        _compact_strategy_timeline_entry(entry) for entry in timeline_entries
+    ]
+    timeline_payload = asdict(cfg.strategy_timeline)
+    timeline_payload["recent_entries"] = compact_timeline_entries
+    timeline_payload["recent_events"] = compact_timeline_entries
+    timeline_payload["summary"] = summarize_strategy_timeline_entries(
+        timeline_entries
+    )
+    timeline_payload["error"] = timeline_error
     audit_path = default_web_audit_path(cfg)
     try:
         audit_events = read_recent_web_audit_events(cfg)
@@ -305,6 +351,7 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
         "risk": asdict(cfg.risk),
         "alerts": asdict(cfg.alerts),
         "trade_log": trade_log_payload,
+        "strategy_timeline": timeline_payload,
         "web_audit": {
             "enabled": True,
             "path": audit_path,
@@ -1601,6 +1648,11 @@ async def cancel_order_payload(
             "cancel_result": cancel_summary,
         },
     )
+    write_strategy_timeline_from_payload(
+        cfg.strategy_timeline,
+        event,
+        source="manual",
+    )
     return {
         "ok": True,
         "exchange": exchange.key,
@@ -1710,6 +1762,11 @@ async def cancel_bulk_orders_payload(
             },
             "cancel_errors": errors,
         },
+    )
+    write_strategy_timeline_from_payload(
+        cfg.strategy_timeline,
+        event,
+        source="manual",
     )
     return {
         "ok": len(errors) == 0,
@@ -3527,6 +3584,7 @@ async def monitor_loop(
     consecutive_problem_cycles = 0
     last_daily_report_day: str | None = None
     last_spot_arbitrage_execution_at = 0.0
+    last_spot_arbitrage_timeline_fingerprint = ""
     scan_count = 0
     loop_started_monotonic = time.monotonic()
     try:
@@ -3640,6 +3698,8 @@ async def monitor_loop(
                 runtime_slow_execution = runtime_cfg.slow_execution
                 strategy_pauses = await state.strategy_pauses()
                 spot_arbitrage_payload = {
+                    "type": "spot_spread_execution",
+                    "strategy": "spot_spread",
                     "status": "disabled",
                     "mode": "dry_run",
                     "plan": None,
@@ -3815,6 +3875,22 @@ async def monitor_loop(
                             write_trade_event(runtime_cfg.trade_log, spot_arbitrage_payload)
                             if spot_arbitrage_payload.get("status") != "no_opportunity":
                                 last_spot_arbitrage_execution_at = time.monotonic()
+                    timeline_event = strategy_timeline_event_from_payload(
+                        spot_arbitrage_payload,
+                        source="monitor",
+                    )
+                    timeline_fingerprint = strategy_timeline_fingerprint(
+                        timeline_event
+                    )
+                    if timeline_fingerprint != last_spot_arbitrage_timeline_fingerprint:
+                        write_strategy_timeline_from_payload(
+                            runtime_cfg.strategy_timeline,
+                            spot_arbitrage_payload,
+                            source="monitor",
+                        )
+                        last_spot_arbitrage_timeline_fingerprint = (
+                            timeline_fingerprint
+                        )
                 else:
                     opportunities = await scan_with_manager(
                         runtime_cfg,
@@ -4062,9 +4138,12 @@ async def monitor_loop(
                     ]
                 if spot_arbitrage_payload.get("status") in {
                     "blocked_by_plan",
+                    "blocked_by_risk",
+                    "blocked_by_slippage",
                     "blocked_by_validation",
                     "blocked_by_balance",
                     "execution_error",
+                    "hedge_required",
                 }:
                     reason = ""
                     risk_payload = spot_arbitrage_payload.get("risk")
@@ -4583,6 +4662,11 @@ async def market_maker_task_loop(
                     if cancel_payload.get("canceled_count"):
                         last_cancel_at = time.time()
                     write_trade_event(cancel_cfg.trade_log, cancel_payload)
+                    write_strategy_timeline_from_payload(
+                        cancel_cfg.strategy_timeline,
+                        cancel_payload,
+                        source="market_maker_task",
+                    )
                     open_order_ids = []
                     open_order_exchange = ""
                     open_order_symbol = ""
@@ -4635,6 +4719,11 @@ async def market_maker_task_loop(
                         if cancel_payload.get("canceled_count"):
                             last_cancel_at = time.time()
                         write_trade_event(runtime_cfg.trade_log, cancel_payload)
+                        write_strategy_timeline_from_payload(
+                            runtime_cfg.strategy_timeline,
+                            cancel_payload,
+                            source="market_maker_task",
+                        )
                         open_order_ids = []
                         open_order_exchange = ""
                         open_order_symbol = ""
@@ -4736,6 +4825,11 @@ async def market_maker_task_loop(
                     payload["market_data"] = market_data
                     payload["runtime_strategy"] = "market_maker"
                     write_trade_event(runtime_cfg.trade_log, payload)
+                    write_strategy_timeline_from_payload(
+                        runtime_cfg.strategy_timeline,
+                        payload,
+                        source="market_maker_task",
+                    )
                     plan_payload = (
                         payload.get("plan")
                         if isinstance(payload.get("plan"), dict)

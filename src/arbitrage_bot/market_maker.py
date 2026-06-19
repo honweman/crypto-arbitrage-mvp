@@ -22,6 +22,7 @@ from .risk import (
     evaluate_order_batch,
     portfolio_positions_base,
 )
+from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
 
@@ -788,6 +789,11 @@ async def run_loop(
             )
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
             write_trade_event(cfg.trade_log, payload)
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                payload,
+                source="market_maker_loop",
+            )
             sys.stdout.flush()
             plan_payload = payload.get("plan", {})
             if isinstance(plan_payload, dict):

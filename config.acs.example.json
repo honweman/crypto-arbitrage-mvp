@@ -164,6 +164,11 @@
     "path": "data/trade_events.jsonl",
     "max_recent_events": 50
   },
+  "strategy_timeline": {
+    "enabled": true,
+    "path": "data/strategy_timeline.jsonl",
+    "max_recent_events": 100
+  },
   "pnl_store": {
     "enabled": true,
     "path": "data/fill_pnl.sqlite3"

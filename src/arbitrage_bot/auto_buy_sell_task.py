@@ -12,6 +12,7 @@ from typing import Any
 from .config import BotConfig, ExchangeConfig, SlowExecutionConfig
 from .exchanges import ExchangeManager
 from .slow_executor import cancel_order_ids, run_cycle
+from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
 
@@ -327,6 +328,11 @@ class AutoBuySellTaskService:
             )
             cancel_payload["task_id"] = task_id
             write_trade_event(cfg.trade_log, cancel_payload)
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                cancel_payload,
+                source="auto_buy_sell_task",
+            )
 
         async with self._lock:
             task = self._get_task_unlocked(task_id)
@@ -513,6 +519,11 @@ class AutoBuySellTaskService:
             task.placed_count += int(execution.get("placed_count", 0) or 0)
             task.canceled_count += int(execution.get("canceled_count", 0) or 0)
             write_trade_event(cfg.trade_log, payload)
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                payload,
+                source="auto_buy_sell_task",
+            )
             task.next_run_at = self._next_check_time(task)
         except Exception as exc:  # noqa: BLE001
             task.status = "error"
@@ -563,6 +574,11 @@ class AutoBuySellTaskService:
         task.last_error = None
         task.next_run_at = now + max(1.0, task_cfg.interval_seconds)
         write_trade_event(cfg.trade_log, cancel_payload)
+        write_strategy_timeline_from_payload(
+            cfg.strategy_timeline,
+            cancel_payload,
+            source="auto_buy_sell_task",
+        )
         await self._refresh_task_activity(task, cfg, manager)
 
     async def _refresh_task_activity(

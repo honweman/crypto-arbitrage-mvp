@@ -179,6 +179,13 @@ class TradeLogConfig:
 
 
 @dataclass(frozen=True)
+class StrategyTimelineConfig:
+    enabled: bool = True
+    path: str = "data/strategy_timeline.jsonl"
+    max_recent_events: int = 100
+
+
+@dataclass(frozen=True)
 class PnlStoreConfig:
     enabled: bool = False
     path: str = "data/fill_pnl.sqlite3"
@@ -235,6 +242,9 @@ class BotConfig:
     derivative_exchanges: list[ExchangeConfig]
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
+    strategy_timeline: StrategyTimelineConfig = field(
+        default_factory=StrategyTimelineConfig
+    )
     pnl_store: PnlStoreConfig = field(default_factory=PnlStoreConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     web_security: WebSecurityConfig = field(default_factory=WebSecurityConfig)
@@ -344,6 +354,7 @@ def load_config(path: str | Path) -> BotConfig:
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
     trade_log_raw = raw.get("trade_log", {})
+    strategy_timeline_raw = raw.get("strategy_timeline", {})
     pnl_store_raw = raw.get("pnl_store", {})
     alerts_raw = raw.get("alerts", {})
     web_security_raw = raw.get("web_security", {})
@@ -566,6 +577,18 @@ def load_config(path: str | Path) -> BotConfig:
             enabled=bool(trade_log_raw.get("enabled", True)),
             path=str(trade_log_raw.get("path", "data/trade_events.jsonl")),
             max_recent_events=int(trade_log_raw.get("max_recent_events", 50)),
+        ),
+        strategy_timeline=StrategyTimelineConfig(
+            enabled=bool(strategy_timeline_raw.get("enabled", True)),
+            path=str(
+                strategy_timeline_raw.get(
+                    "path",
+                    "data/strategy_timeline.jsonl",
+                )
+            ),
+            max_recent_events=int(
+                strategy_timeline_raw.get("max_recent_events", 100)
+            ),
         ),
         pnl_store=PnlStoreConfig(
             enabled=bool(pnl_store_raw.get("enabled", False)),

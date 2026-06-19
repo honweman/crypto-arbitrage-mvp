@@ -18,6 +18,7 @@ from .risk import (
     portfolio_positions_base,
 )
 from .slow_execution import SlowExecutionPlan, build_slow_execution_plan
+from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
 
@@ -394,6 +395,11 @@ async def run_loop(
             )
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
             write_trade_event(cfg.trade_log, payload)
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                payload,
+                source="auto_buy_sell_loop",
+            )
             sys.stdout.flush()
             plan_payload = payload.get("plan", {})
             if cfg.slow_execution.start_price > 0 and payload.get("status") != "waiting_for_start_price":
@@ -430,6 +436,11 @@ async def run_loop(
                 )
                 print(json.dumps(cancel_payload, ensure_ascii=True, sort_keys=True))
                 write_trade_event(cfg.trade_log, cancel_payload)
+                write_strategy_timeline_from_payload(
+                    cfg.strategy_timeline,
+                    cancel_payload,
+                    source="auto_buy_sell_loop",
+                )
                 sys.stdout.flush()
                 if cancel_payload["canceled_count"] > 0:
                     last_cancel_at = time.time()

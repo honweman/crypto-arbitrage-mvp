@@ -51,6 +51,11 @@
     "enabled": false,
     "path": "data/fill_pnl.sqlite3"
   },
+  "strategy_timeline": {
+    "enabled": true,
+    "path": "data/strategy_timeline.jsonl",
+    "max_recent_events": 100
+  },
   "spot_exchanges": [
     {
       "id": "binance",

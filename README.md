@@ -412,12 +412,30 @@ Every market maker and Auto Buy/Sell cycle is written to JSONL when `trade_log.e
 }
 ```
 
-The monitor shows the current risk settings and normalized trade log rows in the `Risk & Events` table. You can also inspect the same log from the command line:
+The strategy timeline is a separate structured JSONL stream focused on decisions and explanations: why a strategy did not place an order, why it canceled, which risk condition blocked execution, which account/symbol was affected, and key timing/slippage metrics for spot arbitrage execution protection.
+
+```json
+"strategy_timeline": {
+  "enabled": true,
+  "path": "data/strategy_timeline.jsonl",
+  "max_recent_events": 100
+}
+```
+
+The monitor shows the current risk settings, strategy timeline, and normalized trade log rows in the `Risk & Events` table. You can also inspect the trade log from the command line:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m arbitrage_bot.trade_log \
   --config config.acs.json \
   --limit 20
+```
+
+Inspect the strategy timeline:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m arbitrage_bot.strategy_timeline \
+  --config config.acs.json \
+  --limit 30
 ```
 
 For machine-readable output:
