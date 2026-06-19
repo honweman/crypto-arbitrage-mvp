@@ -1503,7 +1503,7 @@ class WebMonitorTest(unittest.TestCase):
     def test_default_strategy_center_path_uses_config(self) -> None:
         cfg = make_config()
 
-        self.assertEqual(default_strategy_center_path(cfg), "data/strategy_center.json")
+        self.assertEqual(default_strategy_center_path(cfg), "data/strategy_center.sqlite3")
 
     def test_registration_code_is_required_when_env_name_is_configured(self) -> None:
         self.assertTrue(_registration_code_required(make_config()))
@@ -2614,7 +2614,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             cfg = make_config(
                 strategy_center=StrategyCenterConfig(
-                    path=str(data_dir / "strategy_center.json"),
+                    path=str(data_dir / "strategy_center.sqlite3"),
                 ),
                 web_security=WebSecurityConfig(
                     password_env=None,

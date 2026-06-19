@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ STRATEGY_TYPES = {
 SIGNAL_SOURCES = {"tradingview", "custom"}
 SIGNAL_ACTIONS = {"alert", "buy", "sell", "entry", "exit", "close"}
 SIDE_VALUES = {"buy", "sell", ""}
+SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 SECRET_FIELD_RE = re.compile(
@@ -580,8 +582,14 @@ class StrategyCenterStore:
     def __init__(self, path: str | Path, *, max_recent_signals: int = 100) -> None:
         self.path = Path(path)
         self.max_recent_signals = max(1, int(max_recent_signals))
+        self._sqlite_ready = False
 
     def read(self) -> dict[str, Any]:
+        if self._is_sqlite:
+            return self._read_sqlite()
+        return self._read_json()
+
+    def _read_json(self) -> dict[str, Any]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -593,6 +601,12 @@ class StrategyCenterStore:
         return self._normalize_payload(raw)
 
     def write(self, payload: dict[str, Any]) -> None:
+        if self._is_sqlite:
+            self._write_sqlite(payload)
+            return
+        self._write_json(payload)
+
+    def _write_json(self, payload: dict[str, Any]) -> None:
         normalized = self._normalize_payload(payload)
         normalized["updated_at"] = _now()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -606,6 +620,334 @@ class StrategyCenterStore:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+
+    @property
+    def _is_sqlite(self) -> bool:
+        return self.path.suffix.lower() in SQLITE_SUFFIXES
+
+    def _connect_sqlite(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        return connection
+
+    def _ensure_sqlite(self) -> None:
+        if self._sqlite_ready:
+            return
+        with self._connect_sqlite() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS strategy_instances (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL DEFAULT '',
+                    asset TEXT NOT NULL DEFAULT '',
+                    symbol TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_strategy_instances_owner
+                    ON strategy_instances(owner_email);
+                CREATE INDEX IF NOT EXISTS idx_strategy_instances_asset
+                    ON strategy_instances(asset);
+                CREATE TABLE IF NOT EXISTS user_api_accounts (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_api_accounts_owner
+                    ON user_api_accounts(owner_email);
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS signals (
+                    id TEXT PRIMARY KEY,
+                    strategy_id TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    symbol TEXT NOT NULL DEFAULT '',
+                    received_at REAL NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_signals_received_at
+                    ON signals(received_at);
+                CREATE INDEX IF NOT EXISTS idx_signals_strategy_id
+                    ON signals(strategy_id);
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO metadata(key, value)
+                VALUES('schema_version', '1')
+                """
+            )
+            self._migrate_legacy_json_unlocked(connection)
+            connection.commit()
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+        self._sqlite_ready = True
+
+    def _legacy_json_path(self) -> Path:
+        return self.path.with_suffix(".json")
+
+    def _migrate_legacy_json_unlocked(self, connection: sqlite3.Connection) -> None:
+        checked = connection.execute(
+            "SELECT value FROM metadata WHERE key = 'json_migration_checked'"
+        ).fetchone()
+        if checked is not None:
+            return
+        legacy_path = self._legacy_json_path()
+        if legacy_path.exists():
+            try:
+                raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    self._write_sqlite_payload_unlocked(
+                        connection,
+                        self._normalize_payload(raw),
+                        updated_at=float(raw.get("updated_at") or _now()),
+                    )
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO metadata(key, value)
+                        VALUES('json_migrated_from', ?)
+                        """,
+                        (str(legacy_path),),
+                    )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO metadata(key, value)
+                    VALUES('json_migration_error', ?)
+                    """,
+                    (f"{exc.__class__.__name__}: {exc}",),
+                )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO metadata(key, value)
+            VALUES('json_migration_checked', '1')
+            """
+        )
+
+    def _json_dumps(self, payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+    def _updated_at_sqlite(self, connection: sqlite3.Connection) -> float | None:
+        row = connection.execute(
+            "SELECT value FROM metadata WHERE key = 'updated_at'"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return float(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    def _set_updated_at_sqlite(
+        self,
+        connection: sqlite3.Connection,
+        updated_at: float,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO metadata(key, value)
+            VALUES('updated_at', ?)
+            """,
+            (str(float(updated_at)),),
+        )
+
+    def _read_sqlite(self) -> dict[str, Any]:
+        self._ensure_sqlite()
+        with self._connect_sqlite() as connection:
+            strategy_rows = connection.execute(
+                """
+                SELECT payload FROM strategy_instances
+                ORDER BY updated_at DESC, id ASC
+                """
+            ).fetchall()
+            account_rows = connection.execute(
+                """
+                SELECT payload FROM user_api_accounts
+                ORDER BY updated_at DESC, id ASC
+                """
+            ).fetchall()
+            funding_row = connection.execute(
+                "SELECT payload FROM settings WHERE key = 'funding_arbitrage'"
+            ).fetchone()
+            signal_bot_row = connection.execute(
+                "SELECT payload FROM settings WHERE key = 'signal_bot'"
+            ).fetchone()
+            signal_rows = connection.execute(
+                """
+                SELECT payload FROM (
+                    SELECT payload, received_at, id FROM signals
+                    ORDER BY received_at DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY received_at ASC, id ASC
+                """,
+                (self.max_recent_signals,),
+            ).fetchall()
+            raw = {
+                "version": 1,
+                "updated_at": self._updated_at_sqlite(connection),
+                "strategy_instances": [
+                    json.loads(row["payload"]) for row in strategy_rows
+                ],
+                "user_api_accounts": [
+                    json.loads(row["payload"]) for row in account_rows
+                ],
+                "funding_arbitrage": (
+                    json.loads(funding_row["payload"])
+                    if funding_row is not None
+                    else {}
+                ),
+                "signal_bot": (
+                    json.loads(signal_bot_row["payload"])
+                    if signal_bot_row is not None
+                    else {}
+                ),
+                "signals": [json.loads(row["payload"]) for row in signal_rows],
+            }
+        return self._normalize_payload(raw)
+
+    def _write_sqlite(self, payload: dict[str, Any]) -> None:
+        normalized = self._normalize_payload(payload)
+        updated_at = _now()
+        self._ensure_sqlite()
+        with self._connect_sqlite() as connection:
+            self._write_sqlite_payload_unlocked(
+                connection,
+                normalized,
+                updated_at=updated_at,
+            )
+            connection.commit()
+
+    def _write_sqlite_payload_unlocked(
+        self,
+        connection: sqlite3.Connection,
+        payload: dict[str, Any],
+        *,
+        updated_at: float,
+    ) -> None:
+        connection.execute("DELETE FROM strategy_instances")
+        connection.execute("DELETE FROM user_api_accounts")
+        connection.execute("DELETE FROM settings")
+        connection.execute("DELETE FROM signals")
+        for item in payload["strategy_instances"]:
+            strategy = StrategyInstance.from_dict(item)
+            self._upsert_strategy_sqlite_unlocked(connection, strategy)
+        for item in payload["user_api_accounts"]:
+            account = UserApiAccount.from_dict(item)
+            self._upsert_api_account_sqlite_unlocked(connection, account)
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO settings(key, payload, updated_at)
+            VALUES('funding_arbitrage', ?, ?)
+            """,
+            (self._json_dumps(payload["funding_arbitrage"]), updated_at),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO settings(key, payload, updated_at)
+            VALUES('signal_bot', ?, ?)
+            """,
+            (self._json_dumps(payload["signal_bot"]), updated_at),
+        )
+        for item in payload["signals"][-self.max_recent_signals :]:
+            event = SignalEvent.from_dict(item)
+            self._upsert_signal_sqlite_unlocked(connection, event)
+        self._trim_signals_sqlite_unlocked(connection)
+        self._set_updated_at_sqlite(connection, updated_at)
+
+    def _upsert_strategy_sqlite_unlocked(
+        self,
+        connection: sqlite3.Connection,
+        strategy: StrategyInstance,
+    ) -> None:
+        row = strategy.to_dict()
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO strategy_instances(
+                id, owner_email, asset, symbol, updated_at, payload
+            )
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                strategy.id,
+                strategy.owner_email,
+                strategy.asset,
+                strategy.symbol,
+                strategy.updated_at,
+                self._json_dumps(row),
+            ),
+        )
+
+    def _upsert_api_account_sqlite_unlocked(
+        self,
+        connection: sqlite3.Connection,
+        account: UserApiAccount,
+    ) -> None:
+        row = account.to_dict()
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO user_api_accounts(
+                id, owner_email, updated_at, payload
+            )
+            VALUES(?, ?, ?, ?)
+            """,
+            (
+                account.id,
+                account.owner_email,
+                account.updated_at,
+                self._json_dumps(row),
+            ),
+        )
+
+    def _upsert_signal_sqlite_unlocked(
+        self,
+        connection: sqlite3.Connection,
+        event: SignalEvent,
+    ) -> None:
+        row = event.to_dict()
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO signals(
+                id, strategy_id, source, symbol, received_at, payload
+            )
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.id,
+                event.strategy_id,
+                event.source,
+                event.symbol,
+                event.received_at,
+                self._json_dumps(row),
+            ),
+        )
+
+    def _trim_signals_sqlite_unlocked(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM signals
+            WHERE id NOT IN (
+                SELECT id FROM signals
+                ORDER BY received_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (self.max_recent_signals,),
+        )
 
     def empty_payload(self) -> dict[str, Any]:
         return {
@@ -647,6 +989,17 @@ class StrategyCenterStore:
         }
 
     def upsert_strategy(self, strategy: StrategyInstance) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            strategy = StrategyInstance.from_dict(
+                {**strategy.to_dict(), "updated_at": updated_at}
+            )
+            with self._connect_sqlite() as connection:
+                self._upsert_strategy_sqlite_unlocked(connection, strategy)
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         rows = [
             item
@@ -659,6 +1012,17 @@ class StrategyCenterStore:
         return self.read()
 
     def delete_strategy(self, strategy_id: str) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            with self._connect_sqlite() as connection:
+                connection.execute(
+                    "DELETE FROM strategy_instances WHERE id = ?",
+                    (strategy_id,),
+                )
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         payload["strategy_instances"] = [
             item
@@ -669,6 +1033,17 @@ class StrategyCenterStore:
         return self.read()
 
     def upsert_api_account(self, account: UserApiAccount) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            account = UserApiAccount.from_dict(
+                {**account.to_dict(), "updated_at": updated_at}
+            )
+            with self._connect_sqlite() as connection:
+                self._upsert_api_account_sqlite_unlocked(connection, account)
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         rows = [
             item
@@ -681,6 +1056,17 @@ class StrategyCenterStore:
         return self.read()
 
     def delete_api_account(self, account_id: str) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            with self._connect_sqlite() as connection:
+                connection.execute(
+                    "DELETE FROM user_api_accounts WHERE id = ?",
+                    (account_id,),
+                )
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         payload["user_api_accounts"] = [
             item
@@ -691,18 +1077,74 @@ class StrategyCenterStore:
         return self.read()
 
     def update_funding(self, settings: FundingArbitrageSettings) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            row = FundingArbitrageSettings.from_dict(
+                {**settings.to_dict(), "updated_at": updated_at}
+            )
+            with self._connect_sqlite() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO settings(key, payload, updated_at)
+                    VALUES('funding_arbitrage', ?, ?)
+                    """,
+                    (self._json_dumps(row.to_dict()), updated_at),
+                )
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         payload["funding_arbitrage"] = settings.to_dict()
         self.write(payload)
         return self.read()
 
     def update_signal_bot(self, settings: SignalBotSettings) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            row = SignalBotSettings.from_dict(
+                {**settings.to_dict(), "updated_at": updated_at}
+            )
+            with self._connect_sqlite() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO settings(key, payload, updated_at)
+                    VALUES('signal_bot', ?, ?)
+                    """,
+                    (self._json_dumps(row.to_dict()), updated_at),
+                )
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         payload["signal_bot"] = settings.to_dict()
         self.write(payload)
         return self.read()
 
     def append_signal(self, event: SignalEvent) -> dict[str, Any]:
+        if self._is_sqlite:
+            self._ensure_sqlite()
+            updated_at = _now()
+            with self._connect_sqlite() as connection:
+                self._upsert_signal_sqlite_unlocked(connection, event)
+                if event.strategy_id:
+                    strategy_row = connection.execute(
+                        """
+                        SELECT payload FROM strategy_instances WHERE id = ?
+                        """,
+                        (event.strategy_id,),
+                    ).fetchone()
+                    if strategy_row is not None:
+                        strategy_payload = json.loads(strategy_row["payload"])
+                        strategy_payload["last_signal_id"] = event.id
+                        strategy_payload["updated_at"] = updated_at
+                        strategy = StrategyInstance.from_dict(strategy_payload)
+                        self._upsert_strategy_sqlite_unlocked(connection, strategy)
+                self._trim_signals_sqlite_unlocked(connection)
+                self._set_updated_at_sqlite(connection, updated_at)
+                connection.commit()
+            return self.read()
         payload = self.read()
         rows = [item for item in payload.get("signals", []) if item.get("id") != event.id]
         rows.append(event.to_dict())

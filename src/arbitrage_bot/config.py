@@ -208,7 +208,7 @@ class BacktestConfig:
 @dataclass(frozen=True)
 class StrategyCenterConfig:
     enabled: bool = True
-    path: str = "data/strategy_center.json"
+    path: str = "data/strategy_center.sqlite3"
     max_recent_signals: int = 100
 
 
@@ -696,7 +696,7 @@ def load_config(path: str | Path) -> BotConfig:
         ),
         strategy_center=StrategyCenterConfig(
             enabled=bool(strategy_center_raw.get("enabled", True)),
-            path=str(strategy_center_raw.get("path", "data/strategy_center.json")),
+            path=str(strategy_center_raw.get("path", "data/strategy_center.sqlite3")),
             max_recent_signals=int(
                 strategy_center_raw.get("max_recent_signals", 100)
             ),

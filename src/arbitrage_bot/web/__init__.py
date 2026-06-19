@@ -2063,7 +2063,7 @@ def default_web_user_store_path(cfg: BotConfig) -> str:
 
 def default_strategy_center_path(cfg: BotConfig) -> str:
     return cfg.strategy_center.path or str(
-        Path(cfg.trade_log.path).with_name("strategy_center.json")
+        Path(cfg.trade_log.path).with_name("strategy_center.sqlite3")
     )
 
 

@@ -102,7 +102,7 @@ def make_test_config(data_dir: Path, *, max_recent_signals: int) -> BotConfig:
         backtest=BacktestConfig(enabled=False),
         strategy_center=StrategyCenterConfig(
             enabled=True,
-            path=str(data_dir / "strategy_center.json"),
+            path=str(data_dir / "strategy_center.sqlite3"),
             max_recent_signals=max_recent_signals,
         ),
         portfolio=PortfolioConfig(enabled=False),

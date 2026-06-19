@@ -104,7 +104,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.backtest.step_count, 200)
         self.assertEqual(cfg.backtest.data_source, "synthetic")
         self.assertTrue(cfg.strategy_center.enabled)
-        self.assertEqual(cfg.strategy_center.path, "data/strategy_center.json")
+        self.assertEqual(cfg.strategy_center.path, "data/strategy_center.sqlite3")
         self.assertEqual(cfg.strategy_center.max_recent_signals, 100)
         self.assertTrue(cfg.portfolio.enabled)
         self.assertEqual(cfg.portfolio.positions[0].asset, "ACS")

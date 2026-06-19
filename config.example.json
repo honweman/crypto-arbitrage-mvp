@@ -119,7 +119,7 @@
   },
   "strategy_center": {
     "enabled": true,
-    "path": "data/strategy_center.json",
+    "path": "data/strategy_center.sqlite3",
     "max_recent_signals": 100
   },
   "portfolio": {

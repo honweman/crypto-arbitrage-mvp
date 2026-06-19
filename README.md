@@ -40,7 +40,7 @@ This starts an in-process aiohttp test server with temporary data files, no
 configured exchanges, no real API credentials, and `allow_live_trading=false`.
 It exercises state reads, strategy-center writes, funding settings, Signal Bot
 webhooks, and concurrent API traffic without placing or canceling live orders.
-State reads can safely be tested with higher concurrency than JSON-backed writes;
+State reads can safely be tested with higher concurrency than SQLite-backed writes;
 increase `--write-concurrency` only when specifically testing strategy-center
 store throughput.
 
