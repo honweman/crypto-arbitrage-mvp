@@ -1,0 +1,958 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Trading Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Crypto Trading Dashboard</h1>
+      <div class="subtle">Multi-asset arbitrage · market making · auto buy/sell</div>
+      <nav class="view-nav" aria-label="Page views">
+        <a class="view-tab active" data-view-tab="status" href="#status">Status</a>
+        <a class="view-tab" data-view-tab="settings" href="#settings">Settings</a>
+        <a class="view-tab" data-view-tab="records" href="#records">Records</a>
+      </nav>
+    </div>
+    <div class="header-actions">
+      <label class="program-switch" title="Pause or resume scans">
+        Program
+        <input id="program-toggle" type="checkbox" checked>
+        <span class="switch-track"></span>
+      </label>
+      <span id="status" class="pill starting">Starting</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="portfolio-bar" data-page="status">
+      <div class="metric">
+        <div class="label">Position</div>
+        <div id="portfolio-position" class="value">--</div>
+        <div id="portfolio-position-detail" class="subtle detail">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Cash Position</div>
+        <div id="portfolio-cash" class="value">--</div>
+        <div id="portfolio-cash-detail" class="subtle detail">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Balances</div>
+        <div id="account-balances-total" class="value">--</div>
+        <div id="account-balances-detail" class="subtle detail">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Mark Price</div>
+        <div id="portfolio-mark" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Position Value</div>
+        <div id="portfolio-value" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Total P/L</div>
+        <div id="portfolio-total-pnl" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">MM P/L</div>
+        <div id="portfolio-mm-pnl" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Arb P/L</div>
+        <div id="portfolio-arb-pnl" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Auto P/L</div>
+        <div id="portfolio-auto-pnl" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Other P/L</div>
+        <div id="portfolio-other-pnl" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Price Move</div>
+        <div id="portfolio-price-pnl" class="value">--</div>
+      </div>
+    </div>
+
+    <section data-page="status" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Overview</h2>
+        <span id="overview-meta" class="subtle"></span>
+      </div>
+      <div class="overview-grid">
+        <div class="overview-row">
+          <div class="label">Program</div>
+          <div id="overview-program" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">MM</div>
+          <div id="overview-mm" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Arbitrage</div>
+          <div id="overview-arb" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Orders</div>
+          <div id="overview-orders" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Auto</div>
+          <div id="overview-auto" class="value">--</div>
+        </div>
+        <div class="overview-row">
+          <div class="label">Risk</div>
+          <div id="overview-risk" class="value">--</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="strategy-overview" data-page="status">
+      <div class="strategy-tile">
+        <div class="label">Market Maker</div>
+        <div id="monitor-mm-summary" class="value">--</div>
+        <div id="monitor-mm-detail" class="subtle detail">--</div>
+      </div>
+      <div class="strategy-tile">
+        <div class="label">Auto Buy/Sell</div>
+        <div id="monitor-auto-summary" class="value">--</div>
+        <div id="monitor-auto-detail" class="subtle detail">--</div>
+      </div>
+      <div class="strategy-tile">
+        <div class="label">Risk</div>
+        <div id="monitor-risk-summary" class="value">--</div>
+        <div id="monitor-risk-detail" class="subtle detail">--</div>
+      </div>
+      <div class="strategy-tile">
+        <div class="label">Orders</div>
+        <div id="monitor-orders-summary" class="value">--</div>
+        <div id="monitor-orders-detail" class="subtle detail">--</div>
+      </div>
+    </div>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Readiness</h2>
+        <span id="readiness-meta" class="subtle"></span>
+      </div>
+      <div class="readiness-grid">
+        <div class="metric compact">
+          <div class="label">Live Gate</div>
+          <div id="readiness-status" class="value">--</div>
+          <div id="readiness-status-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Accounts</div>
+          <div id="readiness-accounts-summary" class="value">--</div>
+          <div id="readiness-accounts-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Strategies</div>
+          <div id="readiness-strategies-summary" class="value">--</div>
+          <div id="readiness-strategies-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Orders</div>
+          <div id="readiness-orders-summary" class="value">--</div>
+          <div id="readiness-orders-detail" class="subtle detail">--</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="readiness-table">
+          <thead>
+            <tr>
+              <th>Priority</th>
+              <th>Scope</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="readiness-actions"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="readiness-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Type</th>
+              <th>Symbols</th>
+              <th>API</th>
+              <th>Balance</th>
+              <th>Orders</th>
+              <th>Risk</th>
+              <th>Status</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="readiness-accounts"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="readiness-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Configured</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Live</th>
+              <th>Status</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="readiness-strategies"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="statusbar" data-page="status">
+      <div class="metric secondary-metric">
+        <div class="label">Scans</div>
+        <div id="scan-count" class="value">0</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Latency</div>
+        <div id="latency" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Opportunity</div>
+        <div id="opp-count" class="value">0</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Notional</div>
+        <div id="notional" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">Threshold</div>
+        <div id="threshold" class="value">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Updated</div>
+        <div id="updated" class="value">--</div>
+      </div>
+      <div class="metric secondary-metric">
+        <div class="label">On-chain</div>
+        <div id="onchain-status" class="value">--</div>
+      </div>
+    </div>
+
+    <section data-page="records" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Live Trading Console</h2>
+        <span id="console-meta" class="subtle"></span>
+      </div>
+      <div class="control-panel console-actions">
+        <button id="console-cancel-all" class="danger-button" type="button">Cancel All</button>
+        <div id="console-account-actions" class="account-options"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="console-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Status</th>
+              <th>Live</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Mode</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="console-strategies"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Status</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Filled</th>
+              <th class="num">Remaining</th>
+              <th class="num">Cost</th>
+              <th>Updated</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="console-open-orders"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="fills-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Source</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Cost</th>
+              <th class="num">P/L</th>
+              <th>Fee</th>
+              <th>Order</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="console-recent-fills"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Markets</h2>
+        <span id="markets-config-meta" class="subtle"></span>
+      </div>
+      <form id="markets-form" class="control-panel">
+        <div class="field">
+          <label for="market-asset">Asset</label>
+          <input id="market-asset" type="text" placeholder="BTC">
+        </div>
+        <div class="field">
+          <label for="market-exchange">Account</label>
+          <select id="market-exchange"></select>
+        </div>
+        <div class="field">
+          <label for="market-symbol">Symbol</label>
+          <input id="market-symbol" type="text" placeholder="BTC/USDT">
+        </div>
+        <button id="market-add" class="control-button" type="submit">Add Market</button>
+      </form>
+      <div class="table-wrap">
+        <table class="markets-config-table">
+          <thead>
+            <tr>
+              <th>Asset</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Quote</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="markets-config"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Cash & Carry Pairs</h2>
+        <span id="carry-config-meta" class="subtle"></span>
+      </div>
+      <form id="carry-form" class="control-panel">
+        <div class="field">
+          <label for="carry-spot-symbol">Spot Symbol</label>
+          <input id="carry-spot-symbol" type="text" placeholder="BTC/USDT">
+        </div>
+        <div class="field">
+          <label for="carry-derivative-symbol">Contract Symbol</label>
+          <input id="carry-derivative-symbol" type="text" placeholder="BTC/USDT:USDT">
+        </div>
+        <button id="carry-add" class="control-button" type="submit">Add Pair</button>
+      </form>
+      <div class="table-wrap">
+        <table class="markets-config-table">
+          <thead>
+            <tr>
+              <th>Spot Symbol</th>
+              <th>Contract Symbol</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="carry-config"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Risk Controls</h2>
+        <span id="risk-control-meta" class="subtle"></span>
+      </div>
+      <form id="risk-form" class="control-panel">
+        <label class="check-field">
+          <input id="risk-allow-live" type="checkbox">
+          Allow Live
+        </label>
+        <div class="form-divider">Scope</div>
+        <div class="field account-field">
+          <label>Accounts</label>
+          <div id="risk-accounts" class="account-options"></div>
+        </div>
+        <div class="field account-field">
+          <label>Strategies</label>
+          <div id="risk-strategies" class="account-options"></div>
+        </div>
+        <div class="form-divider">Order Budget</div>
+        <div class="field">
+          <label for="risk-max-order">Max Order</label>
+          <input id="risk-max-order" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-cycle">Max Cycle</label>
+          <input id="risk-max-cycle" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-exposure">Max Exposure</label>
+          <input id="risk-max-exposure" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-daily-loss">Daily Loss</label>
+          <input id="risk-max-daily-loss" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">MM Guardrails</div>
+        <div class="field">
+          <label for="risk-max-orders-cycle">Max Orders/Cycle</label>
+          <input id="risk-max-orders-cycle" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="risk-max-open-orders">Max Open</label>
+          <input id="risk-max-open-orders" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="risk-max-cancels">Max Cancels</label>
+          <input id="risk-max-cancels" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="risk-cancel-cooldown">Cancel Sec</label>
+          <input id="risk-cancel-cooldown" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Market Data</div>
+        <div class="field">
+          <label for="risk-min-book-depth">Min Book Depth</label>
+          <input id="risk-min-book-depth" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-slippage">Max Slippage Bps</label>
+          <input id="risk-max-slippage" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-book-age">Book Age Sec</label>
+          <input id="risk-max-book-age" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-book-gap">Max Gap Bps</label>
+          <input id="risk-max-book-gap" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-price-jump">Max Jump Bps</label>
+          <input id="risk-max-price-jump" type="number" min="0" step="any">
+        </div>
+        <button id="risk-apply" class="control-button" type="submit">Apply</button>
+      </form>
+    </section>
+
+    <section data-page="records" class="compact-section">
+      <div class="section-title">
+        <h2>Audit Trail</h2>
+        <span id="audit-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Actor</th>
+              <th>Target</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="audit-events"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Account Balances</h2>
+        <span id="account-balances-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="balance-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Currency</th>
+              <th class="num">Free</th>
+              <th class="num">Used</th>
+              <th class="num">Total</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="account-balances"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="records" class="compact-section">
+      <div class="section-title">
+        <h2>Orders & Fills</h2>
+        <span id="orders-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Status</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Filled</th>
+              <th class="num">Remaining</th>
+              <th class="num">Cost</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="open-orders"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="fills-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Source</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Cost</th>
+              <th class="num">P/L</th>
+              <th>Fee</th>
+              <th>Order</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="recent-fills"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="reconciliation-table">
+          <thead>
+            <tr>
+              <th>Level</th>
+              <th>Type</th>
+              <th>Strategy</th>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Order</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="order-reconciliation"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="records" class="compact-section">
+      <div class="section-title">
+        <h2>Risk & Events</h2>
+        <span id="risk-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Time</th>
+              <th>Strategy</th>
+              <th>Mode</th>
+              <th>Status</th>
+              <th>Exchange</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th class="num">Orders</th>
+              <th class="num">Placed</th>
+              <th class="num">Canceled</th>
+              <th class="num">Notional</th>
+              <th>Risk</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="events"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Markets</h2>
+        <span id="warnings" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Exchange</th>
+              <th>Symbol</th>
+              <th>Status</th>
+              <th class="num">Bid</th>
+              <th class="num">Ask</th>
+              <th class="num">Bid USD</th>
+              <th class="num">Ask USD</th>
+              <th class="num">Bid Size</th>
+              <th class="num">Ask Size</th>
+            </tr>
+          </thead>
+          <tbody id="markets"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Live Opportunities</h2>
+        <span id="common-quote" class="subtle">USD</span>
+      </div>
+      <div id="opportunities" class="feed"></div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Auto Buy/Sell</h2>
+        <span id="slow-meta" class="subtle"></span>
+      </div>
+      <form id="slow-form" class="control-panel">
+        <label class="check-field">
+          <input id="slow-enabled" type="checkbox">
+          Enabled
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="slow-accounts" class="account-options"></div>
+        </div>
+        <div class="field">
+          <label for="slow-side">Side</label>
+          <select id="slow-side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="form-divider">Pricing</div>
+        <div class="field">
+          <label for="slow-price-mode">Price Mode</label>
+          <select id="slow-price-mode">
+            <option value="taker">Taker Top</option>
+            <option value="maker">Maker Top</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="slow-offset-bps">Offset bps</label>
+          <input id="slow-offset-bps" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Target</div>
+        <label class="check-field">
+          <input id="slow-unlimited" type="checkbox">
+          Unlimited
+        </label>
+        <div class="field">
+          <label for="slow-total-base">Total Base</label>
+          <input id="slow-total-base" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-total-quote">Total Quote</label>
+          <input id="slow-total-quote" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Order Size</div>
+        <div class="field">
+          <label for="slow-slice-mode">Size Mode</label>
+          <select id="slow-slice-mode">
+            <option value="configured">Configured</option>
+            <option value="top_level">Top Level</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="slow-slice-min">Min Base/Order</label>
+          <input id="slow-slice-min" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-slice-max">Max Base/Order</label>
+          <input id="slow-slice-max" type="number" min="0" step="any">
+        </div>
+        <label class="check-field">
+          <input id="slow-randomize" type="checkbox">
+          Random
+        </label>
+        <div class="form-divider">Timing</div>
+        <div class="field">
+          <label for="slow-interval">Place Sec</label>
+          <input id="slow-interval" type="number" min="1" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-ttl">Cancel Sec</label>
+          <input id="slow-ttl" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-start-price">Start Price</label>
+          <input id="slow-start-price" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="slow-stop-price">Stop Price</label>
+          <input id="slow-stop-price" type="number" min="0" step="any">
+        </div>
+        <button id="slow-apply" class="control-button" type="submit">Apply</button>
+        <button id="slow-create-task" class="control-button" type="button">Create Task</button>
+        <button id="slow-clear-terminal" class="control-button" type="button">Clear Done</button>
+      </form>
+      <div class="table-wrap stacked-table">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Status</th>
+              <th>Account</th>
+              <th>Side</th>
+              <th class="num">Filled</th>
+              <th class="num">Remaining</th>
+              <th class="num">Progress</th>
+              <th class="num">Open</th>
+              <th>Last</th>
+              <th>Next</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="slow-tasks"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th>Exchange</th>
+              <th>Symbol</th>
+              <th class="num">Order Price</th>
+              <th class="num">Slice Amount</th>
+              <th class="num">Quote</th>
+              <th class="num">Submitted</th>
+              <th class="num">Remaining</th>
+              <th class="num">Interval</th>
+              <th class="num">Cancel</th>
+              <th class="num">Start</th>
+              <th class="num">Stop</th>
+            </tr>
+          </thead>
+          <tbody id="slow-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Market Maker</h2>
+        <span id="mm-meta" class="subtle"></span>
+      </div>
+      <form id="mm-form" class="control-panel">
+        <label class="check-field">
+          <input id="mm-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field">
+          <input id="mm-live-enabled" type="checkbox">
+          Live MM
+        </label>
+        <div class="field account-field">
+          <label>Account</label>
+          <div id="mm-accounts" class="account-options"></div>
+        </div>
+        <div class="form-divider">Ladder</div>
+        <div class="field">
+          <label for="mm-levels">Levels</label>
+          <input id="mm-levels" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="mm-band">Band %</label>
+          <input id="mm-band" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-quote">Quote/Level</label>
+          <input id="mm-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-depth-shape">Depth Shape</label>
+          <select id="mm-depth-shape">
+            <option value="linear">Linear</option>
+            <option value="flat">Flat</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="mm-min-quote">Min Quote</label>
+          <input id="mm-min-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-min-distance">Min Distance</label>
+          <input id="mm-min-distance" type="number" min="0" step="any">
+        </div>
+        <div class="form-divider">Execution</div>
+        <div class="field">
+          <label for="mm-reprice">Reprice Bps</label>
+          <input id="mm-reprice" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-poll">Refresh Sec</label>
+          <input id="mm-poll" type="number" min="1" step="any">
+        </div>
+        <label class="check-field">
+          <input id="mm-post-only" type="checkbox">
+          Post Only
+        </label>
+        <div class="form-divider">Inventory</div>
+        <label class="check-field">
+          <input id="mm-inventory-enabled" type="checkbox">
+          Inventory Control
+        </label>
+        <div class="field">
+          <label for="mm-inventory-target">Target Base</label>
+          <input id="mm-inventory-target" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-inventory-band">No-skew Band</label>
+          <input id="mm-inventory-band" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="mm-inventory-max">Max Deviation</label>
+          <input id="mm-inventory-max" type="number" min="0" step="any">
+        </div>
+        <button id="mm-apply" class="control-button" type="submit">Apply</button>
+      </form>
+      <div class="mm-safety-grid">
+        <div class="metric compact">
+          <div class="label">Live Gate</div>
+          <div id="mm-safety-status" class="value">--</div>
+          <div id="mm-safety-reason" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Orders</div>
+          <div id="mm-safety-orders" class="value">--</div>
+          <div id="mm-safety-orders-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Budget</div>
+          <div id="mm-safety-budget" class="value">--</div>
+          <div id="mm-safety-budget-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Market Data</div>
+          <div id="mm-safety-market" class="value">--</div>
+          <div id="mm-safety-market-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Inventory</div>
+          <div id="mm-quality-inventory" class="value">--</div>
+          <div id="mm-quality-inventory-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Fills</div>
+          <div id="mm-quality-fills" class="value">--</div>
+          <div id="mm-quality-fills-detail" class="subtle detail">--</div>
+        </div>
+        <div class="metric compact">
+          <div class="label">Spread P/L</div>
+          <div id="mm-quality-spread" class="value">--</div>
+          <div id="mm-quality-spread-detail" class="subtle detail">--</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th class="num">Level</th>
+              <th class="num">Price</th>
+              <th class="num">Amount</th>
+              <th class="num">Quote</th>
+              <th class="num">Distance</th>
+            </tr>
+          </thead>
+          <tbody id="mm-orders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Quote Rates</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Currency</th>
+              <th class="num">USD Rate</th>
+            </tr>
+          </thead>
+          <tbody id="rates"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Solana Top Holders</h2>
+        <span id="onchain-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Label</th>
+              <th>Owner Wallet</th>
+              <th class="num">Balance</th>
+              <th class="num">Supply Share</th>
+              <th class="num">Since Online</th>
+              <th class="num">Last Change</th>
+              <th class="num">Changes</th>
+              <th class="num">Token Accts</th>
+            </tr>
+          </thead>
+          <tbody id="holders"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="records" class="compact-section">
+      <div class="section-title">
+        <h2>Holder Change Log</h2>
+        <span id="onchain-history-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Label</th>
+              <th>Owner Wallet</th>
+              <th class="num">Rank</th>
+              <th class="num">Delta</th>
+              <th class="num">Balance</th>
+              <th class="num">Since Online</th>
+            </tr>
+          </thead>
+          <tbody id="holder-changes"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+
+</body>
+</html>

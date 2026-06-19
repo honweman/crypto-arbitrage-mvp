@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
+
+STATE_VIEW_IDS = {"status", "settings", "records"}
+
+
+def _copy_payload_keys(
+    payload: dict[str, Any] | None,
+    keys: Iterable[str],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _compact_config_payload(config: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    if full:
+        return config
+    return _copy_payload_keys(
+        config,
+        (
+            "poll_seconds",
+            "notional_quote",
+            "min_profit_quote",
+            "min_profit_bps",
+            "common_quote_currency",
+        ),
+    )
+
+
+def _compact_plan_payload(
+    plan: dict[str, Any] | None,
+    *,
+    include_orders: bool,
+) -> dict[str, Any] | None:
+    if not isinstance(plan, dict):
+        return None
+    if include_orders:
+        return plan
+    return {key: value for key, value in plan.items() if key != "orders"}
+
+
+def _compact_market_maker_runtime(
+    runtime: dict[str, Any] | None,
+    *,
+    include_orders: bool,
+) -> dict[str, Any]:
+    if not isinstance(runtime, dict):
+        return {}
+    result = dict(runtime)
+    if isinstance(result.get("last_plan"), dict):
+        result["last_plan"] = _compact_plan_payload(
+            result["last_plan"],
+            include_orders=include_orders,
+        )
+    return result
+
+def _compact_market_maker_payload(
+    market_maker: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return market_maker
+    result = _copy_payload_keys(
+        market_maker,
+        (
+            "status",
+            "mode",
+            "market_data",
+            "quote_conversion",
+            "exchange_features",
+            "error",
+        ),
+    )
+    result["runtime"] = _compact_market_maker_runtime(
+        market_maker.get("runtime"),
+        include_orders=False,
+    )
+    plan = market_maker.get("plan")
+    if not isinstance(plan, dict):
+        runtime_plan = result.get("runtime", {}).get("last_plan")
+        plan = runtime_plan if isinstance(runtime_plan, dict) else None
+    result["plan"] = _compact_plan_payload(plan, include_orders=False)
+    return result
+
+
+def _compact_slow_execution_payload(
+    slow_execution: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    def compact_task_config(config: dict[str, Any] | None) -> dict[str, Any]:
+        return _copy_payload_keys(
+            config,
+            (
+                "exchange",
+                "symbol",
+                "side",
+                "total_base",
+                "total_quote",
+                "unlimited_total",
+            ),
+        )
+
+    def compact_task(task: dict[str, Any]) -> dict[str, Any]:
+        compact = _copy_payload_keys(
+            task,
+            (
+                "id",
+                "status",
+                "last_error",
+                "last_status",
+                "filled_base",
+                "filled_quote",
+                "remaining_base",
+                "remaining_quote",
+                "progress_label",
+                "progress_mode",
+                "progress_pct",
+                "open_order_count",
+                "last_cycle_at",
+                "next_run_at",
+                "last_fill_at",
+                "created_at",
+                "started_at",
+                "updated_at",
+                "finished_at",
+            ),
+        )
+        compact["config"] = compact_task_config(task.get("config"))
+        return compact
+
+    def compact_tasks(task_payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(task_payload, dict):
+            return {}
+        result = _copy_payload_keys(
+            task_payload,
+            ("status", "path", "task_count", "active_count", "updated_at", "error"),
+        )
+        result["tasks"] = [
+            compact_task(task)
+            for task in task_payload.get("tasks", [])
+            if isinstance(task, dict)
+        ]
+        return result
+
+    if full:
+        result = dict(slow_execution)
+    else:
+        result = _copy_payload_keys(
+            slow_execution,
+            ("status", "mode", "plan", "tasks", "error"),
+        )
+    if "tasks" in result:
+        result["tasks"] = compact_tasks(result.get("tasks"))
+    return result
+
+
+def _compact_order_activity_payload(
+    order_activity: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return order_activity
+    return _copy_payload_keys(
+        order_activity,
+        (
+            "status",
+            "open_order_count",
+            "closed_order_count",
+            "recent_trade_count",
+            "pnl_summary",
+            "daily_pnl",
+            "reconciliation",
+            "checked_account_count",
+            "total_account_count",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_account_balances_payload(
+    account_balances: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return account_balances
+    return _copy_payload_keys(
+        account_balances,
+        (
+            "status",
+            "checked_account_count",
+            "total_account_count",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_onchain_payload(
+    onchain: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return onchain
+    history = onchain.get("history") if isinstance(onchain, dict) else {}
+    compact = _copy_payload_keys(
+        onchain,
+        ("status", "label", "mint", "last_finished", "error"),
+    )
+    if isinstance(history, dict):
+        compact["history"] = _copy_payload_keys(
+            history,
+            ("enabled", "path", "baseline_at", "updated_at", "event_count"),
+        )
+    return compact
+
+
+def _compact_operations_payload(
+    operations: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return operations
+    return _copy_payload_keys(operations, ("risk",))
+
+
+def state_payload_for_view(
+    payload: dict[str, Any],
+    view: str | None = None,
+) -> dict[str, Any]:
+    if view not in STATE_VIEW_IDS:
+        return payload
+
+    is_status = view == "status"
+    is_settings = view == "settings"
+    is_records = view == "records"
+
+    result: dict[str, Any] = {
+        "status": payload.get("status"),
+        "config": _compact_config_payload(
+            payload.get("config", {}),
+            full=is_settings,
+        ),
+        "scan": payload.get("scan", {}),
+        "opportunities": payload.get("opportunities", []),
+        "portfolio": payload.get("portfolio", {}),
+        "program": payload.get("program", {}),
+        "warnings": payload.get("warnings", []),
+        "market_maker": _compact_market_maker_payload(
+            payload.get("market_maker", {}),
+            full=is_settings,
+        ),
+        "slow_execution": _compact_slow_execution_payload(
+            payload.get("slow_execution", {}),
+            full=is_settings,
+        ),
+        "spot_arbitrage": payload.get("spot_arbitrage", {}),
+        "operations": _compact_operations_payload(
+            payload.get("operations", {}),
+            full=is_records,
+        ),
+        "order_activity": _compact_order_activity_payload(
+            payload.get("order_activity", {}),
+            full=is_records,
+        ),
+        "onchain": _compact_onchain_payload(
+            payload.get("onchain", {}),
+            full=is_status or is_records,
+        ),
+    }
+
+    if is_status:
+        result.update(
+            {
+                "markets": payload.get("markets", []),
+                "quote_rates": payload.get("quote_rates", {}),
+                "account_balances": _compact_account_balances_payload(
+                    payload.get("account_balances", {}),
+                    full=True,
+                ),
+                "readiness": payload.get("readiness", {}),
+                "runtime_store": payload.get("runtime_store", {}),
+            }
+        )
+    elif is_settings:
+        result["trading_console"] = payload.get("trading_console", {})
+    elif is_records:
+        result["trading_console"] = payload.get("trading_console", {})
+
+    return result

@@ -29,7 +29,8 @@ from arbitrage_bot.trade_log import (
     write_trade_event,
 )
 from arbitrage_bot.web import (
-    HTML,
+    APP_JS,
+    HTML as INDEX_HTML,
     MonitorState,
     _market_maker_force_replace_reason,
     _monitor_auto_stop_decision,
@@ -66,6 +67,12 @@ from arbitrage_bot.web import (
     slow_execution_accounts,
     write_web_audit_event,
 )
+from arbitrage_bot.web.render_payloads import state_payload_for_view
+from arbitrage_bot.web.routes import register_routes
+from arbitrage_bot.web.state import MonitorState as SplitMonitorState
+
+
+HTML = f"{INDEX_HTML}\n{APP_JS}"
 
 
 def make_config(
@@ -108,6 +115,8 @@ def make_config(
 
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
+        self.assertIn('<script src="/static/app.js" defer></script>', INDEX_HTML)
+        self.assertIn('<link rel="stylesheet" href="/static/styles.css">', INDEX_HTML)
         self.assertIn("Auto Buy/Sell", HTML)
         self.assertIn("/api/auto-buy-sell", HTML)
         self.assertIn("/api/auto-buy-sell/tasks", HTML)
@@ -116,6 +125,14 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="slow-tasks"', HTML)
         self.assertIn('id="slow-start-price"', HTML)
         self.assertNotIn("Slow Execution", HTML)
+
+    def test_web_package_exposes_split_modules(self) -> None:
+        self.assertIs(SplitMonitorState, MonitorState)
+        self.assertTrue(callable(register_routes))
+        self.assertEqual(
+            state_payload_for_view({"status": "running"}, None),
+            {"status": "running"},
+        )
 
     def test_page_uses_generic_dashboard_title(self) -> None:
         self.assertIn("Crypto Trading Dashboard", HTML)
