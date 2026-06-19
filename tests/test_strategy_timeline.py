@@ -119,6 +119,36 @@ class StrategyTimelineTest(unittest.TestCase):
         self.assertEqual(event["action"], "cancel")
         self.assertEqual(event["reason"], "cancel: replace_existing")
 
+    def test_execution_reason_includes_emergency_cancel_errors(self) -> None:
+        event = strategy_timeline_event_from_payload(
+            {
+                "type": "market_maker",
+                "strategy": "market_maker",
+                "mode": "live",
+                "status": "execution_error",
+                "plan": {
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                },
+                "execution": {
+                    "placed_count": 1,
+                    "partial_create": True,
+                    "emergency_cancel": True,
+                    "emergency_cancel_errors": [
+                        {
+                            "order_id": "mm-1",
+                            "error": "cancel timeout",
+                        }
+                    ],
+                },
+            },
+            source="test",
+        )
+
+        self.assertEqual(event["action"], "execution_error")
+        self.assertIn("mm-1", event["reason"])
+        self.assertIn("cancel timeout", event["reason"])
+
     def test_event_type_is_strategy_fallback(self) -> None:
         event = strategy_timeline_event_from_payload(
             {

@@ -150,7 +150,12 @@ def _reason_list(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
         _append_unique(warnings, value)
     for value in _strings(order_validation.get("errors")):
         _append_unique(reasons, f"order validation: {value}")
-    for key in ("create_errors", "cancel_errors", "hedge_errors"):
+    for key in (
+        "create_errors",
+        "cancel_errors",
+        "emergency_cancel_errors",
+        "hedge_errors",
+    ):
         rows = execution.get(key)
         if isinstance(rows, list):
             for row in rows:

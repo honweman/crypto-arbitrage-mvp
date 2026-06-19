@@ -539,6 +539,14 @@ async def _place_orders(
                 )
 
     fill_status = await _execution_fill_status(manager, orders, results)
+    manual_intervention_required = bool(
+        cancel_errors
+        or (
+            isinstance(fill_status, dict)
+            and fill_status.get("hedge_required")
+        )
+        or (emergency_cancel and len(canceled) < len(placed))
+    )
     return {
         "placed_count": len(placed),
         "placed_order_ids": [str(order.get("id") or "") for order in placed],
@@ -549,6 +557,7 @@ async def _place_orders(
         "cancel_errors": cancel_errors,
         "order_ttl_seconds": order_ttl_seconds,
         "emergency_cancel": emergency_cancel,
+        "manual_intervention_required": manual_intervention_required,
         "cancel_reason": (
             "create_error" if emergency_cancel else "ttl_expired" if placed else None
         ),

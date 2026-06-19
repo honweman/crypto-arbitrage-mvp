@@ -129,6 +129,11 @@ STRATEGY_IDS = {
 }
 SESSION_COOKIE = "crypto_arb_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
 
 
 LOGIN_HTML = """<!doctype html>
@@ -2905,6 +2910,12 @@ def _session_valid(cfg: BotConfig, token: str | None) -> bool:
     return hmac.compare_digest(signature, _sign_session(cfg, timestamp))
 
 
+def _add_security_headers(response: web.StreamResponse) -> web.StreamResponse:
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
+
 def _login_html(error: str = "") -> str:
     return LOGIN_HTML.replace("__ERROR__", html.escape(error))
 
@@ -2953,6 +2964,14 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
         request: web.Request,
         handler: Any,
     ) -> web.StreamResponse:
+        async def call_handler() -> web.StreamResponse:
+            try:
+                response = await handler(request)
+            except web.HTTPException as exc:
+                _add_security_headers(exc)
+                raise
+            return _add_security_headers(response)
+
         remote = request.remote or ""
         client_ip = _client_ip(request, cfg)
         allowed_specs = _allowed_ip_specs(cfg)
@@ -2964,21 +2983,25 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
             and not (_is_local_ip(remote) and not proxy_ip_present)
             and not _ip_allowed(client_ip, allowed_specs)
         ):
-            return web.Response(text="Forbidden", status=403)
+            return _add_security_headers(web.Response(text="Forbidden", status=403))
 
         if request.path in {"/login", "/logout"}:
-            return await handler(request)
+            return await call_handler()
 
         password = _web_password(cfg)
         if not password:
-            return await handler(request)
+            return await call_handler()
         if request.path == "/api/health" and _is_local_ip(remote):
-            return await handler(request)
+            return await call_handler()
         if not _session_valid(cfg, request.cookies.get(SESSION_COOKIE)):
             if request.path.startswith("/api/"):
-                return web.json_response({"error": "authentication required"}, status=401)
-            raise web.HTTPFound("/login")
-        return await handler(request)
+                return _add_security_headers(
+                    web.json_response({"error": "authentication required"}, status=401)
+                )
+            redirect = web.HTTPFound("/login")
+            _add_security_headers(redirect)
+            raise redirect
+        return await call_handler()
 
     return security_middleware
 

@@ -188,6 +188,18 @@ def _previous_plan_from_open_orders(
     }
 
 
+def _raw_order_id(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    return str(
+        raw.get("id")
+        or raw.get("order")
+        or raw.get("orderId")
+        or raw.get("uuid")
+        or ""
+    )
+
+
 async def build_plan(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -387,6 +399,9 @@ async def place_plan(
                 ],
                 "create_result_uncertain": True,
                 "remaining_open_order_ids": remaining_open_order_ids,
+                "manual_intervention_required": bool(
+                    remaining_open_order_ids or confirmation_errors
+                ),
                 "used_batch_create": True,
             }
 
@@ -434,13 +449,67 @@ async def place_plan(
             )
             break
 
+    emergency_canceled: list[Any] = []
+    emergency_cancel_errors: list[dict[str, Any]] = []
+    remaining_open_order_ids: list[str] = []
+    partial_create = bool(create_errors and placed)
+    if partial_create:
+        placed_ids = [_raw_order_id(item) for item in placed]
+        placed_ids = [order_id for order_id in placed_ids if order_id]
+        for order_id in placed_ids:
+            try:
+                emergency_canceled.append(
+                    await manager.cancel_order(
+                        exchange_cfg,
+                        symbol=maker_cfg.symbol,
+                        order_id=order_id,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                emergency_cancel_errors.append(
+                    {
+                        "order_id": order_id,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
+        try:
+            open_orders = await manager.fetch_open_orders(
+                exchange_cfg,
+                symbol=maker_cfg.symbol,
+            )
+            remaining_open_order_ids = [
+                _raw_order_id(order)
+                for order in open_orders
+                if _raw_order_id(order) in set(placed_ids)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            emergency_cancel_errors.append(
+                {
+                    "order_id": "open_order_confirmation",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+
+    manual_intervention_required = bool(
+        emergency_cancel_errors or remaining_open_order_ids
+    )
     return {
-        "canceled_count": len(canceled),
+        "canceled_count": len(canceled) + len(emergency_canceled),
         "cancel_errors": cancel_errors,
         "placed_count": len(placed),
-        "placed_order_ids": [item.get("id") for item in placed if isinstance(item, dict)],
+        "placed_order_ids": [_raw_order_id(item) for item in placed if _raw_order_id(item)],
         "create_errors": create_errors,
-        "partial_create": bool(create_errors and placed),
+        "partial_create": partial_create,
+        "emergency_cancel": partial_create,
+        "emergency_canceled_count": len(emergency_canceled),
+        "emergency_canceled_order_ids": [
+            _raw_order_id(item)
+            for item in emergency_canceled
+            if _raw_order_id(item)
+        ],
+        "emergency_cancel_errors": emergency_cancel_errors,
+        "remaining_open_order_ids": remaining_open_order_ids,
+        "manual_intervention_required": manual_intervention_required,
         "used_batch_create": False,
     }
 

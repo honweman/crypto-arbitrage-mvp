@@ -410,6 +410,7 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         class FakeManager:
             def __init__(self) -> None:
                 self.created = 0
+                self.canceled: list[str] = []
 
             async def fetch_order_book(
                 self,
@@ -487,6 +488,7 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         class FakeManager:
             def __init__(self) -> None:
                 self.created = 0
+                self.canceled: list[str] = []
 
             async def fetch_order_book(
                 self,
@@ -502,6 +504,15 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
 
             async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
                 return []
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, str]:
+                self.canceled.append(order_id)
+                return {"id": order_id, "status": "canceled"}
 
             async def prepare_limit_order(
                 self,
@@ -559,6 +570,13 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["execution"]["placed_count"], 1)
         self.assertEqual(payload["execution"]["placed_order_ids"], ["new-mm-1"])
         self.assertTrue(payload["execution"]["partial_create"])
+        self.assertTrue(payload["execution"]["emergency_cancel"])
+        self.assertEqual(payload["execution"]["emergency_canceled_count"], 1)
+        self.assertEqual(
+            payload["execution"]["emergency_canceled_order_ids"],
+            ["new-mm-1"],
+        )
+        self.assertFalse(payload["execution"]["manual_intervention_required"])
         self.assertEqual(len(payload["execution"]["create_errors"]), 1)
         self.assertIn(
             "temporary create failure",

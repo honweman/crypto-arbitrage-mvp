@@ -257,6 +257,7 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execution["placed_order_ids"], ["coinbase-buy-1"])
         self.assertEqual(len(execution["create_errors"]), 1)
         self.assertTrue(execution["emergency_cancel"])
+        self.assertFalse(execution["manual_intervention_required"])
         self.assertEqual(execution["cancel_reason"], "create_error")
         self.assertEqual(execution["canceled_order_ids"], ["coinbase-buy-1"])
         self.assertIn("create_latency_ms", execution)
@@ -349,4 +350,5 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(fill_status["hedge_required"])
         self.assertEqual(fill_status["hedge_side"], "sell")
         self.assertAlmostEqual(fill_status["hedge_base"], 10.0)
+        self.assertTrue(payload["execution"]["manual_intervention_required"])
         self.assertTrue(payload["paper_vs_live"]["hedge_required"])

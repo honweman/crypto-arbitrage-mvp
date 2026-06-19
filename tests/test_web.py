@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from aiohttp import web
+
 from arbitrage_bot.config import (
     AlertConfig,
     AssetPosition,
@@ -33,6 +35,8 @@ from arbitrage_bot.web import (
     APP_JS,
     HTML as INDEX_HTML,
     MonitorState,
+    SECURITY_HEADERS,
+    _add_security_headers,
     _market_maker_force_replace_reason,
     _monitor_auto_stop_decision,
     _monitor_reconciliation_warmup_active,
@@ -1075,6 +1079,22 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.97"]))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.0/24"]))
         self.assertFalse(_ip_allowed("66.96.213.1", ["66.96.212.0/24"]))
+
+    def test_add_security_headers_preserves_existing_values(self) -> None:
+        response = web.Response()
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+
+        _add_security_headers(response)
+
+        self.assertEqual(response.headers["X-Frame-Options"], "SAMEORIGIN")
+        self.assertEqual(
+            response.headers["X-Content-Type-Options"],
+            SECURITY_HEADERS["X-Content-Type-Options"],
+        )
+        self.assertEqual(
+            response.headers["Referrer-Policy"],
+            SECURITY_HEADERS["Referrer-Policy"],
+        )
 
     def test_daily_report_due_and_message(self) -> None:
         cfg = make_config(
