@@ -190,6 +190,32 @@ main {
   gap: 12px;
 }
 
+.user-profile {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.user-profile select {
+  min-height: 30px;
+  max-width: 128px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.user-profile a {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
 .view-nav {
   display: flex;
   flex-wrap: wrap;
@@ -705,7 +731,15 @@ tbody tr:last-child td {
     padding: 13px 14px;
   }
   h1 { font-size: 17px; }
-  .header-actions { width: 100%; justify-content: space-between; }
+  .header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+  .user-profile {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
   .view-nav { width: 100%; }
   .view-tab { flex: 1; }
   main { padding: 12px 14px 22px; }

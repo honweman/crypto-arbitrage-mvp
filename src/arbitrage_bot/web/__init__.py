@@ -20,6 +20,21 @@ from typing import Any
 from aiohttp import web
 
 from .render_payloads import STATE_VIEW_IDS, state_payload_for_view
+from .users import (
+    WebUser,
+    WebUserStore,
+    normalize_assets,
+    totp_provisioning_uri,
+)
+from .user_scope import (
+    _assets_from_cash_and_carry_pairs,
+    _assets_from_spot_markets,
+    _base_asset_from_symbol,
+    _configured_assets,
+    _filter_state_payload_for_user,
+    _require_admin_user,
+    _require_user_assets,
+)
 
 from ..account_check import _auth_env_status, _balance_currencies, _summarize_balance
 from ..alerts import AlertService
@@ -141,7 +156,7 @@ LOGIN_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Crypto Arbitrage Login</title>
+  <title>Crypto Trading Login</title>
   <style>
     body {
       margin: 0;
@@ -162,6 +177,7 @@ LOGIN_HTML = """<!doctype html>
       background: #ffffff;
     }
     h1 { margin: 0 0 4px; font-size: 20px; }
+    p { margin: 0; color: #66736b; font-size: 13px; line-height: 1.45; }
     label { color: #66736b; font-size: 12px; font-weight: 700; text-transform: uppercase; }
     input {
       width: 100%;
@@ -181,17 +197,95 @@ LOGIN_HTML = """<!doctype html>
       font-weight: 700;
       cursor: pointer;
     }
+    a { color: #1d4ed8; font-size: 13px; text-decoration: none; }
+    .optional { display: __EMAIL_DISPLAY__; }
+    .register { display: __REGISTER_DISPLAY__; }
     .error { min-height: 18px; color: #b33b2e; font-size: 13px; }
   </style>
 </head>
 <body>
   <form method="post" action="/login">
-    <h1>Crypto Arbitrage</h1>
+    <h1>Crypto Trading</h1>
+    <p>__LOGIN_HINT__</p>
+    <div class="optional">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="username" autofocus>
+    </div>
     <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+    <input id="password" name="password" type="password" autocomplete="current-password" __PASSWORD_AUTOFOCUS__>
+    <div class="optional">
+      <label for="totp">Google Authenticator Code</label>
+      <input id="totp" name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*">
+    </div>
     <button type="submit">Sign In</button>
+    <a class="register" href="/register">Register with email and 2FA</a>
     <div class="error">__ERROR__</div>
   </form>
+</body>
+</html>
+"""
+
+
+REGISTER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Register Crypto Trading User</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f5f6f2;
+      color: #17211b;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    form, .panel {
+      width: min(440px, calc(100% - 32px));
+      display: grid;
+      gap: 12px;
+      padding: 22px;
+      border: 1px solid #d8ded8;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    p { margin: 0; color: #66736b; font-size: 13px; line-height: 1.45; }
+    label { color: #66736b; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    input {
+      width: 100%;
+      min-height: 40px;
+      padding: 8px 10px;
+      border: 1px solid #d8ded8;
+      border-radius: 6px;
+      font: inherit;
+      box-sizing: border-box;
+    }
+    button {
+      min-height: 40px;
+      border: 1px solid #101828;
+      border-radius: 6px;
+      background: #101828;
+      color: #ffffff;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    code {
+      display: block;
+      padding: 10px;
+      border-radius: 6px;
+      background: #f1f5f9;
+      overflow-wrap: anywhere;
+    }
+    a { color: #1d4ed8; font-size: 13px; text-decoration: none; }
+    .code-field { display: __CODE_DISPLAY__; }
+    .error { min-height: 18px; color: #b33b2e; font-size: 13px; }
+  </style>
+</head>
+<body>
+  __BODY__
 </body>
 </html>
 """
@@ -1829,6 +1923,12 @@ def default_web_audit_path(cfg: BotConfig) -> str:
     return str(Path(cfg.trade_log.path).with_name("web_audit_events.jsonl"))
 
 
+def default_web_user_store_path(cfg: BotConfig) -> str:
+    return cfg.web_security.user_store_path or str(
+        Path(cfg.trade_log.path).with_name("web_users.json")
+    )
+
+
 def _sanitize_audit_payload(value: Any) -> Any:
     if isinstance(value, dict):
         clean: dict[str, Any] = {}
@@ -2831,6 +2931,28 @@ def _cookie_secret(cfg: BotConfig) -> str:
     )
 
 
+def _registration_code(cfg: BotConfig) -> str | None:
+    return _env_optional(cfg.web_security.registration_code_env)
+
+
+def _registration_code_required(cfg: BotConfig) -> bool:
+    return bool(cfg.web_security.registration_code_env)
+
+
+def _user_store(request: web.Request) -> WebUserStore:
+    return request.app["web_user_store"]
+
+
+def _request_user(request: web.Request) -> WebUser | None:
+    email = str(request.get("user_email") or "")
+    if not email:
+        return None
+    try:
+        return _user_store(request).get_user(email)
+    except ValueError:
+        return None
+
+
 def _request_is_https(request: web.Request, cfg: BotConfig) -> bool:
     if request.secure:
         return True
@@ -2884,30 +3006,43 @@ def _ip_allowed(ip_value: str, allowed_specs: list[str]) -> bool:
     return False
 
 
-def _sign_session(cfg: BotConfig, timestamp: int) -> str:
+def _sign_session(cfg: BotConfig, timestamp: int, email: str = "") -> str:
     secret = _cookie_secret(cfg).encode("utf-8")
-    payload = str(timestamp).encode("utf-8")
+    payload = f"{timestamp}:{email}".encode("utf-8")
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
-def _make_session_token(cfg: BotConfig) -> str:
+def _make_session_token(cfg: BotConfig, email: str = "") -> str:
     timestamp = int(time.time())
-    raw = f"{timestamp}:{_sign_session(cfg, timestamp)}"
+    if email:
+        raw = f"v2:{timestamp}:{email}:{_sign_session(cfg, timestamp, email)}"
+    else:
+        raw = f"{timestamp}:{_sign_session(cfg, timestamp)}"
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def _session_valid(cfg: BotConfig, token: str | None) -> bool:
+def _session_identity(cfg: BotConfig, token: str | None) -> tuple[bool, str]:
     if not token:
-        return False
+        return False, ""
     try:
         raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        timestamp_text, signature = raw.split(":", 1)
+        if raw.startswith("v2:"):
+            _, timestamp_text, email, signature = raw.split(":", 3)
+        else:
+            timestamp_text, signature = raw.split(":", 1)
+            email = ""
         timestamp = int(timestamp_text)
     except (ValueError, TypeError):
-        return False
+        return False, ""
     if time.time() - timestamp > SESSION_MAX_AGE_SECONDS:
-        return False
-    return hmac.compare_digest(signature, _sign_session(cfg, timestamp))
+        return False, ""
+    valid = hmac.compare_digest(signature, _sign_session(cfg, timestamp, email))
+    return valid, email if valid else ""
+
+
+def _session_valid(cfg: BotConfig, token: str | None) -> bool:
+    valid, _ = _session_identity(cfg, token)
+    return valid
 
 
 def _add_security_headers(response: web.StreamResponse) -> web.StreamResponse:
@@ -2916,27 +3051,142 @@ def _add_security_headers(response: web.StreamResponse) -> web.StreamResponse:
     return response
 
 
-def _login_html(error: str = "") -> str:
-    return LOGIN_HTML.replace("__ERROR__", html.escape(error))
+def _login_html(
+    *,
+    error: str = "",
+    email_login: bool = False,
+    registration_enabled: bool = False,
+) -> str:
+    hint = (
+        "Use your registered email, password, and Google Authenticator code."
+        if email_login
+        else "Use the temporary dashboard password. Email login starts after users are registered."
+    )
+    return (
+        LOGIN_HTML.replace("__ERROR__", html.escape(error))
+        .replace("__LOGIN_HINT__", html.escape(hint))
+        .replace("__EMAIL_DISPLAY__", "block" if email_login else "none")
+        .replace("__REGISTER_DISPLAY__", "block" if registration_enabled else "none")
+        .replace("__PASSWORD_AUTOFOCUS__", "" if email_login else "autofocus")
+    )
+
+
+def _register_html(
+    *,
+    cfg: BotConfig,
+    error: str = "",
+    user: WebUser | None = None,
+) -> str:
+    code_required = _registration_code_required(cfg)
+    if user is not None:
+        uri = totp_provisioning_uri(
+            email=user.email,
+            secret=user.totp_secret,
+            issuer=cfg.web_security.totp_issuer,
+        )
+        body = f"""
+  <div class="panel">
+    <h1>2FA Setup</h1>
+    <p>User <strong>{html.escape(user.email)}</strong> is registered.</p>
+    <p>Add this setup key to Google Authenticator, then sign in with the 6-digit code.</p>
+    <label>Setup Key</label>
+    <code>{html.escape(user.totp_secret)}</code>
+    <label>Authenticator URI</label>
+    <code>{html.escape(uri)}</code>
+    <a href="/login">Continue to login</a>
+  </div>
+"""
+    else:
+        body = f"""
+  <form method="post" action="/register">
+    <h1>Register User</h1>
+    <p>Create an email user and Google Authenticator setup key. Use comma-separated assets such as ACS,BTC.</p>
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password">
+    <label for="assets">Allowed Assets</label>
+    <input id="assets" name="assets" type="text" placeholder="ACS,BTC">
+    <div class="code-field">
+      <label for="registration_code">Registration Code</label>
+      <input id="registration_code" name="registration_code" type="password">
+    </div>
+    <button type="submit">Register</button>
+    <a href="/login">Back to login</a>
+    <div class="error">{html.escape(error)}</div>
+  </form>
+"""
+    return (
+        REGISTER_HTML.replace("__BODY__", body)
+        .replace("__CODE_DISPLAY__", "block" if code_required else "none")
+    )
+
+
+def _email_login_enabled(request: web.Request) -> bool:
+    try:
+        return _user_store(request).has_users()
+    except ValueError:
+        return False
 
 
 async def login_get(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
     return web.Response(
-        text=_login_html(),
+        text=_login_html(
+            email_login=_email_login_enabled(request),
+            registration_enabled=cfg.web_security.registration_enabled,
+        ),
         content_type="text/html",
     )
 
 
 async def login_post(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
+    form = await request.post()
+    email_login = _email_login_enabled(request)
+    supplied_password = str(form.get("password", ""))
+    email = str(form.get("email", ""))
+    totp = str(form.get("totp", ""))
+    if email_login:
+        try:
+            user = _user_store(request).authenticate(
+                email=email,
+                password=supplied_password,
+                totp=totp,
+            )
+        except ValueError:
+            user = None
+        if user is None:
+            return web.Response(
+                text=_login_html(
+                    error="Invalid email, password, or authenticator code",
+                    email_login=True,
+                    registration_enabled=cfg.web_security.registration_enabled,
+                ),
+                content_type="text/html",
+                status=401,
+            )
+        response = web.HTTPFound("/")
+        response.set_cookie(
+            SESSION_COOKIE,
+            _make_session_token(cfg, user.email),
+            max_age=SESSION_MAX_AGE_SECONDS,
+            httponly=True,
+            secure=cfg.web_security.cookie_secure and _request_is_https(request, cfg),
+            samesite="Strict",
+        )
+        raise response
+
     password = _web_password(cfg)
     if not password:
         raise web.HTTPFound("/")
-    form = await request.post()
-    supplied = str(form.get("password", ""))
-    if not hmac.compare_digest(supplied, password):
+    if not hmac.compare_digest(supplied_password, password):
         return web.Response(
-            text=_login_html("Invalid password"),
+            text=_login_html(
+                error="Invalid password",
+                email_login=False,
+                registration_enabled=cfg.web_security.registration_enabled,
+            ),
             content_type="text/html",
             status=401,
         )
@@ -2950,6 +3200,70 @@ async def login_post(request: web.Request) -> web.Response:
         samesite="Strict",
     )
     raise response
+
+
+async def register_get(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    if not cfg.web_security.registration_enabled:
+        return web.Response(text="Registration is disabled", status=404)
+    return web.Response(
+        text=_register_html(cfg=cfg),
+        content_type="text/html",
+    )
+
+
+async def register_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    if not cfg.web_security.registration_enabled:
+        return web.Response(text="Registration is disabled", status=404)
+    form = await request.post()
+    expected_code = _registration_code(cfg)
+    if _registration_code_required(cfg) and expected_code is None:
+        return web.Response(
+            text=_register_html(
+                cfg=cfg,
+                error="Registration code environment variable is not set",
+            ),
+            content_type="text/html",
+            status=503,
+        )
+    supplied_code = str(form.get("registration_code", ""))
+    if expected_code is not None and not hmac.compare_digest(
+        supplied_code,
+        expected_code,
+    ):
+        return web.Response(
+            text=_register_html(cfg=cfg, error="Invalid registration code"),
+            content_type="text/html",
+            status=403,
+        )
+    try:
+        user = _user_store(request).create_user(
+            email=str(form.get("email", "")),
+            password=str(form.get("password", "")),
+            allowed_assets=normalize_assets(str(form.get("assets", ""))),
+        )
+    except ValueError as exc:
+        return web.Response(
+            text=_register_html(cfg=cfg, error=str(exc)),
+            content_type="text/html",
+            status=400,
+        )
+    write_system_web_audit_event(
+        cfg,
+        action="user_register",
+        target=user.email,
+        detail="registered web user",
+        payload={"email": user.email, "allowed_assets": user.allowed_assets},
+        actor_ip=_client_ip(request, cfg),
+        path=request.path,
+        method=request.method,
+        user_agent=str(request.headers.get("User-Agent", ""))[:160],
+    )
+    return web.Response(
+        text=_register_html(cfg=cfg, user=user),
+        content_type="text/html",
+    )
 
 
 async def logout(request: web.Request) -> web.Response:
@@ -2985,15 +3299,21 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
         ):
             return _add_security_headers(web.Response(text="Forbidden", status=403))
 
-        if request.path in {"/login", "/logout"}:
+        if request.path in {"/login", "/logout", "/register"}:
             return await call_handler()
 
         password = _web_password(cfg)
-        if not password:
+        email_login = _email_login_enabled(request)
+        auth_required = bool(password) or email_login
+        if not auth_required:
             return await call_handler()
         if request.path == "/api/health" and _is_local_ip(remote):
             return await call_handler()
-        if not _session_valid(cfg, request.cookies.get(SESSION_COOKIE)):
+        session_valid, session_email = _session_identity(
+            cfg,
+            request.cookies.get(SESSION_COOKIE),
+        )
+        if not session_valid or (email_login and not session_email):
             if request.path.startswith("/api/"):
                 return _add_security_headers(
                     web.json_response({"error": "authentication required"}, status=401)
@@ -3001,6 +3321,19 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
             redirect = web.HTTPFound("/login")
             _add_security_headers(redirect)
             raise redirect
+        if session_email:
+            try:
+                if _user_store(request).get_user(session_email) is None:
+                    raise ValueError("unknown user")
+            except ValueError:
+                if request.path.startswith("/api/"):
+                    return _add_security_headers(
+                        web.json_response({"error": "authentication required"}, status=401)
+                    )
+                redirect = web.HTTPFound("/login")
+                _add_security_headers(redirect)
+                raise redirect
+            request["user_email"] = session_email
         return await call_handler()
 
     return security_middleware
@@ -3012,17 +3345,67 @@ async def index(_: web.Request) -> web.Response:
 
 async def api_state(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
     view = request.query.get("view")
-    return web.json_response(await state.get(view=view))
+    payload = await state.get(view=view)
+    return web.json_response(
+        _filter_state_payload_for_user(
+            payload,
+            cfg=await state.runtime_config(cfg),
+            user=_request_user(request),
+        )
+    )
+
+
+async def api_profile(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    user = _request_user(request)
+    runtime_cfg = await state.runtime_config(cfg)
+    if user is None:
+        return web.json_response(
+            {
+                "mode": "legacy",
+                "available_assets": _configured_assets(runtime_cfg),
+            }
+        )
+    try:
+        payload = await request.json()
+        preferred_asset = str(payload.get("preferred_asset", "")).strip().upper()
+        if preferred_asset and preferred_asset not in _configured_assets(runtime_cfg):
+            raise ValueError(f"unknown asset: {preferred_asset}")
+        updated = _user_store(request).update_profile(
+            email=user.email,
+            preferred_asset=preferred_asset,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="user_profile",
+        target=updated.email,
+        detail="updated preferred asset",
+        payload={"preferred_asset": updated.preferred_asset},
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "profile": updated.public_dict(available_assets=_configured_assets(runtime_cfg)),
+        }
+    )
 
 
 async def api_control(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON"}, status=400)
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
 
     running = payload.get("running")
     if not isinstance(running, bool):
@@ -3057,6 +3440,13 @@ async def api_slow_execution(request: web.Request) -> web.Response:
             allowed_exchanges=allowed_exchanges,
             symbols_by_exchange=symbols_by_exchange,
         )
+        base_config = await state.slow_execution_config(runtime_cfg.slow_execution)
+        target_symbol = str(overrides.get("symbol") or base_config.symbol)
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(target_symbol)
+        ])
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3097,6 +3487,13 @@ async def api_market_maker(request: web.Request) -> web.Response:
             },
             symbols_by_exchange=symbols_by_exchange,
         )
+        current_config = await state.market_maker_config(runtime_cfg.market_maker)
+        target_symbol = str(overrides.get("symbol") or current_config.symbol)
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(target_symbol)
+        ])
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3124,11 +3521,15 @@ async def api_markets(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         markets = _spot_markets_from_payload(
             payload,
             allowed_exchanges={exchange.key for exchange in cfg.spot_exchanges},
         )
+        _require_user_assets(_request_user(request), _assets_from_spot_markets(markets))
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3149,8 +3550,15 @@ async def api_cash_and_carry_pairs(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         pairs = _cash_and_carry_pairs_from_payload(payload)
+        _require_user_assets(
+            _request_user(request),
+            _assets_from_cash_and_carry_pairs(pairs),
+        )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3187,7 +3595,12 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         )
         base_config = await state.slow_execution_config(cfg.slow_execution)
         task_config = replace(base_config, **{**overrides, "enabled": True})
+        _require_user_assets(_request_user(request), [
+            _base_asset_from_symbol(task_config.symbol)
+        ])
         validate_task_config(task_config)
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3233,6 +3646,25 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
         action = str(payload.get("action", "")).strip().lower()
         if action not in {"pause", "resume", "stop"}:
             raise ValueError("action must be pause, resume, or stop")
+        task_snapshot = await tasks.snapshot()
+        task_row = next(
+            (
+                item
+                for item in task_snapshot.get("tasks", [])
+                if isinstance(item, dict) and item.get("id") == task_id
+            ),
+            None,
+        )
+        if isinstance(task_row, dict):
+            task_config = (
+                task_row.get("config")
+                if isinstance(task_row.get("config"), dict)
+                else {}
+            )
+            _require_user_assets(
+                _request_user(request),
+                [_base_asset_from_symbol(str(task_config.get("symbol") or ""))],
+            )
         if action == "stop":
             manager = ExchangeManager()
             runtime_cfg = await state.runtime_config(cfg)
@@ -3245,6 +3677,8 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
             )
         else:
             task = await tasks.set_paused(task_id, action == "pause")
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3273,9 +3707,12 @@ async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         if not bool(payload.get("terminal_only", True)):
             raise ValueError("only terminal task cleanup is supported")
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3300,6 +3737,7 @@ async def api_risk(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         allowed_accounts = {
@@ -3310,6 +3748,8 @@ async def api_risk(request: web.Request) -> web.Response:
             allowed_accounts=allowed_accounts,
             allowed_strategies=STRATEGY_IDS,
         )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3333,6 +3773,12 @@ async def api_cancel_order(request: web.Request) -> web.Response:
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
+        _require_user_assets(
+            _request_user(request),
+            [_base_asset_from_symbol(str(payload.get("symbol") or ""))],
+        )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3370,9 +3816,12 @@ async def api_cancel_bulk_orders(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3410,6 +3859,7 @@ async def api_strategy_control(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         strategy_id = str(payload.get("strategy", "")).strip()
         paused = payload.get("paused")
@@ -3422,6 +3872,8 @@ async def api_strategy_control(request: web.Request) -> web.Response:
             paused,
             cfg=cfg,
         )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -3461,9 +3913,11 @@ def create_app(
         runtime_store_path=default_runtime_store_path(cfg),
     )
     auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
+    web_user_store = WebUserStore(default_web_user_store_path(cfg))
     app["monitor_state"] = state
     app["config"] = cfg
     app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
+    app["web_user_store"] = web_user_store
 
     async def monitor_context(app_: web.Application) -> Any:
         monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))

@@ -16,6 +16,7 @@ def register_routes(app: web.Application) -> None:
         api_health,
         api_market_maker,
         api_markets,
+        api_profile,
         api_risk,
         api_slow_execution,
         api_state,
@@ -24,14 +25,19 @@ def register_routes(app: web.Application) -> None:
         login_get,
         login_post,
         logout,
+        register_get,
+        register_post,
     )
 
     app.router.add_get("/login", login_get)
     app.router.add_post("/login", login_post)
+    app.router.add_get("/register", register_get)
+    app.router.add_post("/register", register_post)
     app.router.add_get("/logout", logout)
     app.router.add_get("/", index)
     app.router.add_static("/static/", STATIC_DIR, name="static", append_version=True)
     app.router.add_get("/api/state", api_state)
+    app.router.add_post("/api/profile", api_profile)
     app.router.add_post("/api/control", api_control)
     app.router.add_post("/api/markets", api_markets)
     app.router.add_post("/api/cash-and-carry-pairs", api_cash_and_carry_pairs)

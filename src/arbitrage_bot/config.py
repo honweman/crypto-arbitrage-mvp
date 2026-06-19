@@ -218,6 +218,10 @@ class WebSecurityConfig:
     allowed_ips_env: str | None = "CRYPTO_ARB_WEB_ALLOWED_IPS"
     trust_proxy_headers: bool = True
     cookie_secure: bool = True
+    user_store_path: str = "data/web_users.json"
+    registration_enabled: bool = False
+    registration_code_env: str | None = "CRYPTO_ARB_WEB_REGISTRATION_CODE"
+    totp_issuer: str = "Crypto Trading Dashboard"
 
 
 @dataclass(frozen=True)
@@ -631,5 +635,20 @@ def load_config(path: str | Path) -> BotConfig:
                 web_security_raw.get("trust_proxy_headers", True)
             ),
             cookie_secure=bool(web_security_raw.get("cookie_secure", True)),
+            user_store_path=web_security_raw.get(
+                "user_store_path",
+                "data/web_users.json",
+            ),
+            registration_enabled=bool(
+                web_security_raw.get("registration_enabled", False)
+            ),
+            registration_code_env=web_security_raw.get(
+                "registration_code_env",
+                "CRYPTO_ARB_WEB_REGISTRATION_CODE",
+            ),
+            totp_issuer=web_security_raw.get(
+                "totp_issuer",
+                "Crypto Trading Dashboard",
+            ),
         ),
     )

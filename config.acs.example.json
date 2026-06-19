@@ -196,7 +196,11 @@
     "cookie_secret_env": "CRYPTO_ARB_WEB_COOKIE_SECRET",
     "allowed_ips_env": "CRYPTO_ARB_WEB_ALLOWED_IPS",
     "trust_proxy_headers": true,
-    "cookie_secure": true
+    "cookie_secure": true,
+    "user_store_path": "data/web_users.json",
+    "registration_enabled": false,
+    "registration_code_env": "CRYPTO_ARB_WEB_REGISTRATION_CODE",
+    "totp_issuer": "DayDayUp Trade"
   },
   "spot_symbols": [],
   "spot_markets": [

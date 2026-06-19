@@ -250,6 +250,50 @@ function balanceStatusClass(status) {
       return value || "--";
     }
 
+    function renderAuthProfile(auth) {
+      const emailEl = document.getElementById("user-email");
+      const select = document.getElementById("profile-asset");
+      if (!emailEl || !select) return;
+      const mode = auth?.mode || "legacy";
+      emailEl.textContent = mode === "user" ? (auth.email || "User") : "Legacy";
+      emailEl.title = emailEl.textContent;
+      const available = auth?.available_assets || [];
+      const allowed = auth?.allowed_assets?.length ? auth.allowed_assets : available;
+      const assets = [...new Set((allowed || []).filter(Boolean))].sort();
+      select.innerHTML = "";
+      const allOption = document.createElement("option");
+      allOption.value = "";
+      allOption.textContent = assets.length > 1 ? "All assets" : "Asset";
+      select.appendChild(allOption);
+      for (const asset of assets) {
+        const option = document.createElement("option");
+        option.value = asset;
+        option.textContent = asset;
+        select.appendChild(option);
+      }
+      select.value = auth?.preferred_asset || "";
+      select.disabled = mode !== "user" || assets.length === 0;
+    }
+
+    async function updateProfileAsset(event) {
+      const preferredAsset = event.target.value || "";
+      const res = await fetch("/api/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preferred_asset: preferredAsset }),
+      });
+      if (res.status === 401) {
+        window.location.assign("/login");
+        return;
+      }
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        text("warnings", payload.error || `profile update failed (${res.status})`);
+        return;
+      }
+      await refresh({ force: true });
+    }
+
     function displayReconciliationType(value) {
       const labels = {
         tracked_order_missing: "Tracked Missing",
@@ -2120,6 +2164,7 @@ function balanceStatusClass(status) {
 
     function renderCommonState(data) {
       setHeaderStatus(data.status || "starting");
+      renderAuthProfile(data.auth);
       document.getElementById("program-toggle").checked = data.program?.running !== false;
 
       text("scan-count", data.scan?.count ?? 0);
@@ -2252,6 +2297,7 @@ function balanceStatusClass(status) {
     document.getElementById("program-toggle").addEventListener("change", (event) => {
       setProgramRunning(event.target.checked);
     });
+    document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
     document.getElementById("risk-form").addEventListener("input", () => {
       riskFormDirty = true;
     });

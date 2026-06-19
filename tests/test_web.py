@@ -23,6 +23,7 @@ from arbitrage_bot.config import (
     SpotMarketConfig,
     StrategyTimelineConfig,
     TradeLogConfig,
+    WebSecurityConfig,
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
@@ -37,6 +38,7 @@ from arbitrage_bot.web import (
     MonitorState,
     SECURITY_HEADERS,
     _add_security_headers,
+    _filter_state_payload_for_user,
     _market_maker_force_replace_reason,
     _monitor_auto_stop_decision,
     _monitor_reconciliation_warmup_active,
@@ -48,8 +50,12 @@ from arbitrage_bot.web import (
     _spot_markets_from_payload,
     _daily_report_due,
     _global_scan_health_warnings,
+    _registration_code_required,
+    _require_admin_user,
+    _require_user_assets,
     _ip_allowed,
     _make_session_token,
+    _session_identity,
     _session_valid,
     build_daily_report_message,
     default_web_audit_path,
@@ -65,6 +71,7 @@ from arbitrage_bot.web import (
     build_trading_console_payload,
     cancel_bulk_orders_payload,
     cancel_order_payload,
+    default_web_user_store_path,
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
     fetch_order_activity_payload,
@@ -75,6 +82,7 @@ from arbitrage_bot.web import (
 from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
+from arbitrage_bot.web.users import WebUserStore, totp_code
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 
 
@@ -94,6 +102,7 @@ def make_config(
     trade_log: TradeLogConfig | None = None,
     strategy_timeline: StrategyTimelineConfig | None = None,
     alerts: AlertConfig | None = None,
+    web_security: WebSecurityConfig | None = None,
 ) -> BotConfig:
     return BotConfig(
         poll_seconds=1.0,
@@ -118,6 +127,7 @@ def make_config(
         trade_log=trade_log or TradeLogConfig(enabled=False),
         strategy_timeline=strategy_timeline or StrategyTimelineConfig(enabled=False),
         alerts=alerts or AlertConfig(),
+        web_security=web_security or WebSecurityConfig(),
     )
 
 
@@ -146,6 +156,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Crypto Trading Dashboard", HTML)
         self.assertIn("Multi-asset arbitrage", HTML)
         self.assertNotIn("ACS Arbitrage Monitor", HTML)
+
+    def test_page_includes_user_profile_asset_switcher(self) -> None:
+        self.assertIn('id="user-profile"', HTML)
+        self.assertIn('id="user-email"', HTML)
+        self.assertIn('id="profile-asset"', HTML)
+        self.assertIn("/api/profile", HTML)
+        self.assertIn("function renderAuthProfile", HTML)
 
     def test_page_has_status_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)
@@ -1073,12 +1090,227 @@ class WebMonitorTest(unittest.TestCase):
     def test_security_helpers_validate_session_and_ip(self) -> None:
         cfg = make_config()
         token = _make_session_token(cfg)
+        user_token = _make_session_token(cfg, "trader@example.com")
 
         self.assertTrue(_session_valid(cfg, token))
+        self.assertEqual(_session_identity(cfg, user_token), (True, "trader@example.com"))
         self.assertFalse(_session_valid(cfg, token + "bad"))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.97"]))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.0/24"]))
         self.assertFalse(_ip_allowed("66.96.213.1", ["66.96.212.0/24"]))
+
+    def test_default_web_user_store_path_uses_security_config(self) -> None:
+        cfg = make_config(
+            web_security=WebSecurityConfig(user_store_path="data/users/web_users.json")
+        )
+
+        self.assertEqual(default_web_user_store_path(cfg), "data/users/web_users.json")
+
+    def test_registration_code_is_required_when_env_name_is_configured(self) -> None:
+        self.assertTrue(_registration_code_required(make_config()))
+        self.assertFalse(
+            _registration_code_required(
+                make_config(
+                    web_security=WebSecurityConfig(registration_code_env=None)
+                )
+            )
+        )
+
+    def test_user_role_and_asset_permission_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            admin = store.create_user(
+                email="admin@example.com",
+                password="strong-password",
+                allowed_assets=["ACS"],
+            )
+            user = store.create_user(
+                email="user@example.com",
+                password="strong-password",
+                allowed_assets=["ACS"],
+            )
+
+        self.assertEqual(admin.role, "admin")
+        self.assertEqual(user.role, "user")
+        _require_admin_user(admin)
+        _require_user_assets(user, ["ACS"])
+        _require_user_assets(admin, ["BTC"])
+        with self.assertRaisesRegex(PermissionError, "admin role"):
+            _require_admin_user(user)
+        with self.assertRaisesRegex(PermissionError, "BTC"):
+            _require_user_assets(user, ["BTC"])
+
+    def test_state_payload_filters_to_user_asset_scope(self) -> None:
+        cfg = make_config(
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                ),
+                SpotMarketConfig(
+                    asset="BTC",
+                    exchange="binance-spot",
+                    symbol="BTC/USDT",
+                    quote_currency="USDT",
+                ),
+            ],
+            portfolio=PortfolioConfig(
+                enabled=True,
+                positions=[
+                    AssetPosition(asset="ACS", position_base=100.0),
+                    AssetPosition(asset="BTC", position_base=1.0),
+                ],
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            user = WebUserStore(Path(tmp) / "users.json").create_user(
+                email="trader@example.com",
+                password="strong-password",
+                allowed_assets=["ACS", "BTC"],
+                preferred_asset="ACS",
+            )
+        payload = {
+            "markets": [
+                {"asset": "ACS", "symbol": "ACS/USDC"},
+                {"asset": "BTC", "symbol": "BTC/USDT"},
+            ],
+            "config": {
+                "spot_markets": [
+                    {"asset": "ACS", "symbol": "ACS/USDC"},
+                    {"asset": "BTC", "symbol": "BTC/USDT"},
+                ],
+            },
+            "opportunities": [
+                {"metadata": {"asset": "ACS"}},
+                {"metadata": {"asset": "BTC"}},
+            ],
+            "recent_opportunities": [
+                {"asset": "ACS"},
+                {"asset": "BTC"},
+            ],
+            "portfolio": {
+                "positions": [
+                    {"asset": "ACS", "position_base": 100.0},
+                    {"asset": "BTC", "position_base": 1.0},
+                ],
+            },
+            "market_maker": {
+                "status": "planned",
+                "config": {"symbol": "BTC/USDT"},
+                "plan": {"symbol": "BTC/USDT"},
+                "accounts": [{"key": "binance-spot", "symbols": ["BTC/USDT"]}],
+            },
+            "slow_execution": {
+                "status": "planned",
+                "config": {"symbol": "ACS/USDC"},
+                "plan": {"symbol": "ACS/USDC"},
+                "tasks": {
+                    "tasks": [
+                        {"id": "acs-task", "status": "running", "config": {"symbol": "ACS/USDC"}},
+                        {"id": "btc-task", "status": "running", "config": {"symbol": "BTC/USDT"}},
+                    ]
+                },
+            },
+            "order_activity": {
+                "accounts": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbols": ["ACS/USDC", "BTC/USDT"],
+                        "open_orders": [
+                            {"symbol": "ACS/USDC", "id": "acs-order"},
+                            {"symbol": "BTC/USDT", "id": "btc-order"},
+                        ],
+                    }
+                ],
+                "open_orders": [
+                    {"symbol": "ACS/USDC", "id": "acs-order"},
+                    {"symbol": "BTC/USDT", "id": "btc-order"},
+                ],
+                "closed_orders": [],
+                "recent_trades": [
+                    {"symbol": "ACS/USDC", "id": "acs-fill"},
+                    {"symbol": "BTC/USDT", "id": "btc-fill"},
+                ],
+                "pnl_summary": {"currency": "USD"},
+                "reconciliation": {
+                    "issues": [
+                        {"symbol": "ACS/USDC", "level": "warning"},
+                        {"symbol": "BTC/USDT", "level": "error"},
+                    ]
+                },
+            },
+            "account_balances": {
+                "accounts": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "symbols": ["ACS/USDC", "BTC/USDT"],
+                        "balance": {
+                            "currencies": [
+                                {"currency": "ACS", "total": 100.0},
+                                {"currency": "BTC", "total": 1.0},
+                                {"currency": "USDC", "total": 50.0},
+                            ]
+                        },
+                    }
+                ],
+                "totals": [
+                    {"currency": "ACS", "total": 100.0},
+                    {"currency": "BTC", "total": 1.0},
+                    {"currency": "USDC", "total": 50.0},
+                ],
+            },
+            "trading_console": {
+                "accounts": [{"key": "coinbase-spot"}],
+                "strategies": [
+                    {"id": "market_maker", "symbol": "BTC/USDT"},
+                    {"id": "slow_execution", "symbol": "ACS/USDC"},
+                    {"id": "spot_spread", "symbol": "ACS,BTC"},
+                ],
+            },
+        }
+
+        filtered = _filter_state_payload_for_user(payload, cfg=cfg, user=user)
+
+        self.assertEqual([row["asset"] for row in filtered["markets"]], ["ACS"])
+        self.assertEqual(
+            [row["asset"] for row in filtered["config"]["spot_markets"]],
+            ["ACS"],
+        )
+        self.assertEqual(
+            [row["asset"] for row in filtered["portfolio"]["positions"]],
+            ["ACS"],
+        )
+        self.assertEqual(len(filtered["opportunities"]), 1)
+        self.assertEqual(filtered["market_maker"]["status"], "out_of_scope")
+        self.assertEqual(
+            [task["id"] for task in filtered["slow_execution"]["tasks"]["tasks"]],
+            ["acs-task"],
+        )
+        self.assertEqual(
+            [row["id"] for row in filtered["order_activity"]["open_orders"]],
+            ["acs-order"],
+        )
+        self.assertEqual(
+            [row["id"] for row in filtered["order_activity"]["recent_trades"]],
+            ["acs-fill"],
+        )
+        self.assertEqual(
+            [
+                row["currency"]
+                for row in filtered["account_balances"]["accounts"][0]["balance"]["currencies"]
+            ],
+            ["ACS", "USDC"],
+        )
+        self.assertEqual(
+            [row["id"] for row in filtered["trading_console"]["strategies"]],
+            ["slow_execution", "spot_spread"],
+        )
+        self.assertEqual(filtered["trading_console"]["strategies"][1]["symbol"], "ACS")
+        self.assertEqual(filtered["auth"]["mode"], "user")
+        self.assertEqual(filtered["auth"]["email"], "trader@example.com")
+        self.assertEqual(filtered["auth"]["asset_scope"], ["ACS"])
 
     def test_add_security_headers_preserves_existing_values(self) -> None:
         response = web.Response()

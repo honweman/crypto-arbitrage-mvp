@@ -56,6 +56,17 @@
     "path": "data/strategy_timeline.jsonl",
     "max_recent_events": 100
   },
+  "web_security": {
+    "password_env": "CRYPTO_ARB_WEB_PASSWORD",
+    "cookie_secret_env": "CRYPTO_ARB_WEB_COOKIE_SECRET",
+    "allowed_ips_env": "CRYPTO_ARB_WEB_ALLOWED_IPS",
+    "trust_proxy_headers": true,
+    "cookie_secure": true,
+    "user_store_path": "data/web_users.json",
+    "registration_enabled": false,
+    "registration_code_env": "CRYPTO_ARB_WEB_REGISTRATION_CODE",
+    "totp_issuer": "Crypto Trading Dashboard"
+  },
   "spot_exchanges": [
     {
       "id": "binance",
