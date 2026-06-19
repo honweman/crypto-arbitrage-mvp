@@ -160,6 +160,27 @@ class StrategyCenterTest(unittest.TestCase):
                 source="custom",
             )
 
+    def test_signal_store_normalization_does_not_nest_raw_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StrategyCenterStore(Path(tmp) / "strategy_center.json")
+            event = SignalEvent.from_payload(
+                {
+                    "id": "signal-1",
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                    "message": "entry",
+                },
+                source="tradingview",
+                status="accepted",
+            )
+
+            first = store.append_signal(event)
+            second = store.read()
+
+        self.assertEqual(first["signals"][0]["raw"]["message"], "entry")
+        self.assertNotIn("raw", first["signals"][0]["raw"])
+        self.assertNotIn("raw", second["signals"][0]["raw"])
+
     def test_api_account_env_status_requires_key_and_secret(self) -> None:
         account = UserApiAccount.from_dict(
             {

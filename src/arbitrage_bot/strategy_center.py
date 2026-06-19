@@ -479,6 +479,38 @@ class SignalEvent:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "SignalEvent":
+        if not isinstance(raw, dict):
+            raise ValueError("signal event must be an object")
+        _reject_secret_values(raw)
+        source = _clean_text(raw.get("source") or "custom", max_length=40).lower()
+        if source not in SIGNAL_SOURCES:
+            source = "custom"
+        side = _clean_text(raw.get("side"), max_length=12).lower()
+        if side not in SIDE_VALUES:
+            side = ""
+        action = _clean_text(raw.get("action") or side or "alert", max_length=20).lower()
+        if action not in SIGNAL_ACTIONS:
+            action = "alert"
+        return cls(
+            id=_clean_text(raw.get("id"), max_length=80) or _new_id("signal"),
+            source=source,
+            strategy_id=_clean_text(raw.get("strategy_id"), max_length=80),
+            symbol=_clean_text(raw.get("symbol"), max_length=60),
+            side=side,
+            action=action,
+            price=float(raw.get("price") or 0.0),
+            amount=float(raw.get("amount") or 0.0),
+            quote_notional=float(raw.get("quote_notional") or 0.0),
+            timeframe=_clean_text(raw.get("timeframe"), max_length=40),
+            message=_clean_text(raw.get("message"), max_length=240),
+            status=_clean_text(raw.get("status") or "received", max_length=40),
+            reason=_clean_text(raw.get("reason"), max_length=240),
+            received_at=float(raw.get("received_at") or _now()),
+            raw=_clean_dict(raw.get("raw", {})),
+        )
+
+    @classmethod
     def from_payload(
         cls,
         payload: dict[str, Any],
@@ -598,12 +630,7 @@ class StrategyCenterStore:
             if isinstance(item, dict)
         ]
         signals = [
-            SignalEvent.from_payload(
-                item,
-                source=str(item.get("source") or "custom"),
-                status=str(item.get("status") or "received"),
-                reason=str(item.get("reason") or ""),
-            ).to_dict()
+            SignalEvent.from_dict(item).to_dict()
             for item in raw.get("signals", [])[-self.max_recent_signals :]
             if isinstance(item, dict)
         ]
@@ -730,12 +757,7 @@ def build_strategy_center_public_payload(
         )
     ]
     signals = [
-        SignalEvent.from_payload(
-            item,
-            source=str(item.get("source") or "custom"),
-            status=str(item.get("status") or "received"),
-            reason=str(item.get("reason") or ""),
-        ).to_dict()
+        SignalEvent.from_dict(item).to_dict()
         for item in store_payload.get("signals", [])
         if isinstance(item, dict)
         and can_view_asset("", str(item.get("symbol") or ""))

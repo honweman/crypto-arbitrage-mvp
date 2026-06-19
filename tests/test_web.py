@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from arbitrage_bot.config import (
     AlertConfig,
@@ -25,6 +26,7 @@ from arbitrage_bot.config import (
     SlowExecutionConfig,
     SpotGridConfig,
     SpotMarketConfig,
+    StrategyCenterConfig,
     StrategyTimelineConfig,
     TradeLogConfig,
     WebSecurityConfig,
@@ -83,6 +85,7 @@ from arbitrage_bot.web import (
     build_trading_console_payload,
     cancel_bulk_orders_payload,
     cancel_order_payload,
+    create_app,
     default_web_user_store_path,
     default_strategy_center_path,
     enrich_recent_trades_with_pnl,
@@ -117,6 +120,7 @@ def make_config(
     derivative_exchanges: list[ExchangeConfig] | None = None,
     risk: RiskConfig | None = None,
     trade_log: TradeLogConfig | None = None,
+    strategy_center: StrategyCenterConfig | None = None,
     strategy_timeline: StrategyTimelineConfig | None = None,
     alerts: AlertConfig | None = None,
     web_security: WebSecurityConfig | None = None,
@@ -138,6 +142,7 @@ def make_config(
         dca=dca or DcaConfig(),
         execution_algo=execution_algo or ExecutionAlgoConfig(),
         backtest=backtest or BacktestConfig(),
+        strategy_center=strategy_center or StrategyCenterConfig(),
         portfolio=portfolio or PortfolioConfig(),
         spot_symbols=[],
         spot_markets=spot_markets or [],
@@ -2604,6 +2609,74 @@ class WebMonitorTest(unittest.TestCase):
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_strategy_center_api_upsert_creates_with_supplied_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            cfg = make_config(
+                strategy_center=StrategyCenterConfig(
+                    path=str(data_dir / "strategy_center.json"),
+                ),
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(data_dir / "web_users.json"),
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=True,
+                    path=str(data_dir / "trade_events.jsonl"),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                account_response = await client.post(
+                    "/api/strategy-center",
+                    json={
+                        "action": "upsert_account",
+                        "account": {
+                            "id": "coinbase-main",
+                            "label": "Coinbase Main",
+                            "exchange": "coinbase-spot",
+                            "asset_scope": ["ACS"],
+                            "api_key_env": "COINBASE_API_KEY",
+                            "secret_env": "COINBASE_SECRET",
+                            "enabled": True,
+                        },
+                    },
+                )
+                account_payload = await account_response.json()
+                strategy_response = await client.post(
+                    "/api/strategy-center",
+                    json={
+                        "action": "upsert_strategy",
+                        "strategy": {
+                            "id": "acs-mm",
+                            "name": "ACS Coinbase MM",
+                            "strategy_type": "market_maker",
+                            "account_id": "coinbase-main",
+                            "exchange": "coinbase-spot",
+                            "symbol": "ACS/USDC",
+                            "asset": "ACS",
+                            "enabled": True,
+                        },
+                    },
+                )
+                strategy_payload = await strategy_response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(account_response.status, 200, account_payload)
+        self.assertEqual(strategy_response.status, 200, strategy_payload)
+        self.assertTrue(account_payload["ok"])
+        self.assertTrue(strategy_payload["ok"])
+        self.assertEqual(
+            strategy_payload["strategy_center"]["summary"]["strategy_count"],
+            1,
+        )
+
     async def test_fetch_order_activity_payload_summarizes_orders_and_fills(self) -> None:
         class FakeOrderManager:
             async def fetch_open_orders(

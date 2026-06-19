@@ -4681,6 +4681,16 @@ def _strategy_center_existing_row(
     raise ValueError(f"{label} not found: {row_id}")
 
 
+def _strategy_center_optional_row(
+    rows: list[dict[str, Any]],
+    row_id: str,
+) -> dict[str, Any] | None:
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == row_id:
+            return row
+    return None
+
+
 def _strategy_payload_from_request(
     payload: dict[str, Any],
     *,
@@ -4734,12 +4744,19 @@ async def api_strategy_center(request: web.Request) -> web.Response:
             strategy_raw = payload.get("strategy")
             if isinstance(strategy_raw, dict):
                 strategy_id = str(strategy_raw.get("id") or strategy_id).strip()
-            if action != "create_strategy" and strategy_id:
+            if action == "update_strategy" and strategy_id:
                 existing = _strategy_center_existing_row(
                     store_payload["strategy_instances"],
                     strategy_id,
                     label="strategy",
                 )
+                _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
+            elif action == "upsert_strategy" and strategy_id:
+                existing = _strategy_center_optional_row(
+                    store_payload["strategy_instances"],
+                    strategy_id,
+                )
+            if existing is not None:
                 _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
             strategy = _strategy_payload_from_request(
                 payload,
@@ -4776,12 +4793,19 @@ async def api_strategy_center(request: web.Request) -> web.Response:
             account_raw = payload.get("account")
             if isinstance(account_raw, dict):
                 account_id = str(account_raw.get("id") or account_id).strip()
-            if action != "create_account" and account_id:
+            if action == "update_account" and account_id:
                 existing = _strategy_center_existing_row(
                     store_payload["user_api_accounts"],
                     account_id,
                     label="api account",
                 )
+                _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
+            elif action == "upsert_account" and account_id:
+                existing = _strategy_center_optional_row(
+                    store_payload["user_api_accounts"],
+                    account_id,
+                )
+            if existing is not None:
                 _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
             account = _api_account_payload_from_request(
                 payload,

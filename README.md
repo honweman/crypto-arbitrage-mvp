@@ -23,6 +23,27 @@ If you only want to run the pure unit tests without installing CCXT:
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
+To run a broader offline functional and pressure test of the web/API stack:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/functional_stress_test.py \
+  --state-requests 600 \
+  --settings-requests 200 \
+  --strategy-writes 20 \
+  --signals 60 \
+  --concurrency 50 \
+  --write-concurrency 5 \
+  --report /tmp/crypto-functional-stress.json
+```
+
+This starts an in-process aiohttp test server with temporary data files, no
+configured exchanges, no real API credentials, and `allow_live_trading=false`.
+It exercises state reads, strategy-center writes, funding settings, Signal Bot
+webhooks, and concurrent API traffic without placing or canceling live orders.
+State reads can safely be tested with higher concurrency than JSON-backed writes;
+increase `--write-concurrency` only when specifically testing strategy-center
+store throughput.
+
 ## Run modes
 
 ```bash
