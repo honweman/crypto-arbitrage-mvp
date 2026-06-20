@@ -4023,12 +4023,21 @@ def _request_is_https(request: web.Request, cfg: BotConfig) -> bool:
 
 def _client_ip(request: web.Request, cfg: BotConfig) -> str:
     if cfg.web_security.trust_proxy_headers:
-        forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
-            return forwarded_for.split(",", 1)[0].strip()
+        # X-Real-IP is set wholesale by a well-configured reverse proxy (e.g.
+        # nginx's $remote_addr), so it cannot carry a client-supplied value.
+        # X-Forwarded-For is normally *appended to* by the proxy
+        # (nginx's $proxy_add_x_forwarded_for), so a client can prepend an
+        # arbitrary spoofed address; only the rightmost hop added by our
+        # immediate trusted proxy is safe to read. Preferring the leftmost
+        # entry (or trusting X-Forwarded-For over X-Real-IP) would let any
+        # remote client forge the IP used for the allowlist, login lockout,
+        # and audit logging.
         real_ip = request.headers.get("X-Real-IP")
         if real_ip:
             return real_ip.strip()
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            return forwarded_for.rsplit(",", 1)[-1].strip()
     return request.remote or ""
 
 

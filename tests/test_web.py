@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from arbitrage_bot.config import (
     AlertConfig,
@@ -67,6 +67,7 @@ from arbitrage_bot.web import (
     _registration_code_required,
     _require_admin_user,
     _require_user_assets,
+    _client_ip,
     _ip_allowed,
     _make_session_token,
     _session_identity,
@@ -1496,6 +1497,38 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.97"]))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.0/24"]))
         self.assertFalse(_ip_allowed("66.96.213.1", ["66.96.212.0/24"]))
+
+    def test_client_ip_trusts_real_ip_over_spoofable_forwarded_for(self) -> None:
+        cfg = make_config(web_security=WebSecurityConfig(trust_proxy_headers=True))
+        request = make_mocked_request(
+            "GET",
+            "/api/state",
+            headers={
+                "X-Forwarded-For": "203.0.113.7, 10.0.0.5",
+                "X-Real-IP": "10.0.0.5",
+            },
+        )
+        self.assertEqual(_client_ip(request, cfg), "10.0.0.5")
+
+    def test_client_ip_uses_nearest_forwarded_for_hop_not_client_supplied_prefix(
+        self,
+    ) -> None:
+        cfg = make_config(web_security=WebSecurityConfig(trust_proxy_headers=True))
+        request = make_mocked_request(
+            "GET",
+            "/api/state",
+            headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.5"},
+        )
+        self.assertEqual(_client_ip(request, cfg), "10.0.0.5")
+
+    def test_client_ip_ignores_proxy_headers_when_not_trusted(self) -> None:
+        cfg = make_config(web_security=WebSecurityConfig(trust_proxy_headers=False))
+        request = make_mocked_request(
+            "GET",
+            "/api/state",
+            headers={"X-Forwarded-For": "203.0.113.7", "X-Real-IP": "203.0.113.7"},
+        )
+        self.assertEqual(_client_ip(request, cfg), request.remote or "")
 
     def test_default_web_user_store_path_uses_security_config(self) -> None:
         cfg = make_config(

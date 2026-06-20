@@ -582,7 +582,18 @@ The web monitor can be protected with a password and an IP allowlist without sto
 }
 ```
 
-Set `CRYPTO_ARB_WEB_PASSWORD` and `CRYPTO_ARB_WEB_ALLOWED_IPS` in the server environment file. `CRYPTO_ARB_WEB_ALLOWED_IPS` accepts comma-separated IPs or CIDR ranges. When nginx terminates HTTPS, bind the Python app to `127.0.0.1` and pass `X-Real-IP` / `X-Forwarded-Proto` headers.
+Set `CRYPTO_ARB_WEB_PASSWORD` and `CRYPTO_ARB_WEB_ALLOWED_IPS` in the server environment file. `CRYPTO_ARB_WEB_ALLOWED_IPS` accepts comma-separated IPs or CIDR ranges. When nginx terminates HTTPS, bind the Python app to `127.0.0.1` and pass `X-Real-IP` / `X-Forwarded-Proto` headers:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+`trust_proxy_headers: true` only makes sense behind a proxy configured this way. The app trusts `X-Real-IP` (which nginx overwrites with the real socket peer) over `X-Forwarded-For`, and when only `X-Forwarded-For` is present it reads the rightmost hop rather than the leftmost one — the leftmost entry is whatever a client put there, while `$proxy_add_x_forwarded_for` always appends the address nginx itself observed. Set `trust_proxy_headers: false` if the app is ever exposed directly to clients, otherwise the IP allowlist and login lockout can be bypassed with a forged header.
 
 Alerts support generic webhook, Telegram, and SMTP email:
 
