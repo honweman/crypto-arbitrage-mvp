@@ -22,6 +22,18 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _flag(value: Any) -> float:
+    return 1.0 if bool(value) else 0.0
+
+
 def _label_value(value: Any) -> str:
     text = str(value or "")
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
@@ -44,35 +56,31 @@ def _line(name: str, value: float, labels: dict[str, Any] | None = None) -> str:
 
 
 def render_prometheus_metrics(payload: dict[str, Any]) -> str:
-    scan = payload.get("scan") if isinstance(payload.get("scan"), dict) else {}
-    order_activity = (
-        payload.get("order_activity")
-        if isinstance(payload.get("order_activity"), dict)
-        else {}
-    )
-    market_maker = (
-        payload.get("market_maker")
-        if isinstance(payload.get("market_maker"), dict)
-        else {}
-    )
-    spot_grid = (
-        payload.get("spot_grid")
-        if isinstance(payload.get("spot_grid"), dict)
-        else {}
-    )
-    program = payload.get("program") if isinstance(payload.get("program"), dict) else {}
-    mm_runtime = (
-        market_maker.get("runtime")
-        if isinstance(market_maker.get("runtime"), dict)
-        else {}
-    )
-    grid_runtime = (
-        spot_grid.get("runtime")
-        if isinstance(spot_grid.get("runtime"), dict)
-        else {}
-    )
+    scan = _dict(payload.get("scan"))
+    order_activity = _dict(payload.get("order_activity"))
+    market_maker = _dict(payload.get("market_maker"))
+    spot_grid = _dict(payload.get("spot_grid"))
+    readiness = _dict(payload.get("readiness"))
+    readiness_summary = _dict(readiness.get("summary"))
+    readiness_order_checks = _dict(readiness.get("order_checks"))
+    program = _dict(payload.get("program"))
+    operations = _dict(payload.get("operations"))
+    risk = _dict(operations.get("risk"))
+    if not risk:
+        risk = {
+            "enabled": readiness.get("risk_enabled"),
+            "trading_enabled": readiness.get("trading_enabled"),
+            "allow_live_trading": readiness.get("live_trading"),
+        }
+    trading_console = _dict(payload.get("trading_console"))
+    mm_runtime = _dict(market_maker.get("runtime"))
+    grid_runtime = _dict(spot_grid.get("runtime"))
     status = str(payload.get("status") or "unknown")
+    readiness_status = str(readiness.get("status") or "unknown")
     lines = [
+        "# HELP crypto_arb_status Current monitor status as a labeled gauge.",
+        "# TYPE crypto_arb_status gauge",
+        _line("crypto_arb_status", 1.0, {"status": status}),
         "# HELP crypto_arb_scan_count Total completed monitor scan cycles.",
         "# TYPE crypto_arb_scan_count counter",
         _line("crypto_arb_scan_count", _number(scan.get("count"))),
@@ -83,15 +91,30 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
         "# TYPE crypto_arb_opportunity_count gauge",
         _line(
             "crypto_arb_opportunity_count",
-            len(payload.get("opportunities") or []),
+            len(_list_items(payload.get("opportunities"))),
             {"status": status},
         ),
         "# HELP crypto_arb_warning_count Current warning count.",
         "# TYPE crypto_arb_warning_count gauge",
-        _line("crypto_arb_warning_count", len(payload.get("warnings") or [])),
+        _line("crypto_arb_warning_count", len(_list_items(payload.get("warnings")))),
         "# HELP crypto_arb_program_running Program switch state.",
         "# TYPE crypto_arb_program_running gauge",
-        _line("crypto_arb_program_running", 1.0 if program.get("running") else 0.0),
+        _line("crypto_arb_program_running", _flag(program.get("running"))),
+        "# HELP crypto_arb_program_auto_stopped Program auto-stop state.",
+        "# TYPE crypto_arb_program_auto_stopped gauge",
+        _line("crypto_arb_program_auto_stopped", _flag(program.get("auto_stopped"))),
+        "# HELP crypto_arb_risk_enabled Risk engine enabled state.",
+        "# TYPE crypto_arb_risk_enabled gauge",
+        _line("crypto_arb_risk_enabled", _flag(risk.get("enabled"))),
+        "# HELP crypto_arb_risk_trading_enabled Risk trading switch state.",
+        "# TYPE crypto_arb_risk_trading_enabled gauge",
+        _line("crypto_arb_risk_trading_enabled", _flag(risk.get("trading_enabled"))),
+        "# HELP crypto_arb_risk_live_trading_allowed Live trading risk switch state.",
+        "# TYPE crypto_arb_risk_live_trading_allowed gauge",
+        _line(
+            "crypto_arb_risk_live_trading_allowed",
+            _flag(risk.get("allow_live_trading")),
+        ),
         "# HELP crypto_arb_open_order_count Current open order count from order activity.",
         "# TYPE crypto_arb_open_order_count gauge",
         _line(
@@ -103,6 +126,19 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
         _line(
             "crypto_arb_recent_trade_count",
             _number(order_activity.get("recent_trade_count")),
+        ),
+        "# HELP crypto_arb_order_activity_status Current order activity status.",
+        "# TYPE crypto_arb_order_activity_status gauge",
+        _line(
+            "crypto_arb_order_activity_status",
+            1.0,
+            {"status": order_activity.get("status", "unknown")},
+        ),
+        "# HELP crypto_arb_reconciliation_issue_count Actionable order reconciliation issue count.",
+        "# TYPE crypto_arb_reconciliation_issue_count gauge",
+        _line(
+            "crypto_arb_reconciliation_issue_count",
+            _number(readiness_order_checks.get("reconciliation_issue_count")),
         ),
         "# HELP crypto_arb_market_maker_open_orders Tracked market maker open orders.",
         "# TYPE crypto_arb_market_maker_open_orders gauge",
@@ -118,6 +154,125 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
             _number(grid_runtime.get("open_order_count")),
             {"mode": grid_runtime.get("mode", "unknown")},
         ),
+        "# HELP crypto_arb_readiness_status Current readiness status.",
+        "# TYPE crypto_arb_readiness_status gauge",
+        _line("crypto_arb_readiness_status", 1.0, {"status": readiness_status}),
+        "# HELP crypto_arb_readiness_blocked_count Blocked readiness item count.",
+        "# TYPE crypto_arb_readiness_blocked_count gauge",
+        _line(
+            "crypto_arb_readiness_blocked_count",
+            _number(readiness_summary.get("blocked_count")),
+        ),
+        "# HELP crypto_arb_readiness_warning_count Warning readiness item count.",
+        "# TYPE crypto_arb_readiness_warning_count gauge",
+        _line(
+            "crypto_arb_readiness_warning_count",
+            _number(readiness_summary.get("warning_count")),
+        ),
+        "# HELP crypto_arb_readiness_action_count Suggested readiness action count.",
+        "# TYPE crypto_arb_readiness_action_count gauge",
+        _line(
+            "crypto_arb_readiness_action_count",
+            _number(readiness_summary.get("action_count")),
+        ),
     ]
-    return "\n".join(lines) + "\n"
 
+    lines.extend(
+        [
+            "# HELP crypto_arb_readiness_account_status Readiness status by account.",
+            "# TYPE crypto_arb_readiness_account_status gauge",
+        ]
+    )
+    for account in _list_items(readiness.get("accounts")):
+        if not isinstance(account, dict):
+            continue
+        lines.append(
+            _line(
+                "crypto_arb_readiness_account_status",
+                1.0,
+                {
+                    "account": account.get("key", "unknown"),
+                    "status": account.get("status", "unknown"),
+                    "used": str(bool(account.get("used"))).lower(),
+                },
+            )
+        )
+
+    lines.extend(
+        [
+            "# HELP crypto_arb_readiness_strategy_status Readiness status by strategy.",
+            "# TYPE crypto_arb_readiness_strategy_status gauge",
+            "# HELP crypto_arb_strategy_live Strategy live state from the trading console.",
+            "# TYPE crypto_arb_strategy_live gauge",
+            "# HELP crypto_arb_strategy_paused Strategy pause state from the trading console.",
+            "# TYPE crypto_arb_strategy_paused gauge",
+            "# HELP crypto_arb_strategy_configured Strategy configured state from the trading console.",
+            "# TYPE crypto_arb_strategy_configured gauge",
+        ]
+    )
+    strategy_rows = [
+        row
+        for row in _list_items(readiness.get("strategies"))
+        if isinstance(row, dict)
+    ]
+    if not strategy_rows:
+        strategy_rows = [
+            row
+            for row in _list_items(trading_console.get("strategies"))
+            if isinstance(row, dict)
+        ]
+    for strategy in strategy_rows:
+        strategy_id = strategy.get("id", "unknown")
+        labels = {
+            "strategy": strategy_id,
+            "status": strategy.get("status", "unknown"),
+            "mode": strategy.get("mode", "unknown"),
+        }
+        lines.append(_line("crypto_arb_readiness_strategy_status", 1.0, labels))
+        lines.append(
+            _line(
+                "crypto_arb_strategy_live",
+                _flag(strategy.get("live")),
+                {"strategy": strategy_id},
+            )
+        )
+        lines.append(
+            _line(
+                "crypto_arb_strategy_paused",
+                _flag(strategy.get("paused")),
+                {"strategy": strategy_id},
+            )
+        )
+        lines.append(
+            _line(
+                "crypto_arb_strategy_configured",
+                _flag(strategy.get("configured")),
+                {"strategy": strategy_id},
+            )
+        )
+
+    lines.extend(
+        [
+            "# HELP crypto_arb_runtime_status Runtime status by background strategy loop.",
+            "# TYPE crypto_arb_runtime_status gauge",
+            _line(
+                "crypto_arb_runtime_status",
+                1.0,
+                {
+                    "strategy": "market_maker",
+                    "status": mm_runtime.get("status", "unknown"),
+                    "mode": mm_runtime.get("mode", "unknown"),
+                },
+            ),
+            _line(
+                "crypto_arb_runtime_status",
+                1.0,
+                {
+                    "strategy": "spot_grid",
+                    "status": grid_runtime.get("status", "unknown"),
+                    "mode": grid_runtime.get("mode", "unknown"),
+                },
+            ),
+        ]
+    )
+    return "\n".join(lines) + "\n"

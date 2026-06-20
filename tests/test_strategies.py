@@ -338,6 +338,96 @@ class StrategyTest(unittest.TestCase):
         self.assertAlmostEqual(opportunity.metadata["final_amount"], 1100.0)
         self.assertFalse(opportunity.metadata["requires_cross_exchange_transfer"])
 
+    def test_triangular_arbitrage_skips_when_order_book_depth_is_insufficient(self) -> None:
+        exchanges = [ExchangeConfig(id="binance", label="binance-spot", fee_bps=0)]
+        books = {
+            ("binance-spot", "BTC/USDT"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="BTC/USDT",
+                bids=[BookLevel(price=99.0, amount=1.0)],
+                asks=[BookLevel(price=100.0, amount=1.0)],
+            ),
+            ("binance-spot", "ETH/BTC"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="ETH/BTC",
+                bids=[BookLevel(price=0.49, amount=30)],
+                asks=[BookLevel(price=0.5, amount=30)],
+            ),
+            ("binance-spot", "ETH/USDT"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="ETH/USDT",
+                bids=[BookLevel(price=55.0, amount=30)],
+                asks=[BookLevel(price=56.0, amount=30)],
+            ),
+        }
+
+        opportunities = find_triangular_arbitrage_opportunities(
+            books=books,
+            exchanges=exchanges,
+            cfg=TriangularArbitrageConfig(
+                enabled=True,
+                notional_quote=1000.0,
+                min_profit_quote=0.0,
+                min_profit_bps=0.0,
+                routes=[
+                    TriangleRouteConfig(
+                        exchange="binance-spot",
+                        start_currency="USDT",
+                        symbols=["BTC/USDT", "ETH/BTC", "ETH/USDT"],
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(opportunities, [])
+
+    def test_triangular_arbitrage_reports_fees_by_quote_currency(self) -> None:
+        exchanges = [ExchangeConfig(id="binance", label="binance-spot", fee_bps=10)]
+        books = {
+            ("binance-spot", "BTC/USDT"): book(
+                "binance-spot",
+                "BTC/USDT",
+                bid=99.0,
+                ask=100.0,
+            ),
+            ("binance-spot", "ETH/BTC"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="ETH/BTC",
+                bids=[BookLevel(price=0.49, amount=30)],
+                asks=[BookLevel(price=0.5, amount=30)],
+            ),
+            ("binance-spot", "ETH/USDT"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="ETH/USDT",
+                bids=[BookLevel(price=55.0, amount=30)],
+                asks=[BookLevel(price=56.0, amount=30)],
+            ),
+        }
+
+        opportunities = find_triangular_arbitrage_opportunities(
+            books=books,
+            exchanges=exchanges,
+            cfg=TriangularArbitrageConfig(
+                enabled=True,
+                notional_quote=1000.0,
+                min_profit_quote=1.0,
+                min_profit_bps=1.0,
+                routes=[
+                    TriangleRouteConfig(
+                        exchange="binance-spot",
+                        start_currency="USDT",
+                        symbols=["BTC/USDT", "ETH/BTC", "ETH/USDT"],
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(len(opportunities), 1)
+        fees = opportunities[0].metadata["fees_by_currency"]
+        self.assertGreater(fees["USDT"], 0)
+        self.assertGreater(fees["BTC"], 0)
+        self.assertEqual(set(fees), {"BTC", "USDT"})
+
 
 if __name__ == "__main__":
     unittest.main()

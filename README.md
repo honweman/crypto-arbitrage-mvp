@@ -133,9 +133,12 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted bid/ask prices, quote rates, and any live opportunities. The program switch next to the status pill pauses or resumes scanning without stopping the web server.
 
 The web service also exposes Prometheus-compatible metrics at `/metrics` and
-`/api/metrics`, including scan latency, opportunity count, warnings, open orders,
-recent trades, and tracked MM/Grid order counts. The endpoint is protected by
-the same web authentication middleware as the rest of the dashboard.
+`/api/metrics`. A local scrape from the server itself is allowed without a
+dashboard session; external requests still go through the same web authentication
+and IP rules as the rest of the dashboard. Metrics include scan latency,
+opportunity count, warnings, live/risk/program switches, order activity,
+reconciliation issue counts, readiness status, per-account readiness,
+per-strategy live/paused/configured state, and tracked MM/Grid order counts.
 
 The top row shows configured positions, cash balances, and P/L attribution:
 
