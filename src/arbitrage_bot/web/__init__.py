@@ -168,6 +168,7 @@ STRATEGY_IDS = {
     "spot_spread",
     "cash_and_carry",
     "funding_arbitrage",
+    "options_arbitrage",
     "signal_bot",
 }
 SESSION_COOKIE = "crypto_arb_session"
@@ -664,6 +665,15 @@ def build_trading_console_payload(
             exchange="",
             symbol="strategy center",
             strategy_allowed=_risk_strategy_enabled(cfg, "funding_arbitrage"),
+            mode="scan",
+        ),
+        strategy_row(
+            strategy_id="options_arbitrage",
+            label="Options Arbitrage",
+            configured=bool(cfg.option_combos),
+            exchange="",
+            symbol=",".join(sorted({combo.underlying for combo in cfg.option_combos})),
+            strategy_allowed=_risk_strategy_enabled(cfg, "options_arbitrage"),
             mode="scan",
         ),
         strategy_row(

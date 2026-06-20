@@ -31,6 +31,42 @@ class GridOrder:
 
 
 @dataclass(frozen=True)
+class GridFill:
+    side: Side
+    level: int
+    price: float
+    amount: float
+    quote_notional: float = 0.0
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "GridFill":
+        side = str(raw.get("side") or "").lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("grid fill side must be buy or sell")
+        return cls(
+            side=side,  # type: ignore[arg-type]
+            level=int(raw.get("level") or 0),
+            price=float(raw.get("price") or 0.0),
+            amount=float(raw.get("amount") or raw.get("filled") or 0.0),
+            quote_notional=float(raw.get("quote_notional") or raw.get("cost") or 0.0),
+        )
+
+
+@dataclass(frozen=True)
+class GridFillReplacementPlan:
+    status: str
+    reason: str
+    replacements: list[GridOrder] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "replacements": [order.to_dict() for order in self.replacements],
+        }
+
+
+@dataclass(frozen=True)
 class SpotGridPlan:
     exchange: str
     symbol: str
@@ -50,6 +86,7 @@ class SpotGridPlan:
     max_open_orders: int
     min_grid_step_bps: float
     cancel_retry_attempts: int
+    grid_prices: list[float] = field(default_factory=list)
     orders: list[GridOrder] = field(default_factory=list)
     observed_at: float = field(default_factory=time)
     bid_depth_quote: float = 0.0
@@ -78,6 +115,7 @@ class SpotGridPlan:
             "max_open_orders": self.max_open_orders,
             "min_grid_step_bps": self.min_grid_step_bps,
             "cancel_retry_attempts": self.cancel_retry_attempts,
+            "grid_prices": self.grid_prices,
             "orders": [order.to_dict() for order in self.orders],
             "observed_at": self.observed_at,
             "bid_depth_quote": self.bid_depth_quote,
@@ -294,8 +332,76 @@ def build_spot_grid_plan(
         max_open_orders=cfg.max_open_orders,
         min_grid_step_bps=cfg.min_grid_step_bps,
         cancel_retry_attempts=cfg.cancel_retry_attempts,
+        grid_prices=prices,
         orders=orders,
         **_metric_fields(book),
+    )
+
+
+def build_spot_grid_fill_replacement_plan(
+    cfg: SpotGridConfig,
+    fills: list[GridFill | dict[str, Any]],
+) -> GridFillReplacementPlan:
+    try:
+        prices, _ = _grid_prices(cfg)
+    except ValueError as exc:
+        return GridFillReplacementPlan(
+            status="blocked",
+            reason=str(exc),
+        )
+    if not fills:
+        return GridFillReplacementPlan(
+            status="idle",
+            reason="no grid fills to replace",
+        )
+
+    replacements: list[GridOrder] = []
+    for raw_fill in fills:
+        fill = raw_fill if isinstance(raw_fill, GridFill) else GridFill.from_dict(raw_fill)
+        if fill.amount <= 0 or fill.price <= 0:
+            continue
+        level_index = fill.level - 1 if fill.level > 0 else min(
+            range(len(prices)),
+            key=lambda index: abs(prices[index] - fill.price),
+        )
+        if level_index < 0 or level_index >= len(prices):
+            continue
+        target_index = level_index + 1 if fill.side == "buy" else level_index - 1
+        if target_index < 0 or target_index >= len(prices):
+            continue
+        target_price = prices[target_index]
+        if target_price <= 0:
+            continue
+        if fill.side == "buy":
+            amount = fill.amount
+            quote_notional = amount * target_price
+            side: Side = "sell"
+        else:
+            quote_notional = fill.quote_notional if fill.quote_notional > 0 else fill.amount * fill.price
+            amount = quote_notional / target_price
+            side = "buy"
+        replacements.append(
+            GridOrder(
+                side=side,
+                level=target_index + 1,
+                price=target_price,
+                amount=amount,
+                quote_notional=quote_notional,
+                distance_bps=abs(target_price - fill.price) / fill.price * 10_000,
+            )
+        )
+
+    if not replacements:
+        return GridFillReplacementPlan(
+            status="no_replacement",
+            reason="fills were outside the grid boundaries or had zero size",
+        )
+    if cfg.max_open_orders > 0:
+        replacements = replacements[: cfg.max_open_orders]
+    return GridFillReplacementPlan(
+        status="planned",
+        reason="replace filled grid orders at adjacent levels",
+        replacements=replacements,
     )
 
 

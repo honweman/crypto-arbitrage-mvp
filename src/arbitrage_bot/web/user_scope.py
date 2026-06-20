@@ -32,6 +32,8 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
         assets.add(_base_asset_from_symbol(cfg.execution_algo.symbol))
     if cfg.backtest.symbol:
         assets.add(_base_asset_from_symbol(cfg.backtest.symbol))
+    for combo in cfg.option_combos:
+        assets.add(combo.underlying.upper() or _base_asset_from_symbol(combo.spot_symbol))
     return sorted(asset for asset in assets if asset)
 
 

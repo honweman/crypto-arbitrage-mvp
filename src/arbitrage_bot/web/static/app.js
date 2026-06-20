@@ -249,7 +249,10 @@ function balanceStatusClass(status) {
       if (value === "dca") return "DCA Bot";
       if (value === "execution_algo") return "TWAP/VWAP/POV";
       if (value === "backtest") return "Backtest/Paper";
+      if (value === "spot_spread") return "Spot Arbitrage";
+      if (value === "cash_and_carry") return "Cash & Carry";
       if (value === "funding_arbitrage") return "Funding Arbitrage";
+      if (value === "options_arbitrage") return "Options Arbitrage";
       if (value === "signal_bot") return "Signal Bot";
       if (value === "manual") return "Manual";
       if (value === "unattributed") return "Unattributed";
@@ -2137,6 +2140,7 @@ function balanceStatusClass(status) {
       if (value === "spot_spread") return "Spot Arbitrage";
       if (value === "cash_and_carry") return "Cash & Carry";
       if (value === "funding_arbitrage") return "Funding Arbitrage";
+      if (value === "options_arbitrage") return "Options Arbitrage";
       if (value === "signal_bot") return "Signal Bot";
       return value || "--";
     }

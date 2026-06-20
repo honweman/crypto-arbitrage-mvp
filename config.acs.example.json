@@ -169,6 +169,16 @@
     "data_source": "synthetic",
     "history_path": ""
   },
+  "options_arbitrage": {
+    "enabled": false,
+    "notional_quote": 200.0,
+    "min_edge_quote": 0.1,
+    "min_edge_bps": 10.0,
+    "max_contracts": 0.0,
+    "max_days_to_expiry": 0.0,
+    "risk_free_rate_bps": 0.0,
+    "borrow_rate_bps": 0.0
+  },
   "strategy_center": {
     "enabled": true,
     "path": "data/strategy_center.sqlite3",
@@ -209,6 +219,7 @@
       "spot_spread": true,
       "cash_and_carry": true,
       "funding_arbitrage": true,
+      "options_arbitrage": true,
       "signal_bot": true
     },
     "account_enabled": {
@@ -321,6 +332,7 @@
     }
   ],
   "cash_and_carry_pairs": [],
+  "option_combos": [],
   "spot_exchanges": [
     {
       "id": "bithumb",

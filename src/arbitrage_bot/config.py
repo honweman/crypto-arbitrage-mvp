@@ -206,6 +206,32 @@ class BacktestConfig:
 
 
 @dataclass(frozen=True)
+class OptionComboConfig:
+    underlying: str
+    spot_exchange: str
+    spot_symbol: str
+    option_exchange: str
+    call_symbol: str
+    put_symbol: str
+    strike: float
+    expiry: str = ""
+    contract_size: float = 1.0
+    quote_currency: str = "USDT"
+
+
+@dataclass(frozen=True)
+class OptionsArbitrageConfig:
+    enabled: bool = False
+    notional_quote: float = 1000.0
+    min_edge_quote: float = 0.0
+    min_edge_bps: float = 10.0
+    max_contracts: float = 0.0
+    max_days_to_expiry: float = 0.0
+    risk_free_rate_bps: float = 0.0
+    borrow_rate_bps: float = 0.0
+
+
+@dataclass(frozen=True)
 class StrategyCenterConfig:
     enabled: bool = True
     path: str = "data/strategy_center.sqlite3"
@@ -339,10 +365,14 @@ class BotConfig:
     cash_and_carry_pairs: list[CashAndCarryPair]
     spot_exchanges: list[ExchangeConfig]
     derivative_exchanges: list[ExchangeConfig]
+    option_combos: list[OptionComboConfig] = field(default_factory=list)
     spot_grid: SpotGridConfig = field(default_factory=SpotGridConfig)
     dca: DcaConfig = field(default_factory=DcaConfig)
     execution_algo: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
+    options_arbitrage: OptionsArbitrageConfig = field(
+        default_factory=OptionsArbitrageConfig
+    )
     strategy_center: StrategyCenterConfig = field(default_factory=StrategyCenterConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
@@ -378,6 +408,21 @@ def _asset_position_from_dict(raw: dict[str, Any]) -> AssetPosition:
         asset=str(raw["asset"]).upper(),
         position_base=float(raw.get("position_base", 0.0)),
         average_entry_price=float(raw.get("average_entry_price", 0.0)),
+    )
+
+
+def _option_combo_from_dict(raw: dict[str, Any]) -> OptionComboConfig:
+    return OptionComboConfig(
+        underlying=str(raw["underlying"]).upper(),
+        spot_exchange=str(raw["spot_exchange"]),
+        spot_symbol=str(raw["spot_symbol"]).upper(),
+        option_exchange=str(raw["option_exchange"]),
+        call_symbol=str(raw["call_symbol"]),
+        put_symbol=str(raw["put_symbol"]),
+        strike=float(raw["strike"]),
+        expiry=str(raw.get("expiry", "")),
+        contract_size=float(raw.get("contract_size", 1.0)),
+        quote_currency=str(raw.get("quote_currency", "USDT")).upper(),
     )
 
 
@@ -459,6 +504,7 @@ def load_config(path: str | Path) -> BotConfig:
     dca_raw = raw.get("dca", {})
     execution_algo_raw = raw.get("execution_algo", {})
     backtest_raw = raw.get("backtest", {})
+    options_arbitrage_raw = raw.get("options_arbitrage", {})
     strategy_center_raw = raw.get("strategy_center", {})
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
@@ -738,12 +784,42 @@ def load_config(path: str | Path) -> BotConfig:
             )
             for item in raw.get("cash_and_carry_pairs", [])
         ],
+        option_combos=[
+            _option_combo_from_dict(item)
+            for item in raw.get("option_combos", [])
+        ],
         spot_exchanges=[
             _exchange_from_dict(item) for item in raw.get("spot_exchanges", [])
         ],
         derivative_exchanges=[
             _exchange_from_dict(item) for item in raw.get("derivative_exchanges", [])
         ],
+        options_arbitrage=OptionsArbitrageConfig(
+            enabled=bool(options_arbitrage_raw.get("enabled", False)),
+            notional_quote=float(
+                options_arbitrage_raw.get(
+                    "notional_quote",
+                    raw.get("notional_quote", 1000.0),
+                )
+            ),
+            min_edge_quote=float(
+                options_arbitrage_raw.get(
+                    "min_edge_quote",
+                    raw.get("min_profit_quote", 0.0),
+                )
+            ),
+            min_edge_bps=float(options_arbitrage_raw.get("min_edge_bps", 10.0)),
+            max_contracts=float(options_arbitrage_raw.get("max_contracts", 0.0)),
+            max_days_to_expiry=float(
+                options_arbitrage_raw.get("max_days_to_expiry", 0.0)
+            ),
+            risk_free_rate_bps=float(
+                options_arbitrage_raw.get("risk_free_rate_bps", 0.0)
+            ),
+            borrow_rate_bps=float(
+                options_arbitrage_raw.get("borrow_rate_bps", 0.0)
+            ),
+        ),
         risk=RiskConfig(
             enabled=bool(risk_raw.get("enabled", True)),
             trading_enabled=bool(risk_raw.get("trading_enabled", True)),

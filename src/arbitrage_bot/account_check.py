@@ -43,6 +43,11 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
             symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
         for exchange in cfg.derivative_exchanges:
             symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
+    for combo in cfg.option_combos:
+        symbols.setdefault(combo.spot_exchange, set()).add(combo.spot_symbol)
+        symbols.setdefault(combo.option_exchange, set()).update(
+            {combo.call_symbol, combo.put_symbol}
+        )
 
     if cfg.market_maker.exchange and cfg.market_maker.symbol:
         symbols.setdefault(cfg.market_maker.exchange, set()).add(

@@ -7,9 +7,10 @@ import sys
 import time
 from collections.abc import Iterable
 
-from .config import BotConfig, CashAndCarryPair, ExchangeConfig, load_config
+from .config import BotConfig, CashAndCarryPair, ExchangeConfig, OptionComboConfig, load_config
 from .exchanges import ExchangeManager
 from .models import OrderBookSnapshot, Opportunity
+from .strategies.options_arbitrage import find_options_arbitrage_opportunities
 from .strategies.cash_and_carry import find_cash_and_carry_opportunities
 from .strategies.spot_spread import (
     find_converted_spot_spread_opportunities,
@@ -88,6 +89,26 @@ def _derivative_symbols_for_cash_and_carry(pairs: Iterable[CashAndCarryPair]) ->
     return {pair.derivative_symbol for pair in pairs}
 
 
+def _spot_symbols_for_option_combos(
+    combos: Iterable[OptionComboConfig],
+) -> dict[str, set[str]]:
+    symbols: dict[str, set[str]] = {}
+    for combo in combos:
+        symbols.setdefault(combo.spot_exchange, set()).add(combo.spot_symbol)
+    return symbols
+
+
+def _option_symbols_for_option_combos(
+    combos: Iterable[OptionComboConfig],
+) -> dict[str, set[str]]:
+    symbols: dict[str, set[str]] = {}
+    for combo in combos:
+        symbols.setdefault(combo.option_exchange, set()).update(
+            {combo.call_symbol, combo.put_symbol}
+        )
+    return symbols
+
+
 async def scan_with_manager(
     cfg: BotConfig,
     strategy: StrategyName,
@@ -163,6 +184,29 @@ async def scan_with_manager(
                 funding_rates=funding_rates,
             )
         )
+
+    if strategy in {"all", "options-arbitrage"} and cfg.option_combos:
+        if strategy == "options-arbitrage" or cfg.options_arbitrage.enabled:
+            spot_books = await manager.fetch_order_books(
+                cfg.spot_exchanges,
+                _spot_symbols_for_option_combos(cfg.option_combos),
+                cfg.order_book_depth,
+            )
+            option_books = await manager.fetch_order_books(
+                cfg.derivative_exchanges,
+                _option_symbols_for_option_combos(cfg.option_combos),
+                cfg.order_book_depth,
+            )
+            opportunities.extend(
+                find_options_arbitrage_opportunities(
+                    spot_books=spot_books,
+                    option_books=option_books,
+                    spot_exchanges=cfg.spot_exchanges,
+                    option_exchanges=cfg.derivative_exchanges,
+                    combos=cfg.option_combos,
+                    cfg=cfg.options_arbitrage,
+                )
+            )
 
     opportunities.sort(key=lambda item: item.profit_bps, reverse=True)
     return opportunities
@@ -256,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.json", help="Path to JSON config")
     parser.add_argument(
         "--strategy",
-        choices=["all", "spot-spread", "cash-and-carry"],
+        choices=["all", "spot-spread", "cash-and-carry", "options-arbitrage"],
         default="all",
         help="Strategy to run",
     )

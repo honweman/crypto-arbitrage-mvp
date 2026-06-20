@@ -36,22 +36,87 @@ def find_cash_and_carry_opportunities(
                 if derivative_book is None or not derivative_book.bids:
                     continue
 
-                spot_capacity = max_base_for_quote(spot_book.asks, notional_quote)
-                derivative_capacity = available_base(derivative_book.bids)
-                quantity_base = min(spot_capacity, derivative_capacity)
-                if quantity_base <= 0:
+                funding_rate = funding_rates.get((derivative_key, pair.derivative_symbol))
+
+                positive_quantity_base = min(
+                    max_base_for_quote(spot_book.asks, notional_quote),
+                    available_base(derivative_book.bids),
+                )
+                if positive_quantity_base > 0:
+                    spot_fill = estimate_fill(
+                        spot_book.asks,
+                        side="buy",
+                        quantity_base=positive_quantity_base,
+                        fee_bps=spot_cfg.fee_bps,
+                    )
+                    derivative_fill = estimate_fill(
+                        derivative_book.bids,
+                        side="sell",
+                        quantity_base=positive_quantity_base,
+                        fee_bps=derivative_cfg.fee_bps,
+                    )
+                    if spot_fill is not None and derivative_fill is not None:
+                        basis_bps = (
+                            (derivative_fill.average_price - spot_fill.average_price)
+                            / spot_fill.average_price
+                            * 10_000
+                        )
+                        entry_edge_quote = derivative_fill.net_quote - spot_fill.net_quote
+
+                        if (
+                            basis_bps >= min_basis_bps
+                            and entry_edge_quote >= min_profit_quote
+                        ):
+                            opportunities.append(
+                                Opportunity(
+                                    strategy="cash-and-carry",
+                                    profit_quote=entry_edge_quote,
+                                    profit_bps=entry_edge_quote / spot_fill.net_quote * 10_000,
+                                    legs=[
+                                        OpportunityLeg(
+                                            exchange=spot_key,
+                                            symbol=pair.spot_symbol,
+                                            side="buy",
+                                            quantity_base=positive_quantity_base,
+                                            average_price=spot_fill.average_price,
+                                            fee_quote=spot_fill.fee_quote,
+                                        ),
+                                        OpportunityLeg(
+                                            exchange=derivative_key,
+                                            symbol=pair.derivative_symbol,
+                                            side="sell",
+                                            quantity_base=positive_quantity_base,
+                                            average_price=derivative_fill.average_price,
+                                            fee_quote=derivative_fill.fee_quote,
+                                        ),
+                                    ],
+                                    metadata={
+                                        "basis_bps": basis_bps,
+                                        "direction": "positive_basis",
+                                        "entry_edge_quote": entry_edge_quote,
+                                        "funding_rate": funding_rate,
+                                        "requires_margin_controls": True,
+                                    },
+                                )
+                            )
+
+                reverse_quantity_base = min(
+                    available_base(spot_book.bids),
+                    max_base_for_quote(derivative_book.asks, notional_quote),
+                )
+                if reverse_quantity_base <= 0:
                     continue
 
                 spot_fill = estimate_fill(
-                    spot_book.asks,
-                    side="buy",
-                    quantity_base=quantity_base,
+                    spot_book.bids,
+                    side="sell",
+                    quantity_base=reverse_quantity_base,
                     fee_bps=spot_cfg.fee_bps,
                 )
                 derivative_fill = estimate_fill(
-                    derivative_book.bids,
-                    side="sell",
-                    quantity_base=quantity_base,
+                    derivative_book.asks,
+                    side="buy",
+                    quantity_base=reverse_quantity_base,
                     fee_bps=derivative_cfg.fee_bps,
                 )
                 if spot_fill is None or derivative_fill is None:
@@ -62,39 +127,39 @@ def find_cash_and_carry_opportunities(
                     / spot_fill.average_price
                     * 10_000
                 )
-                entry_edge_quote = derivative_fill.net_quote - spot_fill.net_quote
-
-                if basis_bps < min_basis_bps or entry_edge_quote < min_profit_quote:
+                entry_edge_quote = spot_fill.net_quote - derivative_fill.net_quote
+                if -basis_bps < min_basis_bps or entry_edge_quote < min_profit_quote:
                     continue
 
-                funding_rate = funding_rates.get((derivative_key, pair.derivative_symbol))
                 opportunities.append(
                     Opportunity(
                         strategy="cash-and-carry",
                         profit_quote=entry_edge_quote,
-                        profit_bps=entry_edge_quote / spot_fill.net_quote * 10_000,
+                        profit_bps=entry_edge_quote / derivative_fill.net_quote * 10_000,
                         legs=[
                             OpportunityLeg(
                                 exchange=spot_key,
                                 symbol=pair.spot_symbol,
-                                side="buy",
-                                quantity_base=quantity_base,
+                                side="sell",
+                                quantity_base=reverse_quantity_base,
                                 average_price=spot_fill.average_price,
                                 fee_quote=spot_fill.fee_quote,
                             ),
                             OpportunityLeg(
                                 exchange=derivative_key,
                                 symbol=pair.derivative_symbol,
-                                side="sell",
-                                quantity_base=quantity_base,
+                                side="buy",
+                                quantity_base=reverse_quantity_base,
                                 average_price=derivative_fill.average_price,
                                 fee_quote=derivative_fill.fee_quote,
                             ),
                         ],
                         metadata={
                             "basis_bps": basis_bps,
+                            "direction": "negative_basis",
                             "entry_edge_quote": entry_edge_quote,
                             "funding_rate": funding_rate,
+                            "requires_borrow_or_inventory": True,
                             "requires_margin_controls": True,
                         },
                     )

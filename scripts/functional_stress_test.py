@@ -51,6 +51,7 @@ STRATEGY_IDS = {
     "spot_spread": True,
     "cash_and_carry": True,
     "funding_arbitrage": True,
+    "options_arbitrage": True,
     "signal_bot": True,
 }
 

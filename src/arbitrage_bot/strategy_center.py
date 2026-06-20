@@ -21,6 +21,7 @@ STRATEGY_TYPES = {
     "spot_spread",
     "cash_and_carry",
     "funding_arbitrage",
+    "options_arbitrage",
     "signal_bot",
 }
 SIGNAL_SOURCES = {"tradingview", "custom"}

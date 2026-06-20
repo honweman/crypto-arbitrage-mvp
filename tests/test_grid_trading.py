@@ -1,7 +1,11 @@
 import unittest
 
 from arbitrage_bot.config import DcaConfig, SpotGridConfig
-from arbitrage_bot.grid_trading import build_dca_plan, build_spot_grid_plan
+from arbitrage_bot.grid_trading import (
+    build_dca_plan,
+    build_spot_grid_fill_replacement_plan,
+    build_spot_grid_plan,
+)
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 
 
@@ -94,6 +98,44 @@ class GridTradingTest(unittest.TestCase):
         self.assertGreater(plan.grid_step_bps, 0.0)
         self.assertTrue(any(order.side == "buy" for order in plan.orders))
         self.assertTrue(any(order.side == "sell" for order in plan.orders))
+        self.assertEqual(len(plan.grid_prices), 3)
+
+    def test_spot_grid_builds_adjacent_replacements_after_fills(self) -> None:
+        cfg = SpotGridConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            lower_price=90.0,
+            upper_price=110.0,
+            grid_count=4,
+            quote_per_grid=10.0,
+            max_open_orders=10,
+        )
+
+        replacement_plan = build_spot_grid_fill_replacement_plan(
+            cfg,
+            [
+                {
+                    "side": "buy",
+                    "level": 2,
+                    "price": 95.0,
+                    "amount": 1.0,
+                },
+                {
+                    "side": "sell",
+                    "level": 4,
+                    "price": 105.0,
+                    "amount": 1.0,
+                    "quote_notional": 105.0,
+                },
+            ],
+        )
+
+        self.assertEqual(replacement_plan.status, "planned")
+        self.assertEqual(replacement_plan.replacements[0].side, "sell")
+        self.assertEqual(replacement_plan.replacements[0].price, 100.0)
+        self.assertEqual(replacement_plan.replacements[1].side, "buy")
+        self.assertEqual(replacement_plan.replacements[1].price, 100.0)
 
     def test_dca_waits_for_buy_trigger_then_builds_multiplier_schedule(self) -> None:
         cfg = DcaConfig(

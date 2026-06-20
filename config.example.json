@@ -19,6 +19,7 @@
       "derivative_symbol": "ETH/USDT:USDT"
     }
   ],
+  "option_combos": [],
   "market_maker": {
     "enabled": false,
     "exchange": "binance-spot",
@@ -116,6 +117,16 @@
     "max_recent_points": 80,
     "data_source": "synthetic",
     "history_path": ""
+  },
+  "options_arbitrage": {
+    "enabled": false,
+    "notional_quote": 1000.0,
+    "min_edge_quote": 3.0,
+    "min_edge_bps": 10.0,
+    "max_contracts": 0.0,
+    "max_days_to_expiry": 0.0,
+    "risk_free_rate_bps": 0.0,
+    "borrow_rate_bps": 0.0
   },
   "strategy_center": {
     "enabled": true,
