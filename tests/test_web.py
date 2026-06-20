@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,9 +42,12 @@ from arbitrage_bot.trade_log import (
 from arbitrage_bot.web import (
     APP_JS,
     HTML as INDEX_HTML,
+    LOGIN_MAX_FAILURES,
+    LoginRateLimiter,
     MonitorState,
     SECURITY_HEADERS,
     _add_security_headers,
+    _cookie_secret,
     _filter_state_payload_for_user,
     _market_maker_force_replace_reason,
     _monitor_auto_stop_decision,
@@ -1735,16 +1739,30 @@ class WebMonitorTest(unittest.TestCase):
             )
         )
 
-        due, day = _daily_report_due(
-            cfg,
-            last_report_day=None,
-            now=1_704_153_599,
-        )
-        not_due, _ = _daily_report_due(
-            cfg,
-            last_report_day=day,
-            now=1_704_153_600,
-        )
+        previous_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        try:
+            # 2024-01-01 12:00:00 UTC and one minute later. Both checks land on
+            # the same local day, so the second one must not re-trigger the
+            # daily report. Pinning TZ keeps the result host-timezone agnostic.
+            due, day = _daily_report_due(
+                cfg,
+                last_report_day=None,
+                now=1_704_110_400,
+            )
+            not_due, _ = _daily_report_due(
+                cfg,
+                last_report_day=day,
+                now=1_704_110_460,
+            )
+        finally:
+            if previous_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_tz
+            time.tzset()
+
         message = build_daily_report_message(
             cfg,
             scan_count=12,
@@ -2608,7 +2626,120 @@ class WebMonitorTest(unittest.TestCase):
         )
 
 
+class LoginRateLimiterTest(unittest.TestCase):
+    def test_locks_out_after_max_failures_and_recovers(self) -> None:
+        limiter = LoginRateLimiter(
+            max_failures=3,
+            window_seconds=100.0,
+            lockout_seconds=60.0,
+        )
+        key = "203.0.113.7"
+
+        self.assertEqual(limiter.retry_after(key, now=0.0), 0.0)
+        self.assertEqual(limiter.register_failure(key, now=1.0), 0.0)
+        self.assertEqual(limiter.register_failure(key, now=2.0), 0.0)
+        # Third failure crosses the threshold and triggers the lockout.
+        self.assertEqual(limiter.register_failure(key, now=3.0), 60.0)
+        self.assertEqual(limiter.retry_after(key, now=3.0), 60.0)
+        self.assertAlmostEqual(limiter.retry_after(key, now=33.0), 30.0)
+        # After the lockout window expires the client may try again.
+        self.assertEqual(limiter.retry_after(key, now=64.0), 0.0)
+
+    def test_success_clears_failure_history(self) -> None:
+        limiter = LoginRateLimiter(max_failures=3, window_seconds=100.0)
+        key = "203.0.113.8"
+        limiter.register_failure(key, now=1.0)
+        limiter.register_failure(key, now=2.0)
+        limiter.register_success(key)
+        # History reset, so two more failures must not lock the client out.
+        self.assertEqual(limiter.register_failure(key, now=3.0), 0.0)
+        self.assertEqual(limiter.register_failure(key, now=4.0), 0.0)
+        self.assertEqual(limiter.retry_after(key, now=4.0), 0.0)
+
+    def test_old_failures_outside_window_are_forgotten(self) -> None:
+        limiter = LoginRateLimiter(max_failures=3, window_seconds=100.0)
+        key = "203.0.113.9"
+        limiter.register_failure(key, now=1.0)
+        limiter.register_failure(key, now=2.0)
+        # This failure is far outside the window; the earlier two have aged out.
+        self.assertEqual(limiter.register_failure(key, now=500.0), 0.0)
+        self.assertEqual(limiter.retry_after(key, now=500.0), 0.0)
+
+    def test_clients_are_tracked_independently(self) -> None:
+        limiter = LoginRateLimiter(
+            max_failures=2, window_seconds=100.0, lockout_seconds=60.0
+        )
+        limiter.register_failure("10.0.0.1", now=1.0)
+        self.assertEqual(limiter.register_failure("10.0.0.1", now=2.0), 60.0)
+        # A different client IP is unaffected by the first one's lockout.
+        self.assertEqual(limiter.retry_after("10.0.0.2", now=2.0), 0.0)
+        self.assertEqual(limiter.register_failure("10.0.0.2", now=2.0), 0.0)
+
+
+class CookieSecretTest(unittest.TestCase):
+    def test_unconfigured_secret_is_random_not_a_known_constant(self) -> None:
+        cfg = make_config(
+            web_security=WebSecurityConfig(
+                password_env=None,
+                cookie_secret_env=None,
+            )
+        )
+        secret = _cookie_secret(cfg)
+        self.assertTrue(secret)
+        self.assertNotEqual(secret, "crypto-arbitrage-dev")
+        # Stable within the process so existing sessions stay valid.
+        self.assertEqual(secret, _cookie_secret(cfg))
+
+    def test_explicit_cookie_secret_env_takes_precedence(self) -> None:
+        cfg = make_config(
+            web_security=WebSecurityConfig(
+                password_env="WEB_PW_TEST",
+                cookie_secret_env="COOKIE_SECRET_TEST",
+            )
+        )
+        with patch.dict(
+            os.environ,
+            {"COOKIE_SECRET_TEST": "configured-secret", "WEB_PW_TEST": "pw"},
+        ):
+            self.assertEqual(_cookie_secret(cfg), "configured-secret")
+
+
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_login_lockout_after_repeated_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env="WEB_LOGIN_PW_TEST",
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(data_dir / "web_users.json"),
+                ),
+            )
+            with patch.dict(os.environ, {"WEB_LOGIN_PW_TEST": "correct horse"}):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    for _ in range(LOGIN_MAX_FAILURES):
+                        bad = await client.post(
+                            "/login", data={"password": "wrong"}
+                        )
+                        self.assertEqual(bad.status, 401)
+
+                    locked = await client.post("/login", data={"password": "wrong"})
+                    self.assertEqual(locked.status, 429)
+                    self.assertIn("Retry-After", locked.headers)
+
+                    # Even the correct password is refused while locked out.
+                    blocked = await client.post(
+                        "/login", data={"password": "correct horse"}
+                    )
+                    self.assertEqual(blocked.status, 429)
+                finally:
+                    await client.close()
+
     async def test_strategy_center_api_upsert_creates_with_supplied_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
