@@ -2740,6 +2740,36 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await client.close()
 
+    async def test_metrics_endpoint_allows_local_scrape_without_dashboard_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            cfg = make_config(
+                strategy_center=StrategyCenterConfig(
+                    path=str(data_dir / "strategy_center.sqlite3"),
+                ),
+                web_security=WebSecurityConfig(
+                    password_env="TEST_WEB_PASSWORD",
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(data_dir / "web_users.json"),
+                ),
+            )
+            with patch.dict(os.environ, {"TEST_WEB_PASSWORD": "123456"}, clear=False):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    metrics_response = await client.get("/metrics")
+                    metrics_text = await metrics_response.text()
+                    state_response = await client.get("/api/state")
+
+                    self.assertEqual(metrics_response.status, 200)
+                    self.assertIn("crypto_arb_scan_count", metrics_text)
+                    self.assertEqual(state_response.status, 401)
+                finally:
+                    await client.close()
+
     async def test_strategy_center_api_upsert_creates_with_supplied_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

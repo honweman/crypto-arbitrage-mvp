@@ -341,6 +341,22 @@ def _transfer_status_warnings(exchange: ExchangeConfig, summary: dict[str, Any])
             warnings.append(f"{exchange.key} {currency} deposit is disabled")
         if row.get("withdraw") is False:
             warnings.append(f"{exchange.key} {currency} withdrawal is disabled")
+        for network in row.get("networks", []):
+            if not isinstance(network, dict):
+                continue
+            network_name = network.get("network") or "unknown"
+            if network.get("active") is False:
+                warnings.append(
+                    f"{exchange.key} {currency} {network_name} network is inactive"
+                )
+            if network.get("deposit") is False:
+                warnings.append(
+                    f"{exchange.key} {currency} {network_name} deposit is disabled"
+                )
+            if network.get("withdraw") is False:
+                warnings.append(
+                    f"{exchange.key} {currency} {network_name} withdrawal is disabled"
+                )
     return warnings
 
 

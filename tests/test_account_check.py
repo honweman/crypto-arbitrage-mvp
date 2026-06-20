@@ -193,6 +193,51 @@ class AccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "warning")
         self.assertIn("bybit-spot ACS withdrawal is disabled", account["warnings"])
 
+    async def test_transfer_status_warns_when_network_withdrawal_is_disabled(self) -> None:
+        cfg = self._cfg(RiskConfig(allow_live_trading=True))
+        manager = FakeAccountCheckManager()
+
+        async def network_disabled_status(
+            _: ExchangeConfig,
+            *,
+            currencies: set[str],
+        ) -> dict[str, object]:
+            return {
+                "checked": True,
+                "unsupported": False,
+                "currencies": {
+                    currency: {
+                        "active": True,
+                        "deposit": True,
+                        "withdraw": True,
+                        "networks": {
+                            "SOL": {
+                                "active": True,
+                                "deposit": True,
+                                "withdraw": currency != "ACS",
+                            }
+                        },
+                    }
+                    for currency in currencies
+                },
+            }
+
+        manager.fetch_currency_status = network_disabled_status  # type: ignore[method-assign]
+
+        with patch.dict(
+            os.environ,
+            {"BYBIT_API_KEY": "key", "BYBIT_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await run_account_checks(cfg, manager)
+
+        account = payload["accounts"][0]
+        self.assertEqual(payload["status"], "warning")
+        self.assertIn(
+            "bybit-spot ACS SOL withdrawal is disabled",
+            account["warnings"],
+        )
+
     async def test_exchange_filter_reports_missing_configured_exchange(self) -> None:
         cfg = self._cfg(RiskConfig(allow_live_trading=True))
         manager = FakeAccountCheckManager()

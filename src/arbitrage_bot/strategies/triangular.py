@@ -216,6 +216,16 @@ def _simulate_route(
     return amount, fills
 
 
+def _fees_by_currency(fills: list[TriangleLegFill]) -> dict[str, float]:
+    fees: dict[str, float] = {}
+    for fill in fills:
+        fee_currency = _split_symbol(fill.plan.symbol)[1]
+        if not fee_currency:
+            continue
+        fees[fee_currency] = fees.get(fee_currency, 0.0) + fill.fee_quote
+    return {currency: amount for currency, amount in sorted(fees.items())}
+
+
 def find_triangular_arbitrage_opportunities(
     *,
     books: dict[tuple[str, str], OrderBookSnapshot],
@@ -279,6 +289,7 @@ def find_triangular_arbitrage_opportunities(
                         "start_currency": route.start_currency.upper(),
                         "start_amount": cfg.notional_quote,
                         "final_amount": final_amount,
+                        "fees_by_currency": _fees_by_currency(fills),
                         "requires_cross_exchange_transfer": False,
                         "requires_prefunded_inventory": True,
                         "execution_risk": "three-leg atomicity is not guaranteed",
@@ -299,4 +310,3 @@ def find_triangular_arbitrage_opportunities(
 
     opportunities.sort(key=lambda item: item.profit_bps, reverse=True)
     return opportunities
-
