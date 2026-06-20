@@ -137,6 +137,7 @@ class SpotGridConfig:
     cancel_retry_attempts: int = 3
     post_only: bool = True
     client_order_prefix: str = "crypto-arb-grid"
+    runtime_path: str = "data/spot_grid_runtime.json"
 
 
 @dataclass(frozen=True)
@@ -656,6 +657,9 @@ def load_config(path: str | Path) -> BotConfig:
             client_order_prefix=spot_grid_raw.get(
                 "client_order_prefix",
                 "crypto-arb-grid",
+            ),
+            runtime_path=str(
+                spot_grid_raw.get("runtime_path", "data/spot_grid_runtime.json")
             ),
         ),
         dca=DcaConfig(

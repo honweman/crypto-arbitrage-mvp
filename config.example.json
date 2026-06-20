@@ -56,7 +56,8 @@
     "min_grid_step_bps": 10.0,
     "cancel_retry_attempts": 3,
     "post_only": true,
-    "client_order_prefix": "crypto-arb-grid"
+    "client_order_prefix": "crypto-arb-grid",
+    "runtime_path": "data/spot_grid_runtime.json"
   },
   "dca": {
     "enabled": false,

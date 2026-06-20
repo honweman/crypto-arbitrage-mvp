@@ -3876,6 +3876,7 @@ from .loops import (
     build_daily_report_message,
     market_maker_task_loop,
     monitor_loop,
+    spot_grid_task_loop,
 )
 
 def _env_optional(name: str | None) -> str | None:
@@ -5498,22 +5499,27 @@ def create_app(
     async def monitor_context(app_: web.Application) -> Any:
         monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
         mm_task = asyncio.create_task(market_maker_task_loop(cfg, state))
+        grid_task = asyncio.create_task(spot_grid_task_loop(cfg, state))
         auto_task = asyncio.create_task(
             auto_buy_sell_task_loop(cfg, state, auto_buy_sell_tasks)
         )
         app_["monitor_task"] = monitor_task
         app_["market_maker_task"] = mm_task
+        app_["spot_grid_task"] = grid_task
         app_["auto_buy_sell_task"] = auto_task
         try:
             yield
         finally:
             monitor_task.cancel()
             mm_task.cancel()
+            grid_task.cancel()
             auto_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await monitor_task
             with contextlib.suppress(asyncio.CancelledError):
                 await mm_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await grid_task
             with contextlib.suppress(asyncio.CancelledError):
                 await auto_task
 

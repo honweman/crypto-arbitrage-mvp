@@ -156,6 +156,16 @@ class MonitorState:
         self._market_maker_runtime: dict[str, Any] = self._payload["market_maker"][
             "runtime"
         ]
+        self._spot_grid_runtime: dict[str, Any] = self._payload["spot_grid"].get(
+            "runtime",
+            {
+                "status": "starting",
+                "mode": "dry_run",
+                "open_order_ids": [],
+                "open_order_count": 0,
+                "updated_at": time.time(),
+            },
+        )
         self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
 
@@ -814,6 +824,23 @@ class MonitorState:
         async with self._lock:
             return json.loads(json.dumps(self._market_maker_runtime))
 
+    async def set_spot_grid_runtime(self, runtime: dict[str, Any]) -> None:
+        async with self._lock:
+            self._spot_grid_runtime = runtime
+            if "spot_grid" in self._payload:
+                self._payload["spot_grid"]["runtime"] = runtime
+                if isinstance(runtime.get("last_plan"), dict):
+                    self._payload["spot_grid"]["plan"] = runtime["last_plan"]
+                if runtime.get("mode"):
+                    self._payload["spot_grid"]["mode"] = runtime["mode"]
+                if runtime.get("status"):
+                    self._payload["spot_grid"]["status"] = runtime["status"]
+                self._payload["spot_grid"]["error"] = runtime.get("last_error")
+
+    async def spot_grid_runtime(self) -> dict[str, Any]:
+        async with self._lock:
+            return json.loads(json.dumps(self._spot_grid_runtime))
+
     async def set_auto_buy_sell_tasks(self, tasks: dict[str, Any]) -> None:
         async with self._lock:
             self._auto_buy_sell_tasks = tasks
@@ -870,6 +897,15 @@ class MonitorState:
                 market_maker,
                 portfolio,
             )
+            spot_grid["runtime"] = self._spot_grid_runtime
+            if isinstance(self._spot_grid_runtime.get("last_plan"), dict):
+                spot_grid["plan"] = self._spot_grid_runtime["last_plan"]
+            if self._spot_grid_runtime.get("mode"):
+                spot_grid["mode"] = self._spot_grid_runtime["mode"]
+            if self._spot_grid_runtime.get("status"):
+                spot_grid["status"] = self._spot_grid_runtime["status"]
+            if self._spot_grid_runtime.get("last_error"):
+                spot_grid["error"] = self._spot_grid_runtime["last_error"]
             self._payload = {
                 "status": status,
                 "config": {

@@ -76,6 +76,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.spot_grid.min_grid_step_bps, 10.0)
         self.assertEqual(cfg.spot_grid.cancel_retry_attempts, 3)
         self.assertTrue(cfg.spot_grid.post_only)
+        self.assertEqual(cfg.spot_grid.runtime_path, "data/spot_grid_runtime.json")
         self.assertFalse(cfg.dca.enabled)
         self.assertFalse(cfg.dca.live_enabled)
         self.assertEqual(cfg.dca.exchange, "bybit-spot")
