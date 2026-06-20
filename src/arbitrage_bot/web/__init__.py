@@ -10,6 +10,7 @@ import html
 import ipaddress
 import json
 import os
+import secrets
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -180,6 +181,64 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
+
+# Brute-force protection for the login endpoint.
+LOGIN_MAX_FAILURES = 8
+LOGIN_FAILURE_WINDOW_SECONDS = 300.0
+LOGIN_LOCKOUT_SECONDS = 300.0
+
+
+class LoginRateLimiter:
+    """In-memory, per-client throttle that slows down login brute forcing.
+
+    Keyed by client IP rather than account so a flood of guesses for one
+    account cannot lock a victim out (which would itself be a denial of
+    service). After ``max_failures`` failed attempts inside ``window_seconds``
+    the client is locked out for ``lockout_seconds``.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_failures: int = LOGIN_MAX_FAILURES,
+        window_seconds: float = LOGIN_FAILURE_WINDOW_SECONDS,
+        lockout_seconds: float = LOGIN_LOCKOUT_SECONDS,
+    ) -> None:
+        self.max_failures = max_failures
+        self.window_seconds = window_seconds
+        self.lockout_seconds = lockout_seconds
+        self._failures: dict[str, deque[float]] = {}
+        self._locked_until: dict[str, float] = {}
+
+    def retry_after(self, key: str, *, now: float | None = None) -> float:
+        """Return seconds the client must wait, or 0.0 if it may try now."""
+        now = time.time() if now is None else now
+        locked_until = self._locked_until.get(key)
+        if locked_until is None:
+            return 0.0
+        if locked_until > now:
+            return locked_until - now
+        self._locked_until.pop(key, None)
+        self._failures.pop(key, None)
+        return 0.0
+
+    def register_failure(self, key: str, *, now: float | None = None) -> float:
+        """Record a failed attempt and return the lockout seconds if triggered."""
+        now = time.time() if now is None else now
+        bucket = self._failures.setdefault(key, deque())
+        cutoff = now - self.window_seconds
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        bucket.append(now)
+        if len(bucket) >= self.max_failures:
+            self._locked_until[key] = now + self.lockout_seconds
+            bucket.clear()
+            return self.lockout_seconds
+        return 0.0
+
+    def register_success(self, key: str) -> None:
+        self._failures.pop(key, None)
+        self._locked_until.pop(key, None)
 
 
 LOGIN_HTML = """<!doctype html>
@@ -3893,11 +3952,19 @@ def _web_password(cfg: BotConfig) -> str | None:
     return _env_optional(cfg.web_security.password_env)
 
 
+# Generated once per process. Used only when neither a cookie secret env var
+# nor a web password is configured, so the session signing key is never a
+# publicly known constant that would let anyone forge session tokens. Sessions
+# are invalidated on restart in that case, which is the safe default for an
+# otherwise unconfigured deployment.
+_FALLBACK_COOKIE_SECRET = secrets.token_urlsafe(32)
+
+
 def _cookie_secret(cfg: BotConfig) -> str:
     return (
         _env_optional(cfg.web_security.cookie_secret_env)
         or _web_password(cfg)
-        or "crypto-arbitrage-dev"
+        or _FALLBACK_COOKIE_SECRET
     )
 
 
@@ -3911,6 +3978,10 @@ def _registration_code_required(cfg: BotConfig) -> bool:
 
 def _user_store(request: web.Request) -> WebUserStore:
     return request.app["web_user_store"]
+
+
+def _login_rate_limiter(request: web.Request) -> LoginRateLimiter:
+    return request.app["login_rate_limiter"]
 
 
 def _strategy_center_store(request: web.Request) -> StrategyCenterStore:
@@ -4129,6 +4200,29 @@ async def login_get(request: web.Request) -> web.Response:
     )
 
 
+def _login_throttled_response(
+    cfg: BotConfig,
+    *,
+    email_login: bool,
+    retry_after: float,
+) -> web.Response:
+    wait_seconds = max(1, int(retry_after + 0.999))
+    response = web.Response(
+        text=_login_html(
+            error=(
+                "Too many failed attempts. "
+                f"Try again in about {wait_seconds} seconds."
+            ),
+            email_login=email_login,
+            registration_enabled=cfg.web_security.registration_enabled,
+        ),
+        content_type="text/html",
+        status=429,
+    )
+    response.headers["Retry-After"] = str(wait_seconds)
+    return response
+
+
 async def login_post(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     form = await request.post()
@@ -4136,6 +4230,17 @@ async def login_post(request: web.Request) -> web.Response:
     supplied_password = str(form.get("password", ""))
     email = str(form.get("email", ""))
     totp = str(form.get("totp", ""))
+
+    limiter = _login_rate_limiter(request)
+    throttle_key = _client_ip(request, cfg) or "unknown"
+    retry_after = limiter.retry_after(throttle_key)
+    if retry_after > 0:
+        return _login_throttled_response(
+            cfg,
+            email_login=email_login,
+            retry_after=retry_after,
+        )
+
     if email_login:
         try:
             user = _user_store(request).authenticate(
@@ -4146,6 +4251,7 @@ async def login_post(request: web.Request) -> web.Response:
         except ValueError:
             user = None
         if user is None:
+            limiter.register_failure(throttle_key)
             return web.Response(
                 text=_login_html(
                     error="Invalid email, password, or authenticator code",
@@ -4155,6 +4261,7 @@ async def login_post(request: web.Request) -> web.Response:
                 content_type="text/html",
                 status=401,
             )
+        limiter.register_success(throttle_key)
         response = web.HTTPFound("/")
         response.set_cookie(
             SESSION_COOKIE,
@@ -4170,6 +4277,7 @@ async def login_post(request: web.Request) -> web.Response:
     if not password:
         raise web.HTTPFound("/")
     if not hmac.compare_digest(supplied_password, password):
+        limiter.register_failure(throttle_key)
         return web.Response(
             text=_login_html(
                 error="Invalid password",
@@ -4179,6 +4287,7 @@ async def login_post(request: web.Request) -> web.Response:
             content_type="text/html",
             status=401,
         )
+    limiter.register_success(throttle_key)
     response = web.HTTPFound("/")
     response.set_cookie(
         SESSION_COOKIE,
@@ -5511,6 +5620,7 @@ def create_app(
     app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
     app["web_user_store"] = web_user_store
     app["strategy_center_store"] = strategy_center_store
+    app["login_rate_limiter"] = LoginRateLimiter()
 
     async def monitor_context(app_: web.Application) -> Any:
         monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
