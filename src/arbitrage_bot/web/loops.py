@@ -15,6 +15,7 @@ from ..main import (
     StrategyName,
     _quote_rates_from_sources,
     _symbols_for_configured_spot_markets,
+    _symbols_for_triangular_routes,
     scan_with_manager,
 )
 from ..market_maker import (
@@ -55,6 +56,7 @@ from ..strategy_timeline import (
     write_strategy_timeline_from_payload,
 )
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
+from ..strategies.triangular import find_triangular_arbitrage_opportunities
 from ..trade_log import write_trade_event
 from ..web_config import (
     _execution_symbols_by_exchange,
@@ -496,6 +498,36 @@ async def monitor_loop(
                         except Exception as exc:  # noqa: BLE001
                             extra_warnings.append(
                                 f"Cash & carry scan failed: {exc.__class__.__name__}: {exc}"
+                            )
+                    if (
+                        strategy == "all"
+                        and runtime_cfg.triangular_arbitrage.enabled
+                        and runtime_cfg.triangular_arbitrage.routes
+                        and not strategy_pauses.get("triangular_arbitrage", False)
+                    ):
+                        try:
+                            triangular_books = await manager.fetch_order_books(
+                                runtime_cfg.spot_exchanges,
+                                _symbols_for_triangular_routes(
+                                    runtime_cfg.triangular_arbitrage.routes
+                                ),
+                                runtime_cfg.order_book_depth,
+                            )
+                            opportunities.extend(
+                                find_triangular_arbitrage_opportunities(
+                                    books=triangular_books,
+                                    exchanges=runtime_cfg.spot_exchanges,
+                                    cfg=runtime_cfg.triangular_arbitrage,
+                                )
+                            )
+                            opportunities.sort(
+                                key=lambda item: item.profit_bps,
+                                reverse=True,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            extra_warnings.append(
+                                "Triangular arbitrage scan failed: "
+                                f"{exc.__class__.__name__}: {exc}"
                             )
                     warnings = [*_missing_market_warnings(rows), *extra_warnings]
                     if strategy_pauses.get("market_maker", False):

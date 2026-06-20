@@ -48,6 +48,8 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
         symbols.setdefault(combo.option_exchange, set()).update(
             {combo.call_symbol, combo.put_symbol}
         )
+    for route in cfg.triangular_arbitrage.routes:
+        symbols.setdefault(route.exchange, set()).update(route.symbols)
 
     if cfg.market_maker.exchange and cfg.market_maker.symbol:
         symbols.setdefault(cfg.market_maker.exchange, set()).add(
@@ -110,6 +112,17 @@ def _split_symbol(symbol: str) -> tuple[str | None, str | None]:
 
 def _balance_currencies(symbols: Iterable[str]) -> set[str]:
     currencies = set(DEFAULT_BALANCE_CURRENCIES)
+    for symbol in symbols:
+        base, quote = _split_symbol(symbol)
+        if base:
+            currencies.add(base)
+        if quote:
+            currencies.add(quote)
+    return currencies
+
+
+def _symbol_currencies(symbols: Iterable[str]) -> set[str]:
+    currencies = set()
     for symbol in symbols:
         base, quote = _split_symbol(symbol)
         if base:
@@ -242,6 +255,95 @@ def _order_summary(order: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _network_status_summary(raw_networks: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_networks, dict):
+        return []
+    rows = []
+    for network, raw in sorted(raw_networks.items()):
+        if not isinstance(raw, dict):
+            continue
+        rows.append(
+            {
+                "network": str(network),
+                "active": _bool_or_none(raw.get("active")),
+                "deposit": _bool_or_none(raw.get("deposit")),
+                "withdraw": _bool_or_none(raw.get("withdraw")),
+                "fee": _number_or_none(raw.get("fee")),
+            }
+        )
+    return rows
+
+
+def _transfer_status_summary(
+    payload: dict[str, Any],
+    currencies: Iterable[str],
+) -> dict[str, Any]:
+    if payload.get("unsupported"):
+        return {
+            "checked": False,
+            "unsupported": True,
+            "skipped_reason": payload.get("skipped_reason"),
+            "currencies": [],
+        }
+    raw_currencies = payload.get("currencies")
+    if not isinstance(raw_currencies, dict):
+        raw_currencies = {}
+    rows = []
+    for currency in sorted({item.upper() for item in currencies if item}):
+        raw = raw_currencies.get(currency)
+        if not isinstance(raw, dict):
+            rows.append(
+                {
+                    "currency": currency,
+                    "found": False,
+                    "active": None,
+                    "deposit": None,
+                    "withdraw": None,
+                    "fee": None,
+                    "networks": [],
+                }
+            )
+            continue
+        rows.append(
+            {
+                "currency": currency,
+                "found": True,
+                "active": _bool_or_none(raw.get("active")),
+                "deposit": _bool_or_none(raw.get("deposit")),
+                "withdraw": _bool_or_none(raw.get("withdraw")),
+                "fee": _number_or_none(raw.get("fee")),
+                "networks": _network_status_summary(raw.get("networks")),
+            }
+        )
+    return {
+        "checked": True,
+        "unsupported": False,
+        "currencies": rows,
+    }
+
+
+def _transfer_status_warnings(exchange: ExchangeConfig, summary: dict[str, Any]) -> list[str]:
+    if summary.get("unsupported"):
+        return [f"{exchange.key} transfer status API is unsupported"]
+    warnings = []
+    for row in summary.get("currencies", []):
+        currency = row.get("currency")
+        if row.get("found") is False:
+            warnings.append(f"{exchange.key} {currency} transfer status is unavailable")
+            continue
+        if row.get("active") is False:
+            warnings.append(f"{exchange.key} {currency} currency is inactive")
+        if row.get("deposit") is False:
+            warnings.append(f"{exchange.key} {currency} deposit is disabled")
+        if row.get("withdraw") is False:
+            warnings.append(f"{exchange.key} {currency} withdrawal is disabled")
+    return warnings
+
+
 def _risk_summary(cfg: BotConfig, exchange: ExchangeConfig) -> dict[str, Any]:
     key = exchange.key
     account_enabled = cfg.risk.account_enabled.get(key, True)
@@ -327,7 +429,37 @@ async def check_exchange_account(
         "skipped_reason": None,
         "currencies": [],
     }
+    transfer_status_entry: dict[str, Any] = {
+        "checked": False,
+        "unsupported": False,
+        "skipped_reason": None,
+        "currencies": [],
+    }
     open_order_entries: list[dict[str, Any]] = []
+    balance_currencies = _balance_currencies(symbols)
+    transfer_currencies = _symbol_currencies(symbols)
+    if transfer_currencies:
+        try:
+            transfer_status_entry = _transfer_status_summary(
+                await manager.fetch_currency_status(
+                    exchange,
+                    currencies=transfer_currencies,
+                ),
+                transfer_currencies,
+            )
+            warnings.extend(
+                _transfer_status_warnings(exchange, transfer_status_entry)
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = _error_text(exc)
+            transfer_status_entry = {
+                "checked": True,
+                "unsupported": False,
+                "error": message,
+                "currencies": [],
+            }
+            warnings.append(f"{exchange.key} transfer status check failed: {message}")
+
     if auth["private_checks_enabled"]:
         try:
             balance = await manager.fetch_balance(exchange)
@@ -335,7 +467,7 @@ async def check_exchange_account(
                 "checked": True,
                 "currencies": _summarize_balance(
                     balance,
-                    _balance_currencies(symbols),
+                    balance_currencies,
                     include_zero=include_zero_balances,
                 ),
             }
@@ -402,6 +534,7 @@ async def check_exchange_account(
         "risk": risk,
         "markets": market_checks,
         "balance": balance_entry,
+        "transfer_status": transfer_status_entry,
         "open_orders": open_order_entries,
     }
 

@@ -58,6 +58,7 @@ from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
+from ..observability import configure_logging, render_prometheus_metrics
 from ..main import (
     StrategyName,
     _quote_rates_from_sources,
@@ -167,6 +168,7 @@ STRATEGY_IDS = {
     "backtest",
     "spot_spread",
     "cash_and_carry",
+    "triangular_arbitrage",
     "funding_arbitrage",
     "options_arbitrage",
     "signal_bot",
@@ -2408,6 +2410,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
                 cfg.cash_and_carry_pairs
             ),
+            "triangular_arbitrage": asdict(cfg.triangular_arbitrage),
             "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
             "derivative_exchanges": exchange_configs_to_list(
                 cfg.derivative_exchanges
@@ -5472,6 +5475,15 @@ async def api_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def api_metrics(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    payload = await state.get()
+    return web.Response(
+        text=render_prometheus_metrics(payload),
+        headers={"Content-Type": "text/plain; version=0.0.4; charset=utf-8"},
+    )
+
+
 def create_app(
     cfg: BotConfig,
     strategy: StrategyName,
@@ -5536,7 +5548,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
     parser.add_argument(
         "--strategy",
-        choices=["all", "spot-spread", "cash-and-carry"],
+        choices=[
+            "all",
+            "spot-spread",
+            "cash-and-carry",
+            "options-arbitrage",
+            "triangular-arbitrage",
+        ],
         default="spot-spread",
         help="Strategy to monitor",
     )
@@ -5552,6 +5570,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    configure_logging()
     args = build_parser().parse_args()
     cfg = load_config(args.config)
     app = create_app(cfg, args.strategy, args.poll_seconds)

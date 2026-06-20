@@ -85,6 +85,26 @@ class FakeAccountCheckManager:
             }
         ]
 
+    async def fetch_currency_status(
+        self,
+        _: ExchangeConfig,
+        *,
+        currencies: set[str],
+    ) -> dict[str, object]:
+        return {
+            "checked": True,
+            "unsupported": False,
+            "currencies": {
+                currency: {
+                    "active": True,
+                    "deposit": True,
+                    "withdraw": True,
+                    "fee": 0.1,
+                }
+                for currency in currencies
+            },
+        }
+
 
 class AccountCheckTest(unittest.IsolatedAsyncioTestCase):
     async def test_missing_api_env_skips_private_checks(self) -> None:
@@ -127,11 +147,51 @@ class AccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(balances["ACS"]["total"], 1000.0)
         self.assertEqual(balances["USDT"]["free"], 20.0)
         self.assertEqual(account["open_orders"][0]["count"], 1)
+        transfer = {
+            item["currency"]: item
+            for item in account["transfer_status"]["currencies"]
+        }
+        self.assertTrue(transfer["ACS"]["withdraw"])
         self.assertEqual(
             account["open_orders"][0]["preview"][0]["client_order_id"],
             "client-1",
         )
         self.assertEqual(manager.private_calls, 2)
+
+    async def test_transfer_status_warning_when_withdrawal_is_disabled(self) -> None:
+        cfg = self._cfg(RiskConfig(allow_live_trading=True))
+        manager = FakeAccountCheckManager()
+
+        async def disabled_status(
+            _: ExchangeConfig,
+            *,
+            currencies: set[str],
+        ) -> dict[str, object]:
+            return {
+                "checked": True,
+                "unsupported": False,
+                "currencies": {
+                    currency: {
+                        "active": True,
+                        "deposit": True,
+                        "withdraw": currency != "ACS",
+                    }
+                    for currency in currencies
+                },
+            }
+
+        manager.fetch_currency_status = disabled_status  # type: ignore[method-assign]
+
+        with patch.dict(
+            os.environ,
+            {"BYBIT_API_KEY": "key", "BYBIT_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await run_account_checks(cfg, manager)
+
+        account = payload["accounts"][0]
+        self.assertEqual(payload["status"], "warning")
+        self.assertIn("bybit-spot ACS withdrawal is disabled", account["warnings"])
 
     async def test_exchange_filter_reports_missing_configured_exchange(self) -> None:
         cfg = self._cfg(RiskConfig(allow_live_trading=True))

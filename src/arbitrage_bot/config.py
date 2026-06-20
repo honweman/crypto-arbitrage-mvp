@@ -36,6 +36,14 @@ class CashAndCarryPair:
 
 
 @dataclass(frozen=True)
+class TriangleRouteConfig:
+    exchange: str
+    start_currency: str
+    symbols: list[str]
+    label: str = ""
+
+
+@dataclass(frozen=True)
 class SpotMarketConfig:
     asset: str
     exchange: str
@@ -204,6 +212,11 @@ class BacktestConfig:
     max_recent_points: int = 80
     data_source: str = "synthetic"
     history_path: str = ""
+    depth_simulation_enabled: bool = False
+    depth_quote_per_level: float = 0.0
+    depth_step_bps: float = 5.0
+    depth_levels: int = 5
+    latency_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -230,6 +243,15 @@ class OptionsArbitrageConfig:
     max_days_to_expiry: float = 0.0
     risk_free_rate_bps: float = 0.0
     borrow_rate_bps: float = 0.0
+
+
+@dataclass(frozen=True)
+class TriangularArbitrageConfig:
+    enabled: bool = False
+    notional_quote: float = 1000.0
+    min_profit_quote: float = 0.0
+    min_profit_bps: float = 5.0
+    routes: list[TriangleRouteConfig] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -374,6 +396,9 @@ class BotConfig:
     options_arbitrage: OptionsArbitrageConfig = field(
         default_factory=OptionsArbitrageConfig
     )
+    triangular_arbitrage: TriangularArbitrageConfig = field(
+        default_factory=TriangularArbitrageConfig
+    )
     strategy_center: StrategyCenterConfig = field(default_factory=StrategyCenterConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     trade_log: TradeLogConfig = field(default_factory=TradeLogConfig)
@@ -424,6 +449,15 @@ def _option_combo_from_dict(raw: dict[str, Any]) -> OptionComboConfig:
         expiry=str(raw.get("expiry", "")),
         contract_size=float(raw.get("contract_size", 1.0)),
         quote_currency=str(raw.get("quote_currency", "USDT")).upper(),
+    )
+
+
+def _triangle_route_from_dict(raw: dict[str, Any]) -> TriangleRouteConfig:
+    return TriangleRouteConfig(
+        exchange=str(raw["exchange"]),
+        start_currency=str(raw.get("start_currency", "USDT")).upper(),
+        symbols=[str(symbol).upper() for symbol in raw.get("symbols", [])],
+        label=str(raw.get("label", "")),
     )
 
 
@@ -506,6 +540,7 @@ def load_config(path: str | Path) -> BotConfig:
     execution_algo_raw = raw.get("execution_algo", {})
     backtest_raw = raw.get("backtest", {})
     options_arbitrage_raw = raw.get("options_arbitrage", {})
+    triangular_arbitrage_raw = raw.get("triangular_arbitrage", {})
     strategy_center_raw = raw.get("strategy_center", {})
     portfolio_raw = raw.get("portfolio", {})
     risk_raw = raw.get("risk", {})
@@ -743,6 +778,15 @@ def load_config(path: str | Path) -> BotConfig:
             max_recent_points=int(backtest_raw.get("max_recent_points", 80)),
             data_source=str(backtest_raw.get("data_source", "synthetic")).lower(),
             history_path=backtest_raw.get("history_path", ""),
+            depth_simulation_enabled=bool(
+                backtest_raw.get("depth_simulation_enabled", False)
+            ),
+            depth_quote_per_level=float(
+                backtest_raw.get("depth_quote_per_level", 0.0)
+            ),
+            depth_step_bps=float(backtest_raw.get("depth_step_bps", 5.0)),
+            depth_levels=int(backtest_raw.get("depth_levels", 5)),
+            latency_steps=int(backtest_raw.get("latency_steps", 0)),
         ),
         strategy_center=StrategyCenterConfig(
             enabled=bool(strategy_center_raw.get("enabled", True)),
@@ -823,6 +867,31 @@ def load_config(path: str | Path) -> BotConfig:
             borrow_rate_bps=float(
                 options_arbitrage_raw.get("borrow_rate_bps", 0.0)
             ),
+        ),
+        triangular_arbitrage=TriangularArbitrageConfig(
+            enabled=bool(triangular_arbitrage_raw.get("enabled", False)),
+            notional_quote=float(
+                triangular_arbitrage_raw.get(
+                    "notional_quote",
+                    raw.get("notional_quote", 1000.0),
+                )
+            ),
+            min_profit_quote=float(
+                triangular_arbitrage_raw.get(
+                    "min_profit_quote",
+                    raw.get("min_profit_quote", 0.0),
+                )
+            ),
+            min_profit_bps=float(
+                triangular_arbitrage_raw.get(
+                    "min_profit_bps",
+                    raw.get("min_profit_bps", 5.0),
+                )
+            ),
+            routes=[
+                _triangle_route_from_dict(item)
+                for item in triangular_arbitrage_raw.get("routes", [])
+            ],
         ),
         risk=RiskConfig(
             enabled=bool(risk_raw.get("enabled", True)),

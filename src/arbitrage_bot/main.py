@@ -7,15 +7,24 @@ import sys
 import time
 from collections.abc import Iterable
 
-from .config import BotConfig, CashAndCarryPair, ExchangeConfig, OptionComboConfig, load_config
+from .config import (
+    BotConfig,
+    CashAndCarryPair,
+    ExchangeConfig,
+    OptionComboConfig,
+    TriangleRouteConfig,
+    load_config,
+)
 from .exchanges import ExchangeManager
 from .models import OrderBookSnapshot, Opportunity
+from .observability import configure_logging
 from .strategies.options_arbitrage import find_options_arbitrage_opportunities
 from .strategies.cash_and_carry import find_cash_and_carry_opportunities
 from .strategies.spot_spread import (
     find_converted_spot_spread_opportunities,
     find_spot_spread_opportunities,
 )
+from .strategies.triangular import find_triangular_arbitrage_opportunities
 
 
 StrategyName = str
@@ -106,6 +115,15 @@ def _option_symbols_for_option_combos(
         symbols.setdefault(combo.option_exchange, set()).update(
             {combo.call_symbol, combo.put_symbol}
         )
+    return symbols
+
+
+def _symbols_for_triangular_routes(
+    routes: Iterable[TriangleRouteConfig],
+) -> dict[str, set[str]]:
+    symbols: dict[str, set[str]] = {}
+    for route in routes:
+        symbols.setdefault(route.exchange, set()).update(route.symbols)
     return symbols
 
 
@@ -208,6 +226,21 @@ async def scan_with_manager(
                 )
             )
 
+    if strategy in {"all", "triangular-arbitrage"} and cfg.triangular_arbitrage.routes:
+        if strategy == "triangular-arbitrage" or cfg.triangular_arbitrage.enabled:
+            triangular_books = await manager.fetch_order_books(
+                cfg.spot_exchanges,
+                _symbols_for_triangular_routes(cfg.triangular_arbitrage.routes),
+                cfg.order_book_depth,
+            )
+            opportunities.extend(
+                find_triangular_arbitrage_opportunities(
+                    books=triangular_books,
+                    exchanges=cfg.spot_exchanges,
+                    cfg=cfg.triangular_arbitrage,
+                )
+            )
+
     opportunities.sort(key=lambda item: item.profit_bps, reverse=True)
     return opportunities
 
@@ -300,7 +333,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.json", help="Path to JSON config")
     parser.add_argument(
         "--strategy",
-        choices=["all", "spot-spread", "cash-and-carry", "options-arbitrage"],
+        choices=[
+            "all",
+            "spot-spread",
+            "cash-and-carry",
+            "options-arbitrage",
+            "triangular-arbitrage",
+        ],
         default="all",
         help="Strategy to run",
     )
@@ -326,6 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    configure_logging()
     args = build_parser().parse_args()
     cfg = load_config(args.config)
     try:

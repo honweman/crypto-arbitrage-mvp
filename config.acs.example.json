@@ -168,7 +168,12 @@
     "trend_bps": 0.0,
     "max_recent_points": 80,
     "data_source": "synthetic",
-    "history_path": ""
+    "history_path": "",
+    "depth_simulation_enabled": false,
+    "depth_quote_per_level": 0.0,
+    "depth_step_bps": 5.0,
+    "depth_levels": 5,
+    "latency_steps": 0
   },
   "options_arbitrage": {
     "enabled": false,
@@ -179,6 +184,13 @@
     "max_days_to_expiry": 0.0,
     "risk_free_rate_bps": 0.0,
     "borrow_rate_bps": 0.0
+  },
+  "triangular_arbitrage": {
+    "enabled": false,
+    "notional_quote": 50.0,
+    "min_profit_quote": 0.05,
+    "min_profit_bps": 5.0,
+    "routes": []
   },
   "strategy_center": {
     "enabled": true,
@@ -219,6 +231,7 @@
       "backtest": true,
       "spot_spread": true,
       "cash_and_carry": true,
+      "triangular_arbitrage": true,
       "funding_arbitrage": true,
       "options_arbitrage": true,
       "signal_bot": true

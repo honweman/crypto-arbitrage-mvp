@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import BacktestConfig, DcaConfig, ExecutionAlgoConfig, SpotGridConfig
+from .models import BookLevel, Side
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,106 @@ def _append_point(
     return peak
 
 
+def synthetic_depth_levels(
+    *,
+    reference_price: float,
+    side: Side,
+    quote_per_level: float,
+    step_bps: float,
+    level_count: int,
+) -> list[BookLevel]:
+    if reference_price <= 0 or quote_per_level <= 0 or level_count <= 0:
+        return []
+    step = max(0.0, step_bps) / 10_000
+    levels = []
+    for index in range(1, level_count + 1):
+        price = reference_price * (
+            1 + step * index if side == "buy" else 1 - step * index
+        )
+        if price <= 0:
+            continue
+        levels.append(BookLevel(price=price, amount=quote_per_level / price))
+    return levels
+
+
+def estimate_depth_execution(
+    levels: list[BookLevel],
+    *,
+    side: Side,
+    reference_price: float,
+    quote_notional: float = 0.0,
+    base_amount: float = 0.0,
+) -> dict[str, float] | None:
+    if reference_price <= 0:
+        return None
+    if side == "buy":
+        if quote_notional <= 0:
+            return None
+        remaining_quote = quote_notional
+        gross_quote = 0.0
+        amount = 0.0
+        for level in levels:
+            take_quote = min(remaining_quote, level.price * level.amount)
+            gross_quote += take_quote
+            amount += take_quote / level.price
+            remaining_quote -= take_quote
+            if remaining_quote <= 1e-12:
+                break
+        if remaining_quote > 1e-9 or amount <= 0:
+            return None
+        average_price = gross_quote / amount
+        slippage_quote = max(0.0, average_price - reference_price) * amount
+        return {
+            "amount": amount,
+            "average_price": average_price,
+            "gross_quote": gross_quote,
+            "slippage_quote": slippage_quote,
+        }
+
+    if base_amount <= 0:
+        return None
+    remaining_base = base_amount
+    gross_quote = 0.0
+    for level in levels:
+        take_base = min(remaining_base, level.amount)
+        gross_quote += take_base * level.price
+        remaining_base -= take_base
+        if remaining_base <= 1e-12:
+            break
+    if remaining_base > 1e-9 or gross_quote <= 0:
+        return None
+    average_price = gross_quote / base_amount
+    slippage_quote = max(0.0, reference_price - average_price) * base_amount
+    return {
+        "amount": base_amount,
+        "average_price": average_price,
+        "gross_quote": gross_quote,
+        "slippage_quote": slippage_quote,
+    }
+
+
+def _depth_trade_enabled(cfg: BacktestConfig) -> bool:
+    return (
+        cfg.depth_simulation_enabled
+        and cfg.depth_quote_per_level > 0
+        and cfg.depth_levels > 0
+    )
+
+
+def _execution_price_for_step(
+    prices: list[float],
+    *,
+    step: int,
+    signal_price: float,
+    cfg: BacktestConfig,
+) -> float:
+    latency_steps = max(0, int(cfg.latency_steps))
+    if latency_steps <= 0:
+        return signal_price
+    index = min(len(prices) - 1, step + latency_steps)
+    return prices[index]
+
+
 def _trade(
     *,
     step: int,
@@ -161,9 +262,74 @@ def _trade(
     cash: float,
     base: float,
     reason: str,
+    depth_simulation_enabled: bool = False,
+    depth_quote_per_level: float = 0.0,
+    depth_step_bps: float = 5.0,
+    depth_levels: int = 5,
 ) -> tuple[float, float, PaperTrade | None]:
     if quote_notional <= 0 or price <= 0:
         return cash, base, None
+    if depth_simulation_enabled and depth_quote_per_level > 0 and depth_levels > 0:
+        levels = synthetic_depth_levels(
+            reference_price=price,
+            side=side,  # type: ignore[arg-type]
+            quote_per_level=depth_quote_per_level,
+            step_bps=depth_step_bps,
+            level_count=depth_levels,
+        )
+        fee_rate = fee_bps / 10_000
+        if side == "buy":
+            target_quote = min(quote_notional, max(0.0, cash / (1 + fee_rate)))
+            fill = estimate_depth_execution(
+                levels,
+                side="buy",
+                reference_price=price,
+                quote_notional=target_quote,
+            )
+            if fill is None:
+                return cash, base, None
+            fee_quote = fill["gross_quote"] * fee_rate
+            return (
+                cash - fill["gross_quote"] - fee_quote,
+                base + fill["amount"],
+                PaperTrade(
+                    step=step,
+                    strategy=strategy,
+                    side=side,
+                    price=fill["average_price"],
+                    amount=fill["amount"],
+                    quote_notional=fill["gross_quote"],
+                    fee_quote=fee_quote,
+                    slippage_quote=fill["slippage_quote"],
+                    reason=reason,
+                ),
+            )
+        base_amount = min(base, quote_notional / price)
+        fill = estimate_depth_execution(
+            levels,
+            side="sell",
+            reference_price=price,
+            base_amount=base_amount,
+        )
+        if fill is None:
+            return cash, base, None
+        fee_quote = fill["gross_quote"] * fee_rate
+        return (
+            cash + fill["gross_quote"] - fee_quote,
+            base - fill["amount"],
+            PaperTrade(
+                step=step,
+                strategy=strategy,
+                side=side,
+                price=fill["average_price"],
+                amount=fill["amount"],
+                quote_notional=fill["gross_quote"],
+                fee_quote=fee_quote,
+                slippage_quote=fill["slippage_quote"],
+                reason=reason,
+            ),
+        )
+
     slip = slippage_bps / 10_000
     fee_quote = quote_notional * fee_bps / 10_000
     slippage_quote = quote_notional * abs(slip)
@@ -245,17 +411,27 @@ def _run_grid(
                 side = "sell"
             if not side:
                 continue
+            execution_price = _execution_price_for_step(
+                prices,
+                step=step,
+                signal_price=level,
+                cfg=cfg,
+            )
             cash, base, trade = _trade(
                 step=step,
                 strategy="spot_grid",
                 side=side,
-                price=level,
+                price=execution_price,
                 quote_notional=strategy_cfg.quote_per_grid,
                 fee_bps=cfg.fee_bps,
                 slippage_bps=cfg.slippage_bps,
                 cash=cash,
                 base=base,
                 reason=f"grid level {level:.8f} crossed",
+                depth_simulation_enabled=_depth_trade_enabled(cfg),
+                depth_quote_per_level=cfg.depth_quote_per_level,
+                depth_step_bps=cfg.depth_step_bps,
+                depth_levels=cfg.depth_levels,
             )
             if trade is not None:
                 trades.append(trade)
@@ -295,17 +471,27 @@ def _run_dca(
             quote_notional = strategy_cfg.quote_per_order * (
                 strategy_cfg.size_multiplier ** order_count
             )
+            execution_price = _execution_price_for_step(
+                prices,
+                step=step,
+                signal_price=price,
+                cfg=cfg,
+            )
             cash, base, trade = _trade(
                 step=step,
                 strategy="dca",
                 side=side,
-                price=price,
+                price=execution_price,
                 quote_notional=quote_notional,
                 fee_bps=cfg.fee_bps,
                 slippage_bps=cfg.slippage_bps,
                 cash=cash,
                 base=base,
                 reason="DCA trigger",
+                depth_simulation_enabled=_depth_trade_enabled(cfg),
+                depth_quote_per_level=cfg.depth_quote_per_level,
+                depth_step_bps=cfg.depth_step_bps,
+                depth_levels=cfg.depth_levels,
             )
             if trade is not None:
                 trades.append(trade)
@@ -341,17 +527,27 @@ def _run_execution_algo(
         if step % interval == 0 and len(trades) < slice_count:
             remaining = max(0.0, target_quote - sum(t.quote_notional for t in trades))
             quote_notional = min(remaining, target_quote / slice_count)
+            execution_price = _execution_price_for_step(
+                prices,
+                step=step,
+                signal_price=price,
+                cfg=cfg,
+            )
             cash, base, trade = _trade(
                 step=step,
                 strategy="execution_algo",
                 side=side,
-                price=price,
+                price=execution_price,
                 quote_notional=quote_notional,
                 fee_bps=cfg.fee_bps,
                 slippage_bps=cfg.slippage_bps,
                 cash=cash,
                 base=base,
                 reason=f"{strategy_cfg.algo.upper()} slice",
+                depth_simulation_enabled=_depth_trade_enabled(cfg),
+                depth_quote_per_level=cfg.depth_quote_per_level,
+                depth_step_bps=cfg.depth_step_bps,
+                depth_levels=cfg.depth_levels,
             )
             if trade is not None:
                 trades.append(trade)
@@ -417,6 +613,13 @@ def run_paper_backtest(
         target_quote = execution_algo.total_quote or execution_algo.total_base * prices[0]
     target_quote = max(target_quote, filled_quote, 1e-12)
     max_recent = max(1, cfg.max_recent_points)
+    warnings = [
+        "synthetic price path; use exchange history before live deployment"
+    ]
+    if _depth_trade_enabled(cfg):
+        warnings.append("synthetic order book depth simulation is enabled")
+    if cfg.latency_steps > 0:
+        warnings.append(f"execution latency simulation uses {cfg.latency_steps} step(s)")
     return BacktestResult(
         status="ok",
         strategy=strategy,
@@ -435,7 +638,5 @@ def run_paper_backtest(
         trade_count=len(trades),
         points=points[-max_recent:],
         trades=trades[-max_recent:],
-        warnings=[
-            "synthetic price path; use exchange history before live deployment"
-        ],
+        warnings=warnings,
     )

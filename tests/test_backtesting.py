@@ -1,6 +1,11 @@
 import unittest
 
-from arbitrage_bot.backtesting import run_paper_backtest, synthetic_price_series
+from arbitrage_bot.backtesting import (
+    estimate_depth_execution,
+    run_paper_backtest,
+    synthetic_depth_levels,
+    synthetic_price_series,
+)
 from arbitrage_bot.config import BacktestConfig, DcaConfig, ExecutionAlgoConfig, SpotGridConfig
 
 
@@ -96,6 +101,58 @@ class BacktestingTest(unittest.TestCase):
         self.assertEqual(result.trade_count, 4)
         self.assertAlmostEqual(result.filled_quote, 20.0)
         self.assertAlmostEqual(result.fill_rate, 1.0)
+
+    def test_depth_execution_uses_order_book_levels(self) -> None:
+        levels = synthetic_depth_levels(
+            reference_price=100.0,
+            side="buy",
+            quote_per_level=100.0,
+            step_bps=100.0,
+            level_count=2,
+        )
+
+        fill = estimate_depth_execution(
+            levels,
+            side="buy",
+            reference_price=100.0,
+            quote_notional=150.0,
+        )
+
+        self.assertIsNotNone(fill)
+        assert fill is not None
+        self.assertGreater(fill["average_price"], 100.0)
+        self.assertGreater(fill["slippage_quote"], 0.0)
+
+    def test_backtest_depth_and_latency_warnings_are_reported(self) -> None:
+        result = run_paper_backtest(
+            BacktestConfig(
+                enabled=True,
+                strategy="dca",
+                symbol="ACS/USDT",
+                initial_cash=100.0,
+                step_count=5,
+                price_start=1.0,
+                price_end=1.0,
+                volatility_bps=0.0,
+                depth_simulation_enabled=True,
+                depth_quote_per_level=100.0,
+                latency_steps=1,
+            ),
+            dca=DcaConfig(
+                enabled=True,
+                symbol="ACS/USDT",
+                side="buy",
+                quote_per_order=5.0,
+                max_orders=1,
+            ),
+        )
+
+        self.assertEqual(result.trade_count, 1)
+        self.assertGreater(result.slippage_quote, 0.0)
+        self.assertTrue(
+            any("depth simulation" in warning for warning in result.warnings)
+        )
+        self.assertTrue(any("latency" in warning for warning in result.warnings))
 
 
 if __name__ == "__main__":

@@ -126,6 +126,13 @@ def _slow_execution_overrides_from_payload(
             raise ValueError("enabled must be a boolean")
         overrides["enabled"] = payload["enabled"]
 
+    if "depth_simulation_enabled" in payload:
+        if not isinstance(payload["depth_simulation_enabled"], bool):
+            raise ValueError("depth_simulation_enabled must be a boolean")
+        overrides["depth_simulation_enabled"] = payload[
+            "depth_simulation_enabled"
+        ]
+
     if "exchange" in payload:
         exchange = str(payload["exchange"]).strip()
         if not exchange:
@@ -567,6 +574,14 @@ def _backtest_overrides_from_payload(
         if overrides["max_recent_points"] <= 0:
             raise ValueError("max_recent_points must be positive")
 
+    if "depth_levels" in payload:
+        overrides["depth_levels"] = _non_negative_int(payload, "depth_levels")
+        if overrides["depth_levels"] <= 0:
+            raise ValueError("depth_levels must be positive")
+
+    if "latency_steps" in payload:
+        overrides["latency_steps"] = _non_negative_int(payload, "latency_steps")
+
     non_negative_float_fields = {
         "initial_cash",
         "initial_base",
@@ -575,6 +590,8 @@ def _backtest_overrides_from_payload(
         "price_start",
         "price_end",
         "volatility_bps",
+        "depth_quote_per_level",
+        "depth_step_bps",
     }
     for field in non_negative_float_fields:
         if field in payload:

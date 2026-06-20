@@ -4,6 +4,7 @@ This is a dry-run scanner for two common crypto arbitrage families:
 
 - Spot spread arbitrage across exchanges.
 - Spot versus futures or perpetual basis arbitrage.
+- Single-exchange triangular spot arbitrage.
 
 The arbitrage scanner does not place live orders. It estimates executable edge from order book depth, fees, and a target notional size, then prints opportunities. The market maker command defaults to dry-run planning and requires explicit live confirmation before placing orders.
 
@@ -44,6 +45,17 @@ State reads can safely be tested with higher concurrency than SQLite-backed writ
 increase `--write-concurrency` only when specifically testing strategy-center
 store throughput.
 
+GitHub Actions runs JSON validation, `compileall`, and `pytest` on pushes and
+pull requests. A basic Dockerfile is included for later container deployment:
+
+```bash
+docker build -t crypto-arbitrage-mvp .
+docker run --env-file .env -p 8080:8080 \
+  -v "$PWD/config.acs.json:/app/config.acs.json:ro" \
+  -v "$PWD/data:/app/data" \
+  crypto-arbitrage-mvp
+```
+
 ## Run modes
 
 ```bash
@@ -56,9 +68,18 @@ python -m arbitrage_bot.main --config config.json --strategy spot-spread --once
 # Run only spot-futures basis scanning.
 python -m arbitrage_bot.main --config config.json --strategy cash-and-carry --once
 
+# Run only single-exchange triangular arbitrage scanning.
+python -m arbitrage_bot.main --config config.json --strategy triangular-arbitrage --once
+
 # Keep polling.
 python -m arbitrage_bot.main --config config.json
 ```
+
+Triangular arbitrage is configured under `triangular_arbitrage.routes`. Each
+route specifies one exchange, a starting currency, and three spot symbols. The
+scanner automatically tests valid three-leg cycles in both directions, simulates
+fills from order book depth, deducts exchange fees, and reports profit in the
+starting currency. It does not place live triangular orders.
 
 ## ACS spot arbitrage
 
@@ -110,6 +131,11 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 ```
 
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted bid/ask prices, quote rates, and any live opportunities. The program switch next to the status pill pauses or resumes scanning without stopping the web server.
+
+The web service also exposes Prometheus-compatible metrics at `/metrics` and
+`/api/metrics`, including scan latency, opportunity count, warnings, open orders,
+recent trades, and tracked MM/Grid order counts. The endpoint is protected by
+the same web authentication middleware as the rest of the dashboard.
 
 The top row shows configured positions, cash balances, and P/L attribution:
 
@@ -190,6 +216,12 @@ The web background MM loop also has an optional order book cache. If the active 
 Exchange support is intentionally conservative. Binance, Bybit, Coinbase, and Upbit support post-only limit orders through ccxt. Bithumb does not expose post-only support through ccxt, so Bithumb MM with `post_only: true` is blocked before order placement; only set `post_only: false` and `risk.require_post_only: false` for Bithumb if you explicitly accept taker-fill risk. Bithumb also does not support client order ids through ccxt, so its MM orders can only be tracked in memory until the process restarts.
 
 Always run the account preflight before live MM. Public ccxt metadata can expose exchange minimums, but they can change. In a recent ACS public check, Bybit `ACS/USDT` required about 5 USDT minimum order cost, while Bithumb `ACS/KRW` reported a 500 KRW minimum cost. If you raise `quote_per_level`, also raise `risk.max_cycle_quote` enough for `levels * 2 * quote_per_level` after common-currency conversion.
+
+The account preflight also checks transfer metadata when the exchange adapter
+supports it. For each configured symbol currency it reports currency active
+state, deposit availability, withdrawal availability, fees, and network-level
+status when available. Treat unsupported or unavailable transfer status as a
+manual verification item before cross-exchange arbitrage.
 
 ```json
 "market_maker": {

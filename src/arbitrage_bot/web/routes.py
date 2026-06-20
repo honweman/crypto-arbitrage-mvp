@@ -19,6 +19,7 @@ def register_routes(app: web.Application) -> None:
         api_health,
         api_market_maker,
         api_markets,
+        api_metrics,
         api_profile,
         api_risk,
         api_slow_execution,
@@ -71,3 +72,5 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/orders/cancel-bulk", api_cancel_bulk_orders)
     app.router.add_post("/api/strategies/control", api_strategy_control)
     app.router.add_get("/api/health", api_health)
+    app.router.add_get("/api/metrics", api_metrics)
+    app.router.add_get("/metrics", api_metrics)

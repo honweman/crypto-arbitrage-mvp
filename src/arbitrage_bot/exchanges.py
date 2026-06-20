@@ -6,8 +6,8 @@ import hashlib
 import hmac
 import importlib
 import json
+import logging
 import os
-import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -21,6 +21,9 @@ from .config import ExchangeConfig
 from .models import OrderBookSnapshot, Side
 from .order_validation import validate_prepared_limit_order
 from .orderbook import normalize_levels
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 REST_PROXY_ENV_OPTIONS = (
@@ -667,9 +670,13 @@ class ExchangeManager:
         try:
             raw = await client.fetch_order_book(symbol, limit=depth)
         except Exception as exc:  # noqa: BLE001
-            print(
-                f"failed to fetch order book: exchange={cfg.key} symbol={symbol} error={exc}",
-                file=sys.stderr,
+            LOGGER.warning(
+                "failed to fetch order book",
+                extra={
+                    "exchange": cfg.key,
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
             )
             return None
 
@@ -743,9 +750,13 @@ class ExchangeManager:
         try:
             raw = await fetcher(symbol)
         except Exception as exc:  # noqa: BLE001
-            print(
-                f"failed to fetch funding rate: exchange={cfg.key} symbol={symbol} error={exc}",
-                file=sys.stderr,
+            LOGGER.warning(
+                "failed to fetch funding rate",
+                extra={
+                    "exchange": cfg.key,
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
             )
             return None
         rate = raw.get("fundingRate")
@@ -1033,6 +1044,40 @@ class ExchangeManager:
     async def fetch_balance(self, cfg: ExchangeConfig) -> dict[str, Any]:
         client = self.client(cfg)
         return await client.fetch_balance()
+
+    async def fetch_currency_status(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        currencies: Iterable[str],
+    ) -> dict[str, Any]:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        fetcher = getattr(client, "fetch_currencies", None)
+        if capabilities.get("fetchCurrencies") is False or fetcher is None:
+            return {
+                "checked": False,
+                "unsupported": True,
+                "currencies": {},
+                "skipped_reason": "exchange client does not support fetch_currencies",
+            }
+        loaded = await fetcher()
+        if not isinstance(loaded, dict):
+            return {
+                "checked": True,
+                "unsupported": False,
+                "currencies": {},
+            }
+        requested = {currency.upper() for currency in currencies if currency}
+        return {
+            "checked": True,
+            "unsupported": False,
+            "currencies": {
+                currency: loaded.get(currency)
+                for currency in sorted(requested)
+                if isinstance(loaded.get(currency), dict)
+            },
+        }
 
     async def fetch_market_info(
         self,

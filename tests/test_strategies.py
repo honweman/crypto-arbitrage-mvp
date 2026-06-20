@@ -6,6 +6,8 @@ from arbitrage_bot.config import (
     OptionComboConfig,
     OptionsArbitrageConfig,
     SpotMarketConfig,
+    TriangleRouteConfig,
+    TriangularArbitrageConfig,
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.strategies.cash_and_carry import find_cash_and_carry_opportunities
@@ -15,6 +17,9 @@ from arbitrage_bot.strategies.options_arbitrage import (
 from arbitrage_bot.strategies.spot_spread import (
     find_converted_spot_spread_opportunities,
     find_spot_spread_opportunities,
+)
+from arbitrage_bot.strategies.triangular import (
+    find_triangular_arbitrage_opportunities,
 )
 
 
@@ -282,6 +287,56 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(len(opportunities), 1)
         self.assertEqual(opportunities[0].metadata["direction"], "reverse_conversion")
         self.assertGreater(opportunities[0].profit_quote, 0)
+
+    def test_triangular_arbitrage_finds_single_exchange_cycle(self) -> None:
+        exchanges = [ExchangeConfig(id="binance", label="binance-spot", fee_bps=0)]
+        books = {
+            ("binance-spot", "BTC/USDT"): book(
+                "binance-spot",
+                "BTC/USDT",
+                bid=99.0,
+                ask=100.0,
+            ),
+            ("binance-spot", "ETH/BTC"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="ETH/BTC",
+                bids=[BookLevel(price=0.49, amount=30)],
+                asks=[BookLevel(price=0.5, amount=30)],
+            ),
+            ("binance-spot", "ETH/USDT"): OrderBookSnapshot(
+                exchange="binance-spot",
+                symbol="ETH/USDT",
+                bids=[BookLevel(price=55.0, amount=30)],
+                asks=[BookLevel(price=56.0, amount=30)],
+            ),
+        }
+
+        opportunities = find_triangular_arbitrage_opportunities(
+            books=books,
+            exchanges=exchanges,
+            cfg=TriangularArbitrageConfig(
+                enabled=True,
+                notional_quote=1000.0,
+                min_profit_quote=1.0,
+                min_profit_bps=1.0,
+                routes=[
+                    TriangleRouteConfig(
+                        exchange="binance-spot",
+                        start_currency="USDT",
+                        symbols=["BTC/USDT", "ETH/BTC", "ETH/USDT"],
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(len(opportunities), 1)
+        opportunity = opportunities[0]
+        self.assertEqual(opportunity.strategy, "triangular-arbitrage")
+        self.assertEqual(opportunity.legs[0].side, "buy")
+        self.assertEqual(opportunity.legs[1].side, "buy")
+        self.assertEqual(opportunity.legs[2].side, "sell")
+        self.assertAlmostEqual(opportunity.metadata["final_amount"], 1100.0)
+        self.assertFalse(opportunity.metadata["requires_cross_exchange_transfer"])
 
 
 if __name__ == "__main__":

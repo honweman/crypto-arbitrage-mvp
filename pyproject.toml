@@ -5,6 +5,7 @@ description = "A dry-run crypto arbitrage scanner for spot spreads and spot-futu
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "aiohttp>=3.9.0",
   "ccxt>=4.4.0"
 ]
 

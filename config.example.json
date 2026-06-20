@@ -117,7 +117,12 @@
     "trend_bps": 0.0,
     "max_recent_points": 80,
     "data_source": "synthetic",
-    "history_path": ""
+    "history_path": "",
+    "depth_simulation_enabled": false,
+    "depth_quote_per_level": 0.0,
+    "depth_step_bps": 5.0,
+    "depth_levels": 5,
+    "latency_steps": 0
   },
   "options_arbitrage": {
     "enabled": false,
@@ -128,6 +133,24 @@
     "max_days_to_expiry": 0.0,
     "risk_free_rate_bps": 0.0,
     "borrow_rate_bps": 0.0
+  },
+  "triangular_arbitrage": {
+    "enabled": false,
+    "notional_quote": 1000.0,
+    "min_profit_quote": 3.0,
+    "min_profit_bps": 5.0,
+    "routes": [
+      {
+        "label": "BTC-ETH-USDT",
+        "exchange": "binance-spot",
+        "start_currency": "USDT",
+        "symbols": [
+          "BTC/USDT",
+          "ETH/BTC",
+          "ETH/USDT"
+        ]
+      }
+    ]
   },
   "strategy_center": {
     "enabled": true,
