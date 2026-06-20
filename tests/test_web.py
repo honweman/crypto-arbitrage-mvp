@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1735,16 +1736,30 @@ class WebMonitorTest(unittest.TestCase):
             )
         )
 
-        due, day = _daily_report_due(
-            cfg,
-            last_report_day=None,
-            now=1_704_153_599,
-        )
-        not_due, _ = _daily_report_due(
-            cfg,
-            last_report_day=day,
-            now=1_704_153_600,
-        )
+        previous_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        try:
+            # 2024-01-01 12:00:00 UTC and one minute later. Both checks land on
+            # the same local day, so the second one must not re-trigger the
+            # daily report. Pinning TZ keeps the result host-timezone agnostic.
+            due, day = _daily_report_due(
+                cfg,
+                last_report_day=None,
+                now=1_704_110_400,
+            )
+            not_due, _ = _daily_report_due(
+                cfg,
+                last_report_day=day,
+                now=1_704_110_460,
+            )
+        finally:
+            if previous_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_tz
+            time.tzset()
+
         message = build_daily_report_message(
             cfg,
             scan_count=12,
