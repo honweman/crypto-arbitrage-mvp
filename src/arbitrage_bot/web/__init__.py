@@ -4298,7 +4298,11 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
         auth_required = bool(password) or email_login
         if not auth_required:
             return await call_handler()
-        if request.path == "/api/health" and _is_local_ip(remote):
+        if request.path in {
+            "/api/health",
+            "/api/metrics",
+            "/metrics",
+        } and _is_local_ip(remote):
             return await call_handler()
         session_valid, session_email = _session_identity(
             cfg,
