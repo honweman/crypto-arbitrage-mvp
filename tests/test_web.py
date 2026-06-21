@@ -947,7 +947,7 @@ class WebMonitorTest(unittest.TestCase):
                 randomize_slice=False,
                 interval_seconds=30.0,
                 order_ttl_seconds=5.0,
-                stop_price=0.001,
+                stop_price=0.0001,
             )
         )
         books = {
