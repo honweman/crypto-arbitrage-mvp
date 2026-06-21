@@ -174,8 +174,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="slow-cleanup-preview"', HTML)
         self.assertIn('id="slow-tasks"', HTML)
         self.assertIn('id="slow-start-price"', HTML)
+        self.assertIn("Start Gate (Buy <= / Sell >=)", HTML)
+        self.assertIn("Stop Gate (Buy >= / Sell <=)", HTML)
         self.assertIn("Cleanup preview", APP_JS)
         self.assertIn("Same as default", APP_JS)
+        self.assertIn("start ask <=", APP_JS)
+        self.assertIn("start bid >=", APP_JS)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_web_package_exposes_split_modules(self) -> None:

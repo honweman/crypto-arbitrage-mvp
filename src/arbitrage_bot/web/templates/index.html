@@ -1003,11 +1003,11 @@
           <input id="slow-ttl" type="number" min="0" step="any">
         </div>
         <div class="field">
-          <label for="slow-start-price">Start Price</label>
+          <label for="slow-start-price">Start Gate (Buy <= / Sell >=)</label>
           <input id="slow-start-price" type="number" min="0" step="any">
         </div>
         <div class="field">
-          <label for="slow-stop-price">Stop Price</label>
+          <label for="slow-stop-price">Stop Gate (Buy >= / Sell <=)</label>
           <input id="slow-stop-price" type="number" min="0" step="any">
         </div>
         <button id="slow-apply" class="control-button" type="submit">Apply</button>
@@ -1051,8 +1051,8 @@
               <th class="num">Remaining</th>
               <th class="num">Interval</th>
               <th class="num">Cancel</th>
-              <th class="num">Start</th>
-              <th class="num">Stop</th>
+              <th class="num">Start Gate</th>
+              <th class="num">Stop Gate</th>
             </tr>
           </thead>
           <tbody id="slow-orders"></tbody>

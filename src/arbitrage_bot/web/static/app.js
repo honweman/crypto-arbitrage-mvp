@@ -1954,6 +1954,22 @@ function balanceStatusClass(status) {
       return String(value ?? "--") || "--";
     }
 
+    function autoStartGateText(config) {
+      const start = Number(config?.start_price || 0);
+      if (start <= 0) return "start off";
+      return config?.side === "sell"
+        ? `start bid >= ${fmt.format(start)}`
+        : `start ask <= ${fmt.format(start)}`;
+    }
+
+    function autoStopGateText(config) {
+      const stop = Number(config?.stop_price || 0);
+      if (stop <= 0) return "stop off";
+      return config?.side === "sell"
+        ? `stop bid <= ${fmt.format(stop)}`
+        : `stop ask >= ${fmt.format(stop)}`;
+    }
+
     function autoConfigSummary(config) {
       if (!config) return "No default config";
       const side = String(config.side || "--").toUpperCase();
@@ -1969,7 +1985,7 @@ function balanceStatusClass(status) {
         : Number(config.slice_quote || 0) > 0
         ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
         : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
-      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · every ${fmt.format(config.interval_seconds || 0)}s`;
+      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s`;
     }
 
     function compareAutoTaskConfig(taskConfig, defaultConfig) {
