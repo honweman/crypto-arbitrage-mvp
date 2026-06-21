@@ -174,7 +174,10 @@
   "strategy_timeline": {
     "enabled": true,
     "path": "data/strategy_timeline.jsonl",
-    "max_recent_events": 100
+    "max_recent_events": 100,
+    "rotate_max_bytes": 268435456,
+    "rotate_keep_files": 12,
+    "rotate_compress": true
   },
   "web_security": {
     "password_env": "CRYPTO_ARB_WEB_PASSWORD",

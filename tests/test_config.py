@@ -166,12 +166,18 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.risk.max_order_book_age_seconds, 10.0)
         self.assertTrue(cfg.trade_log.enabled)
         self.assertEqual(cfg.trade_log.path, "data/trade_events.jsonl")
+        self.assertEqual(cfg.trade_log.rotate_max_bytes, 268435456)
+        self.assertEqual(cfg.trade_log.rotate_keep_files, 12)
+        self.assertTrue(cfg.trade_log.rotate_compress)
         self.assertTrue(cfg.strategy_timeline.enabled)
         self.assertEqual(
             cfg.strategy_timeline.path,
             "data/strategy_timeline.jsonl",
         )
         self.assertEqual(cfg.strategy_timeline.max_recent_events, 100)
+        self.assertEqual(cfg.strategy_timeline.rotate_max_bytes, 268435456)
+        self.assertEqual(cfg.strategy_timeline.rotate_keep_files, 12)
+        self.assertTrue(cfg.strategy_timeline.rotate_compress)
         self.assertTrue(cfg.pnl_store.enabled)
         self.assertEqual(cfg.pnl_store.path, "data/fill_pnl.sqlite3")
         self.assertFalse(cfg.alerts.enabled)

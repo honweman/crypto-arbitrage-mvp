@@ -477,7 +477,10 @@ Every market maker and Auto Buy/Sell cycle is written to JSONL when `trade_log.e
 "trade_log": {
   "enabled": true,
   "path": "data/trade_events.jsonl",
-  "max_recent_events": 50
+  "max_recent_events": 50,
+  "rotate_max_bytes": 268435456,
+  "rotate_keep_files": 12,
+  "rotate_compress": true
 }
 ```
 
@@ -487,9 +490,17 @@ The strategy timeline is a separate structured JSONL stream focused on decisions
 "strategy_timeline": {
   "enabled": true,
   "path": "data/strategy_timeline.jsonl",
-  "max_recent_events": 100
+  "max_recent_events": 100,
+  "rotate_max_bytes": 268435456,
+  "rotate_keep_files": 12,
+  "rotate_compress": true
 }
 ```
+
+When either JSONL file reaches `rotate_max_bytes`, the active file is moved to a
+timestamped archive, a fresh active file is opened, and the archive is gzipped in
+the background. `rotate_keep_files` limits the number of archived files kept per
+log stream.
 
 The monitor shows the current risk settings, strategy timeline, and normalized trade log rows in the `Risk & Events` table. You can also inspect the trade log from the command line:
 

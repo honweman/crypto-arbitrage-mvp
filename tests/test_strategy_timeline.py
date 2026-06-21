@@ -101,6 +101,36 @@ class StrategyTimelineTest(unittest.TestCase):
         self.assertEqual(summary["event_count"], 2)
         self.assertEqual(summary["no_order_count"], 1)
 
+    def test_strategy_timeline_rotates_large_jsonl_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "timeline.jsonl")
+            cfg = StrategyTimelineConfig(
+                enabled=True,
+                path=path,
+                max_recent_events=10,
+                rotate_max_bytes=1,
+                rotate_keep_files=3,
+                rotate_compress=False,
+            )
+
+            write_strategy_timeline_from_payload(
+                cfg,
+                {"type": "market_maker", "status": "placed"},
+                source="test",
+            )
+            write_strategy_timeline_from_payload(
+                cfg,
+                {"type": "slow_execution", "status": "blocked_by_risk"},
+                source="test",
+            )
+            entries = read_recent_strategy_timeline_entries(cfg)
+            rotated = sorted(
+                name for name in os.listdir(tmp) if name.startswith("timeline.jsonl.")
+            )
+
+        self.assertEqual([entry.event_type for entry in entries], ["slow_execution"])
+        self.assertEqual(len(rotated), 1)
+
     def test_cancel_payload_without_status_is_still_cancel_action(self) -> None:
         event = strategy_timeline_event_from_payload(
             {

@@ -320,6 +320,9 @@ class TradeLogConfig:
     enabled: bool = True
     path: str = "data/trade_events.jsonl"
     max_recent_events: int = 50
+    rotate_max_bytes: int = 256 * 1024 * 1024
+    rotate_keep_files: int = 12
+    rotate_compress: bool = True
 
 
 @dataclass(frozen=True)
@@ -327,6 +330,9 @@ class StrategyTimelineConfig:
     enabled: bool = True
     path: str = "data/strategy_timeline.jsonl"
     max_recent_events: int = 100
+    rotate_max_bytes: int = 256 * 1024 * 1024
+    rotate_keep_files: int = 12
+    rotate_compress: bool = True
 
 
 @dataclass(frozen=True)
@@ -949,6 +955,11 @@ def load_config(path: str | Path) -> BotConfig:
             enabled=bool(trade_log_raw.get("enabled", True)),
             path=str(trade_log_raw.get("path", "data/trade_events.jsonl")),
             max_recent_events=int(trade_log_raw.get("max_recent_events", 50)),
+            rotate_max_bytes=int(
+                trade_log_raw.get("rotate_max_bytes", 256 * 1024 * 1024)
+            ),
+            rotate_keep_files=int(trade_log_raw.get("rotate_keep_files", 12)),
+            rotate_compress=bool(trade_log_raw.get("rotate_compress", True)),
         ),
         strategy_timeline=StrategyTimelineConfig(
             enabled=bool(strategy_timeline_raw.get("enabled", True)),
@@ -960,6 +971,15 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             max_recent_events=int(
                 strategy_timeline_raw.get("max_recent_events", 100)
+            ),
+            rotate_max_bytes=int(
+                strategy_timeline_raw.get("rotate_max_bytes", 256 * 1024 * 1024)
+            ),
+            rotate_keep_files=int(
+                strategy_timeline_raw.get("rotate_keep_files", 12)
+            ),
+            rotate_compress=bool(
+                strategy_timeline_raw.get("rotate_compress", True)
             ),
         ),
         pnl_store=PnlStoreConfig(

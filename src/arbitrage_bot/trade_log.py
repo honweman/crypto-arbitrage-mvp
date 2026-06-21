@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import TradeLogConfig, load_config
+from .jsonl_rotation import rotate_jsonl_log_if_needed
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,12 @@ def write_trade_event(
 
     path = _event_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_jsonl_log_if_needed(
+        path,
+        max_bytes=cfg.rotate_max_bytes,
+        keep_files=cfg.rotate_keep_files,
+        compress=cfg.rotate_compress,
+    )
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(enriched, ensure_ascii=True, sort_keys=True))
         handle.write("\n")
