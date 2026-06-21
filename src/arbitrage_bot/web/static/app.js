@@ -1917,13 +1917,144 @@ function balanceStatusClass(status) {
       return seconds <= 0 ? "due" : `${seconds.toFixed(0)}s`;
     }
 
-    function renderSlowExecutionTasks(taskPayload) {
+    const AUTO_TERMINAL_STATUSES = new Set(["complete", "stopped", "stopped_by_price", "below_min_order_quote"]);
+    const AUTO_CONFIG_COMPARE_FIELDS = [
+      ["exchange", "Account", "string"],
+      ["symbol", "Symbol", "string"],
+      ["side", "Side", "string"],
+      ["price_mode", "Price", "string"],
+      ["price_offset_bps", "Offset", "number"],
+      ["unlimited_total", "Unlimited", "boolean"],
+      ["total_base", "Total Base", "number"],
+      ["total_quote", "Total Quote", "number"],
+      ["slice_mode", "Size Mode", "string"],
+      ["slice_base", "Base/Order", "number"],
+      ["slice_quote", "Quote/Order", "number"],
+      ["slice_base_min", "Min Base", "number"],
+      ["slice_base_max", "Max Base", "number"],
+      ["randomize_slice", "Random", "boolean"],
+      ["interval_seconds", "Place Sec", "number"],
+      ["order_ttl_seconds", "Cancel Sec", "number"],
+      ["start_price", "Start", "number"],
+      ["stop_price", "Stop", "number"],
+    ];
+
+    function normalizeAutoConfigValue(value, type) {
+      if (type === "boolean") return Boolean(value);
+      if (type === "number") {
+        const number = Number(value || 0);
+        return Number.isFinite(number) ? Math.round(number * 1e12) / 1e12 : 0;
+      }
+      return String(value ?? "").trim();
+    }
+
+    function autoConfigValueText(value, type) {
+      if (type === "boolean") return Boolean(value) ? "on" : "off";
+      if (type === "number") return fmt.format(Number(value || 0));
+      return String(value ?? "--") || "--";
+    }
+
+    function autoConfigSummary(config) {
+      if (!config) return "No default config";
+      const side = String(config.side || "--").toUpperCase();
+      const total = Number(config.total_quote || 0) > 0
+        ? `${quoteCurrency(config.symbol)} ${fmt.format(config.total_quote)}`
+        : Number(config.total_base || 0) > 0
+        ? `${baseCurrency(config.symbol)} ${fmt.format(config.total_base)}`
+        : (config.unlimited_total ? "Unlimited" : "No target");
+      const slice = config.slice_mode === "top_level"
+        ? "Top level size"
+        : Number(config.slice_base_min || 0) || Number(config.slice_base_max || 0)
+        ? `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base_min || 0)}-${fmt.format(config.slice_base_max || 0)}`
+        : Number(config.slice_quote || 0) > 0
+        ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
+        : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
+      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · every ${fmt.format(config.interval_seconds || 0)}s`;
+    }
+
+    function compareAutoTaskConfig(taskConfig, defaultConfig) {
+      if (!taskConfig || !defaultConfig) return [];
+      return AUTO_CONFIG_COMPARE_FIELDS
+        .map(([key, label, type]) => {
+          const taskValue = normalizeAutoConfigValue(taskConfig[key], type);
+          const defaultValue = normalizeAutoConfigValue(defaultConfig[key], type);
+          if (taskValue === defaultValue) return null;
+          return {
+            key,
+            label,
+            task: autoConfigValueText(taskConfig[key], type),
+            default: autoConfigValueText(defaultConfig[key], type),
+          };
+        })
+        .filter(Boolean);
+    }
+
+    function renderSlowConfigStatus(taskPayload, defaultConfig) {
+      const box = document.getElementById("slow-config-status");
+      if (!box) return;
+      const tasks = taskPayload?.tasks || [];
+      const runningTasks = tasks.filter((task) => !AUTO_TERMINAL_STATUSES.has(task.status || ""));
+      const compared = runningTasks.map((task) => ({
+        task,
+        diffs: compareAutoTaskConfig(task.config || {}, defaultConfig || {}),
+      }));
+      const diffTasks = compared.filter((item) => item.diffs.length > 0);
+      const defaultText = autoConfigSummary(defaultConfig);
+      if (runningTasks.length === 0) {
+        box.innerHTML = `
+          <div><span class="config-chip config-neutral">Default</span>${escapeHtml(defaultText)}</div>
+          <div class="subtle">No active Auto Buy/Sell task. New tasks will use the default configuration above.</div>
+        `;
+        return;
+      }
+      const statusClass = diffTasks.length ? "config-diff" : "config-same";
+      const statusText = diffTasks.length
+        ? `${diffTasks.length}/${runningTasks.length} active task(s) differ from defaults`
+        : `${runningTasks.length} active task(s) match defaults`;
+      const details = compared
+        .slice(0, 4)
+        .map(({ task, diffs }) => {
+          const label = `${shortId(task.id)} ${task.config?.exchange || "--"} ${task.config?.symbol || "--"}`;
+          if (!diffs.length) return `<li><strong>${escapeHtml(label)}</strong>: matches default</li>`;
+          const diffText = diffs.slice(0, 5).map((diff) => `${diff.label}: ${diff.task} vs ${diff.default}`).join("; ");
+          const more = diffs.length > 5 ? `; +${diffs.length - 5} more` : "";
+          return `<li><strong>${escapeHtml(label)}</strong>: ${escapeHtml(diffText + more)}</li>`;
+        })
+        .join("");
+      box.innerHTML = `
+        <div><span class="config-chip config-neutral">Default</span>${escapeHtml(defaultText)}</div>
+        <div><span class="config-chip ${statusClass}">${diffTasks.length ? "Different" : "Same"}</span>${escapeHtml(statusText)}</div>
+        <ul>${details}</ul>
+      `;
+    }
+
+    function autoTaskConfigCell(task, defaultConfig) {
+      const diffs = compareAutoTaskConfig(task.config || {}, defaultConfig || {});
+      if (!diffs.length) {
+        return {
+          className: "risk-ok",
+          text: "Same as default",
+          title: "Current running task config matches the default form config",
+        };
+      }
+      const title = diffs
+        .map((diff) => `${diff.label}: task ${diff.task}, default ${diff.default}`)
+        .join("\n");
+      return {
+        className: "missing",
+        text: `${diffs.length} diff${diffs.length === 1 ? "" : "s"}`,
+        title,
+      };
+    }
+
+    function renderSlowExecutionTasks(taskPayload, defaultConfig) {
       const body = document.getElementById("slow-tasks");
       body.innerHTML = "";
       const tasks = taskPayload?.tasks || [];
+      renderSlowConfigStatus(taskPayload, defaultConfig);
       if (tasks.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="11">No Auto Buy/Sell tasks.</td>`;
+        tr.innerHTML = `<td colspan="12">No Auto Buy/Sell tasks.</td>`;
         body.appendChild(tr);
         return;
       }
@@ -1931,7 +2062,7 @@ function balanceStatusClass(status) {
       for (const task of tasks) {
         const config = task.config || {};
         const status = task.status || "--";
-        const terminal = ["complete", "stopped", "stopped_by_price", "below_min_order_quote"].includes(status);
+        const terminal = AUTO_TERMINAL_STATUSES.has(status);
         const statusClass = status === "complete" ? "risk-ok" : status === "paused" || status === "stopped" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
         const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
         const progressMode = task.progress_mode || ((config.total_quote || 0) > 0 ? "quote" : "base");
@@ -1944,10 +2075,12 @@ function balanceStatusClass(status) {
           : `${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}`;
         const remainingText = unlimited ? "Unlimited" : formatSymbolQuantity(remainingValue, config.symbol, progressMode);
         const progressPct = unlimited ? "--" : `${(task.progress_pct || 0).toFixed(2)}%`;
+        const configCell = autoTaskConfigCell(task, defaultConfig);
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
           <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
+          <td class="${configCell.className}" title="${escapeHtml(configCell.title)}">${escapeHtml(configCell.text)}</td>
           <td>${escapeHtml(config.exchange || "--")}</td>
           <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
           <td class="num">${filledText}</td>
@@ -3017,16 +3150,69 @@ function balanceStatusClass(status) {
       }
     }
 
+    function cleanupTaskLine(task) {
+      const filled = task.progress_mode === "quote"
+        ? formatSymbolQuantity(task.filled_quote, task.symbol, "quote")
+        : formatSymbolQuantity(task.filled_base, task.symbol, "base");
+      const side = String(task.side || "--").toUpperCase();
+      return `${shortId(task.id)} · ${task.status || "--"} · ${task.exchange || "--"} ${task.symbol || "--"} · ${side} · ${filled}`;
+    }
+
+    function renderCleanupPreview(tasks, mode = "preview") {
+      const box = document.getElementById("slow-cleanup-preview");
+      if (!box) return;
+      if (!tasks.length) {
+        box.innerHTML = `<span class="config-chip config-neutral">Cleanup</span>No completed Auto Buy/Sell tasks to delete.`;
+        return;
+      }
+      const lines = tasks
+        .slice(0, 8)
+        .map((task) => `<li>${escapeHtml(cleanupTaskLine(task))}</li>`)
+        .join("");
+      const more = tasks.length > 8 ? `<li>+${tasks.length - 8} more</li>` : "";
+      const label = mode === "deleted" ? "Deleted" : "Cleanup preview";
+      const verb = mode === "deleted" ? "Deleted" : "Will delete";
+      box.innerHTML = `
+        <span class="config-chip ${mode === "deleted" ? "config-same" : "config-diff"}">${label}</span>
+        ${verb} ${tasks.length} completed task record(s):
+        <ul>${lines}${more}</ul>
+      `;
+    }
+
     async function clearTerminalAutoBuySellTasks() {
       const button = document.getElementById("slow-clear-terminal");
       button.disabled = true;
       try {
+        const previewRes = await fetch("/api/auto-buy-sell/tasks/cleanup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ terminal_only: true, preview: true }),
+        });
+        const preview = await previewRes.json();
+        if (!previewRes.ok) throw new Error(preview.error || "task cleanup preview failed");
+        const tasks = preview.removed_tasks || [];
+        renderCleanupPreview(tasks);
+        if (tasks.length === 0) return;
+        const message = [
+          `Cleanup will delete ${tasks.length} completed Auto Buy/Sell task record(s):`,
+          "",
+          ...tasks.slice(0, 12).map((task) => `- ${cleanupTaskLine(task)}`),
+          tasks.length > 12 ? `- +${tasks.length - 12} more` : "",
+          "",
+          "Open orders are not canceled by cleanup. Continue?",
+        ].filter(Boolean).join("\n");
+        if (!window.confirm(message)) {
+          text("slow-meta", "cleanup canceled");
+          return;
+        }
         const res = await fetch("/api/auto-buy-sell/tasks/cleanup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ terminal_only: true }),
         });
-        if (!res.ok) throw new Error("task cleanup failed");
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "task cleanup failed");
+        renderCleanupPreview(result.removed_tasks || [], "deleted");
         await refresh();
       } finally {
         button.disabled = false;
@@ -3106,7 +3292,10 @@ function balanceStatusClass(status) {
       const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
       const mmFeatures = data.market_maker?.exchange_features || {};
       const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
-      text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
+      const mmSpreadText = mmPlan?.existing_spread_bps == null
+        ? "--"
+        : Number(mmPlan.existing_spread_bps).toFixed(2);
+      text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
 
       const slowPlan = data.slow_execution?.plan;
       const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
@@ -3169,7 +3358,7 @@ function balanceStatusClass(status) {
         renderMarketMaker(data.market_maker);
         renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
         renderSlowExecution(data.slow_execution);
-        renderSlowExecutionTasks(data.slow_execution?.tasks);
+        renderSlowExecutionTasks(data.slow_execution?.tasks, data.slow_execution?.config);
         renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
         renderSpotGrid(data.spot_grid);
         renderDcaConfig(data.dca?.config, data.dca?.accounts);

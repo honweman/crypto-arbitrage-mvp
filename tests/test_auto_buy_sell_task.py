@@ -175,8 +175,28 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             result = await service.clear_terminal_tasks()
 
         self.assertEqual(result["removed_task_ids"], [stopped["id"]])
+        self.assertEqual(result["removed_tasks"][0]["exchange"], "bybit-spot")
+        self.assertEqual(result["removed_tasks"][0]["symbol"], "ACS/USDT")
         self.assertEqual(result["tasks"]["task_count"], 1)
         self.assertEqual(result["tasks"]["tasks"][0]["id"], active["id"])
+
+    async def test_preview_terminal_tasks_does_not_delete_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            stopped = await service.create_task(self._slow_cfg(start_price=0.1))
+            active = await service.create_task(self._slow_cfg(start_price=0.2))
+            service._tasks[0].status = "complete"
+
+            preview = await service.preview_terminal_tasks()
+            snapshot = await service.snapshot()
+
+        self.assertEqual(preview["removed_task_ids"], [stopped["id"]])
+        self.assertEqual(preview["removed_tasks"][0]["status"], "complete")
+        self.assertEqual(snapshot["task_count"], 2)
+        self.assertEqual(
+            [task["id"] for task in snapshot["tasks"]],
+            [stopped["id"], active["id"]],
+        )
 
     async def test_task_progress_uses_fills_not_submitted_amount(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

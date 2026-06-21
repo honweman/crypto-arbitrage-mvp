@@ -170,8 +170,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("/api/auto-buy-sell/tasks", HTML)
         self.assertIn('id="slow-create-task"', HTML)
         self.assertIn('id="slow-clear-terminal"', HTML)
+        self.assertIn('id="slow-config-status"', HTML)
+        self.assertIn('id="slow-cleanup-preview"', HTML)
         self.assertIn('id="slow-tasks"', HTML)
         self.assertIn('id="slow-start-price"', HTML)
+        self.assertIn("Cleanup preview", APP_JS)
+        self.assertIn("Same as default", APP_JS)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_web_package_exposes_split_modules(self) -> None:
@@ -3502,7 +3506,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("known_trade_ids", view_task)
         self.assertNotIn("order_created_at", view_task)
         self.assertEqual(view_task["config"]["exchange"], "coinbase-spot")
-        self.assertNotIn("price_mode", view_task["config"])
+        self.assertEqual(view_task["config"]["price_mode"], "taker")
+        self.assertIn("total_quote", view_task["config"])
 
     async def test_program_state_persists_in_runtime_store(self) -> None:
         cfg = make_config()

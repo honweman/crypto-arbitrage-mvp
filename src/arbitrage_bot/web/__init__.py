@@ -5399,10 +5399,15 @@ async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
         payload = await request.json()
         if not bool(payload.get("terminal_only", True)):
             raise ValueError("only terminal task cleanup is supported")
+        preview_only = bool(payload.get("preview") or payload.get("dry_run"))
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
+
+    if preview_only:
+        result = await tasks.preview_terminal_tasks()
+        return web.json_response({"ok": True, "preview": True, **result})
 
     result = await tasks.clear_terminal_tasks()
     await state.set_auto_buy_sell_tasks(result["tasks"])

@@ -218,6 +218,30 @@ class AutoBuySellTask:
         }
 
 
+def _cleanup_task_summary(task: AutoBuySellTask) -> dict[str, Any]:
+    row = task.to_dict()
+    config = row.get("config") if isinstance(row.get("config"), dict) else {}
+    return {
+        "id": row.get("id"),
+        "status": row.get("status"),
+        "last_status": row.get("last_status"),
+        "exchange": config.get("exchange"),
+        "symbol": config.get("symbol"),
+        "side": config.get("side"),
+        "filled_base": row.get("filled_base"),
+        "filled_quote": row.get("filled_quote"),
+        "remaining_base": row.get("remaining_base"),
+        "remaining_quote": row.get("remaining_quote"),
+        "progress_mode": row.get("progress_mode"),
+        "progress_pct": row.get("progress_pct"),
+        "open_order_count": row.get("open_order_count"),
+        "placed_count": row.get("placed_count"),
+        "created_at": row.get("created_at"),
+        "finished_at": row.get("finished_at"),
+        "last_error": row.get("last_error"),
+    }
+
+
 class AutoBuySellTaskStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -363,8 +387,10 @@ class AutoBuySellTaskService:
 
     async def clear_terminal_tasks(self) -> dict[str, Any]:
         async with self._lock:
-            removed = [
-                task.id for task in self._tasks if task.status in TERMINAL_TASK_STATUSES
+            removed_tasks = [
+                _cleanup_task_summary(task)
+                for task in self._tasks
+                if task.status in TERMINAL_TASK_STATUSES
             ]
             self._tasks = [
                 task for task in self._tasks if task.status not in TERMINAL_TASK_STATUSES
@@ -372,9 +398,23 @@ class AutoBuySellTaskService:
             self.store.save(self._tasks)
             snapshot = self._snapshot_unlocked()
         return {
-            "removed_count": len(removed),
-            "removed_task_ids": removed,
+            "removed_count": len(removed_tasks),
+            "removed_task_ids": [task["id"] for task in removed_tasks],
+            "removed_tasks": removed_tasks,
             "tasks": snapshot,
+        }
+
+    async def preview_terminal_tasks(self) -> dict[str, Any]:
+        async with self._lock:
+            terminal_tasks = [
+                _cleanup_task_summary(task)
+                for task in self._tasks
+                if task.status in TERMINAL_TASK_STATUSES
+            ]
+        return {
+            "removed_count": len(terminal_tasks),
+            "removed_task_ids": [task["id"] for task in terminal_tasks],
+            "removed_tasks": terminal_tasks,
         }
 
     async def snapshot(self) -> dict[str, Any]:
