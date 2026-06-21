@@ -550,6 +550,83 @@ tbody tr:last-child td {
   border-color: #edd2a7;
 }
 
+.config-diff-details {
+  min-width: 180px;
+  max-width: min(520px, 78vw);
+  overflow-x: auto;
+}
+
+.config-diff-details summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid #edd2a7;
+  border-radius: 999px;
+  background: #fff4df;
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.config-diff-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.config-diff-details summary::after {
+  content: "+";
+  margin-left: 6px;
+  font-weight: 900;
+}
+
+.config-diff-details[open] summary::after {
+  content: "-";
+}
+
+.config-diff-grid {
+  display: grid;
+  grid-template-columns: minmax(86px, 0.8fr) minmax(110px, 1fr) minmax(110px, 1fr);
+  gap: 0;
+  min-width: 340px;
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.config-diff-head,
+.config-diff-row > span {
+  min-width: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-diff-head {
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.config-diff-row {
+  display: contents;
+}
+
+.config-diff-row:last-child > span {
+  border-bottom: 0;
+}
+
 .config-neutral {
   color: var(--muted);
   background: var(--surface-2);

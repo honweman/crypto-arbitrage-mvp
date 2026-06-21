@@ -179,6 +179,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Stop Gate (Buy >= / Sell <=)", HTML)
         self.assertIn("Cleanup preview", APP_JS)
         self.assertIn("Same as default", APP_JS)
+        self.assertIn("config-diff-details", APP_JS)
+        self.assertIn("config-diff-grid", APP_JS)
         self.assertIn("start ask <=", APP_JS)
         self.assertIn("start bid >=", APP_JS)
         self.assertNotIn("Slow Execution", HTML)

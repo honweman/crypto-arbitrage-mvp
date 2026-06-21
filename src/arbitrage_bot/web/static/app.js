@@ -2137,16 +2137,35 @@ function balanceStatusClass(status) {
       if (!diffs.length) {
         return {
           className: "risk-ok",
-          text: "Same as default",
+          html: "Same as default",
           title: "Current running task config matches the default form config",
         };
       }
       const title = diffs
         .map((diff) => `${diff.label}: task ${diff.task}, default ${diff.default}`)
         .join("\n");
+      const rows = diffs
+        .map((diff) => `
+          <div class="config-diff-row">
+            <span>${escapeHtml(diff.label)}</span>
+            <span title="Running task">${escapeHtml(diff.task)}</span>
+            <span title="Default form">${escapeHtml(diff.default)}</span>
+          </div>
+        `)
+        .join("");
       return {
         className: "missing",
-        text: `${diffs.length} diff${diffs.length === 1 ? "" : "s"}`,
+        html: `
+          <details class="config-diff-details">
+            <summary>${diffs.length} diff${diffs.length === 1 ? "" : "s"}</summary>
+            <div class="config-diff-grid">
+              <div class="config-diff-head">Field</div>
+              <div class="config-diff-head">Task</div>
+              <div class="config-diff-head">Default</div>
+              ${rows}
+            </div>
+          </details>
+        `,
         title,
       };
     }
@@ -2184,7 +2203,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
           <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
-          <td class="${configCell.className}" title="${escapeHtml(configCell.title)}">${escapeHtml(configCell.text)}</td>
+          <td class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
           <td>${escapeHtml(config.exchange || "--")}</td>
           <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
           <td class="num">${filledText}</td>
