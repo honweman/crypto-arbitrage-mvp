@@ -119,6 +119,38 @@ def _compact_slow_execution_payload(
             ),
         )
 
+    def compact_task_plan(plan: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(plan, dict):
+            return None
+        return _copy_payload_keys(
+            plan,
+            (
+                "status",
+                "best_bid",
+                "best_ask",
+                "mid_price",
+                "trigger_price",
+                "order",
+                "observed_at",
+            ),
+        )
+
+    def compact_task_execution(
+        execution: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(execution, dict):
+            return None
+        return _copy_payload_keys(
+            execution,
+            (
+                "placed_count",
+                "canceled_count",
+                "placed_order_ids",
+                "canceled_order_ids",
+                "errors",
+            ),
+        )
+
     def compact_task(task: dict[str, Any]) -> dict[str, Any]:
         compact = _copy_payload_keys(
             task,
@@ -135,6 +167,9 @@ def _compact_slow_execution_payload(
                 "progress_mode",
                 "progress_pct",
                 "open_order_count",
+                "placed_count",
+                "canceled_count",
+                "start_price_triggered",
                 "last_cycle_at",
                 "next_run_at",
                 "last_fill_at",
@@ -145,6 +180,8 @@ def _compact_slow_execution_payload(
             ),
         )
         compact["config"] = compact_task_config(task.get("config"))
+        compact["last_plan"] = compact_task_plan(task.get("last_plan"))
+        compact["last_execution"] = compact_task_execution(task.get("last_execution"))
         return compact
 
     def compact_tasks(task_payload: dict[str, Any] | None) -> dict[str, Any]:

@@ -2170,6 +2170,30 @@ function balanceStatusClass(status) {
       };
     }
 
+    function autoTaskLastOrderText(task, config) {
+      const order = task.last_plan?.order || null;
+      if (!order) return task.last_status || "--";
+      const side = String(order.side || config.side || "").toUpperCase();
+      const amount = formatSymbolQuantity(order.amount, config.symbol, "base");
+      const price = order.price == null ? "--" : fmt.format(order.price);
+      return `${side} ${amount} @ ${price}`;
+    }
+
+    function autoTaskDetailTitle(task) {
+      const execution = task.last_execution || {};
+      const orderIds = execution.placed_order_ids || [];
+      const lastOrderId = orderIds.length ? orderIds[orderIds.length - 1] : "";
+      const parts = [
+        `last status: ${task.last_status || task.status || "--"}`,
+        `placed: ${task.placed_count || 0}`,
+        `canceled: ${task.canceled_count || 0}`,
+        `start: ${task.start_price_triggered ? "triggered" : "waiting"}`,
+      ];
+      if (lastOrderId) parts.push(`last order: ${lastOrderId}`);
+      if (task.last_error) parts.push(`error: ${task.last_error}`);
+      return parts.join(" · ");
+    }
+
     function renderSlowExecutionTasks(taskPayload, defaultConfig) {
       const body = document.getElementById("slow-tasks");
       body.innerHTML = "";
@@ -2194,23 +2218,25 @@ function balanceStatusClass(status) {
         const totalValue = progressMode === "quote" ? config.total_quote : config.total_base;
         const remainingValue = progressMode === "quote" ? task.remaining_quote : task.remaining_base;
         const filledText = unlimited
-          ? `${progressLabel} ${formatSymbolQuantity(task.filled_base, config.symbol, "base")} / Unlimited`
+          ? `${progressLabel} ${formatSymbolQuantity(task.filled_base, config.symbol, "base")} · ${formatSymbolQuantity(task.filled_quote, config.symbol, "quote")} / Unlimited`
           : `${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}`;
         const remainingText = unlimited ? "Unlimited" : formatSymbolQuantity(remainingValue, config.symbol, progressMode);
         const progressPct = unlimited ? "--" : `${(task.progress_pct || 0).toFixed(2)}%`;
         const configCell = autoTaskConfigCell(task, defaultConfig);
+        const detailTitle = autoTaskDetailTitle(task);
+        const lastText = autoTaskLastOrderText(task, config);
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
-          <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
+          <td class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(status)}</td>
           <td class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
           <td>${escapeHtml(config.exchange || "--")}</td>
           <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
           <td class="num">${filledText}</td>
           <td class="num">${remainingText}</td>
           <td class="num">${progressPct}</td>
-          <td class="num">${task.open_order_count || 0}</td>
-          <td>${formatAge(task.last_cycle_at)}</td>
+          <td class="num" title="${escapeHtml(detailTitle)}">${task.open_order_count || 0}</td>
+          <td title="${escapeHtml(lastText)}"><div>${formatAge(task.last_cycle_at)}</div><div class="subtle">${escapeHtml(lastText)}</div></td>
           <td>${formatDue(task.next_run_at)}</td>
           <td class="strategy-action"></td>
         `;

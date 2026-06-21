@@ -33,6 +33,7 @@ class FakeTaskManager:
         self.ask_price = 0.00016
         self.open_order_ids: list[str] = []
         self.closed_orders: list[dict[str, object]] = []
+        self.closed_order_limits: list[int] = []
         self.trades: list[dict[str, object]] = []
 
     async def fetch_order_book(
@@ -67,9 +68,11 @@ class FakeTaskManager:
     async def fetch_closed_orders(
         self,
         *_: object,
+        limit: int = 100,
         **__: object,
     ) -> list[dict[str, object]]:
-        return self.closed_orders
+        self.closed_order_limits.append(limit)
+        return self.closed_orders[:limit]
 
     async def fetch_my_trades(
         self,
@@ -434,6 +437,99 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("new-trade", first_refresh["known_trade_ids"])
         self.assertAlmostEqual(second_refresh["filled_base"], 102.0)
         self.assertAlmostEqual(second_refresh["filled_quote"], 13.0)
+
+    async def test_refresh_accumulates_closed_order_fills_without_trade_history(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg(order_ttl_seconds=2.0))
+            manager = FakeTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(order_ttl_seconds=2.0),
+            )
+
+            first = await service.run_due_tasks(cfg, manager)
+            self.assertEqual(first["tasks"][0]["open_order_ids"], ["order-1"])
+
+            manager.open_order_ids = []
+            manager.closed_orders = [
+                {
+                    "id": "order-1",
+                    "status": "closed",
+                    "filled": 2.0,
+                    "remaining": 0.0,
+                    "cost": 0.0003,
+                    "timestamp": 1_000_000,
+                }
+            ]
+            service._tasks[0].order_created_at["order-1"] = time.time() - 20.0
+            service._tasks[0].next_run_at = 0.0
+            second = await service.run_due_tasks(cfg, manager)
+            second_task = second["tasks"][0]
+
+        self.assertAlmostEqual(second_task["filled_base"], 2.0)
+        self.assertAlmostEqual(second_task["filled_quote"], 0.0003)
+        self.assertIn("order-1", second_task["known_filled_order_ids"])
+
+    async def test_refresh_bootstraps_closed_order_ids_without_double_counting(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg(total_base=0.0, total_quote=20.0))
+            manager = FakeTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(total_base=0.0, total_quote=20.0),
+            )
+            task = service._tasks[0]
+            task.placed_order_ids = ["order-1", "order-2"]
+            task.filled_base = 10.0
+            task.filled_quote = 1.0
+            manager.closed_orders = [
+                {
+                    "id": "order-1",
+                    "status": "closed",
+                    "filled": 10.0,
+                    "remaining": 0.0,
+                    "cost": 1.0,
+                    "timestamp": 1_000_000,
+                },
+                {
+                    "id": "order-2",
+                    "status": "closed",
+                    "filled": 2.0,
+                    "remaining": 0.0,
+                    "cost": 0.3,
+                    "timestamp": 2_000_000,
+                },
+            ]
+
+            await service._refresh_task_activity(task, cfg, manager)
+            refreshed = task.to_dict()
+
+        self.assertAlmostEqual(refreshed["filled_base"], 12.0)
+        self.assertAlmostEqual(refreshed["filled_quote"], 1.3)
+        self.assertEqual(
+            refreshed["known_filled_order_ids"],
+            ["order-1", "order-2"],
+        )
+
+    async def test_refresh_requests_history_for_tracked_order_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg())
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp)
+            service._tasks[0].placed_order_ids = [
+                f"order-{index}" for index in range(250)
+            ]
+
+            await service._refresh_task_activity(service._tasks[0], cfg, manager)
+
+        self.assertEqual(manager.closed_order_limits[-1], 250)
 
     def test_validate_task_config_requires_one_slice_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "configure exactly one"):
