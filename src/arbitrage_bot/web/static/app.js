@@ -1495,9 +1495,97 @@ function balanceStatusClass(status) {
         .filter(Boolean);
     }
 
+    function strategyUniverseAccounts(kind = "all") {
+      const universe = lastState?.config?.strategy_universe || {};
+      return universe?.[kind]?.accounts || [];
+    }
+
+    function appendOption(select, value, label, title = "") {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      if (title) option.title = title;
+      select.appendChild(option);
+    }
+
+    function setSelectOptions(selectId, rows, selectedValue, placeholder) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const normalizedRows = rows.filter((row) => row && row.value);
+      const signature = JSON.stringify({
+        rows: normalizedRows,
+        selectedValue,
+        placeholder,
+      });
+      if (select.dataset.signature === signature) return;
+      select.dataset.signature = signature;
+      select.innerHTML = "";
+      appendOption(select, "", placeholder);
+      for (const row of normalizedRows) {
+        appendOption(select, row.value, row.label || row.value, row.title || "");
+      }
+      if (selectedValue && !normalizedRows.some((row) => row.value === selectedValue)) {
+        appendOption(select, selectedValue, selectedValue, "Current saved value");
+      }
+      select.value = selectedValue || "";
+    }
+
+    function renderStrategyInstanceAccountOptions(selectedAccountId) {
+      const accounts = lastState?.strategy_center?.user_api_accounts || [];
+      const rows = accounts.map((account) => ({
+        value: account.id,
+        label: `${account.label || account.id} · ${account.exchange || "--"}`,
+        title: `${account.owner_email || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
+      }));
+      setSelectOptions(
+        "strategy-instance-account",
+        rows,
+        selectedAccountId || "",
+        "No API account"
+      );
+    }
+
+    function renderStrategyInstanceMarketOptions(selectedExchange, selectedSymbol) {
+      const accounts = strategyUniverseAccounts("all");
+      const exchangeRows = accounts.map((account) => ({
+        value: account.key,
+        label: `${account.label || account.key} (${account.market_type || "spot"})`,
+        title: `${account.id || account.key} · ${accountSymbols(account).join(", ") || "no symbols"}`,
+      }));
+      setSelectOptions(
+        "strategy-instance-exchange",
+        exchangeRows,
+        selectedExchange || "",
+        "Select exchange"
+      );
+
+      const account = accountForKey(accounts, selectedExchange);
+      const symbolRows = accountSymbols(account).map((symbol) => ({
+        value: symbol,
+        label: symbol,
+      }));
+      const targetSymbol = selectedSymbol || symbolRows[0]?.value || "";
+      setSelectOptions(
+        "strategy-instance-symbol",
+        symbolRows,
+        targetSymbol,
+        "Select symbol"
+      );
+    }
+
+    function syncStrategyInstanceSymbols() {
+      const exchange = document.getElementById("strategy-instance-exchange").value;
+      renderStrategyInstanceMarketOptions(exchange, "");
+      const symbol = document.getElementById("strategy-instance-symbol").value;
+      const asset = document.getElementById("strategy-instance-asset");
+      if (symbol && !asset.value.trim()) asset.value = baseCurrency(symbol);
+    }
+
     function renderStrategyForm(strategy) {
       if (strategyCenterFormDirty || strategyCenterFormBusy) return;
       const authEmail = lastState?.auth?.email || "";
+      renderStrategyInstanceAccountOptions(strategy?.account_id || "");
+      renderStrategyInstanceMarketOptions(strategy?.exchange || "", strategy?.symbol || "");
       setFieldValue("strategy-instance-id", strategy?.id || "");
       setFieldValue("strategy-instance-name", strategy?.name || "");
       setFieldValue("strategy-instance-type", strategy?.strategy_type || "market_maker");
@@ -2562,20 +2650,33 @@ function balanceStatusClass(status) {
       }
     }
 
-    function selectedMarketMakerAccount() {
-      return document.querySelector('input[name="mm-account"]:checked')?.value || "";
+    function accountSymbols(account) {
+      const symbols = Array.isArray(account?.symbols) ? account.symbols : [];
+      const rows = [...symbols];
+      if (account?.symbol && !rows.includes(account.symbol)) rows.unshift(account.symbol);
+      return rows.filter(Boolean);
     }
 
-    function selectedMarketMakerSymbol() {
-      return document.querySelector('input[name="mm-account"]:checked')?.dataset.symbol || "";
+    function accountSelectorValue(inputName) {
+      return document.querySelector(`[data-account-selector="${inputName}"]`)?.value || "";
     }
 
-    function renderMarketMakerAccounts(accounts, selectedExchange) {
-      const body = document.getElementById("mm-accounts");
+    function symbolSelectorValue(inputName) {
+      return document.querySelector(`[data-symbol-selector="${inputName}"]`)?.value || "";
+    }
+
+    function accountForKey(accounts, key) {
+      const list = Array.isArray(accounts) ? accounts : [];
+      return list.find((account) => account.key === key) || null;
+    }
+
+    function renderAccountSymbolSelectors(containerId, inputName, accounts, selectedExchange, selectedSymbol, onDirty) {
+      const body = document.getElementById(containerId);
       const list = Array.isArray(accounts) ? accounts : [];
       const signature = JSON.stringify({
         accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
         selectedExchange,
+        selectedSymbol,
       });
       if (body.dataset.signature === signature) return;
       body.dataset.signature = signature;
@@ -2588,40 +2689,83 @@ function balanceStatusClass(status) {
         return;
       }
 
+      const wrapper = document.createElement("div");
+      wrapper.className = "account-selector";
+      const accountSelect = document.createElement("select");
+      accountSelect.dataset.accountSelector = inputName;
+      accountSelect.className = "account-select";
+      accountSelect.title = "Exchange account";
+      const accountPlaceholder = document.createElement("option");
+      accountPlaceholder.value = "";
+      accountPlaceholder.textContent = "Select account";
+      accountSelect.appendChild(accountPlaceholder);
       for (const account of list) {
-        const label = document.createElement("label");
-        label.className = "account-option";
-        const symbol = account.symbol || (account.symbols || [])[0] || "";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = "mm-account";
-        checkbox.value = account.key;
-        checkbox.dataset.symbol = symbol;
-        checkbox.checked = account.key === selectedExchange;
-        checkbox.addEventListener("change", (event) => {
-          if (event.target.checked) {
-            document.querySelectorAll('input[name="mm-account"]').forEach((item) => {
-              if (item !== event.target) item.checked = false;
-            });
-          } else if (!selectedMarketMakerAccount()) {
-            event.target.checked = true;
-          }
-          mmFormDirty = true;
-        });
-        const textNode = document.createElement("span");
-        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
-        label.appendChild(checkbox);
-        label.appendChild(textNode);
-        body.appendChild(label);
+        const option = document.createElement("option");
+        option.value = account.key;
+        option.textContent = `${account.label || account.key} (${account.market_type || "spot"})`;
+        option.title = `${account.id || account.key} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
+        accountSelect.appendChild(option);
       }
+      if (selectedExchange && list.some((account) => account.key === selectedExchange)) {
+        accountSelect.value = selectedExchange;
+      }
+
+      const symbolSelect = document.createElement("select");
+      symbolSelect.dataset.symbolSelector = inputName;
+      symbolSelect.className = "account-select";
+      symbolSelect.title = "Trading pair";
+
+      const fillSymbols = (preferredSymbol = "") => {
+        const account = accountForKey(list, accountSelect.value);
+        const symbols = accountSymbols(account);
+        symbolSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = symbols.length ? "Select symbol" : "No symbols";
+        symbolSelect.appendChild(placeholder);
+        for (const symbol of symbols) {
+          const option = document.createElement("option");
+          option.value = symbol;
+          option.textContent = symbol;
+          symbolSelect.appendChild(option);
+        }
+        if (preferredSymbol && symbols.includes(preferredSymbol)) {
+          symbolSelect.value = preferredSymbol;
+        } else if (symbols.length) {
+          symbolSelect.value = symbols[0];
+        }
+      };
+
+      accountSelect.addEventListener("change", () => {
+        fillSymbols("");
+        onDirty();
+      });
+      symbolSelect.addEventListener("change", onDirty);
+      fillSymbols(selectedSymbol || "");
+      wrapper.appendChild(accountSelect);
+      wrapper.appendChild(symbolSelect);
+      body.appendChild(wrapper);
+    }
+
+    function selectedMarketMakerAccount() {
+      return accountSelectorValue("mm-account");
+    }
+
+    function selectedMarketMakerSymbol() {
+      return symbolSelectorValue("mm-account");
+    }
+
+    function renderMarketMakerAccounts(accounts, selectedExchange, selectedSymbol) {
+      renderAccountSymbolSelectors("mm-accounts", "mm-account", accounts, selectedExchange, selectedSymbol, () => {
+        mmFormDirty = true;
+      });
     }
 
     function renderMarketMakerConfig(config, accounts) {
       if (!config || mmFormDirty || mmFormBusy) return;
       document.getElementById("mm-enabled").checked = Boolean(config.enabled);
       document.getElementById("mm-live-enabled").checked = Boolean(config.live_enabled);
-      renderMarketMakerAccounts(config.accounts || accounts, config.exchange || "");
+      renderMarketMakerAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       setNumericField("mm-levels", config.levels || 1);
       setNumericField("mm-band", config.price_band_pct || 0);
       setNumericField("mm-quote", config.quote_per_level || 0);
@@ -2684,64 +2828,23 @@ function balanceStatusClass(status) {
     }
 
     function selectedSlowAccount() {
-      return document.querySelector('input[name="slow-account"]:checked')?.value || "";
+      return accountSelectorValue("slow-account");
     }
 
     function selectedSlowSymbol() {
-      return document.querySelector('input[name="slow-account"]:checked')?.dataset.symbol || "";
+      return symbolSelectorValue("slow-account");
     }
 
-    function renderSlowExecutionAccounts(accounts, selectedExchange) {
-      const body = document.getElementById("slow-accounts");
-      const list = Array.isArray(accounts) ? accounts : [];
-      const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
-        selectedExchange,
+    function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
+      renderAccountSymbolSelectors("slow-accounts", "slow-account", accounts, selectedExchange, selectedSymbol, () => {
+        slowFormDirty = true;
       });
-      if (body.dataset.signature === signature) return;
-      body.dataset.signature = signature;
-      body.innerHTML = "";
-      if (list.length === 0) {
-        const empty = document.createElement("span");
-        empty.className = "subtle";
-        empty.textContent = "No accounts";
-        body.appendChild(empty);
-        return;
-      }
-
-      for (const account of list) {
-        const label = document.createElement("label");
-        label.className = "account-option";
-        const symbol = account.symbol || (account.symbols || [])[0] || "";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = "slow-account";
-        checkbox.value = account.key;
-        checkbox.dataset.symbol = symbol;
-        checkbox.checked = account.key === selectedExchange;
-        checkbox.addEventListener("change", (event) => {
-          if (event.target.checked) {
-            document.querySelectorAll('input[name="slow-account"]').forEach((item) => {
-              if (item !== event.target) item.checked = false;
-            });
-          } else if (!selectedSlowAccount()) {
-            event.target.checked = true;
-          }
-          slowFormDirty = true;
-        });
-        const textNode = document.createElement("span");
-        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
-        label.appendChild(checkbox);
-        label.appendChild(textNode);
-        body.appendChild(label);
-      }
     }
 
     function renderSlowExecutionConfig(config, accounts) {
       if (!config || slowFormDirty || slowFormBusy) return;
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
-      renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "");
+      renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
       document.getElementById("slow-price-mode").value = config.price_mode || "taker";
       setNumericField("slow-offset-bps", config.price_offset_bps || 0);
@@ -2806,65 +2909,22 @@ function balanceStatusClass(status) {
     }
 
     function selectedStrategyAccount(inputName) {
-      return document.querySelector(`input[name="${inputName}"]:checked`)?.value || "";
+      return accountSelectorValue(inputName);
     }
 
     function selectedStrategySymbol(inputName) {
-      return document.querySelector(`input[name="${inputName}"]:checked`)?.dataset.symbol || "";
+      return symbolSelectorValue(inputName);
     }
 
-    function renderStrategyAccounts(containerId, inputName, accounts, selectedExchange, onDirty) {
-      const body = document.getElementById(containerId);
-      const list = Array.isArray(accounts) ? accounts : [];
-      const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
-        selectedExchange,
-      });
-      if (body.dataset.signature === signature) return;
-      body.dataset.signature = signature;
-      body.innerHTML = "";
-      if (list.length === 0) {
-        const empty = document.createElement("span");
-        empty.className = "subtle";
-        empty.textContent = "No accounts";
-        body.appendChild(empty);
-        return;
-      }
-
-      for (const account of list) {
-        const label = document.createElement("label");
-        label.className = "account-option";
-        const symbol = account.symbol || (account.symbols || [])[0] || "";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = inputName;
-        checkbox.value = account.key;
-        checkbox.dataset.symbol = symbol;
-        checkbox.checked = account.key === selectedExchange;
-        checkbox.addEventListener("change", (event) => {
-          if (event.target.checked) {
-            document.querySelectorAll(`input[name="${inputName}"]`).forEach((item) => {
-              if (item !== event.target) item.checked = false;
-            });
-          } else if (!selectedStrategyAccount(inputName)) {
-            event.target.checked = true;
-          }
-          onDirty();
-        });
-        const textNode = document.createElement("span");
-        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
-        label.appendChild(checkbox);
-        label.appendChild(textNode);
-        body.appendChild(label);
-      }
+    function renderStrategyAccounts(containerId, inputName, accounts, selectedExchange, selectedSymbol, onDirty) {
+      renderAccountSymbolSelectors(containerId, inputName, accounts, selectedExchange, selectedSymbol, onDirty);
     }
 
     function renderSpotGridConfig(config, accounts) {
       if (!config || gridFormDirty || gridFormBusy) return;
       document.getElementById("grid-enabled").checked = Boolean(config.enabled);
       document.getElementById("grid-live-enabled").checked = Boolean(config.live_enabled);
-      renderStrategyAccounts("grid-accounts", "grid-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("grid-accounts", "grid-account", accounts, config.exchange || "", config.symbol || "", () => {
         gridFormDirty = true;
       });
       setNumericField("grid-lower", config.lower_price || 0);
@@ -2932,7 +2992,7 @@ function balanceStatusClass(status) {
       if (!config || dcaFormDirty || dcaFormBusy) return;
       document.getElementById("dca-enabled").checked = Boolean(config.enabled);
       document.getElementById("dca-live-enabled").checked = Boolean(config.live_enabled);
-      renderStrategyAccounts("dca-accounts", "dca-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("dca-accounts", "dca-account", accounts, config.exchange || "", config.symbol || "", () => {
         dcaFormDirty = true;
       });
       document.getElementById("dca-side").value = config.side || "buy";
@@ -2998,7 +3058,7 @@ function balanceStatusClass(status) {
       if (!config || execFormDirty || execFormBusy) return;
       document.getElementById("exec-enabled").checked = Boolean(config.enabled);
       document.getElementById("exec-live-enabled").checked = Boolean(config.live_enabled);
-      renderStrategyAccounts("exec-accounts", "exec-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("exec-accounts", "exec-account", accounts, config.exchange || "", config.symbol || "", () => {
         execFormDirty = true;
       });
       document.getElementById("exec-side").value = config.side || "buy";
@@ -3069,7 +3129,7 @@ function balanceStatusClass(status) {
     function renderBacktestConfig(config, accounts) {
       if (!config || backtestFormDirty || backtestFormBusy) return;
       document.getElementById("backtest-enabled").checked = Boolean(config.enabled);
-      renderStrategyAccounts("backtest-accounts", "backtest-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("backtest-accounts", "backtest-account", accounts, config.exchange || "", config.symbol || "", () => {
         backtestFormDirty = true;
       });
       document.getElementById("backtest-strategy").value = config.strategy || "spot_grid";
@@ -3473,29 +3533,56 @@ function balanceStatusClass(status) {
     document.getElementById("mm-form").addEventListener("input", () => {
       mmFormDirty = true;
     });
+    document.getElementById("mm-form").addEventListener("change", () => {
+      mmFormDirty = true;
+    });
     document.getElementById("mm-form").addEventListener("submit", applyMarketMakerConfig);
     document.getElementById("slow-form").addEventListener("input", () => {
+      slowFormDirty = true;
+    });
+    document.getElementById("slow-form").addEventListener("change", () => {
       slowFormDirty = true;
     });
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     document.getElementById("grid-form").addEventListener("input", () => {
       gridFormDirty = true;
     });
+    document.getElementById("grid-form").addEventListener("change", () => {
+      gridFormDirty = true;
+    });
     document.getElementById("grid-form").addEventListener("submit", applySpotGridConfig);
     document.getElementById("dca-form").addEventListener("input", () => {
+      dcaFormDirty = true;
+    });
+    document.getElementById("dca-form").addEventListener("change", () => {
       dcaFormDirty = true;
     });
     document.getElementById("dca-form").addEventListener("submit", applyDcaConfig);
     document.getElementById("exec-form").addEventListener("input", () => {
       execFormDirty = true;
     });
+    document.getElementById("exec-form").addEventListener("change", () => {
+      execFormDirty = true;
+    });
     document.getElementById("exec-form").addEventListener("submit", applyExecutionAlgoConfig);
     document.getElementById("backtest-form").addEventListener("input", () => {
+      backtestFormDirty = true;
+    });
+    document.getElementById("backtest-form").addEventListener("change", () => {
       backtestFormDirty = true;
     });
     document.getElementById("backtest-form").addEventListener("submit", applyBacktestConfig);
     document.getElementById("strategy-center-form").addEventListener("input", () => {
       strategyCenterFormDirty = true;
+    });
+    document.getElementById("strategy-center-form").addEventListener("change", () => {
+      strategyCenterFormDirty = true;
+    });
+    document.getElementById("strategy-instance-exchange").addEventListener("change", syncStrategyInstanceSymbols);
+    document.getElementById("strategy-instance-symbol").addEventListener("change", () => {
+      const asset = document.getElementById("strategy-instance-asset");
+      const symbol = document.getElementById("strategy-instance-symbol").value;
+      if (symbol && !asset.value.trim()) asset.value = baseCurrency(symbol);
     });
     document.getElementById("strategy-center-form").addEventListener("submit", applyStrategyCenterConfig);
     document.getElementById("api-account-form").addEventListener("input", () => {

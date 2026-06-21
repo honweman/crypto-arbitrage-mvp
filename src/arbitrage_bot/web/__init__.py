@@ -153,6 +153,7 @@ from ..web_config import (
     slow_execution_config_to_dict,
     spot_grid_config_to_dict,
     spot_markets_to_list,
+    strategy_universe_to_dict,
 )
 
 
@@ -2474,6 +2475,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "derivative_exchanges": exchange_configs_to_list(
                 cfg.derivative_exchanges
             ),
+            "strategy_universe": strategy_universe_to_dict(cfg),
         },
         "scan": {
             "count": 0,

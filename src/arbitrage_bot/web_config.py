@@ -93,6 +93,85 @@ def _execution_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
+def _derivative_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for pair in cfg.cash_and_carry_pairs:
+        for exchange in cfg.derivative_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
+    for combo in cfg.option_combos:
+        symbols.setdefault(combo.option_exchange, set()).update(
+            [combo.call_symbol, combo.put_symbol]
+        )
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _merge_symbols_by_exchange(
+    *items: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for item in items:
+        for exchange, rows in item.items():
+            symbols.setdefault(exchange, set()).update(rows)
+    return {exchange: sorted(rows) for exchange, rows in symbols.items()}
+
+
+def _symbol_asset(symbol: str) -> str:
+    return str(symbol or "").split("/", 1)[0].split(":", 1)[0].upper()
+
+
+def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
+    spot_symbols = _spot_symbols_by_exchange(cfg)
+    grid_symbols = _grid_symbols_by_exchange(cfg)
+    execution_symbols = _execution_symbols_by_exchange(cfg)
+    market_maker_symbols = _market_maker_symbols_by_exchange(cfg)
+    derivative_symbols = _derivative_symbols_by_exchange(cfg)
+    all_symbols = _merge_symbols_by_exchange(
+        spot_symbols,
+        grid_symbols,
+        execution_symbols,
+        market_maker_symbols,
+        derivative_symbols,
+    )
+    all_exchanges = [*cfg.spot_exchanges, *cfg.derivative_exchanges]
+    assets = {
+        market.asset.upper()
+        for market in cfg.spot_markets
+        if market.asset
+    }
+    for symbols in all_symbols.values():
+        assets.update(_symbol_asset(symbol) for symbol in symbols if symbol)
+    return {
+        "assets": sorted(item for item in assets if item),
+        "spot": {
+            "accounts": slow_execution_accounts(cfg.spot_exchanges, spot_symbols),
+        },
+        "grid": {
+            "accounts": slow_execution_accounts(cfg.spot_exchanges, grid_symbols),
+        },
+        "execution": {
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                execution_symbols,
+            ),
+        },
+        "market_maker": {
+            "accounts": slow_execution_accounts(
+                all_exchanges,
+                market_maker_symbols,
+            ),
+        },
+        "derivative": {
+            "accounts": slow_execution_accounts(
+                cfg.derivative_exchanges,
+                derivative_symbols,
+            ),
+        },
+        "all": {
+            "accounts": slow_execution_accounts(all_exchanges, all_symbols),
+        },
+    }
+
+
 def slow_execution_accounts(
     exchanges: Iterable[ExchangeConfig],
     symbols_by_exchange: dict[str, list[str]] | None = None,

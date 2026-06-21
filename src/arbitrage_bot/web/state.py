@@ -41,6 +41,7 @@ from ..web_config import (
     slow_execution_accounts,
     spot_markets_to_list,
     spot_grid_config_to_dict,
+    strategy_universe_to_dict,
 )
 from . import (
     STRATEGY_IDS,
@@ -551,6 +552,9 @@ class MonitorState:
                 self._payload["config"]["spot_exchanges"] = exchange_configs_to_list(
                     runtime_cfg.spot_exchanges
                 )
+                self._payload["config"]["strategy_universe"] = (
+                    strategy_universe_to_dict(runtime_cfg)
+                )
             if "market_maker" in self._payload:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
@@ -619,6 +623,9 @@ class MonitorState:
                 )
                 self._payload["config"]["derivative_exchanges"] = (
                     exchange_configs_to_list(runtime_cfg.derivative_exchanges)
+                )
+                self._payload["config"]["strategy_universe"] = (
+                    strategy_universe_to_dict(runtime_cfg)
                 )
             if "market_maker" in self._payload:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
@@ -922,6 +929,7 @@ class MonitorState:
                     "derivative_exchanges": exchange_configs_to_list(
                         cfg.derivative_exchanges
                     ),
+                    "strategy_universe": strategy_universe_to_dict(cfg),
                 },
                 "scan": {
                     "count": scan_count,
@@ -995,6 +1003,7 @@ class MonitorState:
                         "derivative_exchanges": exchange_configs_to_list(
                             cfg.derivative_exchanges
                         ),
+                        "strategy_universe": strategy_universe_to_dict(cfg),
                     },
                     "scan": {
                         "count": scan_count,

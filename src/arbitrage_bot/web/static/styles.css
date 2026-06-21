@@ -733,6 +733,25 @@ tbody tr:last-child td {
   background: var(--surface-3);
 }
 
+.account-selector {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  width: 100%;
+}
+
+.account-select {
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .mini-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -897,6 +916,7 @@ tbody tr:last-child td {
     grid-column: 1 / -1;
   }
   .control-panel { grid-template-columns: 1fr; }
+  .account-selector { grid-template-columns: 1fr; }
   .mini-grid { grid-template-columns: 1fr; }
   .table-wrap {
     margin-right: -14px;

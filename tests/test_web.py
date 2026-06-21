@@ -103,6 +103,7 @@ from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore, totp_code
+from arbitrage_bot.web_config import strategy_universe_to_dict
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 
 
@@ -213,6 +214,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="api-account-form"', HTML)
         self.assertIn('id="funding-arb-form"', HTML)
         self.assertIn('id="signal-bot-form"', HTML)
+        self.assertIn('id="strategy-instance-exchange"', HTML)
+        self.assertIn('id="strategy-instance-symbol"', HTML)
+        self.assertIn("renderStrategyInstanceMarketOptions", APP_JS)
 
     def test_page_has_status_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)
@@ -317,6 +321,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="grid-spacing"', HTML)
         self.assertIn('id="grid-auto-rebuild"', HTML)
         self.assertIn('id="grid-orders"', HTML)
+        self.assertIn("data-account-selector", APP_JS)
+        self.assertIn("data-symbol-selector", APP_JS)
         self.assertIn("DCA Bot", HTML)
         self.assertIn("/api/dca", HTML)
         self.assertIn('id="dca-form"', HTML)
@@ -1013,6 +1019,54 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(accounts[0]["label"], "bybit:spot")
         self.assertEqual(accounts[0]["symbol"], "")
         self.assertEqual(accounts[0]["symbols"], [])
+
+    def test_strategy_universe_lists_selectable_markets(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+                ExchangeConfig(id="binance", label="binance-spot"),
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                )
+            ],
+            spot_markets=[
+                SpotMarketConfig(
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    asset="ACS",
+                    quote_currency="USDC",
+                ),
+                SpotMarketConfig(
+                    exchange="binance-spot",
+                    symbol="BTC/USDT",
+                    asset="BTC",
+                    quote_currency="USDT",
+                ),
+            ],
+            cash_and_carry_pairs=[
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            spot_grid=SpotGridConfig(
+                exchange="binance-spot",
+                symbol="ETH/USDT",
+            ),
+        )
+
+        universe = strategy_universe_to_dict(cfg)
+        grid_accounts = {row["key"]: row for row in universe["grid"]["accounts"]}
+        all_accounts = {row["key"]: row for row in universe["all"]["accounts"]}
+
+        self.assertIn("ACS", universe["assets"])
+        self.assertIn("BTC", universe["assets"])
+        self.assertIn("ETH/USDT", grid_accounts["binance-spot"]["symbols"])
+        self.assertIn("BTC/USDT:USDT", all_accounts["binance-swap"]["symbols"])
 
     def test_build_spot_grid_payload_returns_plan_and_safety(self) -> None:
         cfg = make_config(
