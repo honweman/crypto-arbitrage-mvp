@@ -3895,5 +3895,157 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["runtime_store"]["loaded"])
         self.assertIsNone(payload["runtime_store"]["error"])
 
+    async def test_admin_users_endpoint_rejects_non_admin_callers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            store.create_user(email="admin@example.com", password="strong-password-1")
+            member = store.create_user(
+                email="member@example.com",
+                password="strong-password-2",
+                allowed_assets=["ACS"],
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": member.email,
+                        "password": "strong-password-2",
+                        "totp": totp_code(member.totp_secret),
+                    },
+                )
+                response = await client.post("/api/admin/users", json={"action": "list"})
+                payload = await response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 403, payload)
+
+    async def test_admin_users_endpoint_create_update_delete_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": admin.email,
+                        "password": "strong-password-1",
+                        "totp": totp_code(admin.totp_secret),
+                    },
+                )
+
+                create_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "create_user",
+                        "email": "trader@example.com",
+                        "password": "another-strong-pw",
+                        "allowed_assets": ["ACS", "BTC"],
+                        "preferred_asset": "ACS",
+                    },
+                )
+                create_payload = await create_response.json()
+
+                # Partial update: change only the role; assets must survive untouched.
+                role_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "update_user",
+                        "email": "trader@example.com",
+                        "role": "admin",
+                    },
+                )
+                role_payload = await role_response.json()
+
+                # Partial update: change only the preferred asset; the allowed list
+                # must be preserved rather than wiped by the omitted field.
+                asset_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "update_user",
+                        "email": "trader@example.com",
+                        "preferred_asset": "BTC",
+                    },
+                )
+                asset_payload = await asset_response.json()
+
+                no_op_response = await client.post(
+                    "/api/admin/users",
+                    json={"action": "update_user", "email": "trader@example.com"},
+                )
+                no_op_payload = await no_op_response.json()
+
+                delete_response = await client.post(
+                    "/api/admin/users",
+                    json={"action": "delete_user", "email": "trader@example.com"},
+                )
+                delete_payload = await delete_response.json()
+
+                list_response = await client.post(
+                    "/api/admin/users", json={"action": "list"}
+                )
+                list_payload = await list_response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(create_response.status, 200, create_payload)
+        created_row = next(
+            row for row in create_payload["users"] if row["email"] == "trader@example.com"
+        )
+        self.assertEqual(created_row["allowed_assets"], ["ACS", "BTC"])
+        self.assertEqual(created_row["preferred_asset"], "ACS")
+
+        self.assertEqual(role_response.status, 200, role_payload)
+        role_row = next(
+            row for row in role_payload["users"] if row["email"] == "trader@example.com"
+        )
+        self.assertEqual(role_row["role"], "admin")
+        self.assertEqual(role_row["allowed_assets"], ["ACS", "BTC"])
+        self.assertEqual(role_row["preferred_asset"], "ACS")
+
+        self.assertEqual(asset_response.status, 200, asset_payload)
+        asset_row = next(
+            row for row in asset_payload["users"] if row["email"] == "trader@example.com"
+        )
+        self.assertEqual(asset_row["allowed_assets"], ["ACS", "BTC"])
+        self.assertEqual(asset_row["preferred_asset"], "BTC")
+
+        self.assertEqual(no_op_response.status, 400, no_op_payload)
+
+        self.assertEqual(delete_response.status, 200, delete_payload)
+        self.assertEqual(list_response.status, 200, list_payload)
+        self.assertNotIn(
+            "trader@example.com",
+            [row["email"] for row in list_payload["users"]],
+        )
+
 if __name__ == "__main__":
     unittest.main()

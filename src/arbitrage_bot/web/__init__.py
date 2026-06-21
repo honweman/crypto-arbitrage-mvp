@@ -4462,16 +4462,21 @@ async def api_state(request: web.Request) -> web.Response:
     view = request.query.get("view")
     payload = await state.get(view=view)
     runtime_cfg = await state.runtime_config(cfg)
+    requesting_user = _request_user(request)
     payload["strategy_center"] = build_strategy_center_payload(
         runtime_cfg,
         request.app["strategy_center_store"],
-        user=_request_user(request),
+        user=requesting_user,
     )
+    if requesting_user is not None and requesting_user.role == "admin":
+        payload["admin_users"] = [
+            _public_admin_user_dict(item) for item in _user_store(request).list_users()
+        ]
     return web.json_response(
         _filter_state_payload_for_user(
             payload,
             cfg=runtime_cfg,
-            user=_request_user(request),
+            user=requesting_user,
         )
     )
 
@@ -4511,6 +4516,121 @@ async def api_profile(request: web.Request) -> web.Response:
         {
             "ok": True,
             "profile": updated.public_dict(available_assets=_configured_assets(runtime_cfg)),
+        }
+    )
+
+
+def _public_admin_user_dict(user: WebUser) -> dict[str, Any]:
+    return {
+        "email": user.email,
+        "role": user.role,
+        "totp_enabled": user.totp_enabled,
+        "allowed_assets": user.allowed_assets,
+        "preferred_asset": user.preferred_asset,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+    }
+
+
+async def api_admin_users(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    store = _user_store(request)
+    audit_action = ""
+    audit_target = ""
+    audit_detail = ""
+    audit_payload: dict[str, Any] = {}
+    try:
+        _require_admin_user(_request_user(request))
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        action = str(payload.get("action") or "").strip().lower()
+        email = str(payload.get("email") or "").strip()
+
+        if action == "list":
+            pass
+        elif action == "create_user":
+            created = store.admin_create_user(
+                email=email,
+                password=str(payload.get("password") or ""),
+                role=str(payload.get("role") or "user"),
+                allowed_assets=payload.get("allowed_assets"),
+                preferred_asset=str(payload.get("preferred_asset") or ""),
+            )
+            audit_action = "admin_user_create"
+            audit_target = created.email
+            audit_detail = f"created user with role {created.role}"
+            audit_payload = {"email": created.email, "role": created.role}
+        elif action == "update_user":
+            if not email:
+                raise ValueError("email is required")
+            current = store.get_user(email)
+            if current is None:
+                raise ValueError("user is not registered")
+            changes: list[str] = []
+            updated = current
+            if "role" in payload:
+                updated = store.admin_set_role(email=email, role=str(payload.get("role") or ""))
+                changes.append("role")
+            if "allowed_assets" in payload or "preferred_asset" in payload:
+                allowed_assets = (
+                    payload.get("allowed_assets")
+                    if "allowed_assets" in payload
+                    else updated.allowed_assets
+                )
+                preferred_asset = str(
+                    payload.get("preferred_asset", updated.preferred_asset) or ""
+                )
+                updated = store.admin_set_allowed_assets(
+                    email=email,
+                    allowed_assets=allowed_assets,
+                    preferred_asset=preferred_asset,
+                )
+                changes.append("assets")
+            new_password = str(payload.get("new_password") or "")
+            if new_password:
+                updated = store.admin_reset_password(email=email, new_password=new_password)
+                changes.append("password")
+            if not changes:
+                raise ValueError("no changes supplied")
+            audit_action = "admin_user_update"
+            audit_target = updated.email
+            audit_detail = "updated " + ", ".join(changes)
+            audit_payload = {
+                "email": updated.email,
+                "role": updated.role,
+                "allowed_assets": updated.allowed_assets,
+                "preferred_asset": updated.preferred_asset,
+                "changed_fields": changes,
+            }
+        elif action == "delete_user":
+            if not email:
+                raise ValueError("email is required")
+            store.admin_delete_user(email=email)
+            audit_action = "admin_user_delete"
+            audit_target = email
+            audit_detail = "deleted user"
+            audit_payload = {"email": email}
+        else:
+            raise ValueError("unsupported admin users action")
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    if audit_action:
+        write_web_audit_event(
+            cfg,
+            request,
+            action=audit_action,
+            target=audit_target,
+            detail=audit_detail,
+            payload=audit_payload,
+        )
+    return web.json_response(
+        {
+            "ok": True,
+            "users": [_public_admin_user_dict(item) for item in store.list_users()],
         }
     )
 

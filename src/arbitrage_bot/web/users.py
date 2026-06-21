@@ -9,7 +9,7 @@ import re
 import secrets
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -304,4 +304,110 @@ class WebUserStore:
         users[updated.email] = updated
         self._write_users(users)
         return updated
+
+    def list_users(self) -> list[WebUser]:
+        return sorted(self._read_users().values(), key=lambda item: item.email)
+
+    def admin_create_user(
+        self,
+        *,
+        email: str,
+        password: str,
+        role: str = "user",
+        allowed_assets: list[str] | str | None = None,
+        preferred_asset: str = "",
+    ) -> WebUser:
+        normalized_role = str(role or "user").strip().lower()
+        if normalized_role not in {"admin", "user"}:
+            raise ValueError("role must be admin or user")
+        normalized_email = normalize_email(email)
+        users = self._read_users()
+        if normalized_email in users:
+            raise ValueError("email is already registered")
+        assets = normalize_assets(allowed_assets or [])
+        preferred = str(preferred_asset or "").strip().upper()
+        if preferred and assets and preferred not in assets:
+            raise ValueError("preferred asset must be in allowed assets")
+        user = WebUser(
+            email=normalized_email,
+            password_hash=hash_password(password),
+            totp_secret=generate_totp_secret(),
+            allowed_assets=assets,
+            preferred_asset=preferred or (assets[0] if len(assets) == 1 else ""),
+            role=normalized_role,
+        )
+        users[user.email] = user
+        self._write_users(users)
+        return user
+
+    def _require_not_last_admin(self, users: dict[str, WebUser], email: str) -> None:
+        admin_count = sum(1 for item in users.values() if item.role == "admin")
+        if admin_count <= 1 and users[email].role == "admin":
+            raise ValueError("cannot remove the last remaining admin")
+
+    def admin_set_role(self, *, email: str, role: str) -> WebUser:
+        normalized_role = str(role or "").strip().lower()
+        if normalized_role not in {"admin", "user"}:
+            raise ValueError("role must be admin or user")
+        users = self._read_users()
+        normalized_email = normalize_email(email)
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        if normalized_role != "admin":
+            self._require_not_last_admin(users, normalized_email)
+        updated = replace(user, role=normalized_role, updated_at=time.time())
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
+
+    def admin_set_allowed_assets(
+        self,
+        *,
+        email: str,
+        allowed_assets: list[str] | str | None,
+        preferred_asset: str = "",
+    ) -> WebUser:
+        users = self._read_users()
+        normalized_email = normalize_email(email)
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        assets = normalize_assets(allowed_assets or [])
+        preferred = str(preferred_asset or "").strip().upper()
+        if preferred and assets and preferred not in assets:
+            raise ValueError("preferred asset must be in allowed assets")
+        updated = replace(
+            user,
+            allowed_assets=assets,
+            preferred_asset=preferred,
+            updated_at=time.time(),
+        )
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
+
+    def admin_reset_password(self, *, email: str, new_password: str) -> WebUser:
+        users = self._read_users()
+        normalized_email = normalize_email(email)
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        updated = replace(
+            user,
+            password_hash=hash_password(new_password),
+            updated_at=time.time(),
+        )
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
+
+    def admin_delete_user(self, *, email: str) -> None:
+        users = self._read_users()
+        normalized_email = normalize_email(email)
+        if normalized_email not in users:
+            raise ValueError("user is not registered")
+        self._require_not_last_admin(users, normalized_email)
+        del users[normalized_email]
+        self._write_users(users)
 
