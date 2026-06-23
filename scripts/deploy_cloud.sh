@@ -47,6 +47,14 @@ remote_backup_excludes=(
   --exclude=config.acs.json
 )
 
+local_tar_flags=()
+if tar --no-xattrs -cf /dev/null README.md >/dev/null 2>&1; then
+  local_tar_flags+=(--no-xattrs)
+fi
+if tar --no-fflags -cf /dev/null README.md >/dev/null 2>&1; then
+  local_tar_flags+=(--no-fflags)
+fi
+
 ssh "$REMOTE" "set -euo pipefail
 cd '$REMOTE_DIR'
 mkdir -p data
@@ -54,7 +62,7 @@ tar -czf 'data/$backup_name' ${remote_backup_excludes[*]} .
 systemctl stop '$SERVICE'
 "
 
-COPYFILE_DISABLE=1 tar "${local_excludes[@]}" -czf - . | ssh "$REMOTE" "set -euo pipefail
+COPYFILE_DISABLE=1 tar "${local_tar_flags[@]}" "${local_excludes[@]}" -czf - . | ssh "$REMOTE" "set -euo pipefail
 cd '$REMOTE_DIR'
 tar -xzf -
 find . -type f \\( -name '._*' -o -name '.DS_Store' \\) -delete
