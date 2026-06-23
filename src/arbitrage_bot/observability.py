@@ -60,6 +60,7 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
     order_activity = _dict(payload.get("order_activity"))
     market_maker = _dict(payload.get("market_maker"))
     spot_grid = _dict(payload.get("spot_grid"))
+    derivatives = _dict(payload.get("derivatives"))
     execution_protection = _dict(payload.get("execution_protection"))
     readiness = _dict(payload.get("readiness"))
     readiness_summary = _dict(readiness.get("summary"))
@@ -155,6 +156,35 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
             _number(grid_runtime.get("open_order_count")),
             {"mode": grid_runtime.get("mode", "unknown")},
         ),
+        "# HELP crypto_arb_derivatives_risk_status Current derivatives risk monitor status.",
+        "# TYPE crypto_arb_derivatives_risk_status gauge",
+        _line(
+            "crypto_arb_derivatives_risk_status",
+            1.0,
+            {"status": derivatives.get("status", "unknown")},
+        ),
+        "# HELP crypto_arb_derivatives_position_count Current derivative position count.",
+        "# TYPE crypto_arb_derivatives_position_count gauge",
+        _line(
+            "crypto_arb_derivatives_position_count",
+            _number(derivatives.get("position_count")),
+        ),
+        "# HELP crypto_arb_derivatives_checked_account_count Checked derivative account count.",
+        "# TYPE crypto_arb_derivatives_checked_account_count gauge",
+        _line(
+            "crypto_arb_derivatives_checked_account_count",
+            _number(derivatives.get("checked_account_count")),
+        ),
+        "# HELP crypto_arb_derivatives_blocked_account_count Blocked derivative account count.",
+        "# TYPE crypto_arb_derivatives_blocked_account_count gauge",
+        _line(
+            "crypto_arb_derivatives_blocked_account_count",
+            sum(
+                1
+                for account in _list_items(derivatives.get("accounts"))
+                if isinstance(account, dict) and account.get("status") == "blocked"
+            ),
+        ),
         "# HELP crypto_arb_readiness_status Current readiness status.",
         "# TYPE crypto_arb_readiness_status gauge",
         _line("crypto_arb_readiness_status", 1.0, {"status": readiness_status}),
@@ -221,8 +251,54 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
                     "status": account.get("status", "unknown"),
                     "used": str(bool(account.get("used"))).lower(),
                 },
-            )
         )
+    )
+
+    lines.extend(
+        [
+            "# HELP crypto_arb_derivatives_account_status Derivative account risk status.",
+            "# TYPE crypto_arb_derivatives_account_status gauge",
+            "# HELP crypto_arb_derivatives_margin_usage_pct Derivative account margin usage percentage.",
+            "# TYPE crypto_arb_derivatives_margin_usage_pct gauge",
+            "# HELP crypto_arb_derivatives_min_liquidation_buffer_pct Minimum liquidation buffer percentage by derivative account.",
+            "# TYPE crypto_arb_derivatives_min_liquidation_buffer_pct gauge",
+            "# HELP crypto_arb_derivatives_position_notional_quote Derivative position notional by account in quote currency.",
+            "# TYPE crypto_arb_derivatives_position_notional_quote gauge",
+        ]
+    )
+    for account in _list_items(derivatives.get("accounts")):
+        if not isinstance(account, dict):
+            continue
+        account_key = account.get("exchange", "unknown")
+        summary = _dict(account.get("summary"))
+        labels = {
+            "account": account_key,
+            "status": account.get("status", "unknown"),
+        }
+        lines.append(_line("crypto_arb_derivatives_account_status", 1.0, labels))
+        if summary:
+            account_label = {"account": account_key}
+            lines.append(
+                _line(
+                    "crypto_arb_derivatives_margin_usage_pct",
+                    _number(summary.get("margin_usage_pct")),
+                    account_label,
+                )
+            )
+            lines.append(
+                _line(
+                    "crypto_arb_derivatives_min_liquidation_buffer_pct",
+                    _number(summary.get("min_liquidation_buffer_pct")),
+                    account_label,
+                )
+            )
+            lines.append(
+                _line(
+                    "crypto_arb_derivatives_position_notional_quote",
+                    _number(summary.get("position_notional_quote")),
+                    account_label,
+                )
+            )
 
     lines.extend(
         [

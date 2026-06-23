@@ -832,6 +832,78 @@ class WebMonitorTest(unittest.TestCase):
             actions["Execution Protection"]["detail"],
         )
 
+    def test_readiness_payload_reports_derivatives_risk_blockers(self) -> None:
+        cfg = make_config(
+            cash_and_carry_pairs=[
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                    api_key_env="BINANCE_API_KEY",
+                    secret_env="BINANCE_SECRET",
+                )
+            ],
+            risk=RiskConfig(allow_live_trading=True),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"BINANCE_API_KEY": "key", "BINANCE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = build_readiness_payload(
+                cfg,
+                account_balances={
+                    "status": "ok",
+                    "accounts": [{"exchange": "binance-swap", "status": "ok"}],
+                },
+                order_activity={
+                    "status": "ok",
+                    "accounts": [{"exchange": "binance-swap", "status": "ok"}],
+                    "reconciliation": {"status": "ok", "issue_count": 0},
+                },
+                derivatives={
+                    "status": "blocked",
+                    "position_count": 1,
+                    "accounts": [
+                        {
+                            "exchange": "binance-swap",
+                            "label": "Binance Futures",
+                            "status": "blocked",
+                            "risk_reasons": ["margin usage 80% > 70%"],
+                            "summary": {
+                                "risk_reasons": ["margin usage 80% > 70%"],
+                            },
+                        }
+                    ],
+                },
+                trading_console=build_trading_console_payload(cfg),
+            )
+
+        accounts = {row["key"]: row for row in payload["accounts"]}
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(accounts["binance-swap"]["status"], "blocked")
+        self.assertEqual(
+            accounts["binance-swap"]["derivatives_status"],
+            "blocked",
+        )
+        self.assertEqual(payload["summary"]["derivative_blocked_account_count"], 1)
+        self.assertEqual(payload["summary"]["derivative_position_count"], 1)
+        self.assertEqual(payload["summary"]["blocked_count"], 1)
+        actions = {row["scope"]: row for row in payload["next_actions"]}
+        self.assertEqual(
+            actions["Derivatives Risk"]["action"],
+            "Review margin and liquidation risk",
+        )
+        self.assertEqual(actions["Derivatives Risk"]["priority"], "high")
+        self.assertIn("margin usage", actions["Derivatives Risk"]["detail"])
+
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
             SpotMarketConfig(

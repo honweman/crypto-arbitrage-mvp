@@ -829,6 +829,60 @@ def _account_payload_messages(account: dict[str, Any]) -> list[str]:
     return messages
 
 
+def _derivative_account_messages(account: dict[str, Any]) -> list[str]:
+    summary = account.get("summary") if isinstance(account.get("summary"), dict) else {}
+    messages = [
+        str(message)
+        for message in [
+            *list(account.get("risk_reasons", []) or []),
+            *list(summary.get("risk_reasons", []) or []),
+            *list(account.get("errors", []) or []),
+            *list(account.get("warnings", []) or []),
+            account.get("skipped_reason"),
+        ]
+        if message
+    ]
+    return _dedupe_readiness_messages(messages)
+
+
+def _derivatives_readiness_summary(
+    derivatives: dict[str, Any],
+) -> dict[str, Any]:
+    accounts = [
+        account
+        for account in derivatives.get("accounts", []) or []
+        if isinstance(account, dict)
+    ]
+    blocked_accounts = [
+        account for account in accounts if account.get("status") == "blocked"
+    ]
+    warning_accounts = [
+        account for account in accounts if account.get("status") == "warning"
+    ]
+    error_accounts = [
+        account for account in accounts if account.get("status") == "error"
+    ]
+    reasons: list[str] = []
+    for account in [*error_accounts, *blocked_accounts, *warning_accounts]:
+        label = account.get("label") or account.get("exchange") or "derivatives"
+        messages = _derivative_account_messages(account)
+        if messages:
+            reasons.append(f"{label}: {messages[0]}")
+    reasons.extend(str(item) for item in derivatives.get("warnings", []) or [] if item)
+    reasons.extend(str(item) for item in derivatives.get("errors", []) or [] if item)
+    return {
+        "status": derivatives.get("status") or "disabled",
+        "account_count": len(accounts),
+        "blocked_account_count": len(blocked_accounts),
+        "warning_account_count": len(warning_accounts),
+        "error_account_count": len(error_accounts),
+        "position_count": int(derivatives.get("position_count") or 0),
+        "reasons": _dedupe_readiness_messages(reasons)[:6],
+        "has_warnings": bool(derivatives.get("warnings")),
+        "has_errors": bool(derivatives.get("errors")),
+    }
+
+
 def _readiness_message_key(message: str) -> str:
     normalized = " ".join(str(message or "").lower().split())
     if "api env" in normalized:
@@ -954,6 +1008,7 @@ def build_readiness_payload(
     *,
     account_balances: dict[str, Any] | None = None,
     order_activity: dict[str, Any] | None = None,
+    derivatives: dict[str, Any] | None = None,
     trading_console: dict[str, Any] | None = None,
     market_maker: dict[str, Any] | None = None,
     slow_execution: dict[str, Any] | None = None,
@@ -967,6 +1022,7 @@ def build_readiness_payload(
 ) -> dict[str, Any]:
     account_balances = account_balances or {}
     order_activity = order_activity or {}
+    derivatives = derivatives or {}
     trading_console = trading_console or build_trading_console_payload(cfg)
     market_maker = market_maker or {}
     slow_execution = slow_execution or {}
@@ -978,6 +1034,8 @@ def build_readiness_payload(
     symbols_by_exchange = _exchange_balance_symbols(cfg)
     balance_by_exchange = _account_payload_by_exchange(account_balances)
     order_by_exchange = _account_payload_by_exchange(order_activity)
+    derivative_by_exchange = _account_payload_by_exchange(derivatives)
+    derivative_readiness = _derivatives_readiness_summary(derivatives)
     checking_statuses = {"starting", "checking", "pending"}
 
     account_rows: list[dict[str, Any]] = []
@@ -997,6 +1055,8 @@ def build_readiness_payload(
             or (order_activity.get("status") if order_activity.get("accounts") else "starting")
             or "starting"
         )
+        derivative_account = derivative_by_exchange.get(exchange.key, {})
+        derivative_status = str(derivative_account.get("status") or "")
         risk_enabled = _risk_account_enabled(cfg, exchange.key)
         reasons: list[str] = []
         if not used:
@@ -1015,19 +1075,43 @@ def build_readiness_payload(
             reasons.extend(_account_payload_messages(orders) or ["order activity failed"])
         elif used and order_status == "warning":
             reasons.extend(_account_payload_messages(orders) or ["order activity warning"])
+        if used and derivative_status == "error":
+            reasons.extend(
+                _derivative_account_messages(derivative_account)
+                or ["derivatives risk check failed"]
+            )
+        elif used and derivative_status == "blocked":
+            reasons.extend(
+                _derivative_account_messages(derivative_account)
+                or ["derivatives risk limit breached"]
+            )
+        elif used and derivative_status == "warning":
+            reasons.extend(
+                _derivative_account_messages(derivative_account)
+                or ["derivatives risk warning"]
+            )
 
         if not used:
             status = "idle"
-        elif balance_status in checking_statuses or order_status in checking_statuses:
+        elif (
+            balance_status in checking_statuses
+            or order_status in checking_statuses
+            or derivative_status in checking_statuses
+        ):
             status = "checking"
         elif (
             not auth["private_checks_enabled"]
             or not risk_enabled
             or balance_status == "error"
             or order_status == "error"
+            or derivative_status in {"blocked", "error"}
         ):
             status = "blocked"
-        elif balance_status == "warning" or order_status == "warning":
+        elif (
+            balance_status == "warning"
+            or order_status == "warning"
+            or derivative_status == "warning"
+        ):
             status = "warning"
         else:
             status = "ready"
@@ -1052,6 +1136,7 @@ def build_readiness_payload(
                 ),
                 "balance_status": balance_status,
                 "order_status": order_status,
+                "derivatives_status": derivative_status or "disabled",
                 "risk_enabled": risk_enabled,
                 "status": status,
                 "reasons": deduped[:6],
@@ -1117,6 +1202,14 @@ def build_readiness_payload(
     protection_manual_review_count = int(
         execution_protection.get("manual_review_count") or 0
     )
+    derivative_blocked_count = int(
+        derivative_readiness["blocked_account_count"]
+        + derivative_readiness["error_account_count"]
+    )
+    derivative_warning_count = int(
+        derivative_readiness["warning_account_count"]
+        + (1 if derivative_readiness["has_warnings"] else 0)
+    )
     warning_count = (
         warning_accounts
         + market_missing_count
@@ -1125,21 +1218,34 @@ def build_readiness_payload(
         + (1 if account_balances.get("status") == "warning" else 0)
         + protection_warning_count
         + protection_manual_review_count
+        + (1 if derivative_readiness["has_warnings"] else 0)
     )
 
     account_checks_status = str(account_balances.get("status") or "starting")
     order_checks_status = str(order_activity.get("status") or "starting")
-    if order_activity.get("status") == "error" or account_balances.get("status") == "error":
+    derivative_checks_status = str(derivatives.get("status") or "disabled")
+    if (
+        order_activity.get("status") == "error"
+        or account_balances.get("status") == "error"
+        or derivative_checks_status == "error"
+        or derivative_readiness["has_errors"]
+    ):
         status = "error"
     elif (
         checking_accounts
         or account_checks_status in checking_statuses
         or order_checks_status in checking_statuses
+        or derivative_checks_status in checking_statuses
     ):
         status = "checking"
     elif not (cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading):
         status = "guarded"
-    elif blocked_accounts or blocked_strategies or protection_blocked_count:
+    elif (
+        blocked_accounts
+        or blocked_strategies
+        or protection_blocked_count
+        or derivative_blocked_count
+    ):
         status = "blocked"
     elif warning_count:
         status = "warning"
@@ -1269,6 +1375,21 @@ def build_readiness_payload(
                 ),
             )
         )
+    if derivative_blocked_count or derivative_warning_count:
+        derivative_reasons = derivative_readiness.get("reasons") or []
+        next_actions.append(
+            _readiness_action(
+                priority="high" if derivative_blocked_count else "medium",
+                scope="Derivatives Risk",
+                action="Review margin and liquidation risk",
+                status=str(derivative_readiness.get("status") or "warning"),
+                detail=(
+                    str(derivative_reasons[0])
+                    if derivative_reasons
+                    else "Derivative risk checks have warnings."
+                ),
+            )
+        )
 
     action_priority = {"high": 0, "medium": 1, "low": 2}
     action_seen: set[tuple[str, str, str]] = set()
@@ -1331,6 +1452,9 @@ def build_readiness_payload(
             "execution_protection_blocked_count": protection_blocked_count,
             "execution_protection_warning_count": protection_warning_count,
             "execution_protection_manual_review_count": protection_manual_review_count,
+            "derivative_blocked_account_count": derivative_blocked_count,
+            "derivative_warning_account_count": derivative_warning_count,
+            "derivative_position_count": derivative_readiness["position_count"],
             "blocked_count": blocked_accounts + blocked_strategies + protection_blocked_count,
             "warning_count": warning_count,
             "warning_messages": list(warnings or [])[:6],
