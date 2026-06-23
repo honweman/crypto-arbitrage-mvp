@@ -4,6 +4,8 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
+from .config import RiskConfig
+from .execution_protection import build_multileg_execution_protection
 from .models import OrderBookSnapshot
 from .strategy_center import FundingArbitrageSettings, StrategyInstance
 
@@ -90,6 +92,7 @@ def funding_basis_row(
     derivative_book: OrderBookSnapshot | None,
     funding_rate: float | None,
     notional_quote: float,
+    risk: RiskConfig | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     observed_at = time.time() if now is None else now
@@ -162,7 +165,17 @@ def funding_basis_row(
         paper_state = "waiting"
         reason = "waiting for entry conditions"
 
-    suggested_legs = []
+    suggested_legs: list[dict[str, Any]] = []
+    base_asset = str(settings.spot_symbol or settings.derivative_symbol).split("/", 1)[0]
+    spot_quantity_raw = notional_quote / spot_mid if spot_mid and spot_mid > 0 else 0.0
+    derivative_quantity_raw = (
+        notional_quote / derivative_mid if derivative_mid and derivative_mid > 0 else 0.0
+    )
+    hedged_quantity = min(spot_quantity_raw, derivative_quantity_raw)
+    spot_notional = hedged_quantity * spot_mid if spot_mid else notional_quote
+    derivative_notional = (
+        hedged_quantity * derivative_mid if derivative_mid else notional_quote
+    )
     if candidate and direction == "long_spot_short_perp":
         suggested_legs = [
             {
@@ -170,14 +183,22 @@ def funding_basis_row(
                 "symbol": settings.spot_symbol,
                 "side": "buy",
                 "type": "spot",
-                "notional_quote": notional_quote,
+                "quantity_base": hedged_quantity,
+                "average_price": spot_mid,
+                "notional_quote": spot_notional,
+                "hedge_asset": base_asset,
+                "hedge_base_equivalent": hedged_quantity,
             },
             {
                 "exchange": settings.derivative_exchange,
                 "symbol": settings.derivative_symbol,
                 "side": "sell",
                 "type": "perp",
-                "notional_quote": notional_quote,
+                "quantity_base": hedged_quantity,
+                "average_price": derivative_mid,
+                "notional_quote": derivative_notional,
+                "hedge_asset": base_asset,
+                "hedge_base_equivalent": hedged_quantity,
             },
         ]
     elif candidate and direction == "short_spot_long_perp":
@@ -187,16 +208,35 @@ def funding_basis_row(
                 "symbol": settings.spot_symbol,
                 "side": "sell",
                 "type": "spot",
-                "notional_quote": notional_quote,
+                "quantity_base": hedged_quantity,
+                "average_price": spot_mid,
+                "notional_quote": spot_notional,
+                "hedge_asset": base_asset,
+                "hedge_base_equivalent": hedged_quantity,
             },
             {
                 "exchange": settings.derivative_exchange,
                 "symbol": settings.derivative_symbol,
                 "side": "buy",
                 "type": "perp",
-                "notional_quote": notional_quote,
+                "quantity_base": hedged_quantity,
+                "average_price": derivative_mid,
+                "notional_quote": derivative_notional,
+                "hedge_asset": base_asset,
+                "hedge_base_equivalent": hedged_quantity,
             },
         ]
+    protection = (
+        build_multileg_execution_protection(
+            strategy="funding_arbitrage",
+            legs=suggested_legs,
+            risk=risk or RiskConfig(),
+            observed_at=observed_at,
+            now=observed_at,
+        )
+        if suggested_legs
+        else None
+    )
 
     return {
         "pair_id": settings.pair_id
@@ -244,6 +284,7 @@ def funding_basis_row(
             "live_enabled": False,
             "notional_quote": notional_quote,
             "suggested_legs": suggested_legs,
+            "protection": protection,
             "reason": reason,
         },
         "observed_at": observed_at,
@@ -257,6 +298,7 @@ def funding_basis_payload(
     derivative_books: dict[tuple[str, str], OrderBookSnapshot],
     funding_rates: dict[tuple[str, str], float],
     notional_quote: float,
+    risk: RiskConfig | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     rows = [
@@ -270,6 +312,7 @@ def funding_basis_payload(
                 (settings.derivative_exchange, settings.derivative_symbol)
             ),
             notional_quote=notional_quote,
+            risk=risk,
             now=now,
         )
         for settings in settings_rows

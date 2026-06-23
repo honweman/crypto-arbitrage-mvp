@@ -3646,6 +3646,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["paper_execution"]["mode"], "paper")
         self.assertEqual(row["paper_execution"]["state"], "would_open")
         self.assertFalse(row["paper_execution"]["live_enabled"])
+        self.assertIn("protection", row["paper_execution"])
+        self.assertFalse(row["paper_execution"]["protection"]["live_submit_allowed"])
 
     async def test_fetch_options_arbitrage_payload_finds_paper_candidate(self) -> None:
         class FakeOptionsManager:
@@ -3724,6 +3726,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["paper_execution"]["mode"], "paper")
         self.assertEqual(row["paper_execution"]["state"], "would_open")
         self.assertFalse(row["paper_execution"]["live_enabled"])
+        self.assertIn("protection", row["paper_execution"])
+        self.assertTrue(row["paper_execution"]["protection"]["requires_manual_review"])
         self.assertEqual(
             [leg["side"] for leg in row["paper_execution"]["suggested_legs"]],
             ["sell", "buy", "buy"],

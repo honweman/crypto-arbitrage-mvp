@@ -169,6 +169,8 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(row["direction"], "long_spot_short_perp")
         self.assertGreater(row["basis_bps"], 10.0)
         self.assertEqual(row["paper_execution"]["state"], "would_open")
+        self.assertIn("protection", row["paper_execution"])
+        self.assertIn(row["paper_execution"]["protection"]["status"], {"ok", "warning"})
         self.assertEqual(
             [leg["side"] for leg in row["paper_execution"]["suggested_legs"]],
             ["buy", "sell"],

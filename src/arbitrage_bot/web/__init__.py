@@ -1707,6 +1707,7 @@ async def fetch_funding_basis_payload(
             derivative_books={},
             funding_rates={},
             notional_quote=cfg.notional_quote,
+            risk=cfg.risk,
         )
 
     spot_symbols: dict[str, set[str]] = {}
@@ -1792,6 +1793,7 @@ async def fetch_funding_basis_payload(
         derivative_books=derivative_books,
         funding_rates=funding_rates,
         notional_quote=cfg.notional_quote,
+        risk=cfg.risk,
     )
     payload["warnings"] = [*payload.get("warnings", []), *warnings]
     payload["errors"] = [*payload.get("errors", []), *errors]

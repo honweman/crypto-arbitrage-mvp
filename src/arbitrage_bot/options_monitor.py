@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from .config import BotConfig, OptionComboConfig
+from .execution_protection import build_multileg_execution_protection
 from .models import Opportunity, OrderBookSnapshot
 from .strategies.options_arbitrage import find_options_arbitrage_opportunities
 
@@ -54,9 +55,15 @@ def _opportunity_combo_key(opportunity: Opportunity) -> tuple[str, str, str, flo
     )
 
 
+def _paper_leg_type(symbol: str) -> str:
+    return "spot" if "/" in str(symbol or "") else "option"
+
+
 def _paper_state(
     opportunity: Opportunity | None,
     reason: str,
+    *,
+    cfg: BotConfig,
 ) -> dict[str, Any]:
     if opportunity is None:
         return {
@@ -66,22 +73,48 @@ def _paper_state(
             "suggested_legs": [],
             "reason": reason,
         }
+    underlying = str(opportunity.metadata.get("underlying") or "")
+    legs = [
+        {
+            "exchange": leg.exchange,
+            "symbol": leg.symbol,
+            "side": leg.side,
+            "type": _paper_leg_type(leg.symbol),
+            "quantity_base": leg.quantity_base,
+            "average_price": leg.average_price,
+            "notional_quote": abs(float(leg.net_quote or leg.gross_quote or 0.0)),
+            "hedge_asset": underlying or _symbol_base_from_leg(leg.symbol),
+            "hedge_base_equivalent": (
+                float(opportunity.metadata.get("contract_size") or 1.0)
+                * leg.quantity_base
+                if _paper_leg_type(leg.symbol) == "option"
+                else leg.quantity_base
+            ),
+        }
+        for leg in opportunity.legs
+    ]
     return {
         "mode": "paper",
         "state": "would_open",
         "live_enabled": False,
-        "suggested_legs": [
-            {
-                "exchange": leg.exchange,
-                "symbol": leg.symbol,
-                "side": leg.side,
-                "quantity_base": leg.quantity_base,
-                "average_price": leg.average_price,
-            }
-            for leg in opportunity.legs
-        ],
+        "suggested_legs": legs,
+        "protection": build_multileg_execution_protection(
+            strategy="options_arbitrage",
+            legs=legs,
+            risk=cfg.risk,
+            observed_at=opportunity.observed_at,
+            now=opportunity.observed_at,
+        ),
         "reason": "entry conditions met",
     }
+
+
+def _symbol_base_from_leg(symbol: str) -> str:
+    if "/" in symbol:
+        return symbol.split("/", 1)[0].split(":", 1)[0].upper()
+    if "-" in symbol:
+        return symbol.split("-", 1)[0].upper()
+    return symbol.upper()
 
 
 def options_arbitrage_payload(
@@ -186,7 +219,7 @@ def options_arbitrage_payload(
                 "reason": reason,
                 "reasons": reasons,
                 "opportunity": opportunity.to_dict() if opportunity else None,
-                "paper_execution": _paper_state(opportunity, reason),
+                "paper_execution": _paper_state(opportunity, reason, cfg=cfg),
                 "observed_at": observed_at,
             }
         )
