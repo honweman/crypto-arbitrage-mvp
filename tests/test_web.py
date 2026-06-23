@@ -791,6 +791,47 @@ class WebMonitorTest(unittest.TestCase):
             20,
         )
 
+    def test_readiness_payload_reports_execution_protection_blockers(self) -> None:
+        cfg = make_config(risk=RiskConfig(allow_live_trading=True))
+
+        payload = build_readiness_payload(
+            cfg,
+            account_balances={"status": "ok", "accounts": []},
+            order_activity={
+                "status": "ok",
+                "accounts": [],
+                "reconciliation": {"status": "ok", "issue_count": 0},
+            },
+            trading_console=build_trading_console_payload(cfg),
+            execution_protection={
+                "status": "blocked",
+                "blocked_count": 1,
+                "warning_count": 1,
+                "manual_review_count": 1,
+                "top_reasons": ["slippage exceeds configured limit"],
+            },
+        )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["summary"]["execution_protection_blocked_count"], 1)
+        self.assertEqual(payload["summary"]["execution_protection_warning_count"], 1)
+        self.assertEqual(
+            payload["summary"]["execution_protection_manual_review_count"],
+            1,
+        )
+        self.assertEqual(payload["summary"]["blocked_count"], 1)
+        self.assertEqual(payload["summary"]["warning_count"], 2)
+        actions = {row["scope"]: row for row in payload["next_actions"]}
+        self.assertEqual(
+            actions["Execution Protection"]["action"],
+            "Review multi-leg paper protection",
+        )
+        self.assertEqual(actions["Execution Protection"]["priority"], "high")
+        self.assertIn(
+            "slippage",
+            actions["Execution Protection"]["detail"],
+        )
+
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
             SpotMarketConfig(
@@ -3781,6 +3822,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("derivatives", full)
         self.assertIn("funding_basis", full)
         self.assertIn("options_arbitrage", full)
+        self.assertIn("execution_protection", full)
         self.assertIn("trading_console", full)
         self.assertIn("recent_opportunities", full)
 
@@ -3788,6 +3830,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("derivatives", status)
         self.assertIn("funding_basis", status)
         self.assertIn("options_arbitrage", status)
+        self.assertIn("execution_protection", status)
         self.assertIn("readiness", status)
         self.assertNotIn("trading_console", status)
         self.assertNotIn("recent_opportunities", status)
@@ -3801,6 +3844,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("rows", settings["funding_basis"])
         self.assertIn("options_arbitrage", settings)
         self.assertNotIn("rows", settings["options_arbitrage"])
+        self.assertIn("execution_protection", settings)
+        self.assertNotIn("rows", settings["execution_protection"])
         self.assertNotIn("readiness", settings)
         self.assertIn("risk", settings["operations"])
         self.assertNotIn("trade_log", settings["operations"])

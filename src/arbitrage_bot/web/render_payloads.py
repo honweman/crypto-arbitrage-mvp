@@ -346,6 +346,31 @@ def _compact_options_arbitrage_payload(
     )
 
 
+def _compact_execution_protection_payload(
+    execution_protection: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return execution_protection
+    return _copy_payload_keys(
+        execution_protection,
+        (
+            "status",
+            "mode",
+            "protection_count",
+            "ok_count",
+            "blocked_count",
+            "warning_count",
+            "manual_review_count",
+            "slippage_block_count",
+            "stale_block_count",
+            "top_reasons",
+            "updated_at",
+        ),
+    )
+
+
 def _compact_onchain_payload(
     onchain: dict[str, Any],
     *,
@@ -471,6 +496,10 @@ def state_payload_for_view(
         ),
         "options_arbitrage": _compact_options_arbitrage_payload(
             payload.get("options_arbitrage", {}),
+            full=is_status,
+        ),
+        "execution_protection": _compact_execution_protection_payload(
+            payload.get("execution_protection", {}),
             full=is_status,
         ),
         "order_activity": _compact_order_activity_payload(

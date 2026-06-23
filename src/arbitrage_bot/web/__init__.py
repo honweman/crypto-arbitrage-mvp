@@ -961,6 +961,7 @@ def build_readiness_payload(
     dca: dict[str, Any] | None = None,
     execution_algo: dict[str, Any] | None = None,
     backtest: dict[str, Any] | None = None,
+    execution_protection: dict[str, Any] | None = None,
     markets: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -973,6 +974,7 @@ def build_readiness_payload(
     dca = dca or {}
     execution_algo = execution_algo or {}
     backtest = backtest or {}
+    execution_protection = execution_protection or {}
     symbols_by_exchange = _exchange_balance_symbols(cfg)
     balance_by_exchange = _account_payload_by_exchange(account_balances)
     order_by_exchange = _account_payload_by_exchange(order_activity)
@@ -1110,12 +1112,19 @@ def build_readiness_payload(
     live_strategies = sum(1 for row in strategy_rows if row["status"] == "live")
     configured_strategies = sum(1 for row in strategy_rows if row.get("configured"))
     blocked_strategies = sum(1 for row in strategy_rows if row["status"] == "blocked")
+    protection_blocked_count = int(execution_protection.get("blocked_count") or 0)
+    protection_warning_count = int(execution_protection.get("warning_count") or 0)
+    protection_manual_review_count = int(
+        execution_protection.get("manual_review_count") or 0
+    )
     warning_count = (
         warning_accounts
         + market_missing_count
         + (1 if reconciliation.get("status") == "warning" else 0)
         + (1 if order_activity.get("status") == "warning" else 0)
         + (1 if account_balances.get("status") == "warning" else 0)
+        + protection_warning_count
+        + protection_manual_review_count
     )
 
     account_checks_status = str(account_balances.get("status") or "starting")
@@ -1130,7 +1139,7 @@ def build_readiness_payload(
         status = "checking"
     elif not (cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading):
         status = "guarded"
-    elif blocked_accounts or blocked_strategies:
+    elif blocked_accounts or blocked_strategies or protection_blocked_count:
         status = "blocked"
     elif warning_count:
         status = "warning"
@@ -1245,6 +1254,21 @@ def build_readiness_payload(
                 ),
             )
         )
+    if protection_blocked_count or protection_warning_count or protection_manual_review_count:
+        protection_reasons = execution_protection.get("top_reasons") or []
+        next_actions.append(
+            _readiness_action(
+                priority="high" if protection_blocked_count else "medium",
+                scope="Execution Protection",
+                action="Review multi-leg paper protection",
+                status=str(execution_protection.get("status") or "warning"),
+                detail=(
+                    str(protection_reasons[0])
+                    if protection_reasons
+                    else "Multi-leg strategy has paper execution protection warnings."
+                ),
+            )
+        )
 
     action_priority = {"high": 0, "medium": 1, "low": 2}
     action_seen: set[tuple[str, str, str]] = set()
@@ -1304,7 +1328,10 @@ def build_readiness_payload(
             "live_strategies": live_strategies,
             "blocked_strategies": blocked_strategies,
             "paused_strategies": sum(1 for row in strategy_rows if row["status"] == "paused"),
-            "blocked_count": blocked_accounts + blocked_strategies,
+            "execution_protection_blocked_count": protection_blocked_count,
+            "execution_protection_warning_count": protection_warning_count,
+            "execution_protection_manual_review_count": protection_manual_review_count,
+            "blocked_count": blocked_accounts + blocked_strategies + protection_blocked_count,
             "warning_count": warning_count,
             "warning_messages": list(warnings or [])[:6],
             "action_count": len(unique_actions),
@@ -2852,6 +2879,20 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "last_finished": None,
             "errors": [],
             "warnings": [],
+        },
+        "execution_protection": {
+            "status": "disabled",
+            "mode": "paper",
+            "protection_count": 0,
+            "ok_count": 0,
+            "blocked_count": 0,
+            "warning_count": 0,
+            "manual_review_count": 0,
+            "slippage_block_count": 0,
+            "stale_block_count": 0,
+            "rows": [],
+            "top_reasons": [],
+            "updated_at": None,
         },
         "order_activity": {
             "status": "starting",

@@ -60,6 +60,7 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
     order_activity = _dict(payload.get("order_activity"))
     market_maker = _dict(payload.get("market_maker"))
     spot_grid = _dict(payload.get("spot_grid"))
+    execution_protection = _dict(payload.get("execution_protection"))
     readiness = _dict(payload.get("readiness"))
     readiness_summary = _dict(readiness.get("summary"))
     readiness_order_checks = _dict(readiness.get("order_checks"))
@@ -174,6 +175,31 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
         _line(
             "crypto_arb_readiness_action_count",
             _number(readiness_summary.get("action_count")),
+        ),
+        "# HELP crypto_arb_execution_protection_count Multi-leg paper execution protection count.",
+        "# TYPE crypto_arb_execution_protection_count gauge",
+        _line(
+            "crypto_arb_execution_protection_count",
+            _number(execution_protection.get("protection_count")),
+            {"status": execution_protection.get("status", "unknown")},
+        ),
+        "# HELP crypto_arb_execution_protection_blocked_count Blocked multi-leg paper protections.",
+        "# TYPE crypto_arb_execution_protection_blocked_count gauge",
+        _line(
+            "crypto_arb_execution_protection_blocked_count",
+            _number(execution_protection.get("blocked_count")),
+        ),
+        "# HELP crypto_arb_execution_protection_warning_count Warning multi-leg paper protections.",
+        "# TYPE crypto_arb_execution_protection_warning_count gauge",
+        _line(
+            "crypto_arb_execution_protection_warning_count",
+            _number(execution_protection.get("warning_count")),
+        ),
+        "# HELP crypto_arb_execution_protection_manual_review_count Multi-leg protections requiring manual review.",
+        "# TYPE crypto_arb_execution_protection_manual_review_count gauge",
+        _line(
+            "crypto_arb_execution_protection_manual_review_count",
+            _number(execution_protection.get("manual_review_count")),
         ),
     ]
 

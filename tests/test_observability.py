@@ -38,6 +38,13 @@ class ObservabilityTest(unittest.TestCase):
                         "open_order_count": 5,
                     }
                 },
+                "execution_protection": {
+                    "status": "warning",
+                    "protection_count": 2,
+                    "blocked_count": 1,
+                    "warning_count": 1,
+                    "manual_review_count": 1,
+                },
                 "readiness": {
                     "status": "blocked",
                     "summary": {
@@ -107,6 +114,13 @@ class ObservabilityTest(unittest.TestCase):
         self.assertIn('crypto_arb_strategy_paused{strategy="slow_execution"} 1', text)
         self.assertIn('crypto_arb_market_maker_open_orders{mode="live"} 4', text)
         self.assertIn('crypto_arb_spot_grid_open_orders{mode="dry_run"} 5', text)
+        self.assertIn(
+            'crypto_arb_execution_protection_count{status="warning"} 2',
+            text,
+        )
+        self.assertIn("crypto_arb_execution_protection_blocked_count 1", text)
+        self.assertIn("crypto_arb_execution_protection_warning_count 1", text)
+        self.assertIn("crypto_arb_execution_protection_manual_review_count 1", text)
         self.assertIn(
             (
                 'crypto_arb_runtime_status{mode="dry_run",'

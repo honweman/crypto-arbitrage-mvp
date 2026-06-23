@@ -22,6 +22,7 @@ from ..config import (
     SpotGridConfig,
     SpotMarketConfig,
 )
+from ..execution_protection import summarize_multileg_execution_protections
 from ..models import Opportunity
 from ..portfolio_metrics import build_market_maker_quality_payload
 from ..web_config import (
@@ -53,6 +54,13 @@ from . import (
     build_readiness_payload,
     build_trading_console_payload,
 )
+
+
+def _execution_protection_from_payloads(payload: dict[str, Any]) -> dict[str, Any]:
+    return summarize_multileg_execution_protections(
+        funding_basis=payload.get("funding_basis"),
+        options_arbitrage=payload.get("options_arbitrage"),
+    )
 
 
 class MonitorState:
@@ -791,6 +799,9 @@ class MonitorState:
                 self._payload["funding_basis"] = funding_basis
             if options_arbitrage is not None:
                 self._payload["options_arbitrage"] = options_arbitrage
+            self._payload["execution_protection"] = (
+                _execution_protection_from_payloads(self._payload)
+            )
             self._payload["trading_console"] = trading_console
             self._payload["readiness"] = build_readiness_payload(
                 cfg,
@@ -803,6 +814,7 @@ class MonitorState:
                 dca=self._payload.get("dca", {}),
                 execution_algo=self._payload.get("execution_algo", {}),
                 backtest=self._payload.get("backtest", {}),
+                execution_protection=self._payload.get("execution_protection", {}),
                 markets=self._payload.get("markets", []),
                 warnings=warning_messages,
             )
@@ -925,6 +937,10 @@ class MonitorState:
                 spot_grid["status"] = self._spot_grid_runtime["status"]
             if self._spot_grid_runtime.get("last_error"):
                 spot_grid["error"] = self._spot_grid_runtime["last_error"]
+            execution_protection = summarize_multileg_execution_protections(
+                funding_basis=funding_basis,
+                options_arbitrage=options_arbitrage,
+            )
             self._payload = {
                 "status": status,
                 "config": {
@@ -957,6 +973,7 @@ class MonitorState:
                 "derivatives": derivatives,
                 "funding_basis": funding_basis,
                 "options_arbitrage": options_arbitrage,
+                "execution_protection": execution_protection,
                 "order_activity": order_activity,
                 "onchain": onchain,
                 "market_maker": market_maker,
@@ -978,6 +995,7 @@ class MonitorState:
                     dca=dca,
                     execution_algo=execution_algo,
                     backtest=backtest,
+                    execution_protection=execution_protection,
                     markets=markets,
                     warnings=warnings,
                 ),

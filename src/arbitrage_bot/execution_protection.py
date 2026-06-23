@@ -227,3 +227,103 @@ def build_multileg_execution_protection(
         ],
         "evaluated_at": evaluated_at,
     }
+
+
+def _row_protection(
+    row: dict[str, Any],
+    *,
+    strategy: str,
+) -> dict[str, Any] | None:
+    paper = row.get("paper_execution") if isinstance(row.get("paper_execution"), dict) else {}
+    protection = (
+        paper.get("protection") if isinstance(paper.get("protection"), dict) else None
+    )
+    if not protection:
+        return None
+    label = (
+        row.get("pair_id")
+        or row.get("underlying")
+        or row.get("spot_symbol")
+        or row.get("derivative_symbol")
+        or strategy
+    )
+    if row.get("strike"):
+        label = f"{label} K={row.get('strike')}"
+    if row.get("expiry"):
+        label = f"{label} {row.get('expiry')}"
+    reasons = [str(item) for item in protection.get("reasons", []) or [] if item]
+    warnings = [str(item) for item in protection.get("warnings", []) or [] if item]
+    return {
+        "strategy": strategy,
+        "label": str(label),
+        "status": str(protection.get("status") or "unknown"),
+        "requires_manual_review": bool(protection.get("requires_manual_review")),
+        "max_slippage_bps": protection.get("max_slippage_bps"),
+        "plan_age_seconds": protection.get("plan_age_seconds"),
+        "reason": (reasons or warnings or [str(paper.get("reason") or "")])[0],
+        "reasons": reasons,
+        "warnings": warnings,
+        "playbook_count": len(protection.get("playbooks", []) or []),
+        "scenario_count": len(protection.get("paper_failure_scenarios", []) or []),
+    }
+
+
+def summarize_multileg_execution_protections(
+    *,
+    funding_basis: dict[str, Any] | None = None,
+    options_arbitrage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for strategy, payload in (
+        ("funding_arbitrage", funding_basis or {}),
+        ("options_arbitrage", options_arbitrage or {}),
+    ):
+        for row in payload.get("rows", []) or []:
+            if not isinstance(row, dict):
+                continue
+            item = _row_protection(row, strategy=strategy)
+            if item is not None:
+                rows.append(item)
+
+    blocked_count = sum(1 for row in rows if row["status"] == "blocked")
+    warning_count = sum(1 for row in rows if row["status"] == "warning")
+    ok_count = sum(1 for row in rows if row["status"] == "ok")
+    manual_review_count = sum(1 for row in rows if row["requires_manual_review"])
+    slippage_block_count = sum(
+        1
+        for row in rows
+        for reason in row.get("reasons", [])
+        if "slippage" in reason.lower()
+    )
+    stale_block_count = sum(
+        1
+        for row in rows
+        for reason in row.get("reasons", [])
+        if "plan age" in reason.lower() or "stale" in reason.lower()
+    )
+    if not rows:
+        status = "disabled"
+    elif blocked_count:
+        status = "blocked"
+    elif warning_count or manual_review_count:
+        status = "warning"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "mode": "paper",
+        "protection_count": len(rows),
+        "ok_count": ok_count,
+        "blocked_count": blocked_count,
+        "warning_count": warning_count,
+        "manual_review_count": manual_review_count,
+        "slippage_block_count": slippage_block_count,
+        "stale_block_count": stale_block_count,
+        "rows": rows,
+        "top_reasons": [
+            row["reason"]
+            for row in rows
+            if row.get("reason") and row["status"] in {"blocked", "warning"}
+        ][:6],
+        "updated_at": time.time(),
+    }

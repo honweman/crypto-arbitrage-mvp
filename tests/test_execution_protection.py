@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from arbitrage_bot.config import RiskConfig
-from arbitrage_bot.execution_protection import build_multileg_execution_protection
+from arbitrage_bot.execution_protection import (
+    build_multileg_execution_protection,
+    summarize_multileg_execution_protections,
+)
 
 
 class ExecutionProtectionTest(unittest.TestCase):
@@ -115,6 +118,47 @@ class ExecutionProtectionTest(unittest.TestCase):
             payload["paper_failure_scenarios"][1]["status"],
             "manual_review",
         )
+
+    def test_summary_counts_protection_rows_from_strategy_payloads(self) -> None:
+        protection = build_multileg_execution_protection(
+            strategy="funding_arbitrage",
+            legs=[
+                {
+                    "exchange": "spot",
+                    "symbol": "BTC/USDT",
+                    "side": "buy",
+                    "quantity_base": 1.0,
+                    "slippage_bps": 20.0,
+                },
+                {
+                    "exchange": "perp",
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "sell",
+                    "quantity_base": 1.0,
+                    "slippage_bps": 1.0,
+                },
+            ],
+            risk=RiskConfig(max_slippage_bps=5.0),
+            observed_at=100.0,
+            now=100.0,
+        )
+
+        summary = summarize_multileg_execution_protections(
+            funding_basis={
+                "rows": [
+                    {
+                        "pair_id": "BTC basis",
+                        "paper_execution": {"protection": protection},
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(summary["status"], "blocked")
+        self.assertEqual(summary["protection_count"], 1)
+        self.assertEqual(summary["blocked_count"], 1)
+        self.assertEqual(summary["slippage_block_count"], 1)
+        self.assertIn("slippage", summary["top_reasons"][0])
 
 
 if __name__ == "__main__":
