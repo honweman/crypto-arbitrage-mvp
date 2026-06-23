@@ -343,7 +343,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.main \
   --once
 ```
 
-For `start_price`, a sell schedule waits until the best bid is at or above the start price before placing the first marketable sell order. A buy schedule waits until the best ask is at or below the start price before placing the first marketable buy order. After an Auto Buy/Sell task has triggered, it keeps running until the configured amount is filled or `stop_price` is hit. For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
+For `start_price`, a sell schedule waits until the best bid is at or above the start price before placing the first marketable sell order. A buy schedule waits until the best ask is at or below the start price before placing the first marketable buy order. For `stop_price`, a sell schedule stops when the best bid is at or below the stop price, and a buy schedule stops when the best ask is at or below the stop price. Buy stop checks run before the start gate, so a buy task with `stop_price` above `start_price` stops before placing an order once the ask reaches or passes the stop level.
 
 To preview the next slice without placing anything:
 

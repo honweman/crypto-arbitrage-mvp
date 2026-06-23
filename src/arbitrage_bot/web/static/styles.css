@@ -737,6 +737,13 @@ tbody tr:last-child td {
   text-transform: uppercase;
 }
 
+.field-hint {
+  min-height: 15px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .field input,
 .field select,
 .field textarea {

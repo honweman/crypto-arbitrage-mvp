@@ -2055,7 +2055,7 @@ function balanceStatusClass(status) {
       if (stop <= 0) return "stop off";
       return config?.side === "sell"
         ? `stop bid <= ${fmt.format(stop)}`
-        : `stop ask >= ${fmt.format(stop)}`;
+        : `stop ask <= ${fmt.format(stop)}`;
     }
 
     function autoConfigSummary(config) {
@@ -2180,15 +2180,20 @@ function balanceStatusClass(status) {
     }
 
     function autoTaskDetailTitle(task) {
+      const config = task.config || {};
       const execution = task.last_execution || {};
       const orderIds = execution.placed_order_ids || [];
       const lastOrderId = orderIds.length ? orderIds[orderIds.length - 1] : "";
+      const lastPlan = task.last_plan || {};
       const parts = [
         `last status: ${task.last_status || task.status || "--"}`,
         `placed: ${task.placed_count || 0}`,
         `canceled: ${task.canceled_count || 0}`,
         `start: ${task.start_price_triggered ? "triggered" : "waiting"}`,
+        autoStartGateText(config),
+        autoStopGateText(config),
       ];
+      if (lastPlan.trigger_price != null) parts.push(`trigger: ${fmt.format(lastPlan.trigger_price)}`);
       if (lastOrderId) parts.push(`last order: ${lastOrderId}`);
       if (task.last_error) parts.push(`error: ${task.last_error}`);
       return parts.join(" · ");
@@ -2886,11 +2891,31 @@ function balanceStatusClass(status) {
       });
     }
 
+    function updateSlowGateLabels() {
+      const side = document.getElementById("slow-side")?.value || "sell";
+      const startLabel = document.getElementById("slow-start-price-label");
+      const stopLabel = document.getElementById("slow-stop-price-label");
+      const startHelp = document.getElementById("slow-start-price-help");
+      const stopHelp = document.getElementById("slow-stop-price-help");
+      if (side === "buy") {
+        if (startLabel) startLabel.textContent = "Start Gate (Ask <=)";
+        if (stopLabel) stopLabel.textContent = "Stop Gate (Ask <=)";
+        if (startHelp) startHelp.textContent = "Buy starts when the best ask reaches this price or lower.";
+        if (stopHelp) stopHelp.textContent = "Buy stops when the best ask reaches this price or lower. This is checked before Start.";
+        return;
+      }
+      if (startLabel) startLabel.textContent = "Start Gate (Bid >=)";
+      if (stopLabel) stopLabel.textContent = "Stop Gate (Bid <=)";
+      if (startHelp) startHelp.textContent = "Sell starts when the best bid reaches this price or higher.";
+      if (stopHelp) stopHelp.textContent = "Sell stops when the best bid reaches this price or lower.";
+    }
+
     function renderSlowExecutionConfig(config, accounts) {
       if (!config || slowFormDirty || slowFormBusy) return;
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
+      updateSlowGateLabels();
       document.getElementById("slow-price-mode").value = config.price_mode || "taker";
       setNumericField("slow-offset-bps", config.price_offset_bps || 0);
       document.getElementById("slow-unlimited").checked = Boolean(config.unlimited_total);
@@ -3588,6 +3613,7 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("change", () => {
       slowFormDirty = true;
     });
+    document.getElementById("slow-side").addEventListener("change", updateSlowGateLabels);
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     document.getElementById("grid-form").addEventListener("input", () => {
       gridFormDirty = true;
