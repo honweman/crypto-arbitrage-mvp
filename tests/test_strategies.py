@@ -368,6 +368,57 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(opportunities[0].metadata["direction"], "reverse_conversion")
         self.assertGreater(opportunities[0].profit_quote, 0)
 
+    def test_options_arbitrage_filters_illiquid_options(self) -> None:
+        spot_exchanges = [ExchangeConfig(id="spot", label="spot", fee_bps=0)]
+        option_exchanges = [
+            ExchangeConfig(id="deribit", label="deribit-options", market_type="option", fee_bps=0)
+        ]
+        combo = OptionComboConfig(
+            underlying="BTC",
+            spot_exchange="spot",
+            spot_symbol="BTC/USDT",
+            option_exchange="deribit-options",
+            call_symbol="BTC-100-C",
+            put_symbol="BTC-100-P",
+            strike=100.0,
+            contract_size=1.0,
+            quote_currency="USDT",
+        )
+        spot_books = {
+            ("spot", "BTC/USDT"): book("spot", "BTC/USDT", bid=99.0, ask=100.0),
+        }
+        option_books = {
+            ("deribit-options", "BTC-100-C"): book(
+                "deribit-options",
+                "BTC-100-C",
+                bid=8.0,
+                ask=12.0,
+            ),
+            ("deribit-options", "BTC-100-P"): book(
+                "deribit-options",
+                "BTC-100-P",
+                bid=1.0,
+                ask=1.5,
+            ),
+        }
+
+        opportunities = find_options_arbitrage_opportunities(
+            spot_books=spot_books,
+            option_books=option_books,
+            spot_exchanges=spot_exchanges,
+            option_exchanges=option_exchanges,
+            combos=[combo],
+            cfg=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=1000.0,
+                min_edge_quote=1.0,
+                min_edge_bps=1.0,
+                max_option_spread_bps=100.0,
+            ),
+        )
+
+        self.assertEqual(opportunities, [])
+
     def test_triangular_arbitrage_finds_single_exchange_cycle(self) -> None:
         exchanges = [ExchangeConfig(id="binance", label="binance-spot", fee_bps=0)]
         books = {

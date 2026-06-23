@@ -132,7 +132,11 @@
     "max_contracts": 0.0,
     "max_days_to_expiry": 0.0,
     "risk_free_rate_bps": 0.0,
-    "borrow_rate_bps": 0.0
+    "borrow_rate_bps": 0.0,
+    "min_option_depth_quote": 0.0,
+    "max_option_spread_bps": 0.0,
+    "min_days_to_expiry_open": 0.0,
+    "expiry_reminder_days": 0.0
   },
   "triangular_arbitrage": {
     "enabled": false,

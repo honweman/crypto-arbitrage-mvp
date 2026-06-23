@@ -326,11 +326,74 @@ function balanceStatusClass(status) {
       }
     }
 
+    function formatMaybeNumber(value, formatter = fmt) {
+      return value == null || !Number.isFinite(Number(value)) ? "--" : formatter.format(Number(value));
+    }
+
+    function renderOptionsRiskSummary(optionsArbitrage) {
+      const container = document.getElementById("options-risk-summary");
+      if (!container) return;
+      const risk = optionsArbitrage?.risk || {};
+      const controls = risk.controls || optionsArbitrage?.execution_controls || {};
+      const expiryReminders = risk.expiry_reminders || [];
+      const items = [
+        ["Risk", risk.status || optionsArbitrage?.status || "--", `${risk.blocked_new_open_count || 0} blocked opens`],
+        ["Delta", formatMaybeNumber(risk.total_delta), `Gamma ${formatMaybeNumber(risk.total_gamma)}`],
+        ["Vega", formatMaybeNumber(risk.total_vega), `Theta ${formatMaybeNumber(risk.total_theta)}`],
+        ["Expiry", `${expiryReminders.length || 0} alerts`, `${(risk.expiry_concentration || []).length || 0} expiries`],
+        ["Payoff", formatMaybeNumber(risk.max_profit_quote, money), `Max loss ${formatMaybeNumber(risk.max_loss_quote, money)}`],
+        ["Liquidity", `${formatMaybeNumber(controls.min_option_depth_quote)} min depth`, `${formatBps(controls.max_option_spread_bps)}`],
+      ];
+      container.innerHTML = items.map(([label, value, detail]) => `
+        <div class="metric compact">
+          <div class="label">${escapeHtml(label)}</div>
+          <div class="value">${escapeHtml(value)}</div>
+          <div class="detail">${escapeHtml(detail)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderOptionsChain(optionsArbitrage) {
+      const body = document.getElementById("options-chain");
+      if (!body) return;
+      body.innerHTML = "";
+      const rows = optionsArbitrage?.option_chain || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No option chain rows.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const reason = (row.reasons || []).join(" · ");
+        const greeks = [
+          `D ${formatMaybeNumber(row.delta)}`,
+          `G ${formatMaybeNumber(row.gamma)}`,
+          `V ${formatMaybeNumber(row.vega)}`,
+          `T ${formatMaybeNumber(row.theta)}`,
+        ].join(" / ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(row.expiry || "--")}<br><span class="subtle">${row.days_to_expiry == null ? "--" : `${Number(row.days_to_expiry).toFixed(1)}d`} · K ${formatMaybeNumber(row.strike)}</span></td>
+          <td>${escapeHtml(row.option_type || "--")}<br><span class="subtle">${escapeHtml(row.symbol || "--")}</span></td>
+          <td class="num">${formatMaybeNumber(row.bid)} / ${formatMaybeNumber(row.ask)}</td>
+          <td class="num">${formatMaybeNumber(row.mark_price)}<br><span class="subtle">${row.iv == null ? "IV --" : `IV ${formatMaybeNumber(row.iv)}`}</span></td>
+          <td class="num">${formatMaybeNumber(row.min_depth_quote, money)}<br><span class="subtle">${formatBps(row.spread_bps)}</span></td>
+          <td class="num">${formatMaybeNumber(row.volume)} / ${formatMaybeNumber(row.open_interest)}</td>
+          <td class="num" title="${escapeHtml(greeks)}">${escapeHtml(greeks)}</td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function renderOptionsArbitrage(optionsArbitrage) {
+      renderOptionsRiskSummary(optionsArbitrage);
+      renderOptionsChain(optionsArbitrage);
       text(
         "options-arbitrage-meta",
         optionsArbitrage
-          ? `${optionsArbitrage.status || "unknown"} · candidates ${optionsArbitrage.candidate_count || 0} · checked ${optionsArbitrage.checked_count || 0}/${optionsArbitrage.configured_count || 0} · ${formatAge(optionsArbitrage.last_finished)}`
+          ? `${optionsArbitrage.status || "unknown"} · candidates ${optionsArbitrage.candidate_count || 0} (${optionsArbitrage.parity_candidate_count || 0} parity / ${optionsArbitrage.enhanced_candidate_count || 0} enhanced) · checked ${optionsArbitrage.checked_count || 0}/${optionsArbitrage.configured_count || 0} · ${formatAge(optionsArbitrage.last_finished)}`
           : ""
       );
       const body = document.getElementById("options-arbitrage");
@@ -345,9 +408,11 @@ function balanceStatusClass(status) {
       for (const row of rows) {
         const paper = row.paper_execution || {};
         const protection = paper.protection || {};
+        const ticket = paper.order_ticket || {};
         const opportunity = row.opportunity || {};
         const edge = opportunity.profit_bps == null ? "" : ` · edge ${formatBps(opportunity.profit_bps)}`;
         const protectionText = protection.status ? ` · protection ${protection.status}` : "";
+        const ticketText = ticket.order_count ? ` · ticket ${ticket.order_count}` : "";
         const protectionTitle = [
           ...(protection.reasons || []),
           ...(protection.warnings || []),
@@ -366,7 +431,7 @@ function balanceStatusClass(status) {
           <td class="num">${row.call_mid == null ? "--" : fmt.format(row.call_mid)}</td>
           <td class="num">${row.put_mid == null ? "--" : fmt.format(row.put_mid)}</td>
           <td class="num">${formatBps(row.parity_gap_bps)}</td>
-          <td>${escapeHtml(paper.state || "--")}<br><span class="subtle" title="${escapeHtml(protectionTitle)}">${escapeHtml((legs || paper.reason || "--") + edge + protectionText)}</span></td>
+          <td>${escapeHtml(paper.state || "--")}<br><span class="subtle" title="${escapeHtml(protectionTitle)}">${escapeHtml((legs || paper.reason || "--") + edge + protectionText + ticketText)}</span></td>
           <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
         `;
         body.appendChild(tr);

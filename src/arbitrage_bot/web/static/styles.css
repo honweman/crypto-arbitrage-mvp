@@ -56,7 +56,8 @@ main {
 .portfolio-bar,
 .strategy-overview,
 .mm-safety-grid,
-.readiness-grid {
+.readiness-grid,
+.metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
@@ -99,6 +100,11 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.compact-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  margin-bottom: 10px;
 }
 
 .mm-safety-grid {

@@ -243,6 +243,10 @@ class OptionsArbitrageConfig:
     max_days_to_expiry: float = 0.0
     risk_free_rate_bps: float = 0.0
     borrow_rate_bps: float = 0.0
+    min_option_depth_quote: float = 0.0
+    max_option_spread_bps: float = 0.0
+    min_days_to_expiry_open: float = 0.0
+    expiry_reminder_days: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -875,6 +879,18 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             borrow_rate_bps=float(
                 options_arbitrage_raw.get("borrow_rate_bps", 0.0)
+            ),
+            min_option_depth_quote=float(
+                options_arbitrage_raw.get("min_option_depth_quote", 0.0)
+            ),
+            max_option_spread_bps=float(
+                options_arbitrage_raw.get("max_option_spread_bps", 0.0)
+            ),
+            min_days_to_expiry_open=float(
+                options_arbitrage_raw.get("min_days_to_expiry_open", 0.0)
+            ),
+            expiry_reminder_days=float(
+                options_arbitrage_raw.get("expiry_reminder_days", 0.0)
             ),
         ),
         triangular_arbitrage=TriangularArbitrageConfig(

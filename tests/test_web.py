@@ -282,6 +282,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Options Arbitrage", HTML)
         self.assertIn('id="options-arbitrage"', HTML)
         self.assertIn('id="options-arbitrage-meta"', HTML)
+        self.assertIn('id="options-risk-summary"', HTML)
+        self.assertIn('id="options-chain"', HTML)
+        self.assertIn("renderOptionsRiskSummary", HTML)
+        self.assertIn("renderOptionsChain", HTML)
 
     def test_page_position_summary_includes_asset_price(self) -> None:
         self.assertIn('id="portfolio-position-detail"', HTML)
@@ -3833,18 +3837,198 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["status"], "candidate")
         self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["parity_candidate_count"], 1)
+        self.assertEqual(payload["enhanced_candidate_count"], 0)
         self.assertEqual(payload["checked_count"], 1)
+        self.assertEqual(len(payload["option_chain"]), 2)
+        self.assertEqual(payload["risk"]["status"], "ok")
+        self.assertEqual(payload["risk"]["greeks_available_count"], 0)
+        self.assertFalse(payload["execution_controls"]["auto_submit_live_orders"])
         row = payload["rows"][0]
         self.assertEqual(row["status"], "candidate")
         self.assertEqual(row["paper_execution"]["mode"], "paper")
         self.assertEqual(row["paper_execution"]["state"], "would_open")
         self.assertFalse(row["paper_execution"]["live_enabled"])
+        self.assertEqual(row["paper_execution"]["order_ticket"]["order_count"], 3)
+        self.assertTrue(
+            row["paper_execution"]["order_ticket"]["requires_final_confirmation"]
+        )
         self.assertIn("protection", row["paper_execution"])
         self.assertTrue(row["paper_execution"]["protection"]["requires_manual_review"])
         self.assertEqual(
             [leg["side"] for leg in row["paper_execution"]["suggested_legs"]],
             ["sell", "buy", "buy"],
         )
+
+    async def test_fetch_options_arbitrage_payload_blocks_wide_option_spread(self) -> None:
+        class FakeOptionsManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        if symbol == "BTC/USDT":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=99.0, amount=10.0)],
+                                asks=[BookLevel(price=100.0, amount=10.0)],
+                            )
+                        elif symbol == "BTC-100-C":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=8.0, amount=10.0)],
+                                asks=[BookLevel(price=12.0, amount=10.0)],
+                            )
+                        elif symbol == "BTC-100-P":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=1.0, amount=10.0)],
+                                asks=[BookLevel(price=1.5, amount=10.0)],
+                            )
+                return books
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=0.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="deribit",
+                    label="deribit-options",
+                    market_type="option",
+                    fee_bps=0.0,
+                )
+            ],
+            option_combos=[
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-100-C",
+                    put_symbol="BTC-100-P",
+                    strike=100.0,
+                    contract_size=1.0,
+                    quote_currency="USDT",
+                )
+            ],
+            options_arbitrage=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=200.0,
+                min_edge_quote=0.1,
+                min_edge_bps=1.0,
+                max_option_spread_bps=100.0,
+            ),
+        )
+
+        payload = await fetch_options_arbitrage_payload(cfg, FakeOptionsManager())
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(payload["risk"]["status"], "blocked")
+        self.assertEqual(payload["risk"]["blocked_new_open_count"], 1)
+        row = payload["rows"][0]
+        self.assertEqual(row["status"], "blocked")
+        self.assertIn("call: spread", row["preflight_reasons"][0])
+        self.assertEqual(row["paper_execution"]["state"], "blocked")
+        self.assertEqual(row["paper_execution"]["protection"]["status"], "blocked")
+        self.assertFalse(
+            row["paper_execution"]["protection"]["live_submit_allowed"]
+        )
+
+    async def test_fetch_options_arbitrage_payload_finds_box_spread_candidate(self) -> None:
+        class FakeOptionsManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                quotes = {
+                    "BTC/USDT": (99.0, 100.0),
+                    "BTC-100-C": (7.8, 8.0),
+                    "BTC-100-P": (1.0, 1.2),
+                    "BTC-110-C": (3.0, 3.2),
+                    "BTC-110-P": (3.8, 4.0),
+                }
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        bid, ask = quotes[symbol]
+                        books[(exchange.key, symbol)] = OrderBookSnapshot(
+                            exchange=exchange.key,
+                            symbol=symbol,
+                            bids=[BookLevel(price=bid, amount=10.0)],
+                            asks=[BookLevel(price=ask, amount=10.0)],
+                        )
+                return books
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=0.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="deribit",
+                    label="deribit-options",
+                    market_type="option",
+                    fee_bps=0.0,
+                )
+            ],
+            option_combos=[
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-100-C",
+                    put_symbol="BTC-100-P",
+                    strike=100.0,
+                    expiry="2026-12-31",
+                    quote_currency="USDT",
+                ),
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-110-C",
+                    put_symbol="BTC-110-P",
+                    strike=110.0,
+                    expiry="2026-12-31",
+                    quote_currency="USDT",
+                ),
+            ],
+            options_arbitrage=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=200.0,
+                min_edge_quote=0.1,
+                min_edge_bps=1.0,
+            ),
+        )
+
+        payload = await fetch_options_arbitrage_payload(cfg, FakeOptionsManager())
+
+        strategy_types = {
+            row["strategy_type"] for row in payload["strategy_candidates"]
+        }
+        self.assertIn("box_spread", strategy_types)
+        self.assertGreaterEqual(payload["enhanced_candidate_count"], 1)
+        box = next(
+            row
+            for row in payload["strategy_candidates"]
+            if row["strategy_type"] == "box_spread"
+        )
+        self.assertFalse(box["auto_submit_live_orders"])
+        self.assertTrue(box["requires_final_confirmation"])
+        self.assertEqual(len(box["legs"]), 4)
 
     async def test_program_switch_updates_running_state(self) -> None:
         state = MonitorState(make_config(), 1.0)

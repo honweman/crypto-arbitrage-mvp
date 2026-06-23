@@ -135,6 +135,40 @@ def _best_bid_ask(book: OrderBookSnapshot) -> tuple[float, float] | None:
     return bid, ask
 
 
+def _spread_bps(book: OrderBookSnapshot) -> float | None:
+    best = _best_bid_ask(book)
+    if best is None:
+        return None
+    bid, ask = best
+    mid = (bid + ask) / 2.0
+    return (ask - bid) / mid * 10_000.0 if mid > 0 else None
+
+
+def _depth_quote(levels: list[BookLevel]) -> float:
+    return sum(max(0.0, level.price) * max(0.0, level.amount) for level in levels)
+
+
+def _min_two_sided_depth_quote(book: OrderBookSnapshot) -> float:
+    return min(_depth_quote(book.bids), _depth_quote(book.asks))
+
+
+def _passes_option_liquidity(
+    book: OrderBookSnapshot,
+    cfg: OptionsArbitrageConfig,
+) -> bool:
+    spread = _spread_bps(book)
+    if spread is None:
+        return False
+    if cfg.max_option_spread_bps > 0 and spread > cfg.max_option_spread_bps:
+        return False
+    if (
+        cfg.min_option_depth_quote > 0
+        and _min_two_sided_depth_quote(book) < cfg.min_option_depth_quote
+    ):
+        return False
+    return True
+
+
 def _passes_thresholds(
     *,
     edge_quote: float,
@@ -227,10 +261,19 @@ def find_options_arbitrage_opportunities(
             continue
         if _best_bid_ask(spot_book) is None or _best_bid_ask(call_book) is None or _best_bid_ask(put_book) is None:
             continue
+        if not (
+            _passes_option_liquidity(call_book, cfg)
+            and _passes_option_liquidity(put_book, cfg)
+        ):
+            continue
 
         spot_bid, spot_ask = _best_bid_ask(spot_book) or (0.0, 0.0)
         call_bid, call_ask = _best_bid_ask(call_book) or (0.0, 0.0)
         put_bid, put_ask = _best_bid_ask(put_book) or (0.0, 0.0)
+        call_spread_bps = _spread_bps(call_book)
+        put_spread_bps = _spread_bps(put_book)
+        call_depth_quote = _min_two_sided_depth_quote(call_book)
+        put_depth_quote = _min_two_sided_depth_quote(put_book)
         discounted_strike = _discounted_strike(combo, cfg)
         max_underlying_from_contracts = (
             cfg.max_contracts * combo.contract_size if cfg.max_contracts > 0 else math.inf
@@ -317,6 +360,10 @@ def find_options_arbitrage_opportunities(
                                 "contracts": call_sell.contracts,
                                 "synthetic_forward_bid": call_bid - put_ask + combo.strike,
                                 "spot_reference": spot_ask,
+                                "option_call_spread_bps": call_spread_bps,
+                                "option_put_spread_bps": put_spread_bps,
+                                "option_call_depth_quote": call_depth_quote,
+                                "option_put_depth_quote": put_depth_quote,
                                 "requires_option_assignment_controls": True,
                                 "requires_margin_controls": True,
                             },
@@ -404,6 +451,10 @@ def find_options_arbitrage_opportunities(
                                 "contracts": call_buy.contracts,
                                 "synthetic_forward_ask": call_ask - put_bid + combo.strike,
                                 "spot_reference": spot_bid,
+                                "option_call_spread_bps": call_spread_bps,
+                                "option_put_spread_bps": put_spread_bps,
+                                "option_call_depth_quote": call_depth_quote,
+                                "option_put_depth_quote": put_depth_quote,
                                 "requires_option_assignment_controls": True,
                                 "requires_margin_controls": True,
                             },
