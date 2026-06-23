@@ -28,6 +28,7 @@ def _compact_config_payload(config: dict[str, Any], *, full: bool = False) -> di
             "min_profit_bps",
             "common_quote_currency",
             "triangular_arbitrage",
+            "contract_strategies",
         ),
     )
 
@@ -350,6 +351,31 @@ def _compact_options_arbitrage_payload(
     )
 
 
+def _compact_contract_strategies_payload(
+    contract_strategies: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return contract_strategies
+    return _copy_payload_keys(
+        contract_strategies,
+        (
+            "status",
+            "mode",
+            "summary",
+            "candidate_count",
+            "blocked_count",
+            "configured_count",
+            "derivative_status",
+            "execution_controls",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
 def _compact_execution_protection_payload(
     execution_protection: dict[str, Any],
     *,
@@ -500,6 +526,10 @@ def state_payload_for_view(
         ),
         "options_arbitrage": _compact_options_arbitrage_payload(
             payload.get("options_arbitrage", {}),
+            full=is_status,
+        ),
+        "contract_strategies": _compact_contract_strategies_payload(
+            payload.get("contract_strategies", {}),
             full=is_status,
         ),
         "execution_protection": _compact_execution_protection_payload(

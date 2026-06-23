@@ -8,6 +8,7 @@ from .config import (
     BotConfig,
     BacktestConfig,
     CashAndCarryPair,
+    ContractStrategiesConfig,
     DcaConfig,
     ExchangeConfig,
     ExecutionAlgoConfig,
@@ -32,6 +33,12 @@ def execution_algo_config_to_dict(cfg: ExecutionAlgoConfig) -> dict[str, Any]:
 
 
 def backtest_config_to_dict(cfg: BacktestConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def contract_strategies_config_to_dict(
+    cfg: ContractStrategiesConfig,
+) -> dict[str, Any]:
     return asdict(cfg)
 
 
@@ -101,6 +108,13 @@ def _derivative_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     for combo in cfg.option_combos:
         symbols.setdefault(combo.option_exchange, set()).update(
             [combo.call_symbol, combo.put_symbol]
+        )
+    if (
+        cfg.contract_strategies.derivative_exchange
+        and cfg.contract_strategies.derivative_symbol
+    ):
+        symbols.setdefault(cfg.contract_strategies.derivative_exchange, set()).add(
+            cfg.contract_strategies.derivative_symbol
         )
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 

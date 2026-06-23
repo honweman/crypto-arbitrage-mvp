@@ -326,6 +326,112 @@ function balanceStatusClass(status) {
       }
     }
 
+    function contractSignalText(signal) {
+      if (!signal || typeof signal !== "object") return ["--", ""];
+      const primary = signal.primary || "--";
+      if (primary === "funding") {
+        const apr = signal.estimated_apr_pct == null
+          ? "APR --"
+          : `APR ${formatMaybeNumber(signal.estimated_apr_pct)}%`;
+        return [
+          `Funding ${formatBps(signal.funding_rate_bps)}`,
+          `Basis ${formatBps(signal.basis_bps)} · ${apr}`,
+        ];
+      }
+      if (primary === "basis") {
+        return [
+          `Basis ${formatBps(signal.basis_bps)}`,
+          `Entry ${formatBps(signal.threshold_bps)} · Exit ${formatBps(signal.exit_bps)}`,
+        ];
+      }
+      if (primary === "grid") {
+        return [
+          `Mid ${formatMaybeNumber(signal.mid_price)}`,
+          signal.detail || "",
+        ];
+      }
+      if (primary === "delta") {
+        return [
+          `Delta ${formatMaybeNumber(signal.net_mm_delta_base)}`,
+          `Threshold ${formatMaybeNumber(signal.threshold_base)} · fills ${signal.trade_count || 0}`,
+        ];
+      }
+      return [String(primary), signal.detail || ""];
+    }
+
+    function contractPlanText(plan) {
+      if (!plan || typeof plan !== "object") return ["--", ""];
+      const summary = plan.summary || "--";
+      const orderCount = plan.order_count == null ? null : Number(plan.order_count);
+      const detail = [
+        plan.notional_quote == null ? "" : `Notional ${formatMaybeNumber(plan.notional_quote, money)}`,
+        orderCount == null ? "" : `${orderCount} orders`,
+        plan.leverage == null ? "" : `${formatMaybeNumber(plan.leverage)}x`,
+        plan.post_only == null ? "" : (plan.post_only ? "post-only" : "taker"),
+      ].filter(Boolean).join(" · ");
+      return [summary, detail];
+    }
+
+    function renderContractStrategies(contractStrategies) {
+      text(
+        "contract-strategies-meta",
+        contractStrategies
+          ? `${contractStrategies.status || "unknown"} · candidates ${contractStrategies.candidate_count || 0} · blocked ${contractStrategies.blocked_count || 0} · ${formatAge(contractStrategies.last_finished)}`
+          : ""
+      );
+      const summary = document.getElementById("contract-strategies-summary");
+      if (summary) {
+        const items = [
+          ["Funding", contractStrategies?.summary?.funding_bot?.status || "--", `${contractStrategies?.summary?.funding_bot?.candidate_count || 0} candidates`],
+          ["Basis", contractStrategies?.summary?.basis_bot?.status || "--", `${contractStrategies?.summary?.basis_bot?.candidate_count || 0} candidates`],
+          ["Grid", contractStrategies?.summary?.futures_grid?.status || "--", `${contractStrategies?.summary?.futures_grid?.row_count || 0} plans`],
+          ["Hedge", contractStrategies?.summary?.hedge_rebalancer?.status || "--", `${contractStrategies?.summary?.hedge_rebalancer?.candidate_count || 0} hedges`],
+          ["Mode", contractStrategies?.mode || "paper", "auto-submit off"],
+        ];
+        summary.innerHTML = items.map(([label, value, detail]) => `
+          <div class="metric compact">
+            <div class="label">${escapeHtml(label)}</div>
+            <div class="value">${escapeHtml(value)}</div>
+            <div class="detail">${escapeHtml(detail)}</div>
+          </div>
+        `).join("");
+      }
+      const body = document.getElementById("contract-strategies");
+      if (!body) return;
+      body.innerHTML = "";
+      const rows = contractStrategies?.rows || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">No contract strategy rows.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const [signalPrimary, signalDetail] = contractSignalText(row.signal);
+        const [planPrimary, planDetail] = contractPlanText(row.plan);
+        const risk = row.risk || {};
+        const riskMessages = [
+          ...(risk.reasons || []),
+          ...(risk.warnings || []),
+          ...(row.warnings || []),
+        ].filter(Boolean).join(" · ");
+        const reason = [
+          row.reason,
+          riskMessages,
+        ].filter(Boolean).join(" · ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(row.strategy || "--")}<br><span class="subtle">${escapeHtml(row.plan?.mode || "paper")}</span></td>
+          <td title="${escapeHtml(row.market?.label || "")}">${escapeHtml(row.market?.label || "--")}</td>
+          <td>${escapeHtml(signalPrimary)}<br><span class="subtle">${escapeHtml(signalDetail)}</span></td>
+          <td>${escapeHtml(planPrimary)}<br><span class="subtle">${escapeHtml(planDetail)}</span></td>
+          <td class="${risk.status === "blocked" ? "risk-blocked" : risk.status === "warning" ? "missing" : "ok"}" title="${escapeHtml(riskMessages)}">${escapeHtml(risk.status || "--")}</td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function formatMaybeNumber(value, formatter = fmt) {
       return value == null || !Number.isFinite(Number(value)) ? "--" : formatter.format(Number(value));
     }
@@ -3754,6 +3860,7 @@ function balanceStatusClass(status) {
       renderAccountBalances(data.account_balances);
       renderDerivativesRisk(data.derivatives);
       renderFundingBasis(data.funding_basis);
+      renderContractStrategies(data.contract_strategies);
       renderOptionsArbitrage(data.options_arbitrage);
       renderRates(data.quote_rates);
       renderOpportunities(data.opportunities);

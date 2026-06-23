@@ -22,6 +22,7 @@ from ..config import (
     SpotGridConfig,
     SpotMarketConfig,
 )
+from ..contract_strategies import build_contract_strategies_payload
 from ..execution_protection import summarize_multileg_execution_protections
 from ..models import Opportunity
 from ..portfolio_metrics import build_market_maker_quality_payload
@@ -34,6 +35,7 @@ from ..web_config import (
     _spot_symbols_by_exchange,
     backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
+    contract_strategies_config_to_dict,
     dca_config_to_dict,
     execution_algo_config_to_dict,
     exchange_configs_to_list,
@@ -802,6 +804,15 @@ class MonitorState:
             self._payload["execution_protection"] = (
                 _execution_protection_from_payloads(self._payload)
             )
+            self._payload["contract_strategies"] = (
+                build_contract_strategies_payload(
+                    cfg,
+                    funding_basis=self._payload.get("funding_basis", {}),
+                    derivatives=self._payload.get("derivatives", {}),
+                    market_maker=self._payload.get("market_maker", {}),
+                    order_activity=order_activity,
+                )
+            )
             self._payload["trading_console"] = trading_console
             self._payload["readiness"] = build_readiness_payload(
                 cfg,
@@ -929,6 +940,14 @@ class MonitorState:
                 market_maker,
                 portfolio,
             )
+            contract_strategies = build_contract_strategies_payload(
+                cfg,
+                funding_basis=funding_basis,
+                derivatives=derivatives,
+                market_maker=market_maker,
+                order_activity=order_activity,
+                now=started_at,
+            )
             spot_grid["runtime"] = self._spot_grid_runtime
             if isinstance(self._spot_grid_runtime.get("last_plan"), dict):
                 spot_grid["plan"] = self._spot_grid_runtime["last_plan"]
@@ -954,6 +973,9 @@ class MonitorState:
                     "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
                         cfg.cash_and_carry_pairs
                     ),
+                    "contract_strategies": contract_strategies_config_to_dict(
+                        cfg.contract_strategies
+                    ),
                     "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
                     "derivative_exchanges": exchange_configs_to_list(
                         cfg.derivative_exchanges
@@ -974,6 +996,7 @@ class MonitorState:
                 "derivatives": derivatives,
                 "funding_basis": funding_basis,
                 "options_arbitrage": options_arbitrage,
+                "contract_strategies": contract_strategies,
                 "execution_protection": execution_protection,
                 "order_activity": order_activity,
                 "onchain": onchain,
@@ -1031,6 +1054,9 @@ class MonitorState:
                         "spot_markets": spot_markets_to_list(cfg.spot_markets),
                         "cash_and_carry_pairs": cash_and_carry_pairs_to_list(
                             cfg.cash_and_carry_pairs
+                        ),
+                        "contract_strategies": contract_strategies_config_to_dict(
+                            cfg.contract_strategies
                         ),
                         "spot_exchanges": exchange_configs_to_list(
                             cfg.spot_exchanges

@@ -55,6 +55,7 @@ from ..config import (
     SpotMarketConfig,
     load_config,
 )
+from ..contract_strategies import build_contract_strategies_payload
 from ..derivatives import derivative_account_summary, normalize_derivative_position
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
@@ -150,6 +151,7 @@ from ..web_config import (
     _spot_symbols_by_exchange,
     backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
+    contract_strategies_config_to_dict,
     dca_config_to_dict,
     execution_algo_config_to_dict,
     exchange_configs_to_list,
@@ -178,6 +180,10 @@ STRATEGY_IDS = {
     "cash_and_carry",
     "triangular_arbitrage",
     "funding_arbitrage",
+    "funding_bot",
+    "basis_bot",
+    "futures_grid",
+    "hedge_rebalancer",
     "options_arbitrage",
     "signal_bot",
 }
@@ -736,6 +742,58 @@ def build_trading_console_payload(
             mode="scan",
         ),
         strategy_row(
+            strategy_id="funding_bot",
+            label="Funding Bot",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.funding_bot_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol or "funding pairs",
+            strategy_allowed=_risk_strategy_enabled(cfg, "funding_bot"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
+            strategy_id="basis_bot",
+            label="Basis Bot",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.basis_bot_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol or "basis pairs",
+            strategy_allowed=_risk_strategy_enabled(cfg, "basis_bot"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
+            strategy_id="futures_grid",
+            label="Futures Grid",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.futures_grid_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "futures_grid"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
+            strategy_id="hedge_rebalancer",
+            label="Hedge Rebalancer",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.hedge_rebalancer_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "hedge_rebalancer"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
             strategy_id="options_arbitrage",
             label="Options Arbitrage",
             configured=bool(cfg.option_combos),
@@ -798,6 +856,19 @@ def _exchange_balance_symbols(
 
     if cfg.backtest.exchange and cfg.backtest.symbol:
         symbols.setdefault(cfg.backtest.exchange, set()).add(cfg.backtest.symbol)
+
+    if cfg.contract_strategies.spot_exchange and cfg.contract_strategies.spot_symbol:
+        symbols.setdefault(cfg.contract_strategies.spot_exchange, set()).add(
+            cfg.contract_strategies.spot_symbol
+        )
+
+    if (
+        cfg.contract_strategies.derivative_exchange
+        and cfg.contract_strategies.derivative_symbol
+    ):
+        symbols.setdefault(cfg.contract_strategies.derivative_exchange, set()).add(
+            cfg.contract_strategies.derivative_symbol
+        )
 
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
@@ -964,7 +1035,11 @@ def _readiness_strategy_reasons(
         reasons.append("strategy disabled by risk")
     if not strategy.get("account_enabled", True):
         reasons.append("account disabled by risk")
-    if strategy_id != "backtest" and not strategy.get("live_ready", True):
+    if (
+        strategy_id != "backtest"
+        and not strategy.get("live_ready", True)
+        and strategy.get("mode") not in {"paper", "research", "scan", "trigger"}
+    ):
         reasons.append("strategy live switch disabled")
 
     account = account_statuses.get(exchange)
@@ -1159,7 +1234,13 @@ def build_readiness_payload(
             execution_algo=execution_algo,
             backtest=backtest,
         )
-        if strategy.get("id") == "backtest" and strategy.get("configured"):
+        if (
+            strategy.get("mode") in {"paper", "research"}
+            and strategy.get("configured")
+            and not reasons
+        ):
+            status = str(strategy.get("mode") or "paper")
+        elif strategy.get("id") == "backtest" and strategy.get("configured"):
             status = "research"
         elif strategy.get("live"):
             status = "live"
@@ -2933,6 +3014,9 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 cfg.cash_and_carry_pairs
             ),
             "triangular_arbitrage": asdict(cfg.triangular_arbitrage),
+            "contract_strategies": contract_strategies_config_to_dict(
+                cfg.contract_strategies
+            ),
             "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
             "derivative_exchanges": exchange_configs_to_list(
                 cfg.derivative_exchanges
@@ -3044,6 +3128,13 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "errors": [],
             "warnings": [],
         },
+        "contract_strategies": build_contract_strategies_payload(
+            cfg,
+            funding_basis={},
+            derivatives={},
+            market_maker={},
+            order_activity={},
+        ),
         "execution_protection": {
             "status": "disabled",
             "mode": "paper",

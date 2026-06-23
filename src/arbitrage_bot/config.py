@@ -250,6 +250,32 @@ class OptionsArbitrageConfig:
 
 
 @dataclass(frozen=True)
+class ContractStrategiesConfig:
+    enabled: bool = True
+    funding_bot_enabled: bool = True
+    basis_bot_enabled: bool = True
+    futures_grid_enabled: bool = False
+    hedge_rebalancer_enabled: bool = False
+    live_enabled: bool = False
+    spot_exchange: str = ""
+    spot_symbol: str = ""
+    derivative_exchange: str = ""
+    derivative_symbol: str = ""
+    notional_quote: float = 100.0
+    funding_min_bps: float = 0.0
+    basis_entry_bps: float = 0.0
+    basis_exit_bps: float = 0.0
+    futures_grid_levels: int = 6
+    futures_grid_band_pct: float = 2.0
+    futures_grid_quote_per_level: float = 5.0
+    futures_grid_max_leverage: float = 1.0
+    hedge_threshold_base: float = 0.0
+    hedge_max_quote: float = 0.0
+    post_only: bool = True
+    client_order_prefix: str = "crypto-arb-contract"
+
+
+@dataclass(frozen=True)
 class TriangularArbitrageConfig:
     enabled: bool = False
     notional_quote: float = 1000.0
@@ -409,6 +435,9 @@ class BotConfig:
     options_arbitrage: OptionsArbitrageConfig = field(
         default_factory=OptionsArbitrageConfig
     )
+    contract_strategies: ContractStrategiesConfig = field(
+        default_factory=ContractStrategiesConfig
+    )
     triangular_arbitrage: TriangularArbitrageConfig = field(
         default_factory=TriangularArbitrageConfig
     )
@@ -553,6 +582,7 @@ def load_config(path: str | Path) -> BotConfig:
     execution_algo_raw = raw.get("execution_algo", {})
     backtest_raw = raw.get("backtest", {})
     options_arbitrage_raw = raw.get("options_arbitrage", {})
+    contract_strategies_raw = raw.get("contract_strategies", {})
     triangular_arbitrage_raw = raw.get("triangular_arbitrage", {})
     strategy_center_raw = raw.get("strategy_center", {})
     portfolio_raw = raw.get("portfolio", {})
@@ -891,6 +921,73 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             expiry_reminder_days=float(
                 options_arbitrage_raw.get("expiry_reminder_days", 0.0)
+            ),
+        ),
+        contract_strategies=ContractStrategiesConfig(
+            enabled=bool(contract_strategies_raw.get("enabled", True)),
+            funding_bot_enabled=bool(
+                contract_strategies_raw.get("funding_bot_enabled", True)
+            ),
+            basis_bot_enabled=bool(
+                contract_strategies_raw.get("basis_bot_enabled", True)
+            ),
+            futures_grid_enabled=bool(
+                contract_strategies_raw.get("futures_grid_enabled", False)
+            ),
+            hedge_rebalancer_enabled=bool(
+                contract_strategies_raw.get("hedge_rebalancer_enabled", False)
+            ),
+            live_enabled=bool(contract_strategies_raw.get("live_enabled", False)),
+            spot_exchange=str(contract_strategies_raw.get("spot_exchange", "")),
+            spot_symbol=str(contract_strategies_raw.get("spot_symbol", "")),
+            derivative_exchange=str(
+                contract_strategies_raw.get("derivative_exchange", "")
+            ),
+            derivative_symbol=str(
+                contract_strategies_raw.get("derivative_symbol", "")
+            ),
+            notional_quote=float(
+                contract_strategies_raw.get(
+                    "notional_quote",
+                    raw.get("notional_quote", 100.0),
+                )
+            ),
+            funding_min_bps=float(
+                contract_strategies_raw.get("funding_min_bps", 0.0)
+            ),
+            basis_entry_bps=float(
+                contract_strategies_raw.get(
+                    "basis_entry_bps",
+                    raw.get("min_basis_bps", 0.0),
+                )
+            ),
+            basis_exit_bps=float(
+                contract_strategies_raw.get("basis_exit_bps", 0.0)
+            ),
+            futures_grid_levels=int(
+                contract_strategies_raw.get("futures_grid_levels", 6)
+            ),
+            futures_grid_band_pct=float(
+                contract_strategies_raw.get("futures_grid_band_pct", 2.0)
+            ),
+            futures_grid_quote_per_level=float(
+                contract_strategies_raw.get("futures_grid_quote_per_level", 5.0)
+            ),
+            futures_grid_max_leverage=float(
+                contract_strategies_raw.get("futures_grid_max_leverage", 1.0)
+            ),
+            hedge_threshold_base=float(
+                contract_strategies_raw.get("hedge_threshold_base", 0.0)
+            ),
+            hedge_max_quote=float(
+                contract_strategies_raw.get("hedge_max_quote", 0.0)
+            ),
+            post_only=bool(contract_strategies_raw.get("post_only", True)),
+            client_order_prefix=str(
+                contract_strategies_raw.get(
+                    "client_order_prefix",
+                    "crypto-arb-contract",
+                )
             ),
         ),
         triangular_arbitrage=TriangularArbitrageConfig(
