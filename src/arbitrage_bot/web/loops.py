@@ -92,6 +92,7 @@ from . import (
     build_spot_grid_payload,
     build_trading_console_payload,
     fetch_account_balances_payload,
+    fetch_derivatives_risk_payload,
     fetch_onchain_payload,
     fetch_order_activity_payload,
     write_system_web_audit_event,
@@ -188,6 +189,7 @@ async def monitor_loop(
     account_balances_payload = _build_initial_payload(cfg, poll_seconds)[
         "account_balances"
     ]
+    derivatives_payload = _build_initial_payload(cfg, poll_seconds)["derivatives"]
     order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
         "order_activity"
     ]
@@ -242,6 +244,20 @@ async def monitor_loop(
                                 "total_account_count": len(
                                     _all_account_exchanges(runtime_cfg)
                                 ),
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
+                        try:
+                            derivatives_payload = await fetch_derivatives_risk_payload(
+                                runtime_cfg,
+                                manager,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            derivatives_payload = {
+                                **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                    "derivatives"
+                                ],
+                                "status": "error",
                                 "last_finished": time.time(),
                                 "errors": [str(exc)],
                             }
@@ -305,6 +321,18 @@ async def monitor_loop(
                     if account_balances_payload.get("status") == "error":
                         errors = account_balances_payload.get("errors") or ["unavailable"]
                         readonly_warnings.append(f"Account balances: {errors[0]}")
+                    if derivatives_payload.get("status") == "error":
+                        errors = derivatives_payload.get("errors") or ["unavailable"]
+                        readonly_warnings.append(f"Derivatives: {errors[0]}")
+                    elif derivatives_payload.get("status") == "blocked":
+                        reasons = [
+                            reason
+                            for account in derivatives_payload.get("accounts", [])
+                            for reason in account.get("risk_reasons", [])
+                        ]
+                        readonly_warnings.append(
+                            f"Derivatives: {reasons[0] if reasons else 'risk limit breached'}"
+                        )
                     if order_activity_payload.get("status") == "error":
                         errors = order_activity_payload.get("errors") or ["unavailable"]
                         readonly_warnings.append(f"Orders: {errors[0]}")
@@ -313,6 +341,7 @@ async def monitor_loop(
                         exec_cfg=runtime_slow_execution,
                         account_balances=account_balances_payload,
                         order_activity=order_activity_payload,
+                        derivatives=derivatives_payload,
                         warnings=readonly_warnings,
                     )
                 else:
@@ -803,6 +832,20 @@ async def monitor_loop(
                             "last_finished": time.time(),
                             "errors": [str(exc)],
                         }
+                    try:
+                        derivatives_payload = await fetch_derivatives_risk_payload(
+                            runtime_cfg,
+                            manager,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        derivatives_payload = {
+                            **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                "derivatives"
+                            ],
+                            "status": "error",
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
                     next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
 
                 if now >= next_order_activity_scan:
@@ -942,6 +985,19 @@ async def monitor_loop(
                         order_activity_payload=order_activity_payload,
                     ),
                 ]
+                if derivatives_payload.get("status") == "error":
+                    errors = derivatives_payload.get("errors") or ["unavailable"]
+                    warnings = [*warnings, f"Derivatives: {errors[0]}"]
+                elif derivatives_payload.get("status") == "blocked":
+                    reasons = [
+                        reason
+                        for account in derivatives_payload.get("accounts", [])
+                        for reason in account.get("risk_reasons", [])
+                    ]
+                    warnings = [
+                        *warnings,
+                        f"Derivatives: {reasons[0] if reasons else 'risk limit breached'}",
+                    ]
                 reconciliation_payload = (
                     order_activity_payload.get("reconciliation")
                     if isinstance(order_activity_payload.get("reconciliation"), dict)
@@ -1081,6 +1137,7 @@ async def monitor_loop(
                     opportunities=opportunities,
                     warnings=warnings,
                     account_balances=account_balances_payload,
+                    derivatives=derivatives_payload,
                     order_activity=order_activity_payload,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,

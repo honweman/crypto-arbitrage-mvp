@@ -278,6 +278,29 @@ def _compact_account_balances_payload(
     )
 
 
+def _compact_derivatives_payload(
+    derivatives: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return derivatives
+    return _copy_payload_keys(
+        derivatives,
+        (
+            "status",
+            "position_count",
+            "checked_account_count",
+            "total_account_count",
+            "funding_rate_count",
+            "limits",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
 def _compact_onchain_payload(
     onchain: dict[str, Any],
     *,
@@ -414,6 +437,10 @@ def state_payload_for_view(
                 "quote_rates": payload.get("quote_rates", {}),
                 "account_balances": _compact_account_balances_payload(
                     payload.get("account_balances", {}),
+                    full=True,
+                ),
+                "derivatives": _compact_derivatives_payload(
+                    payload.get("derivatives", {}),
                     full=True,
                 ),
                 "readiness": payload.get("readiness", {}),

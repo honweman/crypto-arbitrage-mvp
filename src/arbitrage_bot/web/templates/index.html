@@ -455,6 +455,19 @@
           <label for="risk-max-price-jump">Max Jump Bps</label>
           <input id="risk-max-price-jump" type="number" min="0" step="any">
         </div>
+        <div class="form-divider">Derivatives</div>
+        <div class="field">
+          <label for="risk-max-derivative-leverage">Max Leverage</label>
+          <input id="risk-max-derivative-leverage" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-min-liquidation-buffer">Min Liq Buffer %</label>
+          <input id="risk-min-liquidation-buffer" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-max-margin-usage">Max Margin Used %</label>
+          <input id="risk-max-margin-usage" type="number" min="0" step="any">
+        </div>
         <button id="risk-apply" class="control-button" type="submit">Apply</button>
       </form>
     </section>
@@ -736,6 +749,32 @@
             </tr>
           </thead>
           <tbody id="signal-events"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-page="status" class="compact-section">
+      <div class="section-title">
+        <h2>Derivatives Risk</h2>
+        <span id="derivatives-risk-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="derivatives-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th class="num">Notional</th>
+              <th class="num">Lev</th>
+              <th class="num">Mark</th>
+              <th class="num">Liq</th>
+              <th class="num">Liq Buffer</th>
+              <th class="num">Funding</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="derivatives-risk"></tbody>
         </table>
       </div>
     </section>

@@ -913,6 +913,9 @@ def _risk_overrides_from_payload(
         "max_order_book_age_seconds",
         "max_order_book_gap_bps",
         "max_price_jump_bps",
+        "max_derivative_leverage",
+        "min_liquidation_buffer_pct",
+        "max_margin_usage_pct",
     }
     for field in float_fields:
         if field in payload:

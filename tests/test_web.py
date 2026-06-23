@@ -94,6 +94,7 @@ from arbitrage_bot.web import (
     default_strategy_center_path,
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
+    fetch_derivatives_risk_payload,
     fetch_order_activity_payload,
     read_recent_web_audit_events,
     slow_execution_accounts,
@@ -263,6 +264,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
 
+    def test_page_includes_derivatives_risk_panel(self) -> None:
+        self.assertIn("Derivatives Risk", HTML)
+        self.assertIn('id="derivatives-risk"', HTML)
+        self.assertIn('id="derivatives-risk-meta"', HTML)
+
     def test_page_position_summary_includes_asset_price(self) -> None:
         self.assertIn('id="portfolio-position-detail"', HTML)
         self.assertIn("function formatPositionPrice", HTML)
@@ -362,6 +368,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="risk-max-exposure"', HTML)
         self.assertIn('id="risk-min-book-depth"', HTML)
         self.assertIn('id="risk-max-slippage"', HTML)
+        self.assertIn('id="risk-max-derivative-leverage"', HTML)
+        self.assertIn('id="risk-min-liquidation-buffer"', HTML)
+        self.assertIn('id="risk-max-margin-usage"', HTML)
 
     def test_page_includes_audit_trail(self) -> None:
         self.assertIn("Audit Trail", HTML)
@@ -1506,6 +1515,9 @@ class WebMonitorTest(unittest.TestCase):
                 "max_order_book_age_seconds": "60",
                 "max_order_book_gap_bps": "250",
                 "max_price_jump_bps": "80",
+                "max_derivative_leverage": "3",
+                "min_liquidation_buffer_pct": "20",
+                "max_margin_usage_pct": "40",
             },
             allowed_accounts={"coinbase-spot", "bybit-spot"},
             allowed_strategies={"market_maker", "slow_execution"},
@@ -1527,6 +1539,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["max_order_book_age_seconds"], 60.0)
         self.assertEqual(overrides["max_order_book_gap_bps"], 250.0)
         self.assertEqual(overrides["max_price_jump_bps"], 80.0)
+        self.assertEqual(overrides["max_derivative_leverage"], 3.0)
+        self.assertEqual(overrides["min_liquidation_buffer_pct"], 20.0)
+        self.assertEqual(overrides["max_margin_usage_pct"], 40.0)
 
     def test_risk_update_payload_rejects_unknown_account(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown exchange account"):
@@ -3459,6 +3474,93 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "api env vars missing",
         )
 
+    async def test_fetch_derivatives_risk_payload_flags_leverage_and_liquidation(self) -> None:
+        test_case = self
+
+        class FakeDerivativeManager:
+            async def fetch_balance(self, _: ExchangeConfig) -> dict[str, object]:
+                return {
+                    "free": {"USDT": 800.0},
+                    "used": {"USDT": 200.0},
+                    "total": {"USDT": 1000.0},
+                }
+
+            async def fetch_positions(
+                self,
+                _: ExchangeConfig,
+                symbols: list[str],
+            ) -> list[dict[str, object]]:
+                test_case.assertEqual(symbols, ["BTC/USDT:USDT"])
+                return [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1.0,
+                        "contractSize": 1.0,
+                        "markPrice": 100.0,
+                        "entryPrice": 95.0,
+                        "liquidationPrice": 85.0,
+                        "leverage": 5.0,
+                        "notional": 100.0,
+                        "unrealizedPnl": 5.0,
+                    }
+                ]
+
+            async def fetch_funding_rates(
+                self,
+                _: list[ExchangeConfig],
+                __: dict[str, list[str]],
+            ) -> dict[tuple[str, str], float]:
+                return {("binance-swap", "BTC/USDT:USDT"): 0.0001}
+
+        cfg = make_config(
+            cash_and_carry_pairs=[
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                    api_key_env="BINANCE_API_KEY",
+                    secret_env="BINANCE_SECRET",
+                )
+            ],
+            risk=RiskConfig(
+                max_derivative_leverage=3.0,
+                min_liquidation_buffer_pct=20.0,
+                max_margin_usage_pct=10.0,
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"BINANCE_API_KEY": "key", "BINANCE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await fetch_derivatives_risk_payload(
+                cfg,
+                FakeDerivativeManager(),
+            )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["checked_account_count"], 1)
+        self.assertEqual(payload["position_count"], 1)
+        account = payload["accounts"][0]
+        self.assertEqual(account["status"], "blocked")
+        self.assertAlmostEqual(account["summary"]["margin_usage_pct"], 20.0)
+        position = account["positions"][0]
+        self.assertEqual(position["status"], "blocked")
+        self.assertAlmostEqual(position["liquidation_buffer_pct"], 15.0)
+        self.assertEqual(position["funding_rate"], 0.0001)
+        self.assertTrue(any("leverage" in reason for reason in position["risk_reasons"]))
+        self.assertTrue(
+            any("liquidation buffer" in reason for reason in position["risk_reasons"])
+        )
+
     async def test_program_switch_updates_running_state(self) -> None:
         state = MonitorState(make_config(), 1.0)
 
@@ -3504,10 +3606,12 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         records = await state.get(view="records")
 
         self.assertIn("account_balances", full)
+        self.assertIn("derivatives", full)
         self.assertIn("trading_console", full)
         self.assertIn("recent_opportunities", full)
 
         self.assertIn("account_balances", status)
+        self.assertIn("derivatives", status)
         self.assertIn("readiness", status)
         self.assertNotIn("trading_console", status)
         self.assertNotIn("recent_opportunities", status)
@@ -3516,6 +3620,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("config", settings["market_maker"])
         self.assertIn("spot_markets", settings["config"])
         self.assertNotIn("account_balances", settings)
+        self.assertNotIn("derivatives", settings)
         self.assertNotIn("readiness", settings)
         self.assertIn("risk", settings["operations"])
         self.assertNotIn("trade_log", settings["operations"])

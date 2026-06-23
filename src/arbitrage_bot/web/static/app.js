@@ -125,6 +125,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 
 function balanceStatusClass(status) {
       if (status === "ok") return "ok";
+      if (status === "blocked") return "risk-blocked";
       if (["idle", "starting", "checking"].includes(status)) return "subtle";
       return "missing";
     }
@@ -212,6 +213,57 @@ function balanceStatusClass(status) {
             <td class="num" title="${escapeHtml(usedTitle)}">${formatBalanceAmount(row.used)}</td>
             <td class="num">${formatBalanceAmount(row.total)}</td>
             <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
+          `;
+          body.appendChild(tr);
+        }
+      }
+    }
+
+    function renderDerivativesRisk(derivatives) {
+      text(
+        "derivatives-risk-meta",
+        derivatives
+          ? `${derivatives.status || "unknown"} · checked ${derivatives.checked_account_count || 0}/${derivatives.total_account_count || 0} · positions ${derivatives.position_count || 0} · ${formatAge(derivatives.last_finished)}`
+          : ""
+      );
+      const body = document.getElementById("derivatives-risk");
+      body.innerHTML = "";
+      const accounts = derivatives?.accounts || [];
+      if (accounts.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="10">No derivative accounts configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const account of accounts) {
+        const positions = account.positions || [];
+        if (positions.length === 0) {
+          const message = account.error || account.skipped_reason || (account.risk_reasons || []).join(" · ") || "No open positions.";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td colspan="8">${escapeHtml(message)}</td>
+            <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
+          `;
+          body.appendChild(tr);
+          continue;
+        }
+        for (const position of positions) {
+          const funding = position.funding_rate == null ? "--" : `${(Number(position.funding_rate) * 100).toFixed(4)}%`;
+          const buffer = position.liquidation_buffer_pct == null ? "--" : `${Number(position.liquidation_buffer_pct).toFixed(2)}%`;
+          const reasons = (position.risk_reasons || []).join(" · ");
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td>${escapeHtml(position.symbol || "--")}</td>
+            <td class="${position.side === "long" ? "side-buy" : position.side === "short" ? "side-sell" : ""}">${escapeHtml(String(position.side || "--").toUpperCase())}</td>
+            <td class="num">${formatBalanceAmount(position.notional_quote)}</td>
+            <td class="num">${position.leverage == null ? "--" : fmt.format(position.leverage)}</td>
+            <td class="num">${position.mark_price == null ? "--" : fmt.format(position.mark_price)}</td>
+            <td class="num">${position.liquidation_price == null ? "--" : fmt.format(position.liquidation_price)}</td>
+            <td class="num">${buffer}</td>
+            <td class="num">${funding}</td>
+            <td class="${position.status === "blocked" ? "risk-blocked" : "ok"}" title="${escapeHtml(reasons)}">${escapeHtml(position.status || "--")}</td>
           `;
           body.appendChild(tr);
         }
@@ -2628,6 +2680,9 @@ function balanceStatusClass(status) {
       setNumericField("risk-max-book-age", risk.max_order_book_age_seconds || 0);
       setNumericField("risk-max-book-gap", risk.max_order_book_gap_bps || 0);
       setNumericField("risk-max-price-jump", risk.max_price_jump_bps || 0);
+      setNumericField("risk-max-derivative-leverage", risk.max_derivative_leverage || 0);
+      setNumericField("risk-min-liquidation-buffer", risk.min_liquidation_buffer_pct || 0);
+      setNumericField("risk-max-margin-usage", risk.max_margin_usage_pct || 0);
 
       const accounts = (tradingConsole?.accounts || []).map((account) => ({
         key: account.key,
@@ -2684,6 +2739,9 @@ function balanceStatusClass(status) {
         max_order_book_age_seconds: numericValue("risk-max-book-age"),
         max_order_book_gap_bps: numericValue("risk-max-book-gap"),
         max_price_jump_bps: numericValue("risk-max-price-jump"),
+        max_derivative_leverage: numericValue("risk-max-derivative-leverage"),
+        min_liquidation_buffer_pct: numericValue("risk-min-liquidation-buffer"),
+        max_margin_usage_pct: numericValue("risk-max-margin-usage"),
       };
       try {
         const res = await fetch("/api/risk", {
@@ -3526,6 +3584,7 @@ function balanceStatusClass(status) {
       renderReadiness(data.readiness, data.runtime_store);
       renderMarkets(data.markets);
       renderAccountBalances(data.account_balances);
+      renderDerivativesRisk(data.derivatives);
       renderRates(data.quote_rates);
       renderOpportunities(data.opportunities);
       renderHolders(data.onchain);

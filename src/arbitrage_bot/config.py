@@ -309,6 +309,9 @@ class RiskConfig:
     max_plan_age_seconds: float = 5.0
     max_order_book_age_seconds: float = 10.0
     require_order_book_timestamp: bool = False
+    max_derivative_leverage: float = 0.0
+    min_liquidation_buffer_pct: float = 0.0
+    max_margin_usage_pct: float = 0.0
     allowed_exchanges: list[str] = field(default_factory=list)
     blocked_exchanges: list[str] = field(default_factory=list)
     allowed_symbols: list[str] = field(default_factory=list)
@@ -946,6 +949,13 @@ def load_config(path: str | Path) -> BotConfig:
             require_order_book_timestamp=bool(
                 risk_raw.get("require_order_book_timestamp", False)
             ),
+            max_derivative_leverage=float(
+                risk_raw.get("max_derivative_leverage", 0.0)
+            ),
+            min_liquidation_buffer_pct=float(
+                risk_raw.get("min_liquidation_buffer_pct", 0.0)
+            ),
+            max_margin_usage_pct=float(risk_raw.get("max_margin_usage_pct", 0.0)),
             allowed_exchanges=_string_list(risk_raw.get("allowed_exchanges", [])),
             blocked_exchanges=_string_list(risk_raw.get("blocked_exchanges", [])),
             allowed_symbols=_string_list(risk_raw.get("allowed_symbols", [])),

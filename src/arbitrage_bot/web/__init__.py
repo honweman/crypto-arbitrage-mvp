@@ -55,6 +55,7 @@ from ..config import (
     SpotMarketConfig,
     load_config,
 )
+from ..derivatives import derivative_account_summary, normalize_derivative_position
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
@@ -131,6 +132,7 @@ from ..trade_log import (
 from ..web_config import (
     _backtest_overrides_from_payload,
     _cash_and_carry_pairs_from_payload,
+    _derivative_symbols_by_exchange,
     _dca_overrides_from_payload,
     _execution_algo_overrides_from_payload,
     _execution_symbols_by_exchange,
@@ -1322,6 +1324,18 @@ def _account_balance_status(accounts: list[dict[str, Any]]) -> str:
     return "ok"
 
 
+def _derivatives_status(accounts: list[dict[str, Any]]) -> str:
+    if not accounts:
+        return "disabled"
+    if any(account.get("status") == "error" for account in accounts):
+        return "error"
+    if any(account.get("status") == "blocked" for account in accounts):
+        return "blocked"
+    if any(account.get("status") == "warning" for account in accounts):
+        return "warning"
+    return "ok"
+
+
 def _symbol_base_quote(symbol: str) -> tuple[str, str]:
     if "/" not in symbol:
         return "", ""
@@ -1525,6 +1539,150 @@ async def _fetch_exchange_balance_payload(
         "open_order_reserves": reserve_payload,
     }
     return account
+
+
+async def _fetch_derivative_exchange_risk_payload(
+    manager: ExchangeManager,
+    exchange: ExchangeConfig,
+    symbols: list[str],
+    funding_rates: dict[tuple[str, str], float],
+    risk: RiskConfig,
+) -> dict[str, Any]:
+    auth = _auth_env_status(exchange)
+    account: dict[str, Any] = {
+        "exchange": exchange.key,
+        "label": exchange.label or exchange.key,
+        "id": exchange.id,
+        "market_type": exchange.market_type,
+        "symbols": symbols,
+        "auth": {
+            "configured": auth["configured"],
+            "private_checks_enabled": auth["private_checks_enabled"],
+            "missing_env": auth["missing_env"],
+        },
+        "status": "ok",
+        "checked": False,
+        "skipped_reason": "",
+        "summary": {},
+        "positions": [],
+        "risk_reasons": [],
+        "warnings": [],
+        "errors": [],
+    }
+    if not symbols:
+        account["status"] = "idle"
+        account["skipped_reason"] = "no configured derivative symbols"
+        return account
+    if not auth["configured"]:
+        account["status"] = "warning"
+        account["skipped_reason"] = "api env vars not configured"
+        account["warnings"].append("API env vars are not configured")
+        return account
+    if auth["missing_env"]:
+        account["status"] = "warning"
+        account["skipped_reason"] = "api env vars missing"
+        account["warnings"].append("one or more configured API env vars are not set")
+        return account
+
+    try:
+        balance = await manager.fetch_balance(exchange)
+    except Exception as exc:  # noqa: BLE001
+        message = f"{exc.__class__.__name__}: {exc}"
+        account["status"] = "error"
+        account["errors"].append(message)
+        return account
+
+    try:
+        raw_positions = await manager.fetch_positions(exchange, symbols)
+    except Exception as exc:  # noqa: BLE001
+        message = f"{exc.__class__.__name__}: {exc}"
+        account["status"] = "error"
+        account["errors"].append(message)
+        account["checked"] = True
+        return account
+
+    symbol_set = set(symbols)
+    positions = []
+    for raw in raw_positions:
+        if not isinstance(raw, dict):
+            continue
+        row = normalize_derivative_position(exchange, raw, risk=risk)
+        if row is None:
+            continue
+        if row.get("symbol") and row["symbol"] not in symbol_set:
+            continue
+        row["funding_rate"] = funding_rates.get((exchange.key, row.get("symbol", "")))
+        positions.append(row)
+
+    margin_currencies = _balance_currencies(symbols)
+    summary = derivative_account_summary(
+        balance,
+        positions,
+        currencies=margin_currencies,
+        risk=risk,
+    )
+    account["checked"] = True
+    account["summary"] = summary
+    account["positions"] = positions
+    account["risk_reasons"] = summary.get("risk_reasons", [])
+    if summary.get("status") == "blocked":
+        account["status"] = "blocked"
+    return account
+
+
+async def fetch_derivatives_risk_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+) -> dict[str, Any]:
+    symbols_by_exchange = _derivative_symbols_by_exchange(cfg)
+    try:
+        funding_rates = await manager.fetch_funding_rates(
+            cfg.derivative_exchanges,
+            symbols_by_exchange,
+        )
+        funding_errors: list[str] = []
+    except Exception as exc:  # noqa: BLE001
+        funding_rates = {}
+        funding_errors = [f"funding rate check failed: {exc.__class__.__name__}: {exc}"]
+    accounts = await asyncio.gather(
+        *[
+            _fetch_derivative_exchange_risk_payload(
+                manager,
+                exchange,
+                symbols_by_exchange.get(exchange.key, []),
+                funding_rates,
+                cfg.risk,
+            )
+            for exchange in cfg.derivative_exchanges
+        ]
+    )
+    errors = [
+        f"{account['exchange']}: {error}"
+        for account in accounts
+        for error in account.get("errors", [])
+    ]
+    warnings = [
+        f"{account['exchange']}: {warning}"
+        for account in accounts
+        for warning in account.get("warnings", [])
+    ]
+    warnings.extend(funding_errors)
+    return {
+        "status": _derivatives_status(accounts),
+        "accounts": accounts,
+        "position_count": sum(len(account.get("positions", [])) for account in accounts),
+        "checked_account_count": sum(1 for account in accounts if account.get("checked")),
+        "total_account_count": len(accounts),
+        "funding_rate_count": len(funding_rates),
+        "limits": {
+            "max_derivative_leverage": cfg.risk.max_derivative_leverage,
+            "min_liquidation_buffer_pct": cfg.risk.min_liquidation_buffer_pct,
+            "max_margin_usage_pct": cfg.risk.max_margin_usage_pct,
+        },
+        "last_finished": time.time(),
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 def _aggregate_account_balance_totals(
@@ -2495,6 +2653,22 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "total_account_count": len(_all_account_exchanges(cfg)),
             "last_finished": None,
             "errors": [],
+        },
+        "derivatives": {
+            "status": "disabled" if not cfg.derivative_exchanges else "starting",
+            "accounts": [],
+            "position_count": 0,
+            "checked_account_count": 0,
+            "total_account_count": len(cfg.derivative_exchanges),
+            "funding_rate_count": 0,
+            "limits": {
+                "max_derivative_leverage": cfg.risk.max_derivative_leverage,
+                "min_liquidation_buffer_pct": cfg.risk.min_liquidation_buffer_pct,
+                "max_margin_usage_pct": cfg.risk.max_margin_usage_pct,
+            },
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
         },
         "order_activity": {
             "status": "starting",

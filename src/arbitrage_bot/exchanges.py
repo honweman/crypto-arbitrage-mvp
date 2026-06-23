@@ -1063,6 +1063,23 @@ class ExchangeManager:
             return []
         return await fetcher(symbol, None, limit)
 
+    async def fetch_positions(
+        self,
+        cfg: ExchangeConfig,
+        symbols: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        if capabilities.get("fetchPositions") is False:
+            return []
+        fetcher = getattr(client, "fetch_positions", None)
+        if fetcher is None:
+            return []
+        symbols_list = sorted({symbol for symbol in symbols or [] if symbol})
+        if symbols_list:
+            return await fetcher(symbols_list)
+        return await fetcher()
+
     async def fetch_balance(self, cfg: ExchangeConfig) -> dict[str, Any]:
         client = self.client(cfg)
         return await client.fetch_balance()
