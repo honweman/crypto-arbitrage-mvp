@@ -95,6 +95,7 @@ from arbitrage_bot.web import (
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
     fetch_derivatives_risk_payload,
+    fetch_funding_basis_payload,
     fetch_order_activity_payload,
     read_recent_web_audit_events,
     slow_execution_accounts,
@@ -268,6 +269,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Derivatives Risk", HTML)
         self.assertIn('id="derivatives-risk"', HTML)
         self.assertIn('id="derivatives-risk-meta"', HTML)
+        self.assertIn("Funding / Basis", HTML)
+        self.assertIn('id="funding-basis"', HTML)
+        self.assertIn('id="funding-basis-meta"', HTML)
 
     def test_page_position_summary_includes_asset_price(self) -> None:
         self.assertIn('id="portfolio-position-detail"', HTML)
@@ -3561,6 +3565,78 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             any("liquidation buffer" in reason for reason in position["risk_reasons"])
         )
 
+    async def test_fetch_funding_basis_payload_uses_strategy_center_settings(self) -> None:
+        class FakeFundingManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                self.last_depth = depth
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        if exchange.key == "binance-spot":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=99.0, amount=10.0)],
+                                asks=[BookLevel(price=101.0, amount=10.0)],
+                            )
+                        if exchange.key == "binance-swap":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=102.0, amount=10.0)],
+                                asks=[BookLevel(price=104.0, amount=10.0)],
+                            )
+                return books
+
+            async def fetch_funding_rates(
+                self,
+                _: list[ExchangeConfig],
+                __: dict[str, set[str]],
+            ) -> dict[tuple[str, str], float]:
+                return {("binance-swap", "BTC/USDT:USDT"): 0.0002}
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=10.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                    fee_bps=5.0,
+                )
+            ],
+        )
+        payload = await fetch_funding_basis_payload(
+            cfg,
+            FakeFundingManager(),
+            strategy_center_payload={
+                "funding_arbitrage": {
+                    "enabled": True,
+                    "pair_id": "btc funding",
+                    "spot_exchange": "binance-spot",
+                    "spot_symbol": "BTC/USDT",
+                    "derivative_exchange": "binance-swap",
+                    "derivative_symbol": "BTC/USDT:USDT",
+                    "min_funding_bps": 1.0,
+                    "min_entry_basis_bps": 10.0,
+                }
+            },
+        )
+
+        self.assertEqual(payload["status"], "candidate")
+        self.assertEqual(payload["checked_count"], 1)
+        row = payload["rows"][0]
+        self.assertEqual(row["paper_execution"]["mode"], "paper")
+        self.assertEqual(row["paper_execution"]["state"], "would_open")
+        self.assertFalse(row["paper_execution"]["live_enabled"])
+
     async def test_program_switch_updates_running_state(self) -> None:
         state = MonitorState(make_config(), 1.0)
 
@@ -3607,11 +3683,13 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("account_balances", full)
         self.assertIn("derivatives", full)
+        self.assertIn("funding_basis", full)
         self.assertIn("trading_console", full)
         self.assertIn("recent_opportunities", full)
 
         self.assertIn("account_balances", status)
         self.assertIn("derivatives", status)
+        self.assertIn("funding_basis", status)
         self.assertIn("readiness", status)
         self.assertNotIn("trading_console", status)
         self.assertNotIn("recent_opportunities", status)
@@ -3621,6 +3699,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("spot_markets", settings["config"])
         self.assertNotIn("account_balances", settings)
         self.assertNotIn("derivatives", settings)
+        self.assertIn("funding_basis", settings)
+        self.assertNotIn("rows", settings["funding_basis"])
         self.assertNotIn("readiness", settings)
         self.assertIn("risk", settings["operations"])
         self.assertNotIn("trade_log", settings["operations"])

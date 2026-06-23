@@ -123,8 +123,16 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return Math.abs(value) >= 1_000_000 ? shortNumber.format(value) : fmt.format(value);
     }
 
+    function formatBps(value) {
+      if (value == null) return "--";
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return "--";
+      return `${numeric.toFixed(2)} bps`;
+    }
+
 function balanceStatusClass(status) {
       if (status === "ok") return "ok";
+      if (status === "candidate") return "ok";
       if (status === "blocked") return "risk-blocked";
       if (["idle", "starting", "checking"].includes(status)) return "subtle";
       return "missing";
@@ -267,6 +275,46 @@ function balanceStatusClass(status) {
           `;
           body.appendChild(tr);
         }
+      }
+    }
+
+    function renderFundingBasis(fundingBasis) {
+      text(
+        "funding-basis-meta",
+        fundingBasis
+          ? `${fundingBasis.status || "unknown"} · candidates ${fundingBasis.candidate_count || 0} · checked ${fundingBasis.checked_count || 0}/${fundingBasis.configured_count || 0} · ${formatAge(fundingBasis.last_finished)}`
+          : ""
+      );
+      const body = document.getElementById("funding-basis");
+      body.innerHTML = "";
+      const rows = fundingBasis?.rows || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No funding/basis pair configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const paper = row.paper_execution || {};
+        const legs = (paper.suggested_legs || [])
+          .map((leg) => `${leg.side} ${leg.symbol} @ ${leg.exchange}`)
+          .join(" / ");
+        const reason = [
+          row.reason,
+          ...(row.warnings || []),
+        ].filter(Boolean).join(" · ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(row.pair_id || "")}">${escapeHtml(row.pair_id || "--")}</td>
+          <td>${escapeHtml(row.spot_exchange || "--")}<br><span class="subtle">${escapeHtml(row.spot_symbol || "--")}</span><br>${escapeHtml(row.derivative_exchange || "--")}<br><span class="subtle">${escapeHtml(row.derivative_symbol || "--")}</span></td>
+          <td class="num">${row.spot_mid == null ? "--" : fmt.format(row.spot_mid)}</td>
+          <td class="num">${row.derivative_mid == null ? "--" : fmt.format(row.derivative_mid)}</td>
+          <td class="num">${formatBps(row.basis_bps)}</td>
+          <td class="num" title="${row.estimated_apr_pct == null ? "" : `APR ${Number(row.estimated_apr_pct).toFixed(2)}%`}">${formatBps(row.funding_rate_bps)}</td>
+          <td>${escapeHtml(paper.state || "--")}<br><span class="subtle">${escapeHtml(legs || paper.reason || "--")}</span></td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
       }
     }
 
@@ -3585,6 +3633,7 @@ function balanceStatusClass(status) {
       renderMarkets(data.markets);
       renderAccountBalances(data.account_balances);
       renderDerivativesRisk(data.derivatives);
+      renderFundingBasis(data.funding_basis);
       renderRates(data.quote_rates);
       renderOpportunities(data.opportunities);
       renderHolders(data.onchain);

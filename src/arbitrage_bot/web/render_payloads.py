@@ -301,6 +301,28 @@ def _compact_derivatives_payload(
     )
 
 
+def _compact_funding_basis_payload(
+    funding_basis: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return funding_basis
+    return _copy_payload_keys(
+        funding_basis,
+        (
+            "status",
+            "mode",
+            "candidate_count",
+            "configured_count",
+            "checked_count",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
 def _compact_onchain_payload(
     onchain: dict[str, Any],
     *,
@@ -419,6 +441,10 @@ def state_payload_for_view(
         "strategy_center": _compact_strategy_center_payload(
             payload.get("strategy_center", {}),
             full=is_settings,
+        ),
+        "funding_basis": _compact_funding_basis_payload(
+            payload.get("funding_basis", {}),
+            full=is_status,
         ),
         "order_activity": _compact_order_activity_payload(
             payload.get("order_activity", {}),

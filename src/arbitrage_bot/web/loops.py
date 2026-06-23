@@ -50,6 +50,7 @@ from ..spot_grid_executor import (
     tracked_orders_from_state,
     tracked_orders_from_sync,
 )
+from ..strategy_center import StrategyCenterStore
 from ..strategy_timeline import (
     strategy_timeline_event_from_payload,
     strategy_timeline_fingerprint,
@@ -93,6 +94,7 @@ from . import (
     build_trading_console_payload,
     fetch_account_balances_payload,
     fetch_derivatives_risk_payload,
+    fetch_funding_basis_payload,
     fetch_onchain_payload,
     fetch_order_activity_payload,
     write_system_web_audit_event,
@@ -175,6 +177,7 @@ async def monitor_loop(
     strategy: StrategyName,
     state: MonitorState,
     poll_seconds: float,
+    strategy_center_store: StrategyCenterStore | None = None,
 ) -> None:
     manager = ExchangeManager()
     solana_client = (
@@ -190,6 +193,9 @@ async def monitor_loop(
         "account_balances"
     ]
     derivatives_payload = _build_initial_payload(cfg, poll_seconds)["derivatives"]
+    funding_basis_payload = _build_initial_payload(cfg, poll_seconds)[
+        "funding_basis"
+    ]
     order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
         "order_activity"
     ]
@@ -222,6 +228,12 @@ async def monitor_loop(
     loop_started_monotonic = time.monotonic()
     try:
         while True:
+            strategy_center_store_payload: dict[str, Any] = {}
+            if strategy_center_store is not None and cfg.strategy_center.enabled:
+                try:
+                    strategy_center_store_payload = strategy_center_store.read()
+                except Exception:  # noqa: BLE001
+                    strategy_center_store_payload = {}
             if not await state.is_running():
                 now = time.monotonic()
                 if now >= next_balance_scan or now >= next_order_activity_scan:
@@ -256,6 +268,21 @@ async def monitor_loop(
                             derivatives_payload = {
                                 **_build_initial_payload(runtime_cfg, poll_seconds)[
                                     "derivatives"
+                                ],
+                                "status": "error",
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
+                        try:
+                            funding_basis_payload = await fetch_funding_basis_payload(
+                                runtime_cfg,
+                                manager,
+                                strategy_center_payload=strategy_center_store_payload,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            funding_basis_payload = {
+                                **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                    "funding_basis"
                                 ],
                                 "status": "error",
                                 "last_finished": time.time(),
@@ -336,12 +363,16 @@ async def monitor_loop(
                     if order_activity_payload.get("status") == "error":
                         errors = order_activity_payload.get("errors") or ["unavailable"]
                         readonly_warnings.append(f"Orders: {errors[0]}")
+                    if funding_basis_payload.get("status") == "error":
+                        errors = funding_basis_payload.get("errors") or ["unavailable"]
+                        readonly_warnings.append(f"Funding/Basis: {errors[0]}")
                     await state.set_readonly_health(
                         cfg=runtime_cfg,
                         exec_cfg=runtime_slow_execution,
                         account_balances=account_balances_payload,
                         order_activity=order_activity_payload,
                         derivatives=derivatives_payload,
+                        funding_basis=funding_basis_payload,
                         warnings=readonly_warnings,
                     )
                 else:
@@ -846,6 +877,21 @@ async def monitor_loop(
                             "last_finished": time.time(),
                             "errors": [str(exc)],
                         }
+                    try:
+                        funding_basis_payload = await fetch_funding_basis_payload(
+                            runtime_cfg,
+                            manager,
+                            strategy_center_payload=strategy_center_store_payload,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        funding_basis_payload = {
+                            **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                "funding_basis"
+                            ],
+                            "status": "error",
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
                     next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
 
                 if now >= next_order_activity_scan:
@@ -1067,6 +1113,14 @@ async def monitor_loop(
                         *warnings,
                         f"Backtest: {backtest_payload.get('error')}",
                     ]
+                if funding_basis_payload.get("status") == "error":
+                    funding_errors = funding_basis_payload.get("errors") or [
+                        "unavailable"
+                    ]
+                    warnings = [
+                        *warnings,
+                        f"Funding/Basis: {funding_errors[0]}",
+                    ]
                 if spot_arbitrage_payload.get("status") in {
                     "blocked_by_plan",
                     "blocked_by_risk",
@@ -1138,6 +1192,7 @@ async def monitor_loop(
                     warnings=warnings,
                     account_balances=account_balances_payload,
                     derivatives=derivatives_payload,
+                    funding_basis=funding_basis_payload,
                     order_activity=order_activity_payload,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,

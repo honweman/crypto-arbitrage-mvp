@@ -59,6 +59,7 @@ from ..derivatives import derivative_account_summary, normalize_derivative_posit
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
+from ..funding_basis import funding_basis_payload, funding_settings_from_strategy_center
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
 from ..observability import configure_logging, render_prometheus_metrics
 from ..main import (
@@ -1685,6 +1686,117 @@ async def fetch_derivatives_risk_payload(
     }
 
 
+def _configured_exchange_keys(exchanges: Iterable[ExchangeConfig]) -> set[str]:
+    return {exchange.key for exchange in exchanges}
+
+
+async def fetch_funding_basis_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    *,
+    strategy_center_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    settings_rows = funding_settings_from_strategy_center(strategy_center_payload)
+    if not settings_rows:
+        return funding_basis_payload(
+            [],
+            spot_books={},
+            derivative_books={},
+            funding_rates={},
+            notional_quote=cfg.notional_quote,
+        )
+
+    spot_symbols: dict[str, set[str]] = {}
+    derivative_symbols: dict[str, set[str]] = {}
+    warnings: list[str] = []
+    spot_exchange_keys = _configured_exchange_keys(cfg.spot_exchanges)
+    derivative_exchange_keys = _configured_exchange_keys(cfg.derivative_exchanges)
+    for settings in settings_rows:
+        if settings.spot_exchange and settings.spot_symbol:
+            spot_symbols.setdefault(settings.spot_exchange, set()).add(
+                settings.spot_symbol
+            )
+            if settings.spot_exchange not in spot_exchange_keys:
+                warnings.append(
+                    f"{settings.pair_id or settings.spot_symbol}: spot exchange "
+                    f"{settings.spot_exchange} is not configured"
+                )
+        if settings.derivative_exchange and settings.derivative_symbol:
+            derivative_symbols.setdefault(settings.derivative_exchange, set()).add(
+                settings.derivative_symbol
+            )
+            if settings.derivative_exchange not in derivative_exchange_keys:
+                warnings.append(
+                    f"{settings.pair_id or settings.derivative_symbol}: derivative "
+                    f"exchange {settings.derivative_exchange} is not configured"
+                )
+
+    spot_configs = [
+        exchange for exchange in cfg.spot_exchanges if exchange.key in spot_symbols
+    ]
+    derivative_configs = [
+        exchange
+        for exchange in cfg.derivative_exchanges
+        if exchange.key in derivative_symbols
+    ]
+    spot_task = manager.fetch_order_books(
+        spot_configs,
+        spot_symbols,
+        cfg.order_book_depth,
+    )
+    derivative_task = manager.fetch_order_books(
+        derivative_configs,
+        derivative_symbols,
+        cfg.order_book_depth,
+    )
+    funding_task = manager.fetch_funding_rates(
+        derivative_configs,
+        derivative_symbols,
+    )
+    spot_result, derivative_result, funding_result = await asyncio.gather(
+        spot_task,
+        derivative_task,
+        funding_task,
+        return_exceptions=True,
+    )
+    errors: list[str] = []
+    if isinstance(spot_result, Exception):
+        spot_books = {}
+        errors.append(
+            f"spot order books failed: {spot_result.__class__.__name__}: {spot_result}"
+        )
+    else:
+        spot_books = spot_result
+    if isinstance(derivative_result, Exception):
+        derivative_books = {}
+        errors.append(
+            "derivative order books failed: "
+            f"{derivative_result.__class__.__name__}: {derivative_result}"
+        )
+    else:
+        derivative_books = derivative_result
+    if isinstance(funding_result, Exception):
+        funding_rates = {}
+        errors.append(
+            f"funding rates failed: {funding_result.__class__.__name__}: {funding_result}"
+        )
+    else:
+        funding_rates = funding_result
+
+    payload = funding_basis_payload(
+        settings_rows,
+        spot_books=spot_books,
+        derivative_books=derivative_books,
+        funding_rates=funding_rates,
+        notional_quote=cfg.notional_quote,
+    )
+    payload["warnings"] = [*payload.get("warnings", []), *warnings]
+    payload["errors"] = [*payload.get("errors", []), *errors]
+    if errors and payload["status"] == "disabled":
+        payload["status"] = "error"
+    return payload
+
+
 def _aggregate_account_balance_totals(
     accounts: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2666,6 +2778,17 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "min_liquidation_buffer_pct": cfg.risk.min_liquidation_buffer_pct,
                 "max_margin_usage_pct": cfg.risk.max_margin_usage_pct,
             },
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
+        },
+        "funding_basis": {
+            "status": "disabled",
+            "mode": "paper",
+            "rows": [],
+            "candidate_count": 0,
+            "configured_count": 0,
+            "checked_count": 0,
             "last_finished": None,
             "errors": [],
             "warnings": [],
@@ -5804,7 +5927,15 @@ def create_app(
     app["login_rate_limiter"] = LoginRateLimiter()
 
     async def monitor_context(app_: web.Application) -> Any:
-        monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
+        monitor_task = asyncio.create_task(
+            monitor_loop(
+                cfg,
+                strategy,
+                state,
+                interval,
+                strategy_center_store=strategy_center_store,
+            )
+        )
         mm_task = asyncio.create_task(market_maker_task_loop(cfg, state))
         grid_task = asyncio.create_task(spot_grid_task_loop(cfg, state))
         auto_task = asyncio.create_task(
