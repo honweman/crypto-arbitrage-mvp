@@ -543,6 +543,14 @@ Keep `data/` and local config files out of Git. The `alerts` block is reserved f
 
 For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.
 
+Use the deployment helper to sync code to a systemd-based VM without overwriting runtime secrets, data, or logs:
+
+```bash
+CRYPTO_ARB_DEPLOY_HOST=root@example.com scripts/deploy_cloud.sh
+```
+
+The helper excludes `.venv`, `data`, `logs`, `config.json`, `config.acs.json`, `.DS_Store`, and Mac `._*` metadata files, then creates a timestamped backup under the remote `data/` directory before restarting the service.
+
 The config `label` is the account identity used by the rest of the bot. Multiple accounts on the same exchange should be configured as separate exchange entries with the same `id` and different labels:
 
 ```json
