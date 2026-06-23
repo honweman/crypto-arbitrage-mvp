@@ -318,6 +318,46 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderOptionsArbitrage(optionsArbitrage) {
+      text(
+        "options-arbitrage-meta",
+        optionsArbitrage
+          ? `${optionsArbitrage.status || "unknown"} · candidates ${optionsArbitrage.candidate_count || 0} · checked ${optionsArbitrage.checked_count || 0}/${optionsArbitrage.configured_count || 0} · ${formatAge(optionsArbitrage.last_finished)}`
+          : ""
+      );
+      const body = document.getElementById("options-arbitrage");
+      body.innerHTML = "";
+      const rows = optionsArbitrage?.rows || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No option combo configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const paper = row.paper_execution || {};
+        const opportunity = row.opportunity || {};
+        const edge = opportunity.profit_bps == null ? "" : ` · edge ${formatBps(opportunity.profit_bps)}`;
+        const legs = (paper.suggested_legs || [])
+          .map((leg) => `${leg.side} ${leg.symbol}`)
+          .join(" / ");
+        const comboTitle = `${row.underlying || "--"} ${row.expiry || ""} K=${row.strike || "--"}`;
+        const reason = [row.reason, ...(row.reasons || [])].filter(Boolean).join(" · ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(comboTitle)}">${escapeHtml(row.underlying || "--")}<br><span class="subtle">K ${row.strike || "--"} ${escapeHtml(row.expiry || "")}</span></td>
+          <td>${escapeHtml(row.spot_symbol || "--")}<br><span class="subtle">${escapeHtml(row.call_symbol || "--")} / ${escapeHtml(row.put_symbol || "--")}</span></td>
+          <td class="num">${row.spot_mid == null ? "--" : fmt.format(row.spot_mid)}</td>
+          <td class="num">${row.call_mid == null ? "--" : fmt.format(row.call_mid)}</td>
+          <td class="num">${row.put_mid == null ? "--" : fmt.format(row.put_mid)}</td>
+          <td class="num">${formatBps(row.parity_gap_bps)}</td>
+          <td>${escapeHtml(paper.state || "--")}<br><span class="subtle">${escapeHtml((legs || paper.reason || "--") + edge)}</span></td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function formatTimestamp(value) {
       if (value == null) return "--";
       const ts = Number(value);
@@ -3634,6 +3674,7 @@ function balanceStatusClass(status) {
       renderAccountBalances(data.account_balances);
       renderDerivativesRisk(data.derivatives);
       renderFundingBasis(data.funding_basis);
+      renderOptionsArbitrage(data.options_arbitrage);
       renderRates(data.quote_rates);
       renderOpportunities(data.opportunities);
       renderHolders(data.onchain);

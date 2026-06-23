@@ -771,6 +771,7 @@ class MonitorState:
         order_activity: dict[str, Any],
         derivatives: dict[str, Any] | None = None,
         funding_basis: dict[str, Any] | None = None,
+        options_arbitrage: dict[str, Any] | None = None,
         warnings: list[str] | None = None,
     ) -> None:
         async with self._lock:
@@ -788,6 +789,8 @@ class MonitorState:
                 self._payload["derivatives"] = derivatives
             if funding_basis is not None:
                 self._payload["funding_basis"] = funding_basis
+            if options_arbitrage is not None:
+                self._payload["options_arbitrage"] = options_arbitrage
             self._payload["trading_console"] = trading_console
             self._payload["readiness"] = build_readiness_payload(
                 cfg,
@@ -880,6 +883,7 @@ class MonitorState:
         order_activity: dict[str, Any],
         derivatives: dict[str, Any],
         funding_basis: dict[str, Any],
+        options_arbitrage: dict[str, Any],
         onchain: dict[str, Any],
         market_maker: dict[str, Any],
         slow_execution: dict[str, Any],
@@ -952,6 +956,7 @@ class MonitorState:
                 "account_balances": account_balances,
                 "derivatives": derivatives,
                 "funding_basis": funding_basis,
+                "options_arbitrage": options_arbitrage,
                 "order_activity": order_activity,
                 "onchain": onchain,
                 "market_maker": market_maker,

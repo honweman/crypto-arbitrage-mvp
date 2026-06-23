@@ -64,7 +64,9 @@ from ..grid_trading import build_dca_plan, build_spot_grid_plan
 from ..observability import configure_logging, render_prometheus_metrics
 from ..main import (
     StrategyName,
+    _option_symbols_for_option_combos,
     _quote_rates_from_sources,
+    _spot_symbols_for_option_combos,
     _symbols_for_configured_spot_markets,
     scan_with_manager,
 )
@@ -76,6 +78,7 @@ from ..market_maker import (
     run_cycle as run_market_maker_cycle,
 )
 from ..models import OrderBookSnapshot, Opportunity
+from ..options_monitor import options_arbitrage_payload
 from ..orderbook_cache import OrderBookCache
 from ..order_reconciliation import (
     RECONCILIATION_AUTO_STOP_WARMUP_SECONDS,
@@ -1797,6 +1800,42 @@ async def fetch_funding_basis_payload(
     return payload
 
 
+async def fetch_options_arbitrage_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+) -> dict[str, Any]:
+    if not cfg.option_combos:
+        return options_arbitrage_payload(cfg, spot_books={}, option_books={})
+    if not cfg.options_arbitrage.enabled:
+        return options_arbitrage_payload(cfg, spot_books={}, option_books={})
+
+    try:
+        spot_books, option_books = await asyncio.gather(
+            manager.fetch_order_books(
+                cfg.spot_exchanges,
+                _spot_symbols_for_option_combos(cfg.option_combos),
+                cfg.order_book_depth,
+            ),
+            manager.fetch_order_books(
+                cfg.derivative_exchanges,
+                _option_symbols_for_option_combos(cfg.option_combos),
+                cfg.order_book_depth,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            **options_arbitrage_payload(cfg, spot_books={}, option_books={}),
+            "status": "error",
+            "last_finished": time.time(),
+            "errors": [f"{exc.__class__.__name__}: {exc}"],
+        }
+    return options_arbitrage_payload(
+        cfg,
+        spot_books=spot_books,
+        option_books=option_books,
+    )
+
+
 def _aggregate_account_balance_totals(
     accounts: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2789,6 +2828,25 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "candidate_count": 0,
             "configured_count": 0,
             "checked_count": 0,
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
+        },
+        "options_arbitrage": {
+            "status": "disabled" if not cfg.option_combos else "starting",
+            "mode": "paper",
+            "rows": [],
+            "opportunities": [],
+            "candidate_count": 0,
+            "configured_count": len(cfg.option_combos),
+            "checked_count": 0,
+            "thresholds": {
+                "notional_quote": cfg.options_arbitrage.notional_quote,
+                "min_edge_quote": cfg.options_arbitrage.min_edge_quote,
+                "min_edge_bps": cfg.options_arbitrage.min_edge_bps,
+                "max_contracts": cfg.options_arbitrage.max_contracts,
+                "max_days_to_expiry": cfg.options_arbitrage.max_days_to_expiry,
+            },
             "last_finished": None,
             "errors": [],
             "warnings": [],

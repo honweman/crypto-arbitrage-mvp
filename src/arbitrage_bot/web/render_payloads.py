@@ -323,6 +323,29 @@ def _compact_funding_basis_payload(
     )
 
 
+def _compact_options_arbitrage_payload(
+    options_arbitrage: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return options_arbitrage
+    return _copy_payload_keys(
+        options_arbitrage,
+        (
+            "status",
+            "mode",
+            "candidate_count",
+            "configured_count",
+            "checked_count",
+            "thresholds",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
 def _compact_onchain_payload(
     onchain: dict[str, Any],
     *,
@@ -444,6 +467,10 @@ def state_payload_for_view(
         ),
         "funding_basis": _compact_funding_basis_payload(
             payload.get("funding_basis", {}),
+            full=is_status,
+        ),
+        "options_arbitrage": _compact_options_arbitrage_payload(
+            payload.get("options_arbitrage", {}),
             full=is_status,
         ),
         "order_activity": _compact_order_activity_payload(

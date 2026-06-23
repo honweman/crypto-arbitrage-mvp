@@ -96,6 +96,7 @@ from . import (
     fetch_derivatives_risk_payload,
     fetch_funding_basis_payload,
     fetch_onchain_payload,
+    fetch_options_arbitrage_payload,
     fetch_order_activity_payload,
     write_system_web_audit_event,
 )
@@ -196,6 +197,9 @@ async def monitor_loop(
     funding_basis_payload = _build_initial_payload(cfg, poll_seconds)[
         "funding_basis"
     ]
+    options_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
+        "options_arbitrage"
+    ]
     order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
         "order_activity"
     ]
@@ -288,6 +292,22 @@ async def monitor_loop(
                                 "last_finished": time.time(),
                                 "errors": [str(exc)],
                             }
+                        try:
+                            options_arbitrage_payload = (
+                                await fetch_options_arbitrage_payload(
+                                    runtime_cfg,
+                                    manager,
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            options_arbitrage_payload = {
+                                **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                    "options_arbitrage"
+                                ],
+                                "status": "error",
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
                         next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
                     if now >= next_order_activity_scan:
                         try:
@@ -366,6 +386,11 @@ async def monitor_loop(
                     if funding_basis_payload.get("status") == "error":
                         errors = funding_basis_payload.get("errors") or ["unavailable"]
                         readonly_warnings.append(f"Funding/Basis: {errors[0]}")
+                    if options_arbitrage_payload.get("status") == "error":
+                        errors = options_arbitrage_payload.get("errors") or [
+                            "unavailable"
+                        ]
+                        readonly_warnings.append(f"Options: {errors[0]}")
                     await state.set_readonly_health(
                         cfg=runtime_cfg,
                         exec_cfg=runtime_slow_execution,
@@ -373,6 +398,7 @@ async def monitor_loop(
                         order_activity=order_activity_payload,
                         derivatives=derivatives_payload,
                         funding_basis=funding_basis_payload,
+                        options_arbitrage=options_arbitrage_payload,
                         warnings=readonly_warnings,
                     )
                 else:
@@ -892,6 +918,22 @@ async def monitor_loop(
                             "last_finished": time.time(),
                             "errors": [str(exc)],
                         }
+                    try:
+                        options_arbitrage_payload = (
+                            await fetch_options_arbitrage_payload(
+                                runtime_cfg,
+                                manager,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        options_arbitrage_payload = {
+                            **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                "options_arbitrage"
+                            ],
+                            "status": "error",
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
                     next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
 
                 if now >= next_order_activity_scan:
@@ -1121,6 +1163,14 @@ async def monitor_loop(
                         *warnings,
                         f"Funding/Basis: {funding_errors[0]}",
                     ]
+                if options_arbitrage_payload.get("status") == "error":
+                    option_errors = options_arbitrage_payload.get("errors") or [
+                        "unavailable"
+                    ]
+                    warnings = [
+                        *warnings,
+                        f"Options: {option_errors[0]}",
+                    ]
                 if spot_arbitrage_payload.get("status") in {
                     "blocked_by_plan",
                     "blocked_by_risk",
@@ -1193,6 +1243,7 @@ async def monitor_loop(
                     account_balances=account_balances_payload,
                     derivatives=derivatives_payload,
                     funding_basis=funding_basis_payload,
+                    options_arbitrage=options_arbitrage_payload,
                     order_activity=order_activity_payload,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
