@@ -64,6 +64,14 @@ main {
   margin-bottom: 14px;
 }
 
+.portfolio-bar {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.statusbar {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .metric,
 .strategy-tile {
   min-width: 0;
@@ -131,7 +139,7 @@ main {
 
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -322,9 +330,12 @@ section {
 }
 
 .portfolio-bar[data-page].active-page,
-.statusbar[data-page].active-page,
-.strategy-overview[data-page].active-page {
+.statusbar[data-page].active-page {
   display: grid !important;
+}
+
+.strategy-overview[data-page].active-page {
+  display: none !important;
 }
 
 .section-title {
@@ -342,6 +353,7 @@ h2 {
 }
 
 .compact-section {
+  margin-top: 12px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -351,9 +363,9 @@ h2 {
 
 .compact-section > .section-title {
   align-items: center;
-  min-height: 44px;
+  min-height: 40px;
   margin: 0;
-  padding: 11px 13px;
+  padding: 10px 12px;
   cursor: pointer;
   user-select: none;
 }
@@ -965,8 +977,8 @@ tbody tr:last-child td {
   main { padding: 12px 14px 22px; }
   .portfolio-bar,
   .statusbar,
-  .strategy-overview,
   .readiness-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .balance-table { min-width: 620px; }
   .orders-table { min-width: 960px; }
   .fills-table { min-width: 1080px; }
@@ -982,14 +994,17 @@ tbody tr:last-child td {
 
 @media (max-width: 560px) {
   h1 { font-size: 18px; }
+  main { padding: 10px 10px 20px; }
   section { margin-top: 16px; }
   .portfolio-bar,
   .statusbar { gap: 8px; }
-  .strategy-overview { grid-template-columns: 1fr; gap: 8px; }
-  .overview-grid { grid-template-columns: 1fr; }
+  .portfolio-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-row {
-    grid-template-columns: 72px minmax(0, 1fr);
-    min-height: 48px;
+    grid-template-columns: 1fr;
+    gap: 4px;
+    min-height: 58px;
+    padding: 9px 10px;
   }
   .metric,
   .strategy-tile {
@@ -1001,10 +1016,11 @@ tbody tr:last-child td {
   .metric .label,
   .strategy-tile .label { font-size: 10px; }
   .portfolio-bar .metric:nth-child(1),
-  .portfolio-bar .metric:nth-child(2),
-  .portfolio-bar .metric:nth-child(3) {
+  .portfolio-bar .metric:nth-child(2) {
     grid-column: 1 / -1;
   }
+  .compact-section > .section-title { padding: 9px 10px; }
+  .compact-section.section-open > :not(.section-title) { margin: 8px 10px 10px; }
   .control-panel { grid-template-columns: 1fr; }
   .account-selector { grid-template-columns: 1fr; }
   .mini-grid { grid-template-columns: 1fr; }

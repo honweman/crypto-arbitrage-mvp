@@ -48,6 +48,7 @@ from arbitrage_bot.web import (
     LoginRateLimiter,
     MonitorState,
     SECURITY_HEADERS,
+    STYLES_CSS,
     _add_security_headers,
     _cookie_secret,
     _filter_state_payload_for_user,
@@ -310,6 +311,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("function setupCompactSections()", HTML)
         self.assertIn("section-open", HTML)
         self.assertIn('aria-expanded', HTML)
+        self.assertIn("renderOpenSection", HTML)
+        self.assertIn("REFRESH_INTERVAL_MS = 2000", HTML)
+        self.assertIn("document.hidden", HTML)
+        self.assertIn("visibilitychange", HTML)
+        self.assertIn(".strategy-overview[data-page].active-page", STYLES_CSS)
 
     def test_page_includes_persisted_onchain_change_log(self) -> None:
         self.assertIn("Holder Change Log", HTML)

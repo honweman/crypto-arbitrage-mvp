@@ -8,6 +8,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    let refreshQueued = false;
 	    const pageStateCache = {};
 	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
+	    const REFRESH_INTERVAL_MS = 2000;
 	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
 
     function pageFromLocation() {
@@ -54,19 +55,41 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
           if (event.target.closest("a, button, input, label, select, textarea")) return;
           section.classList.toggle("section-open");
           sync();
+          if (section.classList.contains("section-open") && section.dataset.page === currentPage && lastState) {
+            window.requestAnimationFrame(() => {
+              renderVisiblePage(lastState, currentPage, { force: true });
+            });
+          }
         });
         title.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
           section.classList.toggle("section-open");
           sync();
+          if (section.classList.contains("section-open") && section.dataset.page === currentPage && lastState) {
+            window.requestAnimationFrame(() => {
+              renderVisiblePage(lastState, currentPage, { force: true });
+            });
+          }
         });
         sync();
       });
     }
 
     function text(id, value) {
-      document.getElementById(id).textContent = value;
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    function isSectionOpenFor(id) {
+      const el = document.getElementById(id);
+      const section = el?.closest(".compact-section");
+      return !section || section.classList.contains("section-open");
+    }
+
+    function renderOpenSection(id, renderFn) {
+      if (!isSectionOpenFor(id)) return;
+      renderFn();
     }
 
     function formatAge(ts) {
@@ -3757,6 +3780,7 @@ function balanceStatusClass(status) {
       text("common-quote", data.config?.common_quote_currency || "USD");
       text("warnings", (data.warnings || []).join(" · "));
       text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
+      renderAccountBalanceSummary(data.account_balances);
 
       const mmRuntime = data.market_maker?.runtime || {};
       const mmPlan = data.market_maker?.plan;
@@ -3855,16 +3879,16 @@ function balanceStatusClass(status) {
         renderHolders(data.onchain);
         return;
       }
-      renderReadiness(data.readiness, data.runtime_store);
-      renderMarkets(data.markets);
-      renderAccountBalances(data.account_balances);
-      renderDerivativesRisk(data.derivatives);
-      renderFundingBasis(data.funding_basis);
-      renderContractStrategies(data.contract_strategies);
-      renderOptionsArbitrage(data.options_arbitrage);
-      renderRates(data.quote_rates);
-      renderOpportunities(data.opportunities);
-      renderHolders(data.onchain);
+      renderOpenSection("readiness-actions", () => renderReadiness(data.readiness, data.runtime_store));
+      renderOpenSection("markets", () => renderMarkets(data.markets));
+      renderOpenSection("account-balances", () => renderAccountBalances(data.account_balances));
+      renderOpenSection("derivatives-risk", () => renderDerivativesRisk(data.derivatives));
+      renderOpenSection("funding-basis", () => renderFundingBasis(data.funding_basis));
+      renderOpenSection("contract-strategies", () => renderContractStrategies(data.contract_strategies));
+      renderOpenSection("options-arbitrage", () => renderOptionsArbitrage(data.options_arbitrage));
+      renderOpenSection("rates", () => renderRates(data.quote_rates));
+      renderOpenSection("opportunities", () => renderOpportunities(data.opportunities));
+      renderOpenSection("holders", () => renderHolders(data.onchain));
     }
 
     async function refresh(options = {}) {
@@ -4006,4 +4030,9 @@ function balanceStatusClass(status) {
     document.getElementById("signal-bot-form").addEventListener("submit", applySignalBotConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
-    setInterval(refresh, 1000);
+    setInterval(() => {
+      if (!document.hidden) refresh();
+    }, REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refresh({ force: true });
+    });
