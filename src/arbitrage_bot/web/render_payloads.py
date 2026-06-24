@@ -7,6 +7,22 @@ from typing import Any
 STATE_VIEW_IDS = {"status", "settings", "records"}
 
 
+def _section_set(sections: Iterable[str] | str | None) -> set[str] | None:
+    if sections is None:
+        return None
+    if isinstance(sections, str):
+        rows = sections.split(",")
+    else:
+        rows = sections
+    return {str(row).strip() for row in rows if str(row).strip()}
+
+
+def _section_open(section_ids: set[str] | None, *ids: str) -> bool:
+    if section_ids is None:
+        return True
+    return any(id_ in section_ids for id_ in ids)
+
+
 def _copy_payload_keys(
     payload: dict[str, Any] | None,
     keys: Iterable[str],
@@ -455,6 +471,7 @@ def _compact_strategy_center_payload(
 def state_payload_for_view(
     payload: dict[str, Any],
     view: str | None = None,
+    sections: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     if view not in STATE_VIEW_IDS:
         return payload
@@ -462,12 +479,46 @@ def state_payload_for_view(
     is_status = view == "status"
     is_settings = view == "settings"
     is_records = view == "records"
+    section_ids = _section_set(sections)
+
+    config_full = is_settings and _section_open(
+        section_ids,
+        "markets-config",
+        "carry-config",
+        "strategy-instances",
+    )
+    market_maker_full = is_settings and _section_open(section_ids, "mm-orders")
+    slow_execution_full = is_settings and _section_open(section_ids, "slow-orders")
+    spot_grid_full = is_settings and _section_open(section_ids, "grid-orders")
+    dca_full = is_settings and _section_open(section_ids, "dca-orders")
+    execution_algo_full = is_settings and _section_open(section_ids, "exec-schedule")
+    backtest_full = is_settings and _section_open(section_ids, "backtest-points")
+    strategy_center_full = is_settings and _section_open(
+        section_ids,
+        "strategy-instances",
+        "api-accounts",
+        "funding-arb-form",
+        "signal-bot-form",
+    )
+    operations_full = is_records and _section_open(
+        section_ids,
+        "strategy-timeline",
+        "audit-events",
+    )
+    order_activity_full = is_records and _section_open(
+        section_ids,
+        "console-strategies",
+        "open-orders",
+    )
+    onchain_full = is_status or (
+        is_records and _section_open(section_ids, "holder-changes")
+    )
 
     result: dict[str, Any] = {
         "status": payload.get("status"),
         "config": _compact_config_payload(
             payload.get("config", {}),
-            full=is_settings,
+            full=config_full,
         ),
         "scan": payload.get("scan", {}),
         "opportunities": payload.get("opportunities", []),
@@ -476,23 +527,23 @@ def state_payload_for_view(
         "warnings": payload.get("warnings", []),
         "market_maker": _compact_market_maker_payload(
             payload.get("market_maker", {}),
-            full=is_settings,
+            full=market_maker_full,
         ),
         "slow_execution": _compact_slow_execution_payload(
             payload.get("slow_execution", {}),
-            full=is_settings,
+            full=slow_execution_full,
         ),
         "spot_grid": _compact_strategy_plan_payload(
             payload.get("spot_grid", {}),
-            full=is_settings,
+            full=spot_grid_full,
         ),
         "dca": _compact_strategy_plan_payload(
             payload.get("dca", {}),
-            full=is_settings,
+            full=dca_full,
         ),
         "execution_algo": _compact_strategy_plan_payload(
             payload.get("execution_algo", {}),
-            full=is_settings,
+            full=execution_algo_full,
         ),
         "backtest": _copy_payload_keys(
             payload.get("backtest", {}),
@@ -506,7 +557,7 @@ def state_payload_for_view(
                 "error",
             ),
         )
-        if is_settings
+        if backtest_full
         else _copy_payload_keys(
             payload.get("backtest", {}),
             ("status", "mode", "result", "error"),
@@ -514,11 +565,11 @@ def state_payload_for_view(
         "spot_arbitrage": payload.get("spot_arbitrage", {}),
         "operations": _compact_operations_payload(
             payload.get("operations", {}),
-            full=is_records,
+            full=operations_full,
         ),
         "strategy_center": _compact_strategy_center_payload(
             payload.get("strategy_center", {}),
-            full=is_settings,
+            full=strategy_center_full,
         ),
         "funding_basis": _compact_funding_basis_payload(
             payload.get("funding_basis", {}),
@@ -538,11 +589,11 @@ def state_payload_for_view(
         ),
         "order_activity": _compact_order_activity_payload(
             payload.get("order_activity", {}),
-            full=is_records,
+            full=order_activity_full,
         ),
         "onchain": _compact_onchain_payload(
             payload.get("onchain", {}),
-            full=is_status or is_records,
+            full=onchain_full,
         ),
     }
 
@@ -563,9 +614,25 @@ def state_payload_for_view(
                 "runtime_store": payload.get("runtime_store", {}),
             }
         )
-    elif is_settings:
+    elif is_settings and _section_open(section_ids, "risk-form"):
         result["trading_console"] = payload.get("trading_console", {})
     elif is_records:
         result["trading_console"] = payload.get("trading_console", {})
 
     return result
+
+
+def strategy_center_payload_for_view(
+    strategy_center: dict[str, Any],
+    view: str | None = None,
+    sections: Iterable[str] | str | None = None,
+) -> dict[str, Any]:
+    section_ids = _section_set(sections)
+    full = view == "settings" and _section_open(
+        section_ids,
+        "strategy-instances",
+        "api-accounts",
+        "funding-arb-form",
+        "signal-bot-form",
+    )
+    return _compact_strategy_center_payload(strategy_center, full=full)

@@ -276,9 +276,13 @@ class MonitorState:
             ),
         )
 
-    async def get(self, view: str | None = None) -> dict[str, Any]:
+    async def get(
+        self,
+        view: str | None = None,
+        sections: str | None = None,
+    ) -> dict[str, Any]:
         async with self._lock:
-            payload = state_payload_for_view(self._payload, view)
+            payload = state_payload_for_view(self._payload, view, sections=sections)
             return json.loads(json.dumps(payload))
 
     async def portfolio_payload(self) -> dict[str, Any]:

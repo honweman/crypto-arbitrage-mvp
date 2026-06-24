@@ -206,6 +206,33 @@ class WebMonitorTest(unittest.TestCase):
             {"status": "running"},
         )
 
+    def test_state_payload_can_be_limited_to_open_sections(self) -> None:
+        payload = {
+            "status": "running",
+            "config": {"notional_quote": 1, "strategy_universe": {"assets": ["ACS"]}},
+            "operations": {
+                "risk": {"max_order_quote": 5},
+                "web_audit": {"recent_events": [{"id": "audit"}]},
+            },
+            "order_activity": {
+                "open_order_count": 1,
+                "open_orders": [{"id": "order"}],
+            },
+            "strategy_center": {
+                "summary": {"strategy_count": 1},
+                "strategy_instances": [{"id": "mm"}],
+            },
+            "onchain": {"history": {"events": [{"id": "wallet"}]}},
+        }
+        settings = state_payload_for_view(payload, "settings", sections="risk-form")
+        records = state_payload_for_view(payload, "records", sections="console-strategies")
+
+        self.assertNotIn("strategy_universe", settings["config"])
+        self.assertNotIn("strategy_instances", settings["strategy_center"])
+        self.assertIn("open_orders", records["order_activity"])
+        self.assertNotIn("web_audit", records["operations"])
+        self.assertNotIn("events", records["onchain"].get("history", {}))
+
     def test_page_uses_generic_dashboard_title(self) -> None:
         self.assertIn("Crypto Trading Dashboard", HTML)
         self.assertIn("Multi-asset arbitrage", HTML)
@@ -243,7 +270,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('const PAGE_IDS = new Set(["status", "settings", "records"])', HTML)
         self.assertIn('if (hashPage === "monitor") return "status";', HTML)
         self.assertIn('if (hashPage === "control") return "settings";', HTML)
-        self.assertIn("/api/state?view=", HTML)
+        self.assertIn("new URLSearchParams", HTML)
+        self.assertIn("/api/state?${params.toString()}", HTML)
         self.assertIn("pageStateCache", HTML)
 
     def test_page_softens_initial_state_fetch_failure(self) -> None:
@@ -316,6 +344,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("document.hidden", HTML)
         self.assertIn("visibilitychange", HTML)
         self.assertIn(".strategy-overview[data-page].active-page", STYLES_CSS)
+        self.assertIn('renderOpenSection("risk-form"', HTML)
+        self.assertIn('renderOpenSection("strategy-instances"', HTML)
+        self.assertIn('renderOpenSection("console-strategies"', HTML)
+        self.assertIn("function renderRiskEvents", HTML)
+        self.assertIn("function renderAuditTrail", HTML)
 
     def test_page_includes_persisted_onchain_change_log(self) -> None:
         self.assertIn("Holder Change Log", HTML)

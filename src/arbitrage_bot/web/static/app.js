@@ -9,6 +9,30 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const pageStateCache = {};
 	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
 	    const REFRESH_INTERVAL_MS = 2000;
+	    const PAGE_SECTION_IDS = {
+	      settings: [
+	        "markets-config",
+	        "carry-config",
+	        "risk-form",
+	        "strategy-instances",
+	        "api-accounts",
+	        "funding-arb-form",
+	        "signal-bot-form",
+	        "mm-orders",
+	        "slow-orders",
+	        "grid-orders",
+	        "dca-orders",
+	        "exec-schedule",
+	        "backtest-points",
+	      ],
+	      records: [
+	        "console-strategies",
+	        "open-orders",
+	        "strategy-timeline",
+	        "audit-events",
+	        "holder-changes",
+	      ],
+	    };
 	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
 
     function pageFromLocation() {
@@ -55,22 +79,14 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
           if (event.target.closest("a, button, input, label, select, textarea")) return;
           section.classList.toggle("section-open");
           sync();
-          if (section.classList.contains("section-open") && section.dataset.page === currentPage && lastState) {
-            window.requestAnimationFrame(() => {
-              renderVisiblePage(lastState, currentPage, { force: true });
-            });
-          }
+          refreshOpenedSection(section);
         });
         title.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
           section.classList.toggle("section-open");
           sync();
-          if (section.classList.contains("section-open") && section.dataset.page === currentPage && lastState) {
-            window.requestAnimationFrame(() => {
-              renderVisiblePage(lastState, currentPage, { force: true });
-            });
-          }
+          refreshOpenedSection(section);
         });
         sync();
       });
@@ -90,6 +106,21 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function renderOpenSection(id, renderFn) {
       if (!isSectionOpenFor(id)) return;
       renderFn();
+    }
+
+    function openSectionIdsForPage(page) {
+      return (PAGE_SECTION_IDS[page] || []).filter((id) => isSectionOpenFor(id));
+    }
+
+    function refreshOpenedSection(section) {
+      if (!section.classList.contains("section-open") || section.dataset.page !== currentPage) return;
+      const cachedState = pageStateCache[currentPage] || lastState;
+      if (cachedState) {
+        window.requestAnimationFrame(() => {
+          renderVisiblePage(cachedState, currentPage, { force: true });
+        });
+      }
+      refresh({ force: true });
     }
 
     function formatAge(ts) {
@@ -694,7 +725,7 @@ function balanceStatusClass(status) {
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || "cancel failed");
         if (payload.order_activity) {
-          renderOrderActivity(payload.order_activity);
+          renderOpenSection("open-orders", () => renderOrderActivity(payload.order_activity));
         }
         await refresh();
       } catch (error) {
@@ -859,7 +890,9 @@ function balanceStatusClass(status) {
         });
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "cancel failed");
-        if (result.order_activity) renderOrderActivity(result.order_activity);
+        if (result.order_activity) {
+          renderOpenSection("open-orders", () => renderOrderActivity(result.order_activity));
+        }
         await refresh();
       } catch (error) {
         text("console-meta", `cancel failed: ${error.message || error}`);
@@ -1396,12 +1429,11 @@ function balanceStatusClass(status) {
       }
     }
 
-    function renderOperations(ops) {
+    function renderRiskEvents(ops) {
       const risk = ops?.risk || {};
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
       const timeline = ops?.strategy_timeline || {};
-      const audit = ops?.web_audit || {};
       const dailyPnl = ops?.daily_pnl || {};
       const summary = tradeLog.summary || {};
       const timelineSummary = timeline.summary || {};
@@ -1478,7 +1510,10 @@ function balanceStatusClass(status) {
         `;
         body.appendChild(tr);
       }
+    }
 
+    function renderAuditTrail(ops) {
+      const audit = ops?.web_audit || {};
       text(
         "audit-meta",
         `${audit.enabled === false ? "off" : "on"} · ${audit.recent_events?.length || 0} recent · ${audit.error || audit.path || ""}`
@@ -1507,6 +1542,11 @@ function balanceStatusClass(status) {
         `;
         auditBody.appendChild(tr);
       }
+    }
+
+    function renderOperations(ops) {
+      renderRiskEvents(ops);
+      renderAuditTrail(ops);
     }
 
     function setValueState(id, value, stateClass) {
@@ -2159,7 +2199,8 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "api account update failed");
         apiAccountFormDirty = false;
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderApiAccountsPanel(result.strategy_center);
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(result.strategy_center));
       } catch (error) {
         text("api-accounts-meta", `update failed: ${error.message || error}`);
       } finally {
@@ -2180,7 +2221,8 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "delete failed");
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderApiAccountsPanel(result.strategy_center);
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(result.strategy_center));
       } catch (error) {
         text("api-accounts-meta", `delete failed: ${error.message || error}`);
       } finally {
@@ -2240,7 +2282,7 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "funding update failed");
         fundingArbFormDirty = false;
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderFundingArbitragePanel(result.strategy_center);
       } catch (error) {
         text("funding-arb-meta", `update failed: ${error.message || error}`);
       } finally {
@@ -2289,7 +2331,7 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "signal bot update failed");
         signalBotFormDirty = false;
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderSignalBotPanel(result.strategy_center);
       } catch (error) {
         text("signal-bot-meta", `update failed: ${error.message || error}`);
       } finally {
@@ -2329,21 +2371,30 @@ function balanceStatusClass(status) {
         "strategy-center-meta",
         `${center?.status || "disabled"} · ${summary.strategy_count || 0} strategies · ${summary.api_account_count || 0} accounts · ${summary.recent_signal_count || 0} signals`
       );
+      renderStrategyForm((center?.strategy_instances || [])[0] || null);
+      renderStrategyInstances(center);
+    }
+
+    function renderApiAccountsPanel(center) {
+      renderApiAccountForm((center?.user_api_accounts || [])[0] || null);
+      renderApiAccounts(center);
+    }
+
+    function renderFundingArbitragePanel(center) {
       const funding = center?.funding_arbitrage || {};
       text(
         "funding-arb-meta",
         `${funding.enabled ? "enabled" : "disabled"} · ${funding.spot_symbol || "--"} / ${funding.derivative_symbol || "--"}`
       );
+      renderFundingArbConfig(center?.funding_arbitrage);
+    }
+
+    function renderSignalBotPanel(center) {
       const signalBot = center?.signal_bot || {};
       text(
         "signal-bot-meta",
         `${signalBot.enabled ? "enabled" : "disabled"} · secret ${signalBot.webhook_secret_set ? "set" : "missing"}`
       );
-      renderStrategyForm((center?.strategy_instances || [])[0] || null);
-      renderStrategyInstances(center);
-      renderApiAccountForm((center?.user_api_accounts || [])[0] || null);
-      renderApiAccounts(center);
-      renderFundingArbConfig(center?.funding_arbitrage);
       renderSignalBotConfig(center?.signal_bot);
       renderSignalEvents(center);
     }
@@ -3852,31 +3903,47 @@ function balanceStatusClass(status) {
       }
       lastVisibleRenderAt[activePage] = now;
       if (activePage === "settings") {
-        renderMarketsConfig(data);
-        renderCashCarryConfig(data);
-        renderRiskControls(data.operations, data.trading_console);
-        renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
-        renderMarketMakerSafety(data.market_maker);
-        renderMarketMaker(data.market_maker);
-        renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
-        renderSlowExecution(data.slow_execution);
-        renderSlowExecutionTasks(data.slow_execution?.tasks, data.slow_execution?.config);
-        renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
-        renderSpotGrid(data.spot_grid);
-        renderDcaConfig(data.dca?.config, data.dca?.accounts);
-        renderDca(data.dca);
-        renderExecutionAlgoConfig(data.execution_algo?.config, data.execution_algo?.accounts);
-        renderExecutionAlgo(data.execution_algo);
-        renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
-        renderBacktest(data.backtest);
-        renderStrategyCenter(data.strategy_center);
+        renderOpenSection("markets-config", () => renderMarketsConfig(data));
+        renderOpenSection("carry-config", () => renderCashCarryConfig(data));
+        renderOpenSection("risk-form", () => renderRiskControls(data.operations, data.trading_console));
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(data.strategy_center));
+        renderOpenSection("api-accounts", () => renderApiAccountsPanel(data.strategy_center));
+        renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
+        renderOpenSection("signal-bot-form", () => renderSignalBotPanel(data.strategy_center));
+        renderOpenSection("mm-orders", () => {
+          renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
+          renderMarketMakerSafety(data.market_maker);
+          renderMarketMaker(data.market_maker);
+        });
+        renderOpenSection("slow-orders", () => {
+          renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
+          renderSlowExecution(data.slow_execution);
+          renderSlowExecutionTasks(data.slow_execution?.tasks, data.slow_execution?.config);
+        });
+        renderOpenSection("grid-orders", () => {
+          renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
+          renderSpotGrid(data.spot_grid);
+        });
+        renderOpenSection("dca-orders", () => {
+          renderDcaConfig(data.dca?.config, data.dca?.accounts);
+          renderDca(data.dca);
+        });
+        renderOpenSection("exec-schedule", () => {
+          renderExecutionAlgoConfig(data.execution_algo?.config, data.execution_algo?.accounts);
+          renderExecutionAlgo(data.execution_algo);
+        });
+        renderOpenSection("backtest-points", () => {
+          renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
+          renderBacktest(data.backtest);
+        });
         return;
       }
       if (activePage === "records") {
-        renderOperations(data.operations);
-        renderOrderActivity(data.order_activity);
-        renderTradingConsole(data.trading_console, data.order_activity);
-        renderHolders(data.onchain);
+        renderOpenSection("console-strategies", () => renderTradingConsole(data.trading_console, data.order_activity));
+        renderOpenSection("open-orders", () => renderOrderActivity(data.order_activity));
+        renderOpenSection("strategy-timeline", () => renderRiskEvents(data.operations));
+        renderOpenSection("audit-events", () => renderAuditTrail(data.operations));
+        renderOpenSection("holder-changes", () => renderHolders(data.onchain));
         return;
       }
       renderOpenSection("readiness-actions", () => renderReadiness(data.readiness, data.runtime_store));
@@ -3899,7 +3966,10 @@ function balanceStatusClass(status) {
       refreshInFlight = true;
       const requestedPage = PAGE_IDS.has(currentPage) ? currentPage : "status";
       try {
-        const stateUrl = `/api/state?view=${encodeURIComponent(requestedPage)}`;
+        const params = new URLSearchParams({ view: requestedPage });
+        const sectionIds = openSectionIdsForPage(requestedPage);
+        if (sectionIds.length > 0) params.set("sections", sectionIds.join(","));
+        const stateUrl = `/api/state?${params.toString()}`;
         const res = await fetchWithTimeout(stateUrl, { cache: "no-store" });
         if (res.status === 401) {
           window.location.assign("/login");

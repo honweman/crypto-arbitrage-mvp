@@ -20,7 +20,11 @@ from typing import Any
 
 from aiohttp import web
 
-from .render_payloads import STATE_VIEW_IDS, state_payload_for_view
+from .render_payloads import (
+    STATE_VIEW_IDS,
+    state_payload_for_view,
+    strategy_center_payload_for_view,
+)
 from .users import (
     WebUser,
     WebUserStore,
@@ -5106,12 +5110,17 @@ async def api_state(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     view = request.query.get("view")
-    payload = await state.get(view=view)
+    sections = request.query.get("sections")
+    payload = await state.get(view=view, sections=sections)
     runtime_cfg = await state.runtime_config(cfg)
-    payload["strategy_center"] = build_strategy_center_payload(
-        runtime_cfg,
-        request.app["strategy_center_store"],
-        user=_request_user(request),
+    payload["strategy_center"] = strategy_center_payload_for_view(
+        build_strategy_center_payload(
+            runtime_cfg,
+            request.app["strategy_center_store"],
+            user=_request_user(request),
+        ),
+        view=view,
+        sections=sections,
     )
     return web.json_response(
         _filter_state_payload_for_user(
