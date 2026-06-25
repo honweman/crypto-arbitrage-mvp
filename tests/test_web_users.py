@@ -90,26 +90,26 @@ class WebUserStoreTest(unittest.TestCase):
                     role="superuser",
                 )
 
-    def test_admin_set_role_protects_the_last_remaining_admin(self) -> None:
+    def test_admin_update_user_role_protects_the_last_remaining_admin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WebUserStore(Path(tmp) / "users.json")
             admin = store.create_user(email="admin@example.com", password="strong-password")
 
             with self.assertRaisesRegex(ValueError, "last remaining admin"):
-                store.admin_set_role(email=admin.email, role="user")
+                store.admin_update_user(email=admin.email, role="user")
 
             second_admin = store.admin_create_user(
                 email="second-admin@example.com",
                 password="strong-password",
                 role="admin",
             )
-            demoted = store.admin_set_role(email=second_admin.email, role="user")
+            demoted = store.admin_update_user(email=second_admin.email, role="user")
             self.assertEqual(demoted.role, "user")
             # Now that only one admin remains, it is protected again.
             with self.assertRaisesRegex(ValueError, "last remaining admin"):
-                store.admin_set_role(email=admin.email, role="user")
+                store.admin_update_user(email=admin.email, role="user")
 
-    def test_admin_set_allowed_assets_validates_preferred_asset_membership(self) -> None:
+    def test_admin_update_user_validates_preferred_asset_membership(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WebUserStore(Path(tmp) / "users.json")
             store.create_user(email="admin@example.com", password="strong-password")
@@ -120,26 +120,85 @@ class WebUserStoreTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "preferred asset"):
-                store.admin_set_allowed_assets(
+                store.admin_update_user(
                     email=member.email,
                     allowed_assets=["ACS"],
+                    allowed_assets_provided=True,
                     preferred_asset="BTC",
+                    preferred_asset_provided=True,
                 )
 
-            updated = store.admin_set_allowed_assets(
+            updated = store.admin_update_user(
                 email=member.email,
                 allowed_assets=["ACS", "BTC"],
+                allowed_assets_provided=True,
                 preferred_asset="BTC",
+                preferred_asset_provided=True,
             )
             self.assertEqual(updated.allowed_assets, ["ACS", "BTC"])
             self.assertEqual(updated.preferred_asset, "BTC")
 
-    def test_admin_reset_password_replaces_credential(self) -> None:
+    def test_admin_update_user_narrowing_assets_drops_stale_preferred_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            store.create_user(email="admin@example.com", password="strong-password")
+            member = store.admin_create_user(
+                email="member@example.com",
+                password="strong-password",
+                allowed_assets=["ACS", "BTC"],
+                preferred_asset="ACS",
+            )
+
+            # Narrowing the allowed list without touching preferred_asset must not
+            # error just because the old preferred asset fell out of the new list.
+            updated = store.admin_update_user(
+                email=member.email,
+                allowed_assets=["BTC"],
+                allowed_assets_provided=True,
+            )
+            self.assertEqual(updated.allowed_assets, ["BTC"])
+            self.assertEqual(updated.preferred_asset, "")
+
+    def test_admin_update_user_is_atomic_on_validation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            store.create_user(email="admin@example.com", password="strong-password")
+            member = store.admin_create_user(
+                email="member@example.com",
+                password="strong-password",
+                allowed_assets=["ACS", "BTC"],
+                preferred_asset="ACS",
+            )
+
+            with self.assertRaisesRegex(ValueError, "preferred asset"):
+                store.admin_update_user(
+                    email=member.email,
+                    role="admin",
+                    allowed_assets=["BTC"],
+                    allowed_assets_provided=True,
+                    preferred_asset="ACS",
+                    preferred_asset_provided=True,
+                )
+
+            persisted = store.get_user(member.email)
+            self.assertEqual(persisted.role, "user")
+            self.assertEqual(persisted.allowed_assets, ["ACS", "BTC"])
+            self.assertEqual(persisted.preferred_asset, "ACS")
+
+    def test_admin_update_user_rejects_no_op_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WebUserStore(Path(tmp) / "users.json")
             member = store.create_user(email="member@example.com", password="strong-password")
 
-            store.admin_reset_password(email=member.email, new_password="new-strong-password")
+            with self.assertRaisesRegex(ValueError, "no changes"):
+                store.admin_update_user(email=member.email)
+
+    def test_admin_update_user_replaces_password_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            member = store.create_user(email="member@example.com", password="strong-password")
+
+            store.admin_update_user(email=member.email, new_password="new-strong-password")
 
             self.assertIsNone(
                 store.authenticate(

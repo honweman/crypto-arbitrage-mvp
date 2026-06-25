@@ -345,57 +345,63 @@ class WebUserStore:
         if admin_count <= 1 and users[email].role == "admin":
             raise ValueError("cannot remove the last remaining admin")
 
-    def admin_set_role(self, *, email: str, role: str) -> WebUser:
-        normalized_role = str(role or "").strip().lower()
-        if normalized_role not in {"admin", "user"}:
-            raise ValueError("role must be admin or user")
-        users = self._read_users()
-        normalized_email = normalize_email(email)
-        user = users.get(normalized_email)
-        if user is None:
-            raise ValueError("user is not registered")
-        if normalized_role != "admin":
-            self._require_not_last_admin(users, normalized_email)
-        updated = replace(user, role=normalized_role, updated_at=time.time())
-        users[updated.email] = updated
-        self._write_users(users)
-        return updated
-
-    def admin_set_allowed_assets(
+    def admin_update_user(
         self,
         *,
         email: str,
-        allowed_assets: list[str] | str | None,
-        preferred_asset: str = "",
+        role: str | None = None,
+        allowed_assets: list[str] | str | None = None,
+        allowed_assets_provided: bool = False,
+        preferred_asset: str | None = None,
+        preferred_asset_provided: bool = False,
+        new_password: str | None = None,
     ) -> WebUser:
-        users = self._read_users()
         normalized_email = normalize_email(email)
+        users = self._read_users()
         user = users.get(normalized_email)
         if user is None:
             raise ValueError("user is not registered")
-        assets = normalize_assets(allowed_assets or [])
-        preferred = str(preferred_asset or "").strip().upper()
-        if preferred and assets and preferred not in assets:
-            raise ValueError("preferred asset must be in allowed assets")
-        updated = replace(
-            user,
-            allowed_assets=assets,
-            preferred_asset=preferred,
-            updated_at=time.time(),
-        )
-        users[updated.email] = updated
-        self._write_users(users)
-        return updated
 
-    def admin_reset_password(self, *, email: str, new_password: str) -> WebUser:
-        users = self._read_users()
-        normalized_email = normalize_email(email)
-        user = users.get(normalized_email)
-        if user is None:
-            raise ValueError("user is not registered")
+        new_role = user.role
+        if role is not None:
+            new_role = str(role or "").strip().lower()
+            if new_role not in {"admin", "user"}:
+                raise ValueError("role must be admin or user")
+        if new_role != "admin":
+            self._require_not_last_admin(users, normalized_email)
+
+        new_assets = (
+            normalize_assets(allowed_assets or [])
+            if allowed_assets_provided
+            else user.allowed_assets
+        )
+        if preferred_asset_provided:
+            new_preferred = str(preferred_asset or "").strip().upper()
+        else:
+            new_preferred = user.preferred_asset
+            if allowed_assets_provided and new_preferred not in new_assets:
+                new_preferred = ""
+        if new_preferred and new_assets and new_preferred not in new_assets:
+            raise ValueError("preferred asset must be in allowed assets")
+
+        new_password_hash = user.password_hash
+        if new_password:
+            new_password_hash = hash_password(new_password)
+
+        if (
+            new_role == user.role
+            and new_assets == user.allowed_assets
+            and new_preferred == user.preferred_asset
+            and new_password_hash == user.password_hash
+        ):
+            raise ValueError("no changes supplied")
+
         updated = replace(
             user,
-            password_hash=hash_password(new_password),
+            role=new_role,
+            allowed_assets=new_assets,
+            preferred_asset=new_preferred,
+            password_hash=new_password_hash,
             updated_at=time.time(),
         )
         users[updated.email] = updated

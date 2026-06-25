@@ -4468,7 +4468,11 @@ async def api_state(request: web.Request) -> web.Response:
         request.app["strategy_center_store"],
         user=requesting_user,
     )
-    if requesting_user is not None and requesting_user.role == "admin":
+    if (
+        requesting_user is not None
+        and requesting_user.role == "admin"
+        and view in (None, "settings")
+    ):
         payload["admin_users"] = [
             _public_admin_user_dict(item) for item in _user_store(request).list_users()
         ]
@@ -4564,35 +4568,32 @@ async def api_admin_users(request: web.Request) -> web.Response:
         elif action == "update_user":
             if not email:
                 raise ValueError("email is required")
-            current = store.get_user(email)
-            if current is None:
-                raise ValueError("user is not registered")
-            changes: list[str] = []
-            updated = current
-            if "role" in payload:
-                updated = store.admin_set_role(email=email, role=str(payload.get("role") or ""))
-                changes.append("role")
-            if "allowed_assets" in payload or "preferred_asset" in payload:
-                allowed_assets = (
-                    payload.get("allowed_assets")
-                    if "allowed_assets" in payload
-                    else updated.allowed_assets
-                )
-                preferred_asset = str(
-                    payload.get("preferred_asset", updated.preferred_asset) or ""
-                )
-                updated = store.admin_set_allowed_assets(
-                    email=email,
-                    allowed_assets=allowed_assets,
-                    preferred_asset=preferred_asset,
-                )
-                changes.append("assets")
+            role_provided = "role" in payload
+            allowed_assets_provided = "allowed_assets" in payload
+            preferred_asset_provided = "preferred_asset" in payload
             new_password = str(payload.get("new_password") or "")
-            if new_password:
-                updated = store.admin_reset_password(email=email, new_password=new_password)
-                changes.append("password")
-            if not changes:
-                raise ValueError("no changes supplied")
+            updated = store.admin_update_user(
+                email=email,
+                role=str(payload.get("role") or "") if role_provided else None,
+                allowed_assets=payload.get("allowed_assets"),
+                allowed_assets_provided=allowed_assets_provided,
+                preferred_asset=(
+                    str(payload.get("preferred_asset") or "")
+                    if preferred_asset_provided
+                    else None
+                ),
+                preferred_asset_provided=preferred_asset_provided,
+                new_password=new_password or None,
+            )
+            changes = [
+                name
+                for name, touched in (
+                    ("role", role_provided),
+                    ("assets", allowed_assets_provided or preferred_asset_provided),
+                    ("password", bool(new_password)),
+                )
+                if touched
+            ]
             audit_action = "admin_user_update"
             audit_target = updated.email
             audit_detail = "updated " + ", ".join(changes)

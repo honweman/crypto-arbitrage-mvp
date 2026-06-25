@@ -3927,12 +3927,153 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         "totp": totp_code(member.totp_secret),
                     },
                 )
-                response = await client.post("/api/admin/users", json={"action": "list"})
-                payload = await response.json()
+                responses = {}
+                for action, body in (
+                    ("list", {"action": "list"}),
+                    (
+                        "create_user",
+                        {
+                            "action": "create_user",
+                            "email": "new@example.com",
+                            "password": "another-strong-pw",
+                        },
+                    ),
+                    (
+                        "update_user",
+                        {"action": "update_user", "email": member.email, "role": "admin"},
+                    ),
+                    (
+                        "delete_user",
+                        {"action": "delete_user", "email": member.email},
+                    ),
+                ):
+                    response = await client.post("/api/admin/users", json=body)
+                    responses[action] = (response.status, await response.json())
             finally:
                 await client.close()
 
-        self.assertEqual(response.status, 403, payload)
+        for action, (status, payload) in responses.items():
+            self.assertEqual(status, 403, (action, payload))
+
+    async def test_admin_users_endpoint_create_user_rejects_duplicate_email_and_weak_password(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": admin.email,
+                        "password": "strong-password-1",
+                        "totp": totp_code(admin.totp_secret),
+                    },
+                )
+                duplicate_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "create_user",
+                        "email": admin.email,
+                        "password": "another-strong-pw",
+                    },
+                )
+                duplicate_payload = await duplicate_response.json()
+
+                weak_password_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "create_user",
+                        "email": "weak@example.com",
+                        "password": "short",
+                    },
+                )
+                weak_password_payload = await weak_password_response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(duplicate_response.status, 400, duplicate_payload)
+        self.assertEqual(weak_password_response.status, 400, weak_password_payload)
+
+    async def test_admin_users_appear_in_state_payload_for_admin_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            member = store.create_user(
+                email="member@example.com",
+                password="strong-password-2",
+                allowed_assets=["ACS"],
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": admin.email,
+                        "password": "strong-password-1",
+                        "totp": totp_code(admin.totp_secret),
+                    },
+                )
+                admin_state = await (await client.get("/api/state")).json()
+                admin_settings_view = await (
+                    await client.get("/api/state?view=settings")
+                ).json()
+                admin_status_view = await (
+                    await client.get("/api/state?view=status")
+                ).json()
+                await client.get("/logout")
+
+                await client.post(
+                    "/login",
+                    data={
+                        "email": member.email,
+                        "password": "strong-password-2",
+                        "totp": totp_code(member.totp_secret),
+                    },
+                )
+                member_state = await (await client.get("/api/state")).json()
+            finally:
+                await client.close()
+
+        self.assertIn(
+            admin.email,
+            [row["email"] for row in admin_state["admin_users"]],
+        )
+        self.assertIn(
+            admin.email,
+            [row["email"] for row in admin_settings_view["admin_users"]],
+        )
+        # The high-frequency "status" poll view skips the user-store read;
+        # admin_users is only computed for the unfiltered or settings view.
+        self.assertNotIn("admin_users", admin_status_view)
+        self.assertNotIn("admin_users", member_state)
 
     async def test_admin_users_endpoint_create_update_delete_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
