@@ -92,6 +92,11 @@ def _compact_market_maker_payload(
             "quote_conversion",
             "exchange_features",
             "error",
+            "accounts",
+            "config",
+            "instances",
+            "instance_count",
+            "active_instance_count",
         ),
     )
     result["runtime"] = _compact_market_maker_runtime(

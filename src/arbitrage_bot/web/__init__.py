@@ -160,6 +160,11 @@ from ..web_config import (
     execution_algo_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
+    market_maker_config_from_payload,
+    market_maker_configs_for_runtime,
+    market_maker_configs_from_payload,
+    market_maker_configs_to_list,
+    market_maker_config_with_id,
     risk_config_to_dict,
     slow_execution_accounts,
     slow_execution_config_to_dict,
@@ -3005,6 +3010,18 @@ def _save_runtime_overrides(path: Path, payload: dict[str, Any]) -> str | None:
 
 
 def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any]:
+    maker_configs = market_maker_configs_for_runtime(cfg)
+    primary_maker = maker_configs[0] if maker_configs else cfg.market_maker
+    primary_conversion = (
+        market_maker_quote_conversion(cfg, primary_maker.symbol)
+        if primary_maker.symbol
+        else {
+            "quote_currency": "",
+            "common_quote_currency": cfg.common_quote_currency,
+            "quote_to_common_rate": None,
+            "available": False,
+        }
+    )
     return {
         "status": "starting",
         "config": {
@@ -3254,35 +3271,17 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
-            "config": market_maker_config_to_dict(cfg.market_maker),
+            "config": market_maker_config_to_dict(primary_maker),
+            "instances": market_maker_configs_to_list(maker_configs),
             "accounts": slow_execution_accounts(
                 _all_account_exchanges(cfg),
                 _market_maker_symbols_by_exchange(cfg),
             ),
-            "quote_conversion": market_maker_quote_conversion(
-                cfg,
-                cfg.market_maker.symbol,
-            )
-            if cfg.market_maker.symbol
-            else {
-                "quote_currency": "",
-                "common_quote_currency": cfg.common_quote_currency,
-                "quote_to_common_rate": None,
-                "available": False,
-            },
+            "quote_conversion": primary_conversion,
             "safety": build_market_maker_safety_payload(
                 cfg,
                 None,
-                (
-                    market_maker_quote_conversion(cfg, cfg.market_maker.symbol)
-                    if cfg.market_maker.symbol
-                    else {
-                        "quote_currency": "",
-                        "common_quote_currency": cfg.common_quote_currency,
-                        "quote_to_common_rate": None,
-                        "available": False,
-                    }
-                ),
+                primary_conversion,
             ),
             "runtime": {},
             "quality": {},
@@ -3588,15 +3587,13 @@ def build_market_maker_safety_payload(
     }
 
 
-def build_market_maker_payload(
+def _build_market_maker_instance_payload(
     cfg: BotConfig,
+    maker_cfg: MarketMakerConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
+    accounts: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    maker_cfg = cfg.market_maker
-    accounts = slow_execution_accounts(
-        _all_account_exchanges(cfg),
-        _market_maker_symbols_by_exchange(cfg),
-    )
+    instance_cfg = replace(cfg, market_maker=maker_cfg)
     config_payload = market_maker_config_to_dict(maker_cfg)
     conversion = (
         market_maker_quote_conversion(cfg, maker_cfg.symbol)
@@ -3628,7 +3625,7 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
-            "safety": build_market_maker_safety_payload(cfg, None, conversion),
+            "safety": build_market_maker_safety_payload(instance_cfg, None, conversion),
             "market_data": None,
             "runtime": {},
             "error": None,
@@ -3645,7 +3642,7 @@ def build_market_maker_payload(
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
             "safety": build_market_maker_safety_payload(
-                cfg,
+                instance_cfg,
                 None,
                 conversion,
                 error=f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
@@ -3674,7 +3671,7 @@ def build_market_maker_payload(
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
             "safety": build_market_maker_safety_payload(
-                cfg,
+                instance_cfg,
                 None,
                 conversion,
                 error=str(exc),
@@ -3684,7 +3681,7 @@ def build_market_maker_payload(
             "error": str(exc),
         }
 
-    safety = build_market_maker_safety_payload(cfg, plan, conversion)
+    safety = build_market_maker_safety_payload(instance_cfg, plan, conversion)
     return {
         "status": "planned",
         "mode": "dry_run",
@@ -3698,6 +3695,33 @@ def build_market_maker_payload(
         "runtime": {},
         "error": None,
     }
+
+
+def build_market_maker_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    maker_configs = market_maker_configs_for_runtime(cfg)
+    accounts = slow_execution_accounts(
+        _all_account_exchanges(cfg),
+        _market_maker_symbols_by_exchange(cfg),
+    )
+    instances = [
+        _build_market_maker_instance_payload(cfg, maker_cfg, books, accounts)
+        for maker_cfg in maker_configs
+    ]
+    if not instances:
+        maker_cfg = market_maker_config_with_id(cfg.market_maker)
+        instances = [
+            _build_market_maker_instance_payload(cfg, maker_cfg, books, accounts)
+        ]
+    primary = dict(instances[0])
+    primary["instances"] = instances
+    primary["instance_count"] = len(instances)
+    primary["active_instance_count"] = sum(
+        1 for item in instances if item.get("status") not in {"disabled", "paused"}
+    )
+    return primary
 
 
 def build_slow_execution_payload(
@@ -5832,38 +5856,91 @@ async def api_market_maker(request: web.Request) -> web.Response:
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _market_maker_symbols_by_exchange(runtime_cfg)
-        overrides = _market_maker_overrides_from_payload(
-            payload,
-            allowed_exchanges={
-                exchange.key for exchange in _all_account_exchanges(runtime_cfg)
-            },
-            symbols_by_exchange=symbols_by_exchange,
+        allowed_exchanges = {
+            exchange.key for exchange in _all_account_exchanges(runtime_cfg)
+        }
+        current_instances = market_maker_configs_for_runtime(runtime_cfg)
+        action = "upsert"
+        if isinstance(payload, dict) and "instances" in payload:
+            updated_instances = market_maker_configs_from_payload(
+                payload["instances"],
+                base_configs=current_instances,
+                allowed_exchanges=allowed_exchanges,
+                symbols_by_exchange=symbols_by_exchange,
+            )
+            action = "replace"
+        elif isinstance(payload, dict) and payload.get("delete_id"):
+            delete_id = str(payload["delete_id"]).strip()
+            updated_instances = [
+                instance
+                for instance in current_instances
+                if instance.id != delete_id
+            ]
+            action = "delete"
+        else:
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
+            target_id = str(payload.get("id") or "").strip()
+            base_config = next(
+                (
+                    instance
+                    for instance in current_instances
+                    if instance.id == target_id
+                ),
+                current_instances[0] if current_instances else None,
+            )
+            updated_config = market_maker_config_from_payload(
+                payload,
+                base_config=base_config,
+                allowed_exchanges=allowed_exchanges,
+                symbols_by_exchange=symbols_by_exchange,
+            )
+            replaced_instance = False
+            updated_instances = []
+            for instance in current_instances:
+                if instance.id == updated_config.id:
+                    updated_instances.append(updated_config)
+                    replaced_instance = True
+                else:
+                    updated_instances.append(instance)
+            if not replaced_instance:
+                updated_instances.append(updated_config)
+        _require_user_assets(
+            _request_user(request),
+            [
+                _base_asset_from_symbol(instance.symbol)
+                for instance in updated_instances
+                if instance.symbol
+            ],
         )
-        current_config = await state.market_maker_config(runtime_cfg.market_maker)
-        target_symbol = str(overrides.get("symbol") or current_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_market_maker_overrides(overrides, cfg=cfg)
-    current_config = await state.market_maker_config(cfg.market_maker)
+    update = await state.set_market_maker_instances(updated_instances, cfg=cfg)
     runtime_cfg = await state.runtime_config(cfg)
+    current_instances = market_maker_configs_for_runtime(runtime_cfg)
+    current_config = current_instances[0] if current_instances else runtime_cfg.market_maker
     write_web_audit_event(
         runtime_cfg,
         request,
         action="market_maker_config",
-        target=f"{current_config.exchange} {current_config.symbol}".strip(),
-        detail="updated Market Maker config",
-        payload=overrides,
+        target=", ".join(
+            f"{instance.id}:{instance.exchange} {instance.symbol}".strip()
+            for instance in current_instances
+        ),
+        detail=f"{action} Market Maker config",
+        payload={
+            "action": action,
+            "instances": market_maker_configs_to_list(current_instances),
+        },
     )
     return web.json_response(
         {
             "ok": True,
             "config": market_maker_config_to_dict(current_config),
+            "instances": market_maker_configs_to_list(current_instances),
             **update,
         }
     )

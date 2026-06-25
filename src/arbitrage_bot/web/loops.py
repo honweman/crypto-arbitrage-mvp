@@ -67,6 +67,7 @@ from ..web_config import (
     dca_config_to_dict,
     execution_algo_config_to_dict,
     market_maker_config_to_dict,
+    market_maker_configs_for_runtime,
     slow_execution_accounts,
     slow_execution_config_to_dict,
     spot_grid_config_to_dict,
@@ -617,12 +618,12 @@ async def monitor_loop(
                             )
                     warnings = [*_missing_market_warnings(rows), *extra_warnings]
                     if strategy_pauses.get("market_maker", False):
-                        market_maker_payload = {
-                            "status": "paused",
-                            "mode": "paused",
-                            "plan": None,
-                            "error": None,
-                        }
+                        market_maker_payload = build_market_maker_payload(
+                            runtime_cfg,
+                            books,
+                        )
+                        market_maker_payload["status"] = "paused"
+                        market_maker_payload["mode"] = "paused"
                     else:
                         market_maker_payload = build_market_maker_payload(
                             runtime_cfg,
@@ -2415,9 +2416,10 @@ async def spot_grid_task_loop(
         await manager.close()
 
 
-async def market_maker_task_loop(
+async def _market_maker_instance_task_loop(
     cfg: BotConfig,
     state: MonitorState,
+    instance_id: str,
 ) -> None:
     manager = ExchangeManager()
     orderbook_cache = OrderBookCache(manager)
@@ -2430,7 +2432,9 @@ async def market_maker_task_loop(
     last_cancel_at: float | None = None
     previous_mid_price: float | None = None
     previous_plan: dict[str, Any] | None = None
+    last_maker_cfg = None
     runtime: dict[str, Any] = {
+        "id": instance_id,
         "status": "starting",
         "mode": "dry_run",
         "open_order_ids": [],
@@ -2446,10 +2450,66 @@ async def market_maker_task_loop(
         "updated_at": time.time(),
     }
     try:
-        await state.set_market_maker_runtime(runtime)
+        await state.set_market_maker_instance_runtime(instance_id, runtime)
         while True:
             runtime_cfg = await state.runtime_config(cfg)
-            maker_cfg = runtime_cfg.market_maker
+            maker_cfg = next(
+                (
+                    item
+                    for item in market_maker_configs_for_runtime(runtime_cfg)
+                    if item.id == instance_id
+                ),
+                None,
+            )
+            if maker_cfg is None:
+                cancel_payload = None
+                if open_order_ids and last_maker_cfg is not None:
+                    cancel_cfg = replace(
+                        runtime_cfg,
+                        market_maker=replace(
+                            last_maker_cfg,
+                            exchange=open_order_exchange,
+                            symbol=open_order_symbol,
+                        ),
+                        market_makers=[last_maker_cfg],
+                    )
+                    cancel_payload = await cancel_market_maker_order_ids(
+                        cancel_cfg,
+                        manager,
+                        open_order_ids,
+                    )
+                    canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+                    write_trade_event(cancel_cfg.trade_log, cancel_payload)
+                    write_strategy_timeline_from_payload(
+                        cancel_cfg.strategy_timeline,
+                        cancel_payload,
+                        source="market_maker_task",
+                    )
+                    open_order_ids = []
+                    open_order_exchange = ""
+                    open_order_symbol = ""
+                runtime = {
+                    **runtime,
+                    "id": instance_id,
+                    "status": "removed",
+                    "mode": "paused",
+                    "reason": "market maker instance removed",
+                    "open_order_ids": [],
+                    "open_order_count": 0,
+                    "placed_count": placed_count,
+                    "canceled_count": canceled_count,
+                    "last_execution": cancel_payload,
+                    "updated_at": time.time(),
+                }
+                await state.set_market_maker_instance_runtime(instance_id, runtime)
+                return
+            maker_cfg = replace(maker_cfg, id=instance_id)
+            last_maker_cfg = maker_cfg
+            runtime_cfg = replace(
+                runtime_cfg,
+                market_maker=maker_cfg,
+                market_makers=[maker_cfg],
+            )
             interval = max(1.0, maker_cfg.poll_seconds)
             started = time.monotonic()
             strategy_pauses = await state.strategy_pauses()
@@ -2569,7 +2629,7 @@ async def market_maker_task_loop(
                         "market_data": None,
                         "updated_at": time.time(),
                     }
-                    await state.set_market_maker_runtime(runtime)
+                    await state.set_market_maker_instance_runtime(instance_id, runtime)
                 else:
                     if open_order_snapshot.get("error"):
                         cycle_count += 1
@@ -2592,7 +2652,7 @@ async def market_maker_task_loop(
                             "market_data": None,
                             "updated_at": time.time(),
                         }
-                        await state.set_market_maker_runtime(runtime)
+                        await state.set_market_maker_instance_runtime(instance_id, runtime)
                         sleep_for = max(0.0, interval - (time.monotonic() - started))
                         if sleep_for > 0:
                             await asyncio.sleep(sleep_for)
@@ -2711,7 +2771,7 @@ async def market_maker_task_loop(
                         "market_data": payload.get("market_data"),
                         "updated_at": time.time(),
                     }
-                    await state.set_market_maker_runtime(runtime)
+                    await state.set_market_maker_instance_runtime(instance_id, runtime)
             except Exception as exc:  # noqa: BLE001
                 runtime = {
                     **runtime,
@@ -2720,7 +2780,7 @@ async def market_maker_task_loop(
                     "last_error": f"{exc.__class__.__name__}: {exc}",
                     "updated_at": time.time(),
                 }
-                await state.set_market_maker_runtime(runtime)
+                await state.set_market_maker_instance_runtime(instance_id, runtime)
 
             sleep_for = max(0.0, interval - (time.monotonic() - started))
             if sleep_for > 0:
@@ -2728,6 +2788,72 @@ async def market_maker_task_loop(
     finally:
         await orderbook_cache.close()
         await manager.close()
+
+
+async def market_maker_task_loop(
+    cfg: BotConfig,
+    state: MonitorState,
+) -> None:
+    tasks: dict[str, asyncio.Task[None]] = {}
+    await state.set_market_maker_runtime(
+        {
+            "status": "starting",
+            "mode": "dry_run",
+            "instances": [],
+            "instance_count": 0,
+            "active_instance_count": 0,
+            "open_order_count": 0,
+            "placed_count": 0,
+            "canceled_count": 0,
+            "cycle_count": 0,
+            "updated_at": time.time(),
+        }
+    )
+    try:
+        while True:
+            runtime_cfg = await state.runtime_config(cfg)
+            maker_configs = market_maker_configs_for_runtime(runtime_cfg)
+            configured_ids = {maker_cfg.id for maker_cfg in maker_configs}
+
+            for instance_id, task in list(tasks.items()):
+                if not task.done():
+                    continue
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    await state.set_market_maker_instance_runtime(
+                        instance_id,
+                        {
+                            "id": instance_id,
+                            "status": "error",
+                            "mode": "dry_run",
+                            "last_error": f"{exc.__class__.__name__}: {exc}",
+                            "open_order_ids": [],
+                            "open_order_count": 0,
+                            "updated_at": time.time(),
+                        },
+                    )
+                del tasks[instance_id]
+
+            for maker_cfg in maker_configs:
+                if maker_cfg.id in tasks:
+                    continue
+                tasks[maker_cfg.id] = asyncio.create_task(
+                    _market_maker_instance_task_loop(cfg, state, maker_cfg.id)
+                )
+
+            for instance_id in list(tasks):
+                if instance_id not in configured_ids and tasks[instance_id].done():
+                    del tasks[instance_id]
+
+            await asyncio.sleep(1.0)
+    finally:
+        for task in tasks.values():
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
 
 
 __all__ = [

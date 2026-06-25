@@ -40,6 +40,11 @@ from ..web_config import (
     execution_algo_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
+    market_maker_configs_for_runtime,
+    market_maker_configs_from_payload,
+    market_maker_configs_to_list,
+    market_maker_configs_with_ids,
+    market_maker_config_with_id,
     risk_config_to_dict,
     slow_execution_accounts,
     spot_markets_to_list,
@@ -117,6 +122,20 @@ class MonitorState:
         self._market_maker_overrides: dict[str, Any] = dict(
             store_data.get("market_maker_overrides", {})
         )
+        self._market_maker_instances_override: list[MarketMakerConfig] | None = None
+        market_maker_instances_raw = store_data.get("market_maker_instances")
+        if isinstance(market_maker_instances_raw, list):
+            try:
+                self._market_maker_instances_override = (
+                    market_maker_configs_from_payload(
+                        market_maker_instances_raw,
+                        base_configs=market_maker_configs_for_runtime(cfg),
+                    )
+                )
+            except ValueError as exc:
+                self._runtime_store_error = (
+                    f"invalid market_maker_instances: {exc}"
+                )
         self._slow_execution_overrides: dict[str, Any] = dict(
             store_data.get("slow_execution_overrides", {})
         )
@@ -204,6 +223,10 @@ class MonitorState:
             "strategy_paused": self._strategy_paused,
             "program": self._program_payload_unlocked(),
         }
+        if self._market_maker_instances_override is not None:
+            payload["market_maker_instances"] = market_maker_configs_to_list(
+                self._market_maker_instances_override
+            )
         if self._spot_markets_override is not None:
             payload["spot_markets"] = spot_markets_to_list(
                 self._spot_markets_override
@@ -237,6 +260,23 @@ class MonitorState:
         }
 
     def _runtime_config_unlocked(self, cfg: BotConfig) -> BotConfig:
+        legacy_market_maker = market_maker_config_with_id(
+            replace(
+                cfg.market_maker,
+                **self._market_maker_overrides,
+            )
+        )
+        if self._market_maker_instances_override is not None:
+            market_maker_instances = self._market_maker_instances_override
+        elif self._market_maker_overrides:
+            market_maker_instances = [legacy_market_maker]
+        else:
+            market_maker_instances = market_maker_configs_for_runtime(cfg)
+        primary_market_maker = (
+            market_maker_instances[0]
+            if market_maker_instances
+            else legacy_market_maker
+        )
         return replace(
             cfg,
             spot_markets=(
@@ -250,10 +290,8 @@ class MonitorState:
                 else cfg.cash_and_carry_pairs
             ),
             risk=replace(cfg.risk, **self._risk_overrides),
-            market_maker=replace(
-                cfg.market_maker,
-                **self._market_maker_overrides,
-            ),
+            market_maker=primary_market_maker,
+            market_makers=market_maker_instances,
             slow_execution=replace(
                 cfg.slow_execution,
                 **self._slow_execution_overrides,
@@ -311,6 +349,24 @@ class MonitorState:
         async with self._lock:
             return replace(base_config, **self._market_maker_overrides)
 
+    async def market_maker_configs(
+        self,
+        base_configs: list[MarketMakerConfig],
+    ) -> list[MarketMakerConfig]:
+        async with self._lock:
+            if self._market_maker_instances_override is not None:
+                return market_maker_configs_with_ids(
+                    self._market_maker_instances_override
+                )
+            if self._market_maker_overrides:
+                base = base_configs[0] if base_configs else MarketMakerConfig()
+                return [
+                    market_maker_config_with_id(
+                        replace(base, **self._market_maker_overrides)
+                    )
+                ]
+            return market_maker_configs_with_ids(base_configs)
+
     async def spot_grid_config(
         self,
         base_config: SpotGridConfig,
@@ -346,16 +402,51 @@ class MonitorState:
         cfg: BotConfig,
     ) -> dict[str, Any]:
         async with self._lock:
-            self._market_maker_overrides.update(overrides)
+            if self._market_maker_instances_override is not None:
+                runtime_cfg_before = self._runtime_config_unlocked(cfg)
+                instances = market_maker_configs_for_runtime(runtime_cfg_before)
+                target_id = str(overrides.get("id") or instances[0].id)
+                updated: list[MarketMakerConfig] = []
+                replaced_target = False
+                for instance in instances:
+                    if instance.id == target_id:
+                        updated.append(
+                            market_maker_config_with_id(
+                                replace(instance, **overrides)
+                            )
+                        )
+                        replaced_target = True
+                    else:
+                        updated.append(instance)
+                if not replaced_target:
+                    updated.append(
+                        market_maker_config_with_id(
+                            replace(MarketMakerConfig(), **overrides)
+                        )
+                    )
+                self._market_maker_instances_override = (
+                    market_maker_configs_with_ids(updated)
+                )
+                self._market_maker_overrides = {}
+            else:
+                self._market_maker_overrides.update(overrides)
             runtime_cfg = self._runtime_config_unlocked(cfg)
             if "market_maker" in self._payload:
-                current_config = self._payload["market_maker"].get("config", {})
-                current_config.update(overrides)
-                self._payload["market_maker"]["config"] = current_config
+                self._payload["market_maker"]["config"] = (
+                    market_maker_config_to_dict(runtime_cfg.market_maker)
+                )
+                self._payload["market_maker"]["instances"] = (
+                    market_maker_configs_to_list(
+                        market_maker_configs_for_runtime(runtime_cfg)
+                    )
+                )
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
                     _market_maker_symbols_by_exchange(runtime_cfg),
                 )
+            self._payload["config"]["strategy_universe"] = (
+                strategy_universe_to_dict(runtime_cfg)
+            )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
@@ -369,6 +460,60 @@ class MonitorState:
                     {
                         "config": market_maker_config_to_dict(
                             runtime_cfg.market_maker
+                        ),
+                        "instances": market_maker_configs_to_list(
+                            market_maker_configs_for_runtime(runtime_cfg)
+                        ),
+                        "market_maker": self._payload.get("market_maker", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
+    async def set_market_maker_instances(
+        self,
+        instances: list[MarketMakerConfig],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._market_maker_instances_override = market_maker_configs_with_ids(
+                instances
+            )
+            self._market_maker_overrides = {}
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            if "market_maker" in self._payload:
+                self._payload["market_maker"]["config"] = (
+                    market_maker_config_to_dict(runtime_cfg.market_maker)
+                )
+                self._payload["market_maker"]["instances"] = (
+                    market_maker_configs_to_list(
+                        market_maker_configs_for_runtime(runtime_cfg)
+                    )
+                )
+                self._payload["market_maker"]["accounts"] = slow_execution_accounts(
+                    _all_account_exchanges(runtime_cfg),
+                    _market_maker_symbols_by_exchange(runtime_cfg),
+                )
+            self._payload["config"]["strategy_universe"] = (
+                strategy_universe_to_dict(runtime_cfg)
+            )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._save_runtime_store_unlocked()
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": market_maker_config_to_dict(
+                            runtime_cfg.market_maker
+                        ),
+                        "instances": market_maker_configs_to_list(
+                            market_maker_configs_for_runtime(runtime_cfg)
                         ),
                         "market_maker": self._payload.get("market_maker", {}),
                         "trading_console": self._payload["trading_console"],
@@ -864,6 +1009,124 @@ class MonitorState:
                     self._payload["market_maker"]["status"] = runtime["status"]
                 self._payload["market_maker"]["error"] = runtime.get("last_error")
 
+    def _aggregate_market_maker_runtime_unlocked(
+        self,
+        instances: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        active_instances = [
+            item
+            for item in instances
+            if item.get("status") not in {"disabled", "paused"}
+        ]
+        selected = active_instances[0] if active_instances else (instances[0] if instances else {})
+        status_priority = [
+            "error",
+            "open_order_sync_error",
+            "execution_error",
+            "cancel_retry",
+            "blocked_by_risk",
+            "placed",
+            "unchanged",
+            "planned",
+            "starting",
+            "disabled",
+            "paused",
+        ]
+        statuses = {str(item.get("status") or "") for item in instances}
+        aggregate_status = "disabled"
+        for status in status_priority:
+            if status in statuses:
+                aggregate_status = status
+                break
+        return {
+            "status": aggregate_status,
+            "mode": "live" if any(item.get("mode") == "live" for item in instances) else selected.get("mode", "dry_run"),
+            "instances": instances,
+            "instance_count": len(instances),
+            "active_instance_count": len(active_instances),
+            "open_order_count": sum(
+                int(item.get("open_order_count", 0) or 0) for item in instances
+            ),
+            "placed_count": sum(
+                int(item.get("placed_count", 0) or 0) for item in instances
+            ),
+            "canceled_count": sum(
+                int(item.get("canceled_count", 0) or 0) for item in instances
+            ),
+            "cycle_count": sum(
+                int(item.get("cycle_count", 0) or 0) for item in instances
+            ),
+            "last_plan": selected.get("last_plan"),
+            "last_risk": selected.get("last_risk"),
+            "last_execution": selected.get("last_execution"),
+            "last_error": selected.get("last_error"),
+            "market_data": selected.get("market_data"),
+            "updated_at": time.time(),
+        }
+
+    def _sync_market_maker_payload_runtime_unlocked(
+        self,
+        runtime: dict[str, Any],
+    ) -> None:
+        if "market_maker" not in self._payload:
+            return
+        market_maker = self._payload["market_maker"]
+        market_maker["runtime"] = runtime
+        if isinstance(runtime.get("last_plan"), dict):
+            market_maker["plan"] = runtime["last_plan"]
+        if runtime.get("mode"):
+            market_maker["mode"] = runtime["mode"]
+        if runtime.get("status"):
+            market_maker["status"] = runtime["status"]
+        market_maker["error"] = runtime.get("last_error")
+        runtime_by_id = {
+            str(item.get("id") or ""): item
+            for item in runtime.get("instances", [])
+            if isinstance(item, dict)
+        }
+        instances = market_maker.get("instances")
+        if isinstance(instances, list):
+            updated_instances: list[dict[str, Any]] = []
+            for instance in instances:
+                if not isinstance(instance, dict):
+                    continue
+                config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
+                instance_id = str(config.get("id") or instance.get("id") or "")
+                instance_runtime = runtime_by_id.get(instance_id)
+                if instance_runtime is not None:
+                    merged = {
+                        **instance,
+                        "runtime": instance_runtime,
+                        "status": instance_runtime.get("status", instance.get("status")),
+                        "mode": instance_runtime.get("mode", instance.get("mode")),
+                        "error": instance_runtime.get("last_error"),
+                    }
+                    if isinstance(instance_runtime.get("last_plan"), dict):
+                        merged["plan"] = instance_runtime["last_plan"]
+                    updated_instances.append(merged)
+                else:
+                    updated_instances.append(instance)
+            market_maker["instances"] = updated_instances
+
+    async def set_market_maker_instance_runtime(
+        self,
+        instance_id: str,
+        runtime: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            instance_id = str(instance_id)
+            runtime = {**runtime, "id": instance_id}
+            current_instances = {
+                str(item.get("id") or ""): item
+                for item in self._market_maker_runtime.get("instances", [])
+                if isinstance(item, dict)
+            }
+            current_instances[instance_id] = runtime
+            instances = list(current_instances.values())
+            aggregate = self._aggregate_market_maker_runtime_unlocked(instances)
+            self._market_maker_runtime = aggregate
+            self._sync_market_maker_payload_runtime_unlocked(aggregate)
+
     async def market_maker_runtime(self) -> dict[str, Any]:
         async with self._lock:
             return json.loads(json.dumps(self._market_maker_runtime))
@@ -939,6 +1202,40 @@ class MonitorState:
                 market_maker["status"] = self._market_maker_runtime["status"]
             if self._market_maker_runtime.get("last_error"):
                 market_maker["error"] = self._market_maker_runtime["last_error"]
+            runtime_by_id = {
+                str(item.get("id") or ""): item
+                for item in self._market_maker_runtime.get("instances", [])
+                if isinstance(item, dict)
+            }
+            if isinstance(market_maker.get("instances"), list):
+                merged_instances: list[dict[str, Any]] = []
+                for instance in market_maker["instances"]:
+                    if not isinstance(instance, dict):
+                        continue
+                    config = (
+                        instance.get("config")
+                        if isinstance(instance.get("config"), dict)
+                        else {}
+                    )
+                    instance_id = str(config.get("id") or instance.get("id") or "")
+                    instance_runtime = runtime_by_id.get(instance_id)
+                    if instance_runtime is None:
+                        merged_instances.append(instance)
+                        continue
+                    merged = {
+                        **instance,
+                        "runtime": instance_runtime,
+                        "status": instance_runtime.get(
+                            "status",
+                            instance.get("status"),
+                        ),
+                        "mode": instance_runtime.get("mode", instance.get("mode")),
+                        "error": instance_runtime.get("last_error"),
+                    }
+                    if isinstance(instance_runtime.get("last_plan"), dict):
+                        merged["plan"] = instance_runtime["last_plan"]
+                    merged_instances.append(merged)
+                market_maker["instances"] = merged_instances
             market_maker["quality"] = build_market_maker_quality_payload(
                 order_activity,
                 market_maker,

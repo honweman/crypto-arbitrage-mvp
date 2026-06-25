@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from .config import BotConfig, ExchangeConfig, load_config
 from .exchanges import ExchangeManager
 from .models import OrderBookSnapshot
+from .web_config import market_maker_configs_for_runtime
 
 
 AUTH_ENV_FIELDS = ("api_key_env", "secret_env", "password_env")
@@ -51,10 +52,9 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     for route in cfg.triangular_arbitrage.routes:
         symbols.setdefault(route.exchange, set()).update(route.symbols)
 
-    if cfg.market_maker.exchange and cfg.market_maker.symbol:
-        symbols.setdefault(cfg.market_maker.exchange, set()).add(
-            cfg.market_maker.symbol
-        )
+    for maker_cfg in market_maker_configs_for_runtime(cfg):
+        if maker_cfg.exchange and maker_cfg.symbol:
+            symbols.setdefault(maker_cfg.exchange, set()).add(maker_cfg.symbol)
     if cfg.slow_execution.exchange and cfg.slow_execution.symbol:
         symbols.setdefault(cfg.slow_execution.exchange, set()).add(
             cfg.slow_execution.symbol

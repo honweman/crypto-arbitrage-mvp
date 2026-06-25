@@ -26,6 +26,19 @@ from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
 
+def _client_order_prefix(maker_cfg: Any) -> str:
+    prefix = str(getattr(maker_cfg, "client_order_prefix", "") or "")
+    instance_id = str(getattr(maker_cfg, "id", "") or "")
+    if prefix and instance_id:
+        safe_id = "".join(
+            character.lower() if character.isalnum() else "-"
+            for character in instance_id
+        )
+        safe_id = "-".join(part for part in safe_id.split("-") if part)
+        return f"{prefix}-{safe_id}" if safe_id else prefix
+    return prefix
+
+
 def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
     for exchange in [*cfg.spot_exchanges, *cfg.derivative_exchanges]:
         if exchange.key == key:
@@ -331,10 +344,11 @@ async def place_plan(
     create_errors: list[dict[str, Any]] = []
     timestamp_ms = int(time.time() * 1000)
     prepared_orders = prepared_orders or []
+    client_order_prefix = _client_order_prefix(maker_cfg)
     client_order_ids = [
         (
-            f"{maker_cfg.client_order_prefix}-{timestamp_ms}-{index}"
-            if maker_cfg.client_order_prefix
+            f"{client_order_prefix}-{timestamp_ms}-{index}"
+            if client_order_prefix
             else None
         )
         for index in range(1, len(plan.orders) + 1)

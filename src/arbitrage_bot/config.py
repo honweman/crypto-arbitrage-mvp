@@ -77,6 +77,7 @@ class OnchainMonitorConfig:
 
 @dataclass(frozen=True)
 class MarketMakerConfig:
+    id: str = ""
     enabled: bool = False
     live_enabled: bool = False
     exchange: str = ""
@@ -429,6 +430,7 @@ class BotConfig:
     spot_exchanges: list[ExchangeConfig]
     derivative_exchanges: list[ExchangeConfig]
     option_combos: list[OptionComboConfig] = field(default_factory=list)
+    market_makers: list[MarketMakerConfig] = field(default_factory=list)
     spot_grid: SpotGridConfig = field(default_factory=SpotGridConfig)
     dca: DcaConfig = field(default_factory=DcaConfig)
     execution_algo: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
@@ -492,6 +494,35 @@ def _option_combo_from_dict(raw: dict[str, Any]) -> OptionComboConfig:
         expiry=str(raw.get("expiry", "")),
         contract_size=float(raw.get("contract_size", 1.0)),
         quote_currency=str(raw.get("quote_currency", "USDT")).upper(),
+    )
+
+
+def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
+    return MarketMakerConfig(
+        id=str(raw.get("id", "")).strip(),
+        enabled=bool(raw.get("enabled", False)),
+        live_enabled=bool(raw.get("live_enabled", False)),
+        exchange=raw.get("exchange", ""),
+        symbol=raw.get("symbol", ""),
+        levels=int(raw.get("levels", 10)),
+        price_band_pct=float(raw.get("price_band_pct", 10.0)),
+        quote_per_level=float(raw.get("quote_per_level", 1.0)),
+        depth_shape=str(raw.get("depth_shape", "linear")).lower(),
+        min_order_quote=float(raw.get("min_order_quote", 0.0)),
+        min_distance_bps=float(raw.get("min_distance_bps", 0.0)),
+        reprice_threshold_bps=float(raw.get("reprice_threshold_bps", 0.0)),
+        poll_seconds=float(raw.get("poll_seconds", 1.0)),
+        post_only=bool(raw.get("post_only", True)),
+        cancel_existing_orders=bool(raw.get("cancel_existing_orders", False)),
+        client_order_prefix=raw.get("client_order_prefix", "crypto-arb-mm"),
+        inventory_control_enabled=bool(
+            raw.get("inventory_control_enabled", False)
+        ),
+        inventory_target_base=float(raw.get("inventory_target_base", 0.0)),
+        inventory_band_base=float(raw.get("inventory_band_base", 0.0)),
+        inventory_max_deviation_base=float(
+            raw.get("inventory_max_deviation_base", 0.0)
+        ),
     )
 
 
@@ -577,6 +608,7 @@ def load_config(path: str | Path) -> BotConfig:
         default_url=default_solana_rpc,
     )
     market_maker_raw = raw.get("market_maker", {})
+    market_makers_raw = raw.get("market_makers", [])
     slow_execution_raw = raw.get("slow_execution", {})
     spot_grid_raw = raw.get("spot_grid", {})
     dca_raw = raw.get("dca", {})
@@ -593,6 +625,13 @@ def load_config(path: str | Path) -> BotConfig:
     pnl_store_raw = raw.get("pnl_store", {})
     alerts_raw = raw.get("alerts", {})
     web_security_raw = raw.get("web_security", {})
+    market_maker_config = _market_maker_from_dict(market_maker_raw)
+    market_maker_configs = [
+        _market_maker_from_dict(item)
+        for item in market_makers_raw
+        if isinstance(item, dict)
+    ] or [market_maker_config]
+
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -641,42 +680,8 @@ def load_config(path: str | Path) -> BotConfig:
                 for address, label in onchain_raw.get("address_labels", {}).items()
             },
         ),
-        market_maker=MarketMakerConfig(
-            enabled=bool(market_maker_raw.get("enabled", False)),
-            live_enabled=bool(market_maker_raw.get("live_enabled", False)),
-            exchange=market_maker_raw.get("exchange", ""),
-            symbol=market_maker_raw.get("symbol", ""),
-            levels=int(market_maker_raw.get("levels", 10)),
-            price_band_pct=float(market_maker_raw.get("price_band_pct", 10.0)),
-            quote_per_level=float(market_maker_raw.get("quote_per_level", 1.0)),
-            depth_shape=str(market_maker_raw.get("depth_shape", "linear")).lower(),
-            min_order_quote=float(market_maker_raw.get("min_order_quote", 0.0)),
-            min_distance_bps=float(market_maker_raw.get("min_distance_bps", 0.0)),
-            reprice_threshold_bps=float(
-                market_maker_raw.get("reprice_threshold_bps", 0.0)
-            ),
-            poll_seconds=float(market_maker_raw.get("poll_seconds", 1.0)),
-            post_only=bool(market_maker_raw.get("post_only", True)),
-            cancel_existing_orders=bool(
-                market_maker_raw.get("cancel_existing_orders", False)
-            ),
-            client_order_prefix=market_maker_raw.get(
-                "client_order_prefix",
-                "crypto-arb-mm",
-            ),
-            inventory_control_enabled=bool(
-                market_maker_raw.get("inventory_control_enabled", False)
-            ),
-            inventory_target_base=float(
-                market_maker_raw.get("inventory_target_base", 0.0)
-            ),
-            inventory_band_base=float(
-                market_maker_raw.get("inventory_band_base", 0.0)
-            ),
-            inventory_max_deviation_base=float(
-                market_maker_raw.get("inventory_max_deviation_base", 0.0)
-            ),
-        ),
+        market_maker=market_maker_config,
+        market_makers=market_maker_configs,
         slow_execution=SlowExecutionConfig(
             enabled=bool(slow_execution_raw.get("enabled", False)),
             exchange=slow_execution_raw.get("exchange", ""),

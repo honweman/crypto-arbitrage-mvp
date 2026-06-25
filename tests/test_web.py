@@ -119,6 +119,7 @@ HTML = f"{INDEX_HTML}\n{APP_JS}"
 def make_config(
     *,
     market_maker: MarketMakerConfig | None = None,
+    market_makers: list[MarketMakerConfig] | None = None,
     slow_execution: SlowExecutionConfig | None = None,
     spot_grid: SpotGridConfig | None = None,
     dca: DcaConfig | None = None,
@@ -150,6 +151,7 @@ def make_config(
         quote_rate_sources=[],
         onchain_monitor=OnchainMonitorConfig(),
         market_maker=market_maker or MarketMakerConfig(),
+        market_makers=market_makers or [],
         slow_execution=slow_execution or SlowExecutionConfig(),
         spot_grid=spot_grid or SpotGridConfig(),
         dca=dca or DcaConfig(),
@@ -175,11 +177,93 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260625-stopgate" defer></script>',
+            '<script src="/static/app.js?v=20260625-mm-multi" defer></script>',
             INDEX_HTML,
         )
+
+    def test_market_maker_payload_keeps_multiple_instances(self) -> None:
+        coinbase = MarketMakerConfig(
+            id="coinbase-acs",
+            enabled=True,
+            exchange="coinbase-spot",
+            symbol="ACS/USDC",
+            levels=1,
+            quote_per_level=1.0,
+        )
+        upbit = MarketMakerConfig(
+            id="upbit-acs",
+            enabled=True,
+            exchange="upbit-spot",
+            symbol="ACS/USDT",
+            levels=1,
+            quote_per_level=1.0,
+        )
+        cfg = make_config(
+            market_maker=coinbase,
+            market_makers=[coinbase, upbit],
+            spot_exchanges=[
+                ExchangeConfig(id="coinbase", label="coinbase-spot", market_type="spot"),
+                ExchangeConfig(id="upbit", label="upbit-spot", market_type="spot"),
+            ],
+        )
+        books = {
+            ("coinbase-spot", "ACS/USDC"): OrderBookSnapshot(
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+                bids=[BookLevel(price=0.2, amount=100.0)],
+                asks=[BookLevel(price=0.22, amount=100.0)],
+            ),
+            ("upbit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="upbit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.21, amount=100.0)],
+                asks=[BookLevel(price=0.23, amount=100.0)],
+            ),
+        }
+
+        payload = build_market_maker_payload(cfg, books)
+
+        self.assertEqual(payload["instance_count"], 2)
+        self.assertEqual(
+            [item["config"]["id"] for item in payload["instances"]],
+            ["coinbase-acs", "upbit-acs"],
+        )
+        self.assertEqual(payload["instances"][0]["plan"]["symbol"], "ACS/USDC")
+        self.assertEqual(payload["instances"][1]["plan"]["symbol"], "ACS/USDT")
+
+    def test_order_reconciliation_tracks_market_maker_instances(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "open_orders": [
+                    {"exchange": "coinbase-spot", "symbol": "ACS/USDC", "id": "a"},
+                    {"exchange": "upbit-spot", "symbol": "ACS/USDT", "id": "b"},
+                ],
+                "closed_orders": [],
+                "recent_trades": [],
+            },
+            market_maker_runtime={
+                "instances": [
+                    {
+                        "id": "coinbase-acs",
+                        "open_order_exchange": "coinbase-spot",
+                        "open_order_symbol": "ACS/USDC",
+                        "open_order_ids": ["a"],
+                    },
+                    {
+                        "id": "upbit-acs",
+                        "open_order_exchange": "upbit-spot",
+                        "open_order_symbol": "ACS/USDT",
+                        "open_order_ids": ["b"],
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(payload["tracked_order_count"], 2)
+        self.assertEqual(payload["matched_open_count"], 2)
+        self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260625-stopgate">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260625-mm-multi">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)

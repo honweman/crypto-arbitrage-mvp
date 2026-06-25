@@ -1568,6 +1568,7 @@ function balanceStatusClass(status) {
     }
 
     function renderMarketMakerSafety(marketMaker) {
+      marketMaker = selectedMarketMakerInstance(marketMaker) || marketMaker;
       const plan = marketMaker?.plan || {};
       const planOrders = Array.isArray(plan.orders) ? plan.orders : [];
       const safety = marketMaker?.safety || {};
@@ -1675,6 +1676,7 @@ function balanceStatusClass(status) {
     }
 
     function renderMarketMaker(marketMaker) {
+      marketMaker = selectedMarketMakerInstance(marketMaker) || marketMaker;
       const body = document.getElementById("mm-orders");
       body.innerHTML = "";
       if (!marketMaker || !marketMaker.plan || !marketMaker.plan.orders || marketMaker.plan.orders.length === 0) {
@@ -2928,6 +2930,7 @@ function balanceStatusClass(status) {
     let riskFormBusy = false;
     let mmFormDirty = false;
     let mmFormBusy = false;
+    let selectedMarketMakerInstanceId = "";
     let slowFormDirty = false;
     let slowFormBusy = false;
     let gridFormDirty = false;
@@ -3229,11 +3232,55 @@ function balanceStatusClass(status) {
       });
     }
 
-    function renderMarketMakerConfig(config, accounts) {
-      if (!config || mmFormDirty || mmFormBusy) return;
+    function marketMakerInstances(marketMaker) {
+      const instances = Array.isArray(marketMaker?.instances) ? marketMaker.instances : [];
+      if (instances.length) return instances;
+      return marketMaker?.config ? [{ config: marketMaker.config, status: marketMaker.status, mode: marketMaker.mode, runtime: marketMaker.runtime }] : [];
+    }
+
+    function marketMakerInstanceLabel(instance) {
+      const config = instance?.config || {};
+      const status = instance?.runtime?.status || instance?.status || "disabled";
+      return `${config.exchange || "account"} ${config.symbol || "symbol"} · ${status}`;
+    }
+
+    function selectedMarketMakerInstance(marketMaker) {
+      const instances = marketMakerInstances(marketMaker);
+      if (!instances.length) return null;
+      const selected = instances.find((instance) => (instance.config?.id || "") === selectedMarketMakerInstanceId);
+      return selected || instances[0];
+    }
+
+    function renderMarketMakerInstanceSelect(marketMaker) {
+      const select = document.getElementById("mm-instance");
+      if (!select) return;
+      const instances = marketMakerInstances(marketMaker);
+      const ids = instances.map((instance) => instance.config?.id || "").filter(Boolean);
+      if (!selectedMarketMakerInstanceId || !ids.includes(selectedMarketMakerInstanceId)) {
+        selectedMarketMakerInstanceId = ids[0] || "";
+      }
+      select.innerHTML = "";
+      for (const instance of instances) {
+        const config = instance.config || {};
+        const option = document.createElement("option");
+        option.value = config.id || "";
+        option.textContent = marketMakerInstanceLabel(instance);
+        select.appendChild(option);
+      }
+      select.value = selectedMarketMakerInstanceId;
+      document.getElementById("mm-delete").disabled = instances.length <= 1 || mmFormBusy;
+    }
+
+    function renderMarketMakerConfig(marketMaker) {
+      if (!marketMaker || mmFormBusy) return;
+      renderMarketMakerInstanceSelect(marketMaker);
+      if (mmFormDirty) return;
+      const selected = selectedMarketMakerInstance(marketMaker);
+      const config = selected?.config || marketMaker.config;
+      if (!config) return;
       document.getElementById("mm-enabled").checked = Boolean(config.enabled);
       document.getElementById("mm-live-enabled").checked = Boolean(config.live_enabled);
-      renderMarketMakerAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
+      renderMarketMakerAccounts(marketMaker.accounts, config.exchange || "", config.symbol || "");
       setNumericField("mm-levels", config.levels || 1);
       setNumericField("mm-band", config.price_band_pct || 0);
       setNumericField("mm-quote", config.quote_per_level || 0);
@@ -3251,6 +3298,7 @@ function balanceStatusClass(status) {
 
     function marketMakerPayloadFromForm() {
       return {
+        id: selectedMarketMakerInstanceId,
         enabled: document.getElementById("mm-enabled").checked,
         live_enabled: document.getElementById("mm-live-enabled").checked,
         exchange: selectedMarketMakerAccount(),
@@ -3269,6 +3317,61 @@ function balanceStatusClass(status) {
         inventory_max_deviation_base: numericValue("mm-inventory-max"),
         post_only: document.getElementById("mm-post-only").checked,
       };
+    }
+
+    function newMarketMakerId(exchange, symbol) {
+      const seed = `${exchange || "mm"}-${symbol || "symbol"}`.toLowerCase();
+      const normalized = seed.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "mm";
+      return `${normalized}-${Date.now().toString(36)}`;
+    }
+
+    async function saveMarketMakerInstances(instances) {
+      const res = await fetch("/api/market-maker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instances }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "market maker update failed");
+      mmFormDirty = false;
+      await refresh({ force: true });
+    }
+
+    async function addMarketMakerInstance() {
+      if (mmFormBusy) return;
+      mmFormBusy = true;
+      try {
+        const marketMaker = lastState?.market_maker || {};
+        const currentInstances = marketMakerInstances(marketMaker).map((instance) => ({ ...(instance.config || {}) }));
+        const draft = marketMakerPayloadFromForm();
+        draft.id = newMarketMakerId(draft.exchange, draft.symbol);
+        draft.enabled = false;
+        draft.live_enabled = false;
+        currentInstances.push(draft);
+        selectedMarketMakerInstanceId = draft.id;
+        await saveMarketMakerInstances(currentInstances);
+      } catch (error) {
+        text("mm-meta", `add failed: ${error.message || error}`);
+      } finally {
+        mmFormBusy = false;
+      }
+    }
+
+    async function deleteMarketMakerInstance() {
+      if (mmFormBusy || !selectedMarketMakerInstanceId) return;
+      const marketMaker = lastState?.market_maker || {};
+      const currentInstances = marketMakerInstances(marketMaker).map((instance) => ({ ...(instance.config || {}) }));
+      if (currentInstances.length <= 1) return;
+      mmFormBusy = true;
+      try {
+        const remaining = currentInstances.filter((instance) => instance.id !== selectedMarketMakerInstanceId);
+        selectedMarketMakerInstanceId = remaining[0]?.id || "";
+        await saveMarketMakerInstances(remaining);
+      } catch (error) {
+        text("mm-meta", `delete failed: ${error.message || error}`);
+      } finally {
+        mmFormBusy = false;
+      }
     }
 
     async function applyMarketMakerConfig(event) {
@@ -3890,22 +3993,25 @@ function balanceStatusClass(status) {
       text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
       renderAccountBalanceSummary(data.account_balances);
 
-      const mmRuntime = data.market_maker?.runtime || {};
-      const mmPlan = data.market_maker?.plan;
+      const mmSelected = selectedMarketMakerInstance(data.market_maker) || data.market_maker;
+      const mmInstances = marketMakerInstances(data.market_maker);
+      const mmRuntime = mmSelected?.runtime || data.market_maker?.runtime || {};
+      const mmPlan = mmSelected?.plan || data.market_maker?.plan;
       const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
-      const mmMarketData = mmRuntime.market_data || data.market_maker?.market_data || {};
+      const mmMarketData = mmRuntime.market_data || mmSelected?.market_data || data.market_maker?.market_data || {};
       const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
       const mmMarketDataText = mmMarketData.source
         ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(2)}s`}${mmWsText}`
         : mmWsText;
-      const mmQuote = data.market_maker?.quote_conversion;
+      const mmQuote = mmSelected?.quote_conversion || data.market_maker?.quote_conversion;
       const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
-      const mmFeatures = data.market_maker?.exchange_features || {};
+      const mmFeatures = mmSelected?.exchange_features || data.market_maker?.exchange_features || {};
       const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
       const mmSpreadText = mmPlan?.existing_spread_bps == null
         ? "--"
         : Number(mmPlan.existing_spread_bps).toFixed(2);
-      text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
+      const mmInstanceText = mmInstances.length > 1 ? `${mmInstances.length} instances · ` : "";
+      text("mm-meta", mmPlan ? `${mmInstanceText}${mmSelected?.mode || data.market_maker?.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${mmInstanceText}${mmSelected?.status || data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
 
       const slowPlan = data.slow_execution?.plan;
       const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
@@ -3968,7 +4074,7 @@ function balanceStatusClass(status) {
         renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
         renderOpenSection("signal-bot-form", () => renderSignalBotPanel(data.strategy_center));
         renderOpenSection("mm-orders", () => {
-          renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
+          renderMarketMakerConfig(data.market_maker);
           renderMarketMakerSafety(data.market_maker);
           renderMarketMaker(data.market_maker);
         });
@@ -4087,12 +4193,21 @@ function balanceStatusClass(status) {
     document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
     document.getElementById("carry-form").addEventListener("submit", addCashCarryPair);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
-    document.getElementById("mm-form").addEventListener("input", () => {
+    document.getElementById("mm-form").addEventListener("input", (event) => {
+      if (event.target?.id === "mm-instance") return;
       mmFormDirty = true;
     });
-    document.getElementById("mm-form").addEventListener("change", () => {
+    document.getElementById("mm-form").addEventListener("change", (event) => {
+      if (event.target?.id === "mm-instance") return;
       mmFormDirty = true;
     });
+    document.getElementById("mm-instance").addEventListener("change", (event) => {
+      selectedMarketMakerInstanceId = event.target.value || "";
+      mmFormDirty = false;
+      renderMarketMakerConfig(lastState?.market_maker);
+    });
+    document.getElementById("mm-add").addEventListener("click", addMarketMakerInstance);
+    document.getElementById("mm-delete").addEventListener("click", deleteMarketMakerInstance);
     document.getElementById("mm-form").addEventListener("submit", applyMarketMakerConfig);
     document.getElementById("slow-form").addEventListener("input", () => {
       slowFormDirty = true;

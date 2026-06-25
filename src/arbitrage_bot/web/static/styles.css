@@ -958,6 +958,30 @@ tbody tr:last-child td {
   opacity: 0.55;
 }
 
+.ghost-button {
+  min-height: 38px;
+  align-self: end;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.ghost-button.danger {
+  color: var(--red);
+  border-color: #e6bbb4;
+  background: #fbe9e6;
+}
+
+.ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .danger-button {
   min-height: 28px;
   padding: 5px 9px;
