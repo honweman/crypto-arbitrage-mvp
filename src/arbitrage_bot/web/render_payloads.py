@@ -133,6 +133,7 @@ def _compact_slow_execution_payload(
                 "order_ttl_seconds",
                 "start_price",
                 "stop_price",
+                "block_conflicting_market_maker",
             ),
         )
 
