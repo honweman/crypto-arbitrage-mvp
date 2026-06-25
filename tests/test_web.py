@@ -181,6 +181,15 @@ class WebMonitorTest(unittest.TestCase):
             INDEX_HTML,
         )
 
+    def test_page_supports_korean_language_option(self) -> None:
+        i18n_js = Path("src/arbitrage_bot/web/static/i18n.js").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('<option value="ko">한국어</option>', INDEX_HTML)
+        self.assertIn('"ko"', i18n_js)
+        self.assertIn('"Language": "언어"', i18n_js)
+        self.assertIn('"ko-KR"', i18n_js)
+
     def test_market_maker_payload_keeps_multiple_instances(self) -> None:
         coinbase = MarketMakerConfig(
             id="coinbase-acs",
