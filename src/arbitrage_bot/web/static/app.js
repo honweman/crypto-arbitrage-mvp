@@ -1737,8 +1737,8 @@ function balanceStatusClass(status) {
         <td class="num">${remainingText}</td>
         <td class="num">${plan.interval_seconds}s</td>
         <td class="num">${plan.order_ttl_seconds || 0}s</td>
-        <td class="num">${plan.start_price ? fmt.format(plan.start_price) : "--"}</td>
-        <td class="num">${plan.stop_price ? fmt.format(plan.stop_price) : "--"}</td>
+        <td>${escapeHtml(autoStartGateText(plan))}</td>
+        <td>${escapeHtml(autoStopGateText(plan))}</td>
       `;
       body.appendChild(tr);
     }
@@ -2452,8 +2452,8 @@ function balanceStatusClass(status) {
       if (start <= 0) return "start off";
       const quote = quoteCurrency(config?.symbol);
       return config?.side === "sell"
-        ? `start bid >= ${fmt.format(start)} ${quote}`
-        : `start ask <= ${fmt.format(start)} ${quote}`;
+        ? `AutoSell start: Bid >= ${fmt.format(start)} ${quote}`
+        : `AutoBuy start: Ask <= ${fmt.format(start)} ${quote}`;
     }
 
     function autoStopGateText(config) {
@@ -2461,8 +2461,8 @@ function balanceStatusClass(status) {
       if (stop <= 0) return "stop off";
       const quote = quoteCurrency(config?.symbol);
       return config?.side === "sell"
-        ? `stop bid <= ${fmt.format(stop)} ${quote}`
-        : `stop ask >= ${fmt.format(stop)} ${quote}`;
+        ? `AutoSell stop: Bid <= ${fmt.format(stop)} ${quote}`
+        : `AutoBuy stop: Ask >= ${fmt.format(stop)} ${quote}`;
     }
 
     function autoConfigSummary(config) {
@@ -3340,8 +3340,12 @@ function balanceStatusClass(status) {
       const { pair, quote } = slowUnitContext();
       const unitText = `${uiText("Unit")}: ${quote}.`;
       if (side === "buy") {
-        if (startLabel) startLabel.textContent = `${uiText("Start Gate")} (${pair} Ask <=, ${quote})`;
-        if (stopLabel) stopLabel.textContent = `${uiText("Stop Gate")} (${pair} Ask >=, ${quote})`;
+        if (startLabel) {
+          startLabel.textContent = `${uiText("Start Gate")} (${uiText("AutoBuy start when Ask <= price")} · ${pair} · ${quote})`;
+        }
+        if (stopLabel) {
+          stopLabel.textContent = `${uiText("Stop Gate")} (${uiText("AutoBuy stop when Ask >= price")} · ${pair} · ${quote})`;
+        }
         if (startHelp) {
           startHelp.textContent = `${uiText("AutoBuy starts when best ask is at or below this price.")} ${unitText}`;
         }
@@ -3350,8 +3354,12 @@ function balanceStatusClass(status) {
         }
         return;
       }
-      if (startLabel) startLabel.textContent = `${uiText("Start Gate")} (${pair} Bid >=, ${quote})`;
-      if (stopLabel) stopLabel.textContent = `${uiText("Stop Gate")} (${pair} Bid <=, ${quote})`;
+      if (startLabel) {
+        startLabel.textContent = `${uiText("Start Gate")} (${uiText("AutoSell start when Bid >= price")} · ${pair} · ${quote})`;
+      }
+      if (stopLabel) {
+        stopLabel.textContent = `${uiText("Stop Gate")} (${uiText("AutoSell stop when Bid <= price")} · ${pair} · ${quote})`;
+      }
       if (startHelp) {
         startHelp.textContent = `${uiText("AutoSell starts when best bid is at or above this price.")} ${unitText}`;
       }

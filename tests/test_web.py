@@ -174,8 +174,14 @@ def make_config(
 
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
-        self.assertIn('<script src="/static/app.js" defer></script>', INDEX_HTML)
-        self.assertIn('<link rel="stylesheet" href="/static/styles.css">', INDEX_HTML)
+        self.assertIn(
+            '<script src="/static/app.js?v=20260625-stopgate" defer></script>',
+            INDEX_HTML,
+        )
+        self.assertIn(
+            '<link rel="stylesheet" href="/static/styles.css?v=20260625-stopgate">',
+            INDEX_HTML,
+        )
         self.assertIn("Auto Buy/Sell", HTML)
         self.assertIn("/api/auto-buy-sell", HTML)
         self.assertIn("/api/auto-buy-sell/tasks", HTML)
@@ -195,11 +201,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Same as default", APP_JS)
         self.assertIn("config-diff-details", APP_JS)
         self.assertIn("config-diff-grid", APP_JS)
-        self.assertIn("start ask <=", APP_JS)
-        self.assertIn("start bid >=", APP_JS)
-        self.assertIn("stop ask >=", APP_JS)
+        self.assertIn("AutoBuy start: Ask <=", APP_JS)
+        self.assertIn("AutoSell start: Bid >=", APP_JS)
+        self.assertIn("AutoBuy stop: Ask >=", APP_JS)
         self.assertIn("Ask >=", APP_JS)
         self.assertIn("AutoBuy stops before each execution", APP_JS)
+        self.assertIn("AutoBuy stop when Ask >= price", APP_JS)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_web_package_exposes_split_modules(self) -> None:
