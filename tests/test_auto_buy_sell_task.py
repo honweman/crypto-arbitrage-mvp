@@ -321,6 +321,34 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(second_task["next_run_at"], before_cancel + 9.0)
         self.assertEqual(third["tasks"][0]["placed_count"], 1)
 
+    async def test_stop_price_cancels_open_orders_before_waiting_for_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            slow_cfg = self._slow_cfg(
+                stop_price=0.00017,
+                order_ttl_seconds=30.0,
+            )
+            await service.create_task(slow_cfg)
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp, slow_execution=slow_cfg)
+
+            first = await service.run_due_tasks(cfg, manager)
+            self.assertEqual(first["tasks"][0]["open_order_ids"], ["order-1"])
+            self.assertEqual(manager.created, 1)
+
+            manager.ask_price = 0.00018
+            service._tasks[0].next_run_at = 0.0
+            second = await service.run_due_tasks(cfg, manager)
+            second_task = second["tasks"][0]
+
+        self.assertEqual(second_task["status"], "stopped_by_price")
+        self.assertEqual(second_task["last_status"], "stopped_by_price")
+        self.assertEqual(second_task["open_order_ids"], [])
+        self.assertEqual(second_task["open_order_count"], 0)
+        self.assertEqual(second_task["last_execution"]["reason"], "stop_price_reached")
+        self.assertEqual(manager.canceled, 1)
+        self.assertEqual(manager.created, 1)
+
     async def test_filled_order_respects_next_interval_before_replacing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AutoBuySellTaskService(Path(tmp) / "tasks.json")

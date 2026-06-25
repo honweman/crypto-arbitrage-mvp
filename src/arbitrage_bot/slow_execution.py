@@ -218,7 +218,7 @@ def _is_stopped_by_price(
         return False
     if side == "sell":
         return order_price <= stop_price
-    return order_price <= stop_price
+    return order_price >= stop_price
 
 
 def _is_waiting_for_start_price(

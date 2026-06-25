@@ -11,7 +11,7 @@ from typing import Any
 
 from .config import BotConfig, ExchangeConfig, SlowExecutionConfig
 from .exchanges import ExchangeManager
-from .slow_executor import cancel_order_ids, run_cycle
+from .slow_executor import build_plan, cancel_order_ids, run_cycle
 from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
@@ -549,6 +549,12 @@ class AutoBuySellTaskService:
                 task.finished_at = time.time()
                 task.last_status = "complete"
                 return
+            if await self._stop_task_if_price_limit_reached(
+                task,
+                runtime_cfg,
+                manager,
+            ):
+                return
             if task.open_order_ids:
                 await self._handle_open_orders(task, runtime_cfg, manager)
                 return
@@ -609,6 +615,85 @@ class AutoBuySellTaskService:
             task.last_status = "error"
             task.last_error = f"{exc.__class__.__name__}: {exc}"
             task.next_run_at = time.time() + max(1.0, task_cfg.interval_seconds)
+
+    async def _stop_task_if_price_limit_reached(
+        self,
+        task: AutoBuySellTask,
+        cfg: BotConfig,
+        manager: ExchangeManager,
+    ) -> bool:
+        task_cfg = task.exec_cfg
+        if task_cfg.stop_price <= 0:
+            return False
+
+        plan = await build_plan(
+            cfg,
+            manager,
+            submitted_base=task.filled_base,
+            submitted_quote=task.filled_quote,
+            start_price_triggered=task.start_price_triggered,
+        )
+        task.last_plan = plan.to_dict()
+        if plan.status != "stopped_by_price":
+            return False
+
+        open_order_ids = list(task.open_order_ids)
+        now = time.time()
+        if not open_order_ids:
+            task.status = "stopped_by_price"
+            task.last_status = "stopped_by_price"
+            task.last_error = None
+            task.finished_at = now
+            task.updated_at = now
+            task.next_run_at = 0.0
+            return True
+
+        cancel_payload = await cancel_order_ids(cfg, manager, open_order_ids)
+        cancel_payload["task_id"] = task.id
+        cancel_payload["status"] = "stopped_by_price"
+        cancel_payload["reason"] = "stop_price_reached"
+        failed_ids = {
+            str(row.get("order_id"))
+            for row in cancel_payload.get("errors", [])
+            if row.get("order_id")
+        }
+        task.open_order_ids = [
+            order_id for order_id in task.open_order_ids if order_id in failed_ids
+        ]
+        task.canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+        task.last_execution = {
+            "canceled_count": cancel_payload.get("canceled_count", 0),
+            "cancel_requested_order_ids": open_order_ids,
+            "remaining_open_order_ids": list(task.open_order_ids),
+            "errors": cancel_payload.get("errors", []),
+            "reason": "stop_price_reached",
+        }
+        task.updated_at = time.time()
+        write_trade_event(cfg.trade_log, cancel_payload)
+        write_strategy_timeline_from_payload(
+            cfg.strategy_timeline,
+            cancel_payload,
+            source="auto_buy_sell_task",
+        )
+        if task.open_order_ids:
+            task.status = "error"
+            task.last_status = "stop_price_cancel_failed"
+            task.last_error = (
+                "stop price reached; cancel failed for "
+                f"{len(task.open_order_ids)} open order(s)"
+            )
+            task.next_run_at = time.time() + max(
+                1.0,
+                min(5.0, task_cfg.interval_seconds),
+            )
+            return True
+
+        task.status = "stopped_by_price"
+        task.last_status = "stopped_by_price"
+        task.last_error = None
+        task.finished_at = time.time()
+        task.next_run_at = 0.0
+        return True
 
     async def _handle_open_orders(
         self,

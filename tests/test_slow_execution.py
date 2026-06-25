@@ -453,12 +453,12 @@ class SlowExecutionTest(unittest.TestCase):
         self.assertEqual(plan.status, "stopped_by_price")
         self.assertIsNone(plan.order)
 
-    def test_stop_price_blocks_buy_at_or_below_floor(self) -> None:
+    def test_stop_price_blocks_buy_at_or_above_ceiling(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",
             symbol="ACS/USDT",
-            bids=[BookLevel(price=98.0, amount=10.0)],
-            asks=[BookLevel(price=99.0, amount=10.0)],
+            bids=[BookLevel(price=99.0, amount=10.0)],
+            asks=[BookLevel(price=101.0, amount=10.0)],
         )
         cfg = SlowExecutionConfig(
             enabled=True,
@@ -480,8 +480,8 @@ class SlowExecutionTest(unittest.TestCase):
         book = OrderBookSnapshot(
             exchange="bithumb-spot",
             symbol="ACS/KRW",
-            bids=[BookLevel(price=0.228, amount=10_000_000.0)],
-            asks=[BookLevel(price=0.229, amount=10_000_000.0)],
+            bids=[BookLevel(price=0.23, amount=10_000_000.0)],
+            asks=[BookLevel(price=0.231, amount=10_000_000.0)],
         )
         cfg = SlowExecutionConfig(
             enabled=True,
@@ -500,12 +500,12 @@ class SlowExecutionTest(unittest.TestCase):
         self.assertEqual(plan.status, "stopped_by_price")
         self.assertIsNone(plan.order)
 
-    def test_buy_waits_above_stop_price_before_start_trigger(self) -> None:
+    def test_buy_waits_above_start_below_stop_before_start_trigger(self) -> None:
         book = OrderBookSnapshot(
             exchange="bithumb-spot",
             symbol="ACS/KRW",
-            bids=[BookLevel(price=0.23, amount=10_000_000.0)],
-            asks=[BookLevel(price=0.231, amount=10_000_000.0)],
+            bids=[BookLevel(price=0.227, amount=10_000_000.0)],
+            asks=[BookLevel(price=0.228, amount=10_000_000.0)],
         )
         cfg = SlowExecutionConfig(
             enabled=True,

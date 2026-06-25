@@ -137,6 +137,10 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return (String(symbol || "").split("/")[1] || "QUOTE").split(":")[0];
     }
 
+    function uiText(source) {
+      return window.CryptoArbI18n?.t?.(source) || source;
+    }
+
     function formatSymbolQuantity(value, symbol, mode) {
       const currency = mode === "quote" ? quoteCurrency(symbol) : baseCurrency(symbol);
       return `${currency} ${formatBalanceAmount(value || 0)}`;
@@ -2446,17 +2450,19 @@ function balanceStatusClass(status) {
     function autoStartGateText(config) {
       const start = Number(config?.start_price || 0);
       if (start <= 0) return "start off";
+      const quote = quoteCurrency(config?.symbol);
       return config?.side === "sell"
-        ? `start bid >= ${fmt.format(start)}`
-        : `start ask <= ${fmt.format(start)}`;
+        ? `start bid >= ${fmt.format(start)} ${quote}`
+        : `start ask <= ${fmt.format(start)} ${quote}`;
     }
 
     function autoStopGateText(config) {
       const stop = Number(config?.stop_price || 0);
       if (stop <= 0) return "stop off";
+      const quote = quoteCurrency(config?.symbol);
       return config?.side === "sell"
-        ? `stop bid <= ${fmt.format(stop)}`
-        : `stop ask <= ${fmt.format(stop)}`;
+        ? `stop bid <= ${fmt.format(stop)} ${quote}`
+        : `stop ask >= ${fmt.format(stop)} ${quote}`;
     }
 
     function autoConfigSummary(config) {
@@ -3300,7 +3306,29 @@ function balanceStatusClass(status) {
     function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
       renderAccountSymbolSelectors("slow-accounts", "slow-account", accounts, selectedExchange, selectedSymbol, () => {
         slowFormDirty = true;
+        updateSlowLabels();
       });
+    }
+
+    function slowUnitContext() {
+      const symbol = selectedSlowSymbol();
+      const base = baseCurrency(symbol);
+      const quote = quoteCurrency(symbol);
+      const pair = symbol || `${base}/${quote}`;
+      return { base, quote, pair };
+    }
+
+    function setSlowLabel(id, text) {
+      const label = document.getElementById(id);
+      if (label) label.textContent = text;
+    }
+
+    function updateSlowUnitLabels() {
+      const { base, quote } = slowUnitContext();
+      setSlowLabel("slow-total-base-label", `${uiText("Total Base")} (${base})`);
+      setSlowLabel("slow-total-quote-label", `${uiText("Total Quote")} (${quote})`);
+      setSlowLabel("slow-slice-min-label", `${uiText("Min Base/Order")} (${base})`);
+      setSlowLabel("slow-slice-max-label", `${uiText("Max Base/Order")} (${base})`);
     }
 
     function updateSlowGateLabels() {
@@ -3309,17 +3337,32 @@ function balanceStatusClass(status) {
       const stopLabel = document.getElementById("slow-stop-price-label");
       const startHelp = document.getElementById("slow-start-price-help");
       const stopHelp = document.getElementById("slow-stop-price-help");
+      const { pair, quote } = slowUnitContext();
+      const unitText = `${uiText("Unit")}: ${quote}.`;
       if (side === "buy") {
-        if (startLabel) startLabel.textContent = "Start Gate (Ask <=)";
-        if (stopLabel) stopLabel.textContent = "Stop Gate (Ask <=)";
-        if (startHelp) startHelp.textContent = "Buy starts when the best ask reaches this price or lower.";
-        if (stopHelp) stopHelp.textContent = "Buy stops when the best ask reaches this price or lower. This is checked before Start.";
+        if (startLabel) startLabel.textContent = `${uiText("Start Gate")} (${pair} Ask <=, ${quote})`;
+        if (stopLabel) stopLabel.textContent = `${uiText("Stop Gate")} (${pair} Ask >=, ${quote})`;
+        if (startHelp) {
+          startHelp.textContent = `${uiText("AutoBuy starts when best ask is at or below this price.")} ${unitText}`;
+        }
+        if (stopHelp) {
+          stopHelp.textContent = `${uiText("AutoBuy stops before each execution when best ask is at or above this price.")} ${unitText}`;
+        }
         return;
       }
-      if (startLabel) startLabel.textContent = "Start Gate (Bid >=)";
-      if (stopLabel) stopLabel.textContent = "Stop Gate (Bid <=)";
-      if (startHelp) startHelp.textContent = "Sell starts when the best bid reaches this price or higher.";
-      if (stopHelp) stopHelp.textContent = "Sell stops when the best bid reaches this price or lower.";
+      if (startLabel) startLabel.textContent = `${uiText("Start Gate")} (${pair} Bid >=, ${quote})`;
+      if (stopLabel) stopLabel.textContent = `${uiText("Stop Gate")} (${pair} Bid <=, ${quote})`;
+      if (startHelp) {
+        startHelp.textContent = `${uiText("AutoSell starts when best bid is at or above this price.")} ${unitText}`;
+      }
+      if (stopHelp) {
+        stopHelp.textContent = `${uiText("AutoSell stops before each execution when best bid is at or below this price.")} ${unitText}`;
+      }
+    }
+
+    function updateSlowLabels() {
+      updateSlowUnitLabels();
+      updateSlowGateLabels();
     }
 
     function renderSlowExecutionConfig(config, accounts) {
@@ -3327,7 +3370,7 @@ function balanceStatusClass(status) {
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
-      updateSlowGateLabels();
+      updateSlowLabels();
       document.getElementById("slow-price-mode").value = config.price_mode || "taker";
       setNumericField("slow-offset-bps", config.price_offset_bps || 0);
       document.getElementById("slow-unlimited").checked = Boolean(config.unlimited_total);
@@ -4049,8 +4092,9 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("change", () => {
       slowFormDirty = true;
     });
-    document.getElementById("slow-side").addEventListener("change", updateSlowGateLabels);
+    document.getElementById("slow-side").addEventListener("change", updateSlowLabels);
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
+    window.addEventListener("crypto-arb-language-change", updateSlowLabels);
     document.getElementById("grid-form").addEventListener("input", () => {
       gridFormDirty = true;
     });

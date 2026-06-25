@@ -214,9 +214,14 @@
     "Max Base/Order": "每单最大基础币",
     "Random": "随机",
     "Timing": "时间",
+    "Unit": "单位",
     "Place Sec": "下单间隔秒",
     "Start Gate": "启动价格",
     "Stop Gate": "停止价格",
+    "AutoBuy starts when best ask is at or below this price.": "AutoBuy 会在卖一价小于等于该价格时启动。",
+    "AutoBuy stops before each execution when best ask is at or above this price.": "AutoBuy 每次执行前会检查，卖一价大于等于该价格时停止。",
+    "AutoSell starts when best bid is at or above this price.": "AutoSell 会在买一价大于等于该价格时启动。",
+    "AutoSell stops before each execution when best bid is at or below this price.": "AutoSell 每次执行前会检查，买一价小于等于该价格时停止。",
     "Create Task": "创建任务",
     "Clear Done": "清理完成任务",
     "Task": "任务",
@@ -495,6 +500,9 @@
     localStorage.setItem(STORAGE_KEY, currentLanguage);
     syncDocument();
     translateTree(document.body);
+    window.dispatchEvent(new CustomEvent("crypto-arb-language-change", {
+      detail: { language: currentLanguage },
+    }));
   }
 
   function setupLanguageSelector() {

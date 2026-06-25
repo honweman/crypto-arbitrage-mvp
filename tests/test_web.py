@@ -185,17 +185,21 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="slow-cleanup-preview"', HTML)
         self.assertIn('id="slow-tasks"', HTML)
         self.assertIn('id="slow-start-price"', HTML)
+        self.assertIn('id="slow-total-base-label"', HTML)
+        self.assertIn('id="slow-total-quote-label"', HTML)
+        self.assertIn('id="slow-slice-min-label"', HTML)
+        self.assertIn('id="slow-slice-max-label"', HTML)
         self.assertIn('id="slow-start-price-label"', HTML)
         self.assertIn('id="slow-stop-price-label"', HTML)
-        self.assertIn("Stop Gate (Ask <=)", APP_JS)
         self.assertIn("Cleanup preview", APP_JS)
         self.assertIn("Same as default", APP_JS)
         self.assertIn("config-diff-details", APP_JS)
         self.assertIn("config-diff-grid", APP_JS)
         self.assertIn("start ask <=", APP_JS)
         self.assertIn("start bid >=", APP_JS)
-        self.assertIn("stop ask <=", APP_JS)
-        self.assertIn("This is checked before Start", APP_JS)
+        self.assertIn("stop ask >=", APP_JS)
+        self.assertIn("Ask >=", APP_JS)
+        self.assertIn("AutoBuy stops before each execution", APP_JS)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_web_package_exposes_split_modules(self) -> None:
@@ -1134,7 +1138,7 @@ class WebMonitorTest(unittest.TestCase):
                 randomize_slice=False,
                 interval_seconds=30.0,
                 order_ttl_seconds=5.0,
-                stop_price=0.0001,
+                stop_price=0.0002,
             )
         )
         books = {
