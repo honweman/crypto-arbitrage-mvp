@@ -1412,6 +1412,7 @@ async def auto_buy_sell_task_loop(
                 runtime_cfg,
                 manager,
                 strategy_paused=strategy_pauses.get("slow_execution", False),
+                market_maker_paused=strategy_pauses.get("market_maker", False),
                 program_running=await state.is_running(),
             )
             await state.set_auto_buy_sell_tasks(payload)

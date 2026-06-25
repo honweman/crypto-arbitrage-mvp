@@ -269,6 +269,13 @@ def _slow_execution_overrides_from_payload(
             raise ValueError("unlimited_total must be a boolean")
         overrides["unlimited_total"] = payload["unlimited_total"]
 
+    if "block_conflicting_market_maker" in payload:
+        if not isinstance(payload["block_conflicting_market_maker"], bool):
+            raise ValueError("block_conflicting_market_maker must be a boolean")
+        overrides["block_conflicting_market_maker"] = payload[
+            "block_conflicting_market_maker"
+        ]
+
     numeric_fields = {
         "total_base",
         "total_quote",

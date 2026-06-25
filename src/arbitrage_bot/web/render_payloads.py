@@ -198,6 +198,7 @@ def _compact_slow_execution_payload(
         )
         compact["config"] = compact_task_config(task.get("config"))
         compact["last_plan"] = compact_task_plan(task.get("last_plan"))
+        compact["last_risk"] = task.get("last_risk")
         compact["last_execution"] = compact_task_execution(task.get("last_execution"))
         return compact
 

@@ -123,6 +123,7 @@ class SlowExecutionConfig:
     post_only: bool = False
     cancel_existing_orders: bool = False
     client_order_prefix: str = "crypto-arb-slow"
+    block_conflicting_market_maker: bool = True
 
 
 @dataclass(frozen=True)
@@ -710,6 +711,9 @@ def load_config(path: str | Path) -> BotConfig:
             client_order_prefix=slow_execution_raw.get(
                 "client_order_prefix",
                 "crypto-arb-slow",
+            ),
+            block_conflicting_market_maker=bool(
+                slow_execution_raw.get("block_conflicting_market_maker", True)
             ),
         ),
         spot_grid=SpotGridConfig(

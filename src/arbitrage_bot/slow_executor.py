@@ -57,6 +57,144 @@ def _quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]:
     }
 
 
+def _raw_client_order_id(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+    for value in (
+        raw.get("clientOrderId"),
+        raw.get("clientOrderID"),
+        raw.get("client_order_id"),
+        raw.get("clientOid"),
+        raw.get("client_oid"),
+        info.get("clientOrderId"),
+        info.get("clientOrderID"),
+        info.get("client_order_id"),
+        info.get("clientOid"),
+        info.get("client_oid"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _raw_order_id(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("id") or raw.get("order") or "").strip()
+
+
+def _raw_order_side(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+    return str(raw.get("side") or info.get("side") or "").strip().lower()
+
+
+def _symbol_matches(left: str, right: str) -> bool:
+    return str(left or "").upper() == str(right or "").upper()
+
+
+def _opposite_side(left: str, right: str) -> bool:
+    return {str(left).lower(), str(right).lower()} == {"buy", "sell"}
+
+
+def _market_maker_self_trade_guard(
+    cfg: BotConfig,
+    plan: SlowExecutionPlan,
+    *,
+    live: bool,
+    open_orders: list[Any] | None,
+    open_order_error: str | None,
+    market_maker_paused: bool,
+) -> dict[str, Any]:
+    exec_cfg = cfg.slow_execution
+    maker_cfg = cfg.market_maker
+    if not live or not exec_cfg.block_conflicting_market_maker or plan.order is None:
+        return {
+            "enabled": bool(exec_cfg.block_conflicting_market_maker),
+            "blocked": False,
+            "reasons": [],
+            "conflicting_open_orders": [],
+        }
+
+    same_config_target = (
+        maker_cfg.exchange == exec_cfg.exchange
+        and _symbol_matches(maker_cfg.symbol, exec_cfg.symbol)
+    )
+    reasons: list[str] = []
+    if (
+        same_config_target
+        and maker_cfg.enabled
+        and maker_cfg.live_enabled
+        and not market_maker_paused
+    ):
+        reasons.append(
+            "self-trade guard: market maker is live on "
+            f"{exec_cfg.exchange} {exec_cfg.symbol}; pause or disable MM before "
+            "starting Auto Buy/Sell"
+        )
+
+    prefix = str(maker_cfg.client_order_prefix or "").strip()
+    conflicting_open_orders: list[dict[str, Any]] = []
+    if prefix:
+        if open_order_error:
+            reasons.append(
+                "self-trade guard: could not verify existing market maker open "
+                f"orders for {exec_cfg.exchange} {exec_cfg.symbol}: {open_order_error}"
+            )
+        for raw in open_orders or []:
+            client_order_id = _raw_client_order_id(raw)
+            if not client_order_id.startswith(prefix):
+                continue
+            side = _raw_order_side(raw)
+            if side and not _opposite_side(plan.order.side, side):
+                continue
+            conflicting_open_orders.append(
+                {
+                    "id": _raw_order_id(raw),
+                    "client_order_id": client_order_id,
+                    "side": side or "unknown",
+                }
+            )
+        if conflicting_open_orders:
+            reasons.append(
+                "self-trade guard: found "
+                f"{len(conflicting_open_orders)} open market maker order(s) "
+                f"with prefix {prefix} on {exec_cfg.exchange} {exec_cfg.symbol}"
+            )
+
+    return {
+        "enabled": True,
+        "blocked": bool(reasons),
+        "reasons": reasons,
+        "conflicting_open_orders": conflicting_open_orders,
+        "market_maker_paused": market_maker_paused,
+        "market_maker_exchange": maker_cfg.exchange,
+        "market_maker_symbol": maker_cfg.symbol,
+        "market_maker_prefix": prefix,
+    }
+
+
+def _apply_self_trade_guard(
+    risk: dict[str, Any],
+    guard: dict[str, Any],
+) -> dict[str, Any]:
+    if not guard.get("blocked"):
+        risk["self_trade_guard"] = guard
+        return risk
+    reasons = [str(reason) for reason in guard.get("reasons", []) if reason]
+    risk["approved"] = False
+    risk["level"] = "blocked"
+    risk["reasons"] = [
+        *list(risk.get("reasons", [])),
+        *[reason for reason in reasons if reason not in risk.get("reasons", [])],
+    ]
+    risk["self_trade_guard"] = guard
+    return risk
+
+
 async def build_plan(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -227,6 +365,7 @@ async def run_cycle(
     previous_mid_price: float | None = None,
     last_cancel_at: float | None = None,
     start_price_triggered: bool = False,
+    market_maker_paused: bool = False,
 ) -> tuple[dict[str, Any], float]:
     plan = await build_plan(
         cfg,
@@ -267,21 +406,23 @@ async def run_cycle(
             )
         )
     exchange_cfg = _find_exchange(cfg, cfg.slow_execution.exchange)
+    existing_open_orders: list[Any] | None = None
     existing_open_order_count: int | None = None
     open_order_error: str | None = None
     should_cancel_existing = replace_existing or cfg.slow_execution.cancel_existing_orders
-    if live and (
-        cfg.risk.max_open_orders > 0
+    needs_open_orders = live and (
+        cfg.slow_execution.block_conflicting_market_maker
+        or cfg.risk.max_open_orders > 0
         or cfg.risk.max_cancels_per_cycle > 0
         or cfg.risk.min_seconds_between_cancels > 0
-    ):
+    )
+    if needs_open_orders:
         try:
-            existing_open_order_count = len(
-                await manager.fetch_open_orders(
-                    exchange_cfg,
-                    symbol=cfg.slow_execution.symbol,
-                )
+            existing_open_orders = await manager.fetch_open_orders(
+                exchange_cfg,
+                symbol=cfg.slow_execution.symbol,
             )
+            existing_open_order_count = len(existing_open_orders)
         except Exception as exc:  # noqa: BLE001
             open_order_error = str(exc)
     expected_cancel_count = (
@@ -320,7 +461,15 @@ async def run_cycle(
         open_order_error=open_order_error,
         post_only=cfg.slow_execution.post_only,
     )
-    payload["risk"] = risk.to_dict()
+    guard = _market_maker_self_trade_guard(
+        cfg,
+        plan,
+        live=live,
+        open_orders=existing_open_orders,
+        open_order_error=open_order_error,
+        market_maker_paused=market_maker_paused,
+    )
+    payload["risk"] = _apply_self_trade_guard(risk.to_dict(), guard)
     payload["risk"]["currency"] = cfg.common_quote_currency
     payload["risk"]["quote_conversion"] = conversion
     if quote_rate is None:

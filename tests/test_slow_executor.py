@@ -111,6 +111,203 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted_base, 0.0)
         self.assertNotIn("execution", payload)
 
+    async def test_live_cycle_blocks_when_same_symbol_market_maker_is_live(
+        self,
+    ) -> None:
+        class FakeManager:
+            created = 0
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("self-trade guard must block before validation")
+
+            async def create_limit_order(self, *_: object, **__: object) -> None:
+                self.created += 1
+
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                ),
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_open_orders=50,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_risk")
+        self.assertFalse(payload["risk"]["approved"])
+        self.assertTrue(payload["risk"]["self_trade_guard"]["blocked"])
+        self.assertTrue(
+            any("market maker is live" in reason for reason in payload["risk"]["reasons"])
+        )
+        self.assertEqual(submitted_base, 0.0)
+
+    async def test_live_cycle_allows_paused_market_maker_without_open_orders(
+        self,
+    ) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def prepare_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": "bybit-spot",
+                    "symbol": "ACS/USDT",
+                    "side": "sell",
+                    "status": "ok",
+                    "requested_amount": 1_000.0,
+                    "requested_price": 0.00014,
+                    "amount": 1_000.0,
+                    "price": 0.00014,
+                    "cost": 0.14,
+                    "limits": {},
+                    "precision": {},
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, object]:
+                return {"id": "slow-order"}
+
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                ),
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_order_quote=1.0,
+                    max_cycle_quote=1.0,
+                    max_open_orders=50,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=True,
+            replace_existing=False,
+            market_maker_paused=True,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertFalse(payload["risk"]["self_trade_guard"]["blocked"])
+        self.assertEqual(submitted_base, 1_000.0)
+
+    async def test_live_cycle_blocks_paused_market_maker_with_opposite_open_order(
+        self,
+    ) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [
+                    {
+                        "id": "mm-sell-1",
+                        "clientOrderId": "crypto-arb-mm-123",
+                        "side": "sell",
+                    }
+                ]
+
+            async def prepare_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("self-trade guard must block before validation")
+
+            async def create_limit_order(self, *_: object, **__: object) -> None:
+                raise AssertionError("self-trade guard must block before create")
+
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                ),
+                slow_execution=SlowExecutionConfig(
+                    enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    side="buy",
+                    total_base=10_000.0,
+                    slice_base=1_000.0,
+                ),
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_open_orders=50,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=True,
+            replace_existing=False,
+            market_maker_paused=True,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_risk")
+        self.assertFalse(payload["risk"]["approved"])
+        self.assertEqual(
+            payload["risk"]["self_trade_guard"]["conflicting_open_orders"][0]["id"],
+            "mm-sell-1",
+        )
+        self.assertEqual(submitted_base, 0.0)
+
     async def test_live_cycle_converts_krw_notional_for_risk(self) -> None:
         class FakeManager:
             async def fetch_order_book(
@@ -192,6 +389,7 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
         quote_rates: dict[str, float] | None = None,
         slow_execution: SlowExecutionConfig | None = None,
         spot_exchanges: list[ExchangeConfig] | None = None,
+        market_maker: MarketMakerConfig | None = None,
     ) -> BotConfig:
         return BotConfig(
             poll_seconds=1.0,
@@ -204,7 +402,7 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
             quote_rates=quote_rates or {"USD": 1.0, "USDT": 1.0},
             quote_rate_sources=[],
             onchain_monitor=OnchainMonitorConfig(),
-            market_maker=MarketMakerConfig(),
+            market_maker=market_maker or MarketMakerConfig(),
             slow_execution=slow_execution or SlowExecutionConfig(
                 enabled=True,
                 exchange="bybit-spot",

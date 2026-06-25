@@ -204,6 +204,8 @@ class AutoBuySellTask:
 
     def to_dict(self) -> dict[str, Any]:
         cfg = self.exec_cfg
+        row = asdict(self)
+        row["config"] = asdict(cfg)
         unlimited_total = cfg.unlimited_total
         base_target_enabled = not unlimited_total and cfg.total_base > 0
         quote_target_enabled = not unlimited_total and cfg.total_quote > 0
@@ -236,7 +238,7 @@ class AutoBuySellTask:
             else 0.0
         )
         return {
-            **asdict(self),
+            **row,
             "remaining_base": remaining_base,
             "remaining_quote": remaining_quote,
             "progress_mode": progress_mode,
@@ -455,6 +457,7 @@ class AutoBuySellTaskService:
         manager: ExchangeManager,
         *,
         strategy_paused: bool = False,
+        market_maker_paused: bool = False,
         program_running: bool = True,
     ) -> dict[str, Any]:
         async with self._lock:
@@ -477,7 +480,12 @@ class AutoBuySellTaskService:
                 continue
             if task.next_run_at > now:
                 continue
-            await self._run_task_cycle(task, cfg, manager)
+            await self._run_task_cycle(
+                task,
+                cfg,
+                manager,
+                market_maker_paused=market_maker_paused,
+            )
             changed = True
 
         async with self._lock:
@@ -525,6 +533,8 @@ class AutoBuySellTaskService:
         task: AutoBuySellTask,
         cfg: BotConfig,
         manager: ExchangeManager,
+        *,
+        market_maker_paused: bool = False,
     ) -> None:
         task_cfg = task.exec_cfg
         runtime_cfg = replace(cfg, slow_execution=task_cfg)
@@ -551,6 +561,7 @@ class AutoBuySellTaskService:
                 submitted_base=task.filled_base,
                 submitted_quote=task.filled_quote,
                 start_price_triggered=task.start_price_triggered,
+                market_maker_paused=market_maker_paused,
                 live=True,
                 replace_existing=False,
             )

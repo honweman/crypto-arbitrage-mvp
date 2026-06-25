@@ -2425,6 +2425,7 @@ function balanceStatusClass(status) {
       ["order_ttl_seconds", "Cancel Sec", "number"],
       ["start_price", "Start", "number"],
       ["stop_price", "Stop", "number"],
+      ["block_conflicting_market_maker", "MM Guard", "boolean"],
     ];
 
     function normalizeAutoConfigValue(value, type) {
@@ -2473,7 +2474,8 @@ function balanceStatusClass(status) {
         : Number(config.slice_quote || 0) > 0
         ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
         : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
-      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s`;
+      const guard = config.block_conflicting_market_maker === false ? "MM guard off" : "MM guard on";
+      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard}`;
     }
 
     function compareAutoTaskConfig(taskConfig, defaultConfig) {
@@ -2572,7 +2574,8 @@ function balanceStatusClass(status) {
 
     function autoTaskLastOrderText(task, config) {
       const order = task.last_plan?.order || null;
-      if (!order) return task.last_status || "--";
+      const riskReasons = task.last_risk?.reasons || [];
+      if (!order) return riskReasons[0] || task.last_status || "--";
       const side = String(order.side || config.side || "").toUpperCase();
       const amount = formatSymbolQuantity(order.amount, config.symbol, "base");
       const price = order.price == null ? "--" : fmt.format(order.price);
@@ -2595,6 +2598,9 @@ function balanceStatusClass(status) {
       ];
       if (lastPlan.trigger_price != null) parts.push(`trigger: ${fmt.format(lastPlan.trigger_price)}`);
       if (lastOrderId) parts.push(`last order: ${lastOrderId}`);
+      for (const reason of task.last_risk?.reasons || []) {
+        parts.push(`risk: ${reason}`);
+      }
       if (task.last_error) parts.push(`error: ${task.last_error}`);
       return parts.join(" · ");
     }
