@@ -24,6 +24,13 @@
         <select id="profile-asset" title="Current asset view"></select>
         <a href="/logout">Logout</a>
       </div>
+      <label class="language-switch" title="Language">
+        <span>Language</span>
+        <select id="language-select" aria-label="Language">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </label>
       <label class="program-switch" title="Pause or resume scans">
         Program
         <input id="program-toggle" type="checkbox" checked>
@@ -1778,6 +1785,7 @@
     </section>
   </main>
 
+  <script src="/static/i18n.js" defer></script>
   <script src="/static/app.js" defer></script>
 
 </body>
