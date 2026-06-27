@@ -48,6 +48,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    };
 	    const HIDDEN_UI_FEATURES = new Set([
 	      "api_accounts",
+	      "audit_trail",
 	      "backtest",
 	      "cash_and_carry",
 	      "contract_strategies",
@@ -56,10 +57,18 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	      "execution_algo",
 	      "funding_arbitrage",
 	      "funding_basis",
+	      "market_config",
+	      "onchain_history",
+	      "onchain_monitor",
 	      "options_arbitrage",
+	      "orders_detail",
+	      "quote_rates",
+	      "readiness",
+	      "scan_status",
 	      "signal_bot",
 	      "spot_grid",
 	      "strategy_center",
+	      "strategy_timeline",
 	    ]);
 	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
 

@@ -177,7 +177,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260627-simple-ui" defer></script>',
+            '<script src="/static/app.js?v=20260627-essential-ui" defer></script>',
             INDEX_HTML,
         )
 
@@ -272,7 +272,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260627-simple-ui">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260627-essential-ui">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -394,6 +394,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="overview" data-page="status"', HTML)
         self.assertIn('data-ui-feature="cash_and_carry" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="market_config" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="readiness" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="scan_status" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="funding_arbitrage" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="signal_bot" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="options_arbitrage derivatives" data-ui-hidden-default="true"', HTML)
@@ -402,6 +405,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('data-ui-feature="dca" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="execution_algo" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="backtest" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="orders_detail" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="strategy_timeline" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="audit_trail" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="quote_rates" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="onchain_monitor" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="onchain_history" data-ui-hidden-default="true"', HTML)
         self.assertIn("const HIDDEN_UI_FEATURES = new Set", APP_JS)
         self.assertIn("function applyFeatureVisibility", APP_JS)
         self.assertIn('status: [', APP_JS)
