@@ -350,6 +350,11 @@ section {
   display: block !important;
 }
 
+[data-ui-hidden-default="true"],
+.ui-feature-hidden {
+  display: none !important;
+}
+
 .portfolio-bar[data-page].active-page,
 .statusbar[data-page].active-page {
   display: grid !important;

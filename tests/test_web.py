@@ -177,7 +177,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260625-mm-multi" defer></script>',
+            '<script src="/static/app.js?v=20260627-simple-ui" defer></script>',
             INDEX_HTML,
         )
 
@@ -272,7 +272,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260625-mm-multi">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260627-simple-ui">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -326,11 +326,37 @@ class WebMonitorTest(unittest.TestCase):
                 "summary": {"strategy_count": 1},
                 "strategy_instances": [{"id": "mm"}],
             },
-            "onchain": {"history": {"events": [{"id": "wallet"}]}},
+            "funding_basis": {"status": "ok", "rows": [{"id": "basis"}]},
+            "options_arbitrage": {"status": "ok", "rows": [{"id": "option"}]},
+            "contract_strategies": {"status": "ok", "rows": [{"id": "contract"}]},
+            "derivatives": {"status": "ok", "positions": [{"id": "position"}]},
+            "account_balances": {
+                "status": "ok",
+                "totals": [{"currency": "USDC", "total": 10}],
+                "accounts": [{"id": "coinbase"}],
+            },
+            "markets": [{"exchange": "coinbase-spot"}],
+            "quote_rates": {"USD": 1.0},
+            "readiness": {"actions": [{"id": "risk"}]},
+            "onchain": {
+                "holders": [{"rank": 1}],
+                "history": {"events": [{"id": "wallet"}]},
+            },
         }
+        status_overview = state_payload_for_view(payload, "status", sections="overview")
         settings = state_payload_for_view(payload, "settings", sections="risk-form")
         records = state_payload_for_view(payload, "records", sections="console-strategies")
 
+        self.assertEqual(status_overview["markets"], [])
+        self.assertEqual(status_overview["quote_rates"], {})
+        self.assertEqual(status_overview["readiness"], {})
+        self.assertIn("totals", status_overview["account_balances"])
+        self.assertNotIn("accounts", status_overview["account_balances"])
+        self.assertNotIn("positions", status_overview["derivatives"])
+        self.assertNotIn("rows", status_overview["funding_basis"])
+        self.assertNotIn("rows", status_overview["options_arbitrage"])
+        self.assertNotIn("rows", status_overview["contract_strategies"])
+        self.assertNotIn("holders", status_overview["onchain"])
         self.assertNotIn("strategy_universe", settings["config"])
         self.assertNotIn("strategy_instances", settings["strategy_center"])
         self.assertIn("open_orders", records["order_activity"])
@@ -363,6 +389,23 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="strategy-instance-exchange"', HTML)
         self.assertIn('id="strategy-instance-symbol"', HTML)
         self.assertIn("renderStrategyInstanceMarketOptions", APP_JS)
+
+    def test_page_hides_temporarily_disabled_modules(self) -> None:
+        self.assertIn('id="overview" data-page="status"', HTML)
+        self.assertIn('data-ui-feature="cash_and_carry" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="funding_arbitrage" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="signal_bot" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="options_arbitrage derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="contract_strategies derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="spot_grid" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="dca" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="execution_algo" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="backtest" data-ui-hidden-default="true"', HTML)
+        self.assertIn("const HIDDEN_UI_FEATURES = new Set", APP_JS)
+        self.assertIn("function applyFeatureVisibility", APP_JS)
+        self.assertIn('status: [', APP_JS)
+        self.assertIn('.ui-feature-hidden', STYLES_CSS)
 
     def test_page_has_status_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)

@@ -10,6 +10,19 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
 	    const REFRESH_INTERVAL_MS = 2000;
 	    const PAGE_SECTION_IDS = {
+	      status: [
+	        "overview",
+	        "readiness-actions",
+	        "markets",
+	        "account-balances",
+	        "derivatives-risk",
+	        "funding-basis",
+	        "contract-strategies",
+	        "options-arbitrage",
+	        "rates",
+	        "opportunities",
+	        "holders",
+	      ],
 	      settings: [
 	        "markets-config",
 	        "carry-config",
@@ -33,7 +46,44 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "holder-changes",
 	      ],
 	    };
+	    const HIDDEN_UI_FEATURES = new Set([
+	      "api_accounts",
+	      "backtest",
+	      "cash_and_carry",
+	      "contract_strategies",
+	      "dca",
+	      "derivatives",
+	      "execution_algo",
+	      "funding_arbitrage",
+	      "funding_basis",
+	      "options_arbitrage",
+	      "signal_bot",
+	      "spot_grid",
+	      "strategy_center",
+	    ]);
 	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
+
+    function uiFeatureNamesFor(el) {
+      return String(el?.dataset?.uiFeature || "")
+        .split(/\s+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+
+    function isUiFeatureHidden(el) {
+      if (!el) return false;
+      const target = el.closest?.("[data-ui-feature]") || el;
+      if (target.dataset?.uiHiddenDefault === "true") return true;
+      return uiFeatureNamesFor(target).some((feature) => HIDDEN_UI_FEATURES.has(feature));
+    }
+
+    function applyFeatureVisibility() {
+      document.querySelectorAll("[data-ui-feature]").forEach((el) => {
+        const hidden = isUiFeatureHidden(el);
+        el.classList.toggle("ui-feature-hidden", hidden);
+        el.setAttribute("aria-hidden", hidden ? "true" : "false");
+      });
+    }
 
     function pageFromLocation() {
       const hashPage = window.location.hash.replace("#", "");
@@ -42,12 +92,13 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return PAGE_IDS.has(hashPage) ? hashPage : "status";
     }
 
-	    function setActivePage(page, options = {}) {
-	      const activePage = PAGE_IDS.has(page) ? page : "status";
-	      currentPage = activePage;
-	      document.querySelectorAll("[data-page]").forEach((el) => {
-	        el.classList.toggle("active-page", el.dataset.page === activePage);
-	      });
+		    function setActivePage(page, options = {}) {
+		      const activePage = PAGE_IDS.has(page) ? page : "status";
+		      currentPage = activePage;
+	      applyFeatureVisibility();
+		      document.querySelectorAll("[data-page]").forEach((el) => {
+		        el.classList.toggle("active-page", el.dataset.page === activePage);
+		      });
       document.querySelectorAll("[data-view-tab]").forEach((tab) => {
         const active = tab.dataset.viewTab === activePage;
         tab.classList.toggle("active", active);
@@ -77,12 +128,14 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         title.setAttribute("tabindex", "0");
         title.addEventListener("click", (event) => {
           if (event.target.closest("a, button, input, label, select, textarea")) return;
+          if (isUiFeatureHidden(section)) return;
           section.classList.toggle("section-open");
           sync();
           refreshOpenedSection(section);
         });
         title.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
+          if (isUiFeatureHidden(section)) return;
           event.preventDefault();
           section.classList.toggle("section-open");
           sync();
@@ -100,6 +153,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function isSectionOpenFor(id) {
       const el = document.getElementById(id);
       const section = el?.closest(".compact-section");
+      if (section && isUiFeatureHidden(section)) return false;
       return !section || section.classList.contains("section-open");
     }
 
@@ -113,6 +167,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     }
 
     function refreshOpenedSection(section) {
+      if (isUiFeatureHidden(section)) return;
       if (!section.classList.contains("section-open") || section.dataset.page !== currentPage) return;
       const cachedState = pageStateCache[currentPage] || lastState;
       if (cachedState) {
@@ -4176,6 +4231,7 @@ function balanceStatusClass(status) {
       }
     }
 
+    applyFeatureVisibility();
     setupCompactSections();
     setActivePage(pageFromLocation(), { refresh: false });
     window.addEventListener("hashchange", () => {

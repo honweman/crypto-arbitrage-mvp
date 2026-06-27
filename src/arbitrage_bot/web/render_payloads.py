@@ -295,6 +295,7 @@ def _compact_account_balances_payload(
             "status",
             "checked_account_count",
             "total_account_count",
+            "totals",
             "last_finished",
             "errors",
             "warnings",
@@ -487,6 +488,32 @@ def state_payload_for_view(
     is_settings = view == "settings"
     is_records = view == "records"
     section_ids = _section_set(sections)
+    status_account_balances_full = is_status and _section_open(
+        section_ids,
+        "account-balances",
+    )
+    status_derivatives_full = is_status and _section_open(
+        section_ids,
+        "derivatives-risk",
+    )
+    status_funding_basis_full = is_status and _section_open(
+        section_ids,
+        "funding-basis",
+    )
+    status_options_full = is_status and _section_open(
+        section_ids,
+        "options-arbitrage",
+    )
+    status_contracts_full = is_status and _section_open(
+        section_ids,
+        "contract-strategies",
+    )
+    status_markets_full = is_status and _section_open(section_ids, "markets")
+    status_rates_full = is_status and _section_open(section_ids, "rates")
+    status_readiness_full = is_status and _section_open(
+        section_ids,
+        "readiness-actions",
+    )
 
     config_full = is_settings and _section_open(
         section_ids,
@@ -520,6 +547,8 @@ def state_payload_for_view(
     onchain_full = is_status or (
         is_records and _section_open(section_ids, "holder-changes")
     )
+    if is_status:
+        onchain_full = _section_open(section_ids, "holders")
 
     result: dict[str, Any] = {
         "status": payload.get("status"),
@@ -580,15 +609,15 @@ def state_payload_for_view(
         ),
         "funding_basis": _compact_funding_basis_payload(
             payload.get("funding_basis", {}),
-            full=is_status,
+            full=status_funding_basis_full,
         ),
         "options_arbitrage": _compact_options_arbitrage_payload(
             payload.get("options_arbitrage", {}),
-            full=is_status,
+            full=status_options_full,
         ),
         "contract_strategies": _compact_contract_strategies_payload(
             payload.get("contract_strategies", {}),
-            full=is_status,
+            full=status_contracts_full,
         ),
         "execution_protection": _compact_execution_protection_payload(
             payload.get("execution_protection", {}),
@@ -607,17 +636,21 @@ def state_payload_for_view(
     if is_status:
         result.update(
             {
-                "markets": payload.get("markets", []),
-                "quote_rates": payload.get("quote_rates", {}),
+                "markets": payload.get("markets", []) if status_markets_full else [],
+                "quote_rates": payload.get("quote_rates", {})
+                if status_rates_full
+                else {},
                 "account_balances": _compact_account_balances_payload(
                     payload.get("account_balances", {}),
-                    full=True,
+                    full=status_account_balances_full,
                 ),
                 "derivatives": _compact_derivatives_payload(
                     payload.get("derivatives", {}),
-                    full=True,
+                    full=status_derivatives_full,
                 ),
-                "readiness": payload.get("readiness", {}),
+                "readiness": payload.get("readiness", {})
+                if status_readiness_full
+                else {},
                 "runtime_store": payload.get("runtime_store", {}),
             }
         )
