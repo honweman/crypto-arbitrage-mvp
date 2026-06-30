@@ -30,7 +30,6 @@ from ..web_config import (
     _cash_and_carry_pairs_from_payload,
     _execution_symbols_by_exchange,
     _grid_symbols_by_exchange,
-    _market_maker_symbols_by_exchange,
     _spot_markets_from_payload,
     _spot_symbols_by_exchange,
     backtest_config_to_dict,
@@ -45,6 +44,7 @@ from ..web_config import (
     market_maker_configs_to_list,
     market_maker_configs_with_ids,
     market_maker_config_with_id,
+    market_maker_symbols_for_accounts,
     risk_config_to_dict,
     slow_execution_accounts,
     spot_markets_to_list,
@@ -79,6 +79,7 @@ class MonitorState:
         runtime_store_path: str | None = None,
     ) -> None:
         self._lock = asyncio.Lock()
+        self._base_cfg = cfg
         self._program_running = True
         self._program_updated_at = time.time()
         self._auto_stopped = False
@@ -172,6 +173,11 @@ class MonitorState:
         self._strategy_paused.update(store_data.get("strategy_paused", {}))
         runtime_cfg = self._runtime_config_unlocked(cfg)
         self._payload = _build_initial_payload(runtime_cfg, poll_seconds)
+        if "market_maker" in self._payload:
+            self._payload["market_maker"]["accounts"] = slow_execution_accounts(
+                _all_account_exchanges(runtime_cfg),
+                market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
+            )
         if not self._program_running:
             if self._auto_stopped:
                 self._payload["status"] = "auto_stopped"
@@ -442,7 +448,7 @@ class MonitorState:
                 )
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
-                    _market_maker_symbols_by_exchange(runtime_cfg),
+                    market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                 )
             self._payload["config"]["strategy_universe"] = (
                 strategy_universe_to_dict(runtime_cfg)
@@ -493,7 +499,7 @@ class MonitorState:
                 )
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
-                    _market_maker_symbols_by_exchange(runtime_cfg),
+                    market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                 )
             self._payload["config"]["strategy_universe"] = (
                 strategy_universe_to_dict(runtime_cfg)
@@ -717,7 +723,7 @@ class MonitorState:
             if "market_maker" in self._payload:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
-                    _market_maker_symbols_by_exchange(runtime_cfg),
+                    market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                 )
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
@@ -789,7 +795,7 @@ class MonitorState:
             if "market_maker" in self._payload:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
-                    _market_maker_symbols_by_exchange(runtime_cfg),
+                    market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                 )
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
@@ -1193,6 +1199,10 @@ class MonitorState:
         status = "running" if not warnings else "degraded"
         async with self._lock:
             slow_execution["tasks"] = self._auto_buy_sell_tasks
+            market_maker["accounts"] = slow_execution_accounts(
+                _all_account_exchanges(cfg),
+                market_maker_symbols_for_accounts(cfg, base_cfg=self._base_cfg),
+            )
             market_maker["runtime"] = self._market_maker_runtime
             if isinstance(self._market_maker_runtime.get("last_plan"), dict):
                 market_maker["plan"] = self._market_maker_runtime["last_plan"]

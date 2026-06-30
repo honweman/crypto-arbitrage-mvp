@@ -118,6 +118,23 @@ def _market_maker_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
+def market_maker_symbols_for_accounts(
+    cfg: BotConfig,
+    *,
+    base_cfg: BotConfig | None = None,
+) -> dict[str, list[str]]:
+    symbols = {
+        exchange: list(items)
+        for exchange, items in _market_maker_symbols_by_exchange(cfg).items()
+    }
+    if base_cfg is None:
+        return symbols
+    for exchange, items in _market_maker_symbols_by_exchange(base_cfg).items():
+        if not symbols.get(exchange):
+            symbols[exchange] = list(items)
+    return {exchange: sorted(set(items)) for exchange, items in symbols.items()}
+
+
 def _grid_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     symbols: dict[str, set[str]] = {
         exchange: set(items)

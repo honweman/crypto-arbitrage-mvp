@@ -4486,6 +4486,103 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bybit-spot", accounts)
         self.assertIn("ACS/USDT", accounts["bybit-spot"]["symbols"])
 
+    async def test_market_maker_payload_keeps_base_symbols_after_market_override(
+        self,
+    ) -> None:
+        base_cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                ),
+            ],
+        )
+        runtime_cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+            ),
+            spot_exchanges=base_cfg.spot_exchanges,
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+        )
+
+        payload = build_market_maker_payload(runtime_cfg, {}, base_cfg=base_cfg)
+        accounts = {row["key"]: row for row in payload["accounts"]}
+
+        self.assertIn("ACS/USDT", accounts["bybit-spot"]["symbols"])
+        self.assertIn("ACS/USDC", accounts["coinbase-spot"]["symbols"])
+
+    async def test_market_update_keeps_base_symbols_for_market_maker(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                ),
+            ],
+        )
+        state = MonitorState(cfg, 1.0)
+
+        update = await state.set_spot_markets(
+            [
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+            cfg=cfg,
+        )
+        accounts = {
+            row["key"]: row for row in update["market_maker"]["accounts"]
+        }
+
+        self.assertIn("ACS/USDT", accounts["bybit-spot"]["symbols"])
+        self.assertIn("ACS/USDC", accounts["coinbase-spot"]["symbols"])
+
     async def test_grid_and_dca_runtime_overrides_persist(self) -> None:
         cfg = make_config(
             spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],

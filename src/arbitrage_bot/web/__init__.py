@@ -165,6 +165,7 @@ from ..web_config import (
     market_maker_configs_from_payload,
     market_maker_configs_to_list,
     market_maker_config_with_id,
+    market_maker_symbols_for_accounts,
     risk_config_to_dict,
     slow_execution_accounts,
     slow_execution_config_to_dict,
@@ -3700,11 +3701,13 @@ def _build_market_maker_instance_payload(
 def build_market_maker_payload(
     cfg: BotConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
+    *,
+    base_cfg: BotConfig | None = None,
 ) -> dict[str, Any]:
     maker_configs = market_maker_configs_for_runtime(cfg)
     accounts = slow_execution_accounts(
         _all_account_exchanges(cfg),
-        _market_maker_symbols_by_exchange(cfg),
+        market_maker_symbols_for_accounts(cfg, base_cfg=base_cfg),
     )
     instances = [
         _build_market_maker_instance_payload(cfg, maker_cfg, books, accounts)
@@ -5985,7 +5988,10 @@ async def api_market_maker(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
-        symbols_by_exchange = _market_maker_symbols_by_exchange(runtime_cfg)
+        symbols_by_exchange = market_maker_symbols_for_accounts(
+            runtime_cfg,
+            base_cfg=cfg,
+        )
         allowed_exchanges = {
             exchange.key for exchange in _all_account_exchanges(runtime_cfg)
         }

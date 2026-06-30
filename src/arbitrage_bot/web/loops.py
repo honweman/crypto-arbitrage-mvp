@@ -621,6 +621,7 @@ async def monitor_loop(
                         market_maker_payload = build_market_maker_payload(
                             runtime_cfg,
                             books,
+                            base_cfg=cfg,
                         )
                         market_maker_payload["status"] = "paused"
                         market_maker_payload["mode"] = "paused"
@@ -628,6 +629,7 @@ async def monitor_loop(
                         market_maker_payload = build_market_maker_payload(
                             runtime_cfg,
                             books,
+                            base_cfg=cfg,
                         )
                     if strategy_pauses.get("spot_grid", False):
                         spot_grid_payload = {
