@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from arbitrage_bot.config import (
     AlertConfig,
@@ -70,6 +70,7 @@ from arbitrage_bot.web import (
     _registration_code_required,
     _require_admin_user,
     _require_user_assets,
+    _client_ip,
     _ip_allowed,
     _make_session_token,
     _session_identity,
@@ -1911,6 +1912,38 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.97"]))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.0/24"]))
         self.assertFalse(_ip_allowed("66.96.213.1", ["66.96.212.0/24"]))
+
+    def test_client_ip_trusts_real_ip_over_spoofable_forwarded_for(self) -> None:
+        cfg = make_config(web_security=WebSecurityConfig(trust_proxy_headers=True))
+        request = make_mocked_request(
+            "GET",
+            "/api/state",
+            headers={
+                "X-Forwarded-For": "203.0.113.7, 10.0.0.5",
+                "X-Real-IP": "10.0.0.5",
+            },
+        )
+        self.assertEqual(_client_ip(request, cfg), "10.0.0.5")
+
+    def test_client_ip_uses_nearest_forwarded_for_hop_not_client_supplied_prefix(
+        self,
+    ) -> None:
+        cfg = make_config(web_security=WebSecurityConfig(trust_proxy_headers=True))
+        request = make_mocked_request(
+            "GET",
+            "/api/state",
+            headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.5"},
+        )
+        self.assertEqual(_client_ip(request, cfg), "10.0.0.5")
+
+    def test_client_ip_ignores_proxy_headers_when_not_trusted(self) -> None:
+        cfg = make_config(web_security=WebSecurityConfig(trust_proxy_headers=False))
+        request = make_mocked_request(
+            "GET",
+            "/api/state",
+            headers={"X-Forwarded-For": "203.0.113.7", "X-Real-IP": "203.0.113.7"},
+        )
+        self.assertEqual(_client_ip(request, cfg), request.remote or "")
 
     def test_default_web_user_store_path_uses_security_config(self) -> None:
         cfg = make_config(
@@ -4722,6 +4755,299 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pauses["market_maker"])
         self.assertTrue(payload["runtime_store"]["loaded"])
         self.assertIsNone(payload["runtime_store"]["error"])
+
+    async def test_admin_users_endpoint_rejects_non_admin_callers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            store.create_user(email="admin@example.com", password="strong-password-1")
+            member = store.create_user(
+                email="member@example.com",
+                password="strong-password-2",
+                allowed_assets=["ACS"],
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": member.email,
+                        "password": "strong-password-2",
+                        "totp": totp_code(member.totp_secret),
+                    },
+                )
+                responses = {}
+                for action, body in (
+                    ("list", {"action": "list"}),
+                    (
+                        "create_user",
+                        {
+                            "action": "create_user",
+                            "email": "new@example.com",
+                            "password": "another-strong-pw",
+                        },
+                    ),
+                    (
+                        "update_user",
+                        {"action": "update_user", "email": member.email, "role": "admin"},
+                    ),
+                    (
+                        "delete_user",
+                        {"action": "delete_user", "email": member.email},
+                    ),
+                ):
+                    response = await client.post("/api/admin/users", json=body)
+                    responses[action] = (response.status, await response.json())
+            finally:
+                await client.close()
+
+        for action, (status, payload) in responses.items():
+            self.assertEqual(status, 403, (action, payload))
+
+    async def test_admin_users_endpoint_create_user_rejects_duplicate_email_and_weak_password(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": admin.email,
+                        "password": "strong-password-1",
+                        "totp": totp_code(admin.totp_secret),
+                    },
+                )
+                duplicate_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "create_user",
+                        "email": admin.email,
+                        "password": "another-strong-pw",
+                    },
+                )
+                duplicate_payload = await duplicate_response.json()
+
+                weak_password_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "create_user",
+                        "email": "weak@example.com",
+                        "password": "short",
+                    },
+                )
+                weak_password_payload = await weak_password_response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(duplicate_response.status, 400, duplicate_payload)
+        self.assertEqual(weak_password_response.status, 400, weak_password_payload)
+
+    async def test_admin_users_appear_in_state_payload_for_admin_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            member = store.create_user(
+                email="member@example.com",
+                password="strong-password-2",
+                allowed_assets=["ACS"],
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": admin.email,
+                        "password": "strong-password-1",
+                        "totp": totp_code(admin.totp_secret),
+                    },
+                )
+                admin_state = await (await client.get("/api/state")).json()
+                admin_settings_view = await (
+                    await client.get("/api/state?view=settings")
+                ).json()
+                admin_status_view = await (
+                    await client.get("/api/state?view=status")
+                ).json()
+                await client.get("/logout")
+
+                await client.post(
+                    "/login",
+                    data={
+                        "email": member.email,
+                        "password": "strong-password-2",
+                        "totp": totp_code(member.totp_secret),
+                    },
+                )
+                member_state = await (await client.get("/api/state")).json()
+            finally:
+                await client.close()
+
+        self.assertIn(
+            admin.email,
+            [row["email"] for row in admin_state["admin_users"]],
+        )
+        self.assertIn(
+            admin.email,
+            [row["email"] for row in admin_settings_view["admin_users"]],
+        )
+        # The high-frequency "status" poll view skips the user-store read;
+        # admin_users is only computed for the unfiltered or settings view.
+        self.assertNotIn("admin_users", admin_status_view)
+        self.assertNotIn("admin_users", member_state)
+
+    async def test_admin_users_endpoint_create_update_delete_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            store = WebUserStore(store_path)
+            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": admin.email,
+                        "password": "strong-password-1",
+                        "totp": totp_code(admin.totp_secret),
+                    },
+                )
+
+                create_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "create_user",
+                        "email": "trader@example.com",
+                        "password": "another-strong-pw",
+                        "allowed_assets": ["ACS", "BTC"],
+                        "preferred_asset": "ACS",
+                    },
+                )
+                create_payload = await create_response.json()
+
+                # Partial update: change only the role; assets must survive untouched.
+                role_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "update_user",
+                        "email": "trader@example.com",
+                        "role": "admin",
+                    },
+                )
+                role_payload = await role_response.json()
+
+                # Partial update: change only the preferred asset; the allowed list
+                # must be preserved rather than wiped by the omitted field.
+                asset_response = await client.post(
+                    "/api/admin/users",
+                    json={
+                        "action": "update_user",
+                        "email": "trader@example.com",
+                        "preferred_asset": "BTC",
+                    },
+                )
+                asset_payload = await asset_response.json()
+
+                no_op_response = await client.post(
+                    "/api/admin/users",
+                    json={"action": "update_user", "email": "trader@example.com"},
+                )
+                no_op_payload = await no_op_response.json()
+
+                delete_response = await client.post(
+                    "/api/admin/users",
+                    json={"action": "delete_user", "email": "trader@example.com"},
+                )
+                delete_payload = await delete_response.json()
+
+                list_response = await client.post(
+                    "/api/admin/users", json={"action": "list"}
+                )
+                list_payload = await list_response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(create_response.status, 200, create_payload)
+        created_row = next(
+            row for row in create_payload["users"] if row["email"] == "trader@example.com"
+        )
+        self.assertEqual(created_row["allowed_assets"], ["ACS", "BTC"])
+        self.assertEqual(created_row["preferred_asset"], "ACS")
+
+        self.assertEqual(role_response.status, 200, role_payload)
+        role_row = next(
+            row for row in role_payload["users"] if row["email"] == "trader@example.com"
+        )
+        self.assertEqual(role_row["role"], "admin")
+        self.assertEqual(role_row["allowed_assets"], ["ACS", "BTC"])
+        self.assertEqual(role_row["preferred_asset"], "ACS")
+
+        self.assertEqual(asset_response.status, 200, asset_payload)
+        asset_row = next(
+            row for row in asset_payload["users"] if row["email"] == "trader@example.com"
+        )
+        self.assertEqual(asset_row["allowed_assets"], ["ACS", "BTC"])
+        self.assertEqual(asset_row["preferred_asset"], "BTC")
+
+        self.assertEqual(no_op_response.status, 400, no_op_payload)
+
+        self.assertEqual(delete_response.status, 200, delete_payload)
+        self.assertEqual(list_response.status, 200, list_payload)
+        self.assertNotIn(
+            "trader@example.com",
+            [row["email"] for row in list_payload["users"]],
+        )
 
 if __name__ == "__main__":
     unittest.main()

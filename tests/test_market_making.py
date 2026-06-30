@@ -583,6 +583,143 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
             payload["execution"]["create_errors"][0]["error"],
         )
 
+    async def test_live_cycle_force_replace_rebuilds_grid_despite_reprice_threshold(
+        self,
+    ) -> None:
+        """
+        Regression test: when force_replace is active (fills detected), passing
+        existing_open_orders to run_cycle allows _previous_plan_from_open_orders to
+        reconstruct a "previous plan" from whatever orders remain.  If prices are
+        stable the reprice-threshold check then returns "unchanged" and skips the
+        full grid rebuild we explicitly want.
+
+        The fix: pass existing_open_orders=None when force_replace=True so that
+        no previous plan can be reconstructed from the remaining open orders.
+        """
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014, amount=100_000)],
+            asks=[BookLevel(price=0.00016, amount=100_000)],
+        )
+        cfg = self._cfg(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                levels=2,
+                quote_per_level=1.0,
+                depth_shape="flat",
+                reprice_threshold_bps=5.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        plan = build_symmetric_market_maker_plan(book, cfg.market_maker)
+        existing_orders = [
+            {
+                "id": f"old-mm-{index}",
+                "side": order.side,
+                "price": order.price,
+                "amount": order.amount,
+            }
+            for index, order in enumerate(plan.orders, start=1)
+        ]
+        replace_order_ids = [str(order["id"]) for order in existing_orders]
+
+        class FakeManager:
+            def __init__(self) -> None:
+                self.remaining_ids = list(replace_order_ids)
+                self.placed: list[str] = []
+
+            async def fetch_order_book(self, *_: object, **__: object) -> OrderBookSnapshot:
+                return book
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [{"id": oid} for oid in self.remaining_ids]
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, object]:
+                self.remaining_ids = [i for i in self.remaining_ids if i != order_id]
+                return {"id": order_id, "status": "canceled"}
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": float(order["amount"]) * float(order["price"]),
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, str]:
+                self.placed.append("new")
+                return {"id": f"new-mm-{len(self.placed)}"}
+
+        # Bug scenario: passing existing_open_orders (remaining orders after fills)
+        # tricks the reprice-threshold check into returning "unchanged" even though
+        # force_replace is True and we need a full rebuild.
+        bug_manager = FakeManager()
+        bug_payload = await run_cycle(
+            cfg,
+            bug_manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=replace_order_ids,
+            previous_plan=None,
+            existing_open_orders=existing_orders,
+            order_book=book,
+        )
+        self.assertEqual(bug_payload["status"], "unchanged",
+                         "confirms bug: passing existing_open_orders with no previous_plan "
+                         "triggers false 'unchanged' via reprice threshold")
+
+        # Fix scenario: passing existing_open_orders=None (as the fix does when force_replace)
+        # prevents plan reconstruction so the full grid is placed.
+        fix_manager = FakeManager()
+        fix_payload = await run_cycle(
+            cfg,
+            fix_manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=replace_order_ids,
+            previous_plan=None,
+            existing_open_orders=None,
+            order_book=book,
+        )
+        self.assertEqual(fix_payload["status"], "placed",
+                         "fix: passing existing_open_orders=None triggers full grid rebuild")
+        self.assertEqual(fix_payload["execution"]["placed_count"], len(plan.orders))
+
     async def test_live_cycle_adopts_matching_open_orders_after_restart(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",

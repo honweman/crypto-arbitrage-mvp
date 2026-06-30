@@ -6,6 +6,7 @@ from aiohttp import web
 def register_routes(app: web.Application) -> None:
     from . import (
         STATIC_DIR,
+        api_admin_users,
         api_cancel_bulk_orders,
         api_cancel_order,
         api_cash_and_carry_pairs,
@@ -71,6 +72,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/orders/cancel", api_cancel_order)
     app.router.add_post("/api/orders/cancel-bulk", api_cancel_bulk_orders)
     app.router.add_post("/api/strategies/control", api_strategy_control)
+    app.router.add_post("/api/admin/users", api_admin_users)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/metrics", api_metrics)
     app.router.add_get("/metrics", api_metrics)
