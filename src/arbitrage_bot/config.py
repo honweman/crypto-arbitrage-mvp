@@ -77,6 +77,7 @@ class OnchainMonitorConfig:
 
 @dataclass(frozen=True)
 class MarketMakerConfig:
+    id: str = ""
     enabled: bool = False
     live_enabled: bool = False
     exchange: str = ""
@@ -123,6 +124,7 @@ class SlowExecutionConfig:
     post_only: bool = False
     cancel_existing_orders: bool = False
     client_order_prefix: str = "crypto-arb-slow"
+    block_conflicting_market_maker: bool = True
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,36 @@ class OptionsArbitrageConfig:
     max_days_to_expiry: float = 0.0
     risk_free_rate_bps: float = 0.0
     borrow_rate_bps: float = 0.0
+    min_option_depth_quote: float = 0.0
+    max_option_spread_bps: float = 0.0
+    min_days_to_expiry_open: float = 0.0
+    expiry_reminder_days: float = 0.0
+
+
+@dataclass(frozen=True)
+class ContractStrategiesConfig:
+    enabled: bool = True
+    funding_bot_enabled: bool = True
+    basis_bot_enabled: bool = True
+    futures_grid_enabled: bool = False
+    hedge_rebalancer_enabled: bool = False
+    live_enabled: bool = False
+    spot_exchange: str = ""
+    spot_symbol: str = ""
+    derivative_exchange: str = ""
+    derivative_symbol: str = ""
+    notional_quote: float = 100.0
+    funding_min_bps: float = 0.0
+    basis_entry_bps: float = 0.0
+    basis_exit_bps: float = 0.0
+    futures_grid_levels: int = 6
+    futures_grid_band_pct: float = 2.0
+    futures_grid_quote_per_level: float = 5.0
+    futures_grid_max_leverage: float = 1.0
+    hedge_threshold_base: float = 0.0
+    hedge_max_quote: float = 0.0
+    post_only: bool = True
+    client_order_prefix: str = "crypto-arb-contract"
 
 
 @dataclass(frozen=True)
@@ -309,6 +341,9 @@ class RiskConfig:
     max_plan_age_seconds: float = 5.0
     max_order_book_age_seconds: float = 10.0
     require_order_book_timestamp: bool = False
+    max_derivative_leverage: float = 0.0
+    min_liquidation_buffer_pct: float = 0.0
+    max_margin_usage_pct: float = 0.0
     allowed_exchanges: list[str] = field(default_factory=list)
     blocked_exchanges: list[str] = field(default_factory=list)
     allowed_symbols: list[str] = field(default_factory=list)
@@ -320,6 +355,9 @@ class TradeLogConfig:
     enabled: bool = True
     path: str = "data/trade_events.jsonl"
     max_recent_events: int = 50
+    rotate_max_bytes: int = 256 * 1024 * 1024
+    rotate_keep_files: int = 12
+    rotate_compress: bool = True
 
 
 @dataclass(frozen=True)
@@ -327,6 +365,9 @@ class StrategyTimelineConfig:
     enabled: bool = True
     path: str = "data/strategy_timeline.jsonl"
     max_recent_events: int = 100
+    rotate_max_bytes: int = 256 * 1024 * 1024
+    rotate_keep_files: int = 12
+    rotate_compress: bool = True
 
 
 @dataclass(frozen=True)
@@ -389,12 +430,16 @@ class BotConfig:
     spot_exchanges: list[ExchangeConfig]
     derivative_exchanges: list[ExchangeConfig]
     option_combos: list[OptionComboConfig] = field(default_factory=list)
+    market_makers: list[MarketMakerConfig] = field(default_factory=list)
     spot_grid: SpotGridConfig = field(default_factory=SpotGridConfig)
     dca: DcaConfig = field(default_factory=DcaConfig)
     execution_algo: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     options_arbitrage: OptionsArbitrageConfig = field(
         default_factory=OptionsArbitrageConfig
+    )
+    contract_strategies: ContractStrategiesConfig = field(
+        default_factory=ContractStrategiesConfig
     )
     triangular_arbitrage: TriangularArbitrageConfig = field(
         default_factory=TriangularArbitrageConfig
@@ -449,6 +494,35 @@ def _option_combo_from_dict(raw: dict[str, Any]) -> OptionComboConfig:
         expiry=str(raw.get("expiry", "")),
         contract_size=float(raw.get("contract_size", 1.0)),
         quote_currency=str(raw.get("quote_currency", "USDT")).upper(),
+    )
+
+
+def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
+    return MarketMakerConfig(
+        id=str(raw.get("id", "")).strip(),
+        enabled=bool(raw.get("enabled", False)),
+        live_enabled=bool(raw.get("live_enabled", False)),
+        exchange=raw.get("exchange", ""),
+        symbol=raw.get("symbol", ""),
+        levels=int(raw.get("levels", 10)),
+        price_band_pct=float(raw.get("price_band_pct", 10.0)),
+        quote_per_level=float(raw.get("quote_per_level", 1.0)),
+        depth_shape=str(raw.get("depth_shape", "linear")).lower(),
+        min_order_quote=float(raw.get("min_order_quote", 0.0)),
+        min_distance_bps=float(raw.get("min_distance_bps", 0.0)),
+        reprice_threshold_bps=float(raw.get("reprice_threshold_bps", 0.0)),
+        poll_seconds=float(raw.get("poll_seconds", 1.0)),
+        post_only=bool(raw.get("post_only", True)),
+        cancel_existing_orders=bool(raw.get("cancel_existing_orders", False)),
+        client_order_prefix=raw.get("client_order_prefix", "crypto-arb-mm"),
+        inventory_control_enabled=bool(
+            raw.get("inventory_control_enabled", False)
+        ),
+        inventory_target_base=float(raw.get("inventory_target_base", 0.0)),
+        inventory_band_base=float(raw.get("inventory_band_base", 0.0)),
+        inventory_max_deviation_base=float(
+            raw.get("inventory_max_deviation_base", 0.0)
+        ),
     )
 
 
@@ -534,12 +608,14 @@ def load_config(path: str | Path) -> BotConfig:
         default_url=default_solana_rpc,
     )
     market_maker_raw = raw.get("market_maker", {})
+    market_makers_raw = raw.get("market_makers", [])
     slow_execution_raw = raw.get("slow_execution", {})
     spot_grid_raw = raw.get("spot_grid", {})
     dca_raw = raw.get("dca", {})
     execution_algo_raw = raw.get("execution_algo", {})
     backtest_raw = raw.get("backtest", {})
     options_arbitrage_raw = raw.get("options_arbitrage", {})
+    contract_strategies_raw = raw.get("contract_strategies", {})
     triangular_arbitrage_raw = raw.get("triangular_arbitrage", {})
     strategy_center_raw = raw.get("strategy_center", {})
     portfolio_raw = raw.get("portfolio", {})
@@ -549,6 +625,13 @@ def load_config(path: str | Path) -> BotConfig:
     pnl_store_raw = raw.get("pnl_store", {})
     alerts_raw = raw.get("alerts", {})
     web_security_raw = raw.get("web_security", {})
+    market_maker_config = _market_maker_from_dict(market_maker_raw)
+    market_maker_configs = [
+        _market_maker_from_dict(item)
+        for item in market_makers_raw
+        if isinstance(item, dict)
+    ] or [market_maker_config]
+
     return BotConfig(
         poll_seconds=float(raw.get("poll_seconds", 10)),
         order_book_depth=int(raw.get("order_book_depth", 20)),
@@ -597,42 +680,8 @@ def load_config(path: str | Path) -> BotConfig:
                 for address, label in onchain_raw.get("address_labels", {}).items()
             },
         ),
-        market_maker=MarketMakerConfig(
-            enabled=bool(market_maker_raw.get("enabled", False)),
-            live_enabled=bool(market_maker_raw.get("live_enabled", False)),
-            exchange=market_maker_raw.get("exchange", ""),
-            symbol=market_maker_raw.get("symbol", ""),
-            levels=int(market_maker_raw.get("levels", 10)),
-            price_band_pct=float(market_maker_raw.get("price_band_pct", 10.0)),
-            quote_per_level=float(market_maker_raw.get("quote_per_level", 1.0)),
-            depth_shape=str(market_maker_raw.get("depth_shape", "linear")).lower(),
-            min_order_quote=float(market_maker_raw.get("min_order_quote", 0.0)),
-            min_distance_bps=float(market_maker_raw.get("min_distance_bps", 0.0)),
-            reprice_threshold_bps=float(
-                market_maker_raw.get("reprice_threshold_bps", 0.0)
-            ),
-            poll_seconds=float(market_maker_raw.get("poll_seconds", 1.0)),
-            post_only=bool(market_maker_raw.get("post_only", True)),
-            cancel_existing_orders=bool(
-                market_maker_raw.get("cancel_existing_orders", False)
-            ),
-            client_order_prefix=market_maker_raw.get(
-                "client_order_prefix",
-                "crypto-arb-mm",
-            ),
-            inventory_control_enabled=bool(
-                market_maker_raw.get("inventory_control_enabled", False)
-            ),
-            inventory_target_base=float(
-                market_maker_raw.get("inventory_target_base", 0.0)
-            ),
-            inventory_band_base=float(
-                market_maker_raw.get("inventory_band_base", 0.0)
-            ),
-            inventory_max_deviation_base=float(
-                market_maker_raw.get("inventory_max_deviation_base", 0.0)
-            ),
-        ),
+        market_maker=market_maker_config,
+        market_makers=market_maker_configs,
         slow_execution=SlowExecutionConfig(
             enabled=bool(slow_execution_raw.get("enabled", False)),
             exchange=slow_execution_raw.get("exchange", ""),
@@ -667,6 +716,9 @@ def load_config(path: str | Path) -> BotConfig:
             client_order_prefix=slow_execution_raw.get(
                 "client_order_prefix",
                 "crypto-arb-slow",
+            ),
+            block_conflicting_market_maker=bool(
+                slow_execution_raw.get("block_conflicting_market_maker", True)
             ),
         ),
         spot_grid=SpotGridConfig(
@@ -867,6 +919,85 @@ def load_config(path: str | Path) -> BotConfig:
             borrow_rate_bps=float(
                 options_arbitrage_raw.get("borrow_rate_bps", 0.0)
             ),
+            min_option_depth_quote=float(
+                options_arbitrage_raw.get("min_option_depth_quote", 0.0)
+            ),
+            max_option_spread_bps=float(
+                options_arbitrage_raw.get("max_option_spread_bps", 0.0)
+            ),
+            min_days_to_expiry_open=float(
+                options_arbitrage_raw.get("min_days_to_expiry_open", 0.0)
+            ),
+            expiry_reminder_days=float(
+                options_arbitrage_raw.get("expiry_reminder_days", 0.0)
+            ),
+        ),
+        contract_strategies=ContractStrategiesConfig(
+            enabled=bool(contract_strategies_raw.get("enabled", True)),
+            funding_bot_enabled=bool(
+                contract_strategies_raw.get("funding_bot_enabled", True)
+            ),
+            basis_bot_enabled=bool(
+                contract_strategies_raw.get("basis_bot_enabled", True)
+            ),
+            futures_grid_enabled=bool(
+                contract_strategies_raw.get("futures_grid_enabled", False)
+            ),
+            hedge_rebalancer_enabled=bool(
+                contract_strategies_raw.get("hedge_rebalancer_enabled", False)
+            ),
+            live_enabled=bool(contract_strategies_raw.get("live_enabled", False)),
+            spot_exchange=str(contract_strategies_raw.get("spot_exchange", "")),
+            spot_symbol=str(contract_strategies_raw.get("spot_symbol", "")),
+            derivative_exchange=str(
+                contract_strategies_raw.get("derivative_exchange", "")
+            ),
+            derivative_symbol=str(
+                contract_strategies_raw.get("derivative_symbol", "")
+            ),
+            notional_quote=float(
+                contract_strategies_raw.get(
+                    "notional_quote",
+                    raw.get("notional_quote", 100.0),
+                )
+            ),
+            funding_min_bps=float(
+                contract_strategies_raw.get("funding_min_bps", 0.0)
+            ),
+            basis_entry_bps=float(
+                contract_strategies_raw.get(
+                    "basis_entry_bps",
+                    raw.get("min_basis_bps", 0.0),
+                )
+            ),
+            basis_exit_bps=float(
+                contract_strategies_raw.get("basis_exit_bps", 0.0)
+            ),
+            futures_grid_levels=int(
+                contract_strategies_raw.get("futures_grid_levels", 6)
+            ),
+            futures_grid_band_pct=float(
+                contract_strategies_raw.get("futures_grid_band_pct", 2.0)
+            ),
+            futures_grid_quote_per_level=float(
+                contract_strategies_raw.get("futures_grid_quote_per_level", 5.0)
+            ),
+            futures_grid_max_leverage=float(
+                contract_strategies_raw.get("futures_grid_max_leverage", 1.0)
+            ),
+            hedge_threshold_base=float(
+                contract_strategies_raw.get("hedge_threshold_base", 0.0)
+            ),
+            hedge_max_quote=float(
+                contract_strategies_raw.get("hedge_max_quote", 0.0)
+            ),
+            post_only=bool(contract_strategies_raw.get("post_only", True)),
+            client_order_prefix=str(
+                contract_strategies_raw.get(
+                    "client_order_prefix",
+                    "crypto-arb-contract",
+                )
+            ),
         ),
         triangular_arbitrage=TriangularArbitrageConfig(
             enabled=bool(triangular_arbitrage_raw.get("enabled", False)),
@@ -940,6 +1071,13 @@ def load_config(path: str | Path) -> BotConfig:
             require_order_book_timestamp=bool(
                 risk_raw.get("require_order_book_timestamp", False)
             ),
+            max_derivative_leverage=float(
+                risk_raw.get("max_derivative_leverage", 0.0)
+            ),
+            min_liquidation_buffer_pct=float(
+                risk_raw.get("min_liquidation_buffer_pct", 0.0)
+            ),
+            max_margin_usage_pct=float(risk_raw.get("max_margin_usage_pct", 0.0)),
             allowed_exchanges=_string_list(risk_raw.get("allowed_exchanges", [])),
             blocked_exchanges=_string_list(risk_raw.get("blocked_exchanges", [])),
             allowed_symbols=_string_list(risk_raw.get("allowed_symbols", [])),
@@ -949,6 +1087,11 @@ def load_config(path: str | Path) -> BotConfig:
             enabled=bool(trade_log_raw.get("enabled", True)),
             path=str(trade_log_raw.get("path", "data/trade_events.jsonl")),
             max_recent_events=int(trade_log_raw.get("max_recent_events", 50)),
+            rotate_max_bytes=int(
+                trade_log_raw.get("rotate_max_bytes", 256 * 1024 * 1024)
+            ),
+            rotate_keep_files=int(trade_log_raw.get("rotate_keep_files", 12)),
+            rotate_compress=bool(trade_log_raw.get("rotate_compress", True)),
         ),
         strategy_timeline=StrategyTimelineConfig(
             enabled=bool(strategy_timeline_raw.get("enabled", True)),
@@ -960,6 +1103,15 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             max_recent_events=int(
                 strategy_timeline_raw.get("max_recent_events", 100)
+            ),
+            rotate_max_bytes=int(
+                strategy_timeline_raw.get("rotate_max_bytes", 256 * 1024 * 1024)
+            ),
+            rotate_keep_files=int(
+                strategy_timeline_raw.get("rotate_keep_files", 12)
+            ),
+            rotate_compress=bool(
+                strategy_timeline_raw.get("rotate_compress", True)
             ),
         ),
         pnl_store=PnlStoreConfig(

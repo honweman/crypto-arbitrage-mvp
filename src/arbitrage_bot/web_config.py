@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from .config import (
     BotConfig,
     BacktestConfig,
     CashAndCarryPair,
+    ContractStrategiesConfig,
     DcaConfig,
     ExchangeConfig,
     ExecutionAlgoConfig,
@@ -35,12 +36,59 @@ def backtest_config_to_dict(cfg: BacktestConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
+def contract_strategies_config_to_dict(
+    cfg: ContractStrategiesConfig,
+) -> dict[str, Any]:
+    return asdict(cfg)
+
+
 def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
 def market_maker_config_to_dict(cfg: MarketMakerConfig) -> dict[str, Any]:
-    return asdict(cfg)
+    return asdict(market_maker_config_with_id(cfg))
+
+
+def market_maker_instance_id(cfg: MarketMakerConfig) -> str:
+    configured = str(cfg.id or "").strip()
+    if configured:
+        return configured
+    seed = f"{cfg.exchange}-{cfg.symbol}" if cfg.exchange and cfg.symbol else "default"
+    normalized = "".join(
+        character.lower() if character.isalnum() else "-"
+        for character in seed
+    )
+    normalized = "-".join(part for part in normalized.split("-") if part)
+    return normalized or "default"
+
+
+def market_maker_config_with_id(cfg: MarketMakerConfig) -> MarketMakerConfig:
+    return replace(cfg, id=market_maker_instance_id(cfg))
+
+
+def market_maker_configs_with_ids(
+    configs: Iterable[MarketMakerConfig],
+) -> list[MarketMakerConfig]:
+    result: list[MarketMakerConfig] = []
+    seen: dict[str, int] = {}
+    for cfg in configs:
+        base_id = market_maker_instance_id(cfg)
+        count = seen.get(base_id, 0)
+        seen[base_id] = count + 1
+        instance_id = base_id if count == 0 else f"{base_id}-{count + 1}"
+        result.append(replace(cfg, id=instance_id))
+    return result
+
+
+def market_maker_configs_for_runtime(cfg: BotConfig) -> list[MarketMakerConfig]:
+    return market_maker_configs_with_ids(cfg.market_makers or [cfg.market_maker])
+
+
+def market_maker_configs_to_list(
+    configs: Iterable[MarketMakerConfig],
+) -> list[dict[str, Any]]:
+    return [market_maker_config_to_dict(cfg) for cfg in configs]
 
 
 def risk_config_to_dict(cfg: RiskConfig) -> dict[str, Any]:
@@ -64,10 +112,9 @@ def _market_maker_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
             symbols.setdefault(exchange.key, set()).add(pair.spot_symbol)
         for exchange in cfg.derivative_exchanges:
             symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
-    if cfg.market_maker.exchange and cfg.market_maker.symbol:
-        symbols.setdefault(cfg.market_maker.exchange, set()).add(
-            cfg.market_maker.symbol
-        )
+    for maker_cfg in market_maker_configs_for_runtime(cfg):
+        if maker_cfg.exchange and maker_cfg.symbol:
+            symbols.setdefault(maker_cfg.exchange, set()).add(maker_cfg.symbol)
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
@@ -91,6 +138,92 @@ def _execution_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
         if strategy_cfg.exchange and strategy_cfg.symbol:
             symbols.setdefault(strategy_cfg.exchange, set()).add(strategy_cfg.symbol)
     return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _derivative_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for pair in cfg.cash_and_carry_pairs:
+        for exchange in cfg.derivative_exchanges:
+            symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
+    for combo in cfg.option_combos:
+        symbols.setdefault(combo.option_exchange, set()).update(
+            [combo.call_symbol, combo.put_symbol]
+        )
+    if (
+        cfg.contract_strategies.derivative_exchange
+        and cfg.contract_strategies.derivative_symbol
+    ):
+        symbols.setdefault(cfg.contract_strategies.derivative_exchange, set()).add(
+            cfg.contract_strategies.derivative_symbol
+        )
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _merge_symbols_by_exchange(
+    *items: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {}
+    for item in items:
+        for exchange, rows in item.items():
+            symbols.setdefault(exchange, set()).update(rows)
+    return {exchange: sorted(rows) for exchange, rows in symbols.items()}
+
+
+def _symbol_asset(symbol: str) -> str:
+    return str(symbol or "").split("/", 1)[0].split(":", 1)[0].upper()
+
+
+def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
+    spot_symbols = _spot_symbols_by_exchange(cfg)
+    grid_symbols = _grid_symbols_by_exchange(cfg)
+    execution_symbols = _execution_symbols_by_exchange(cfg)
+    market_maker_symbols = _market_maker_symbols_by_exchange(cfg)
+    derivative_symbols = _derivative_symbols_by_exchange(cfg)
+    all_symbols = _merge_symbols_by_exchange(
+        spot_symbols,
+        grid_symbols,
+        execution_symbols,
+        market_maker_symbols,
+        derivative_symbols,
+    )
+    all_exchanges = [*cfg.spot_exchanges, *cfg.derivative_exchanges]
+    assets = {
+        market.asset.upper()
+        for market in cfg.spot_markets
+        if market.asset
+    }
+    for symbols in all_symbols.values():
+        assets.update(_symbol_asset(symbol) for symbol in symbols if symbol)
+    return {
+        "assets": sorted(item for item in assets if item),
+        "spot": {
+            "accounts": slow_execution_accounts(cfg.spot_exchanges, spot_symbols),
+        },
+        "grid": {
+            "accounts": slow_execution_accounts(cfg.spot_exchanges, grid_symbols),
+        },
+        "execution": {
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                execution_symbols,
+            ),
+        },
+        "market_maker": {
+            "accounts": slow_execution_accounts(
+                all_exchanges,
+                market_maker_symbols,
+            ),
+        },
+        "derivative": {
+            "accounts": slow_execution_accounts(
+                cfg.derivative_exchanges,
+                derivative_symbols,
+            ),
+        },
+        "all": {
+            "accounts": slow_execution_accounts(all_exchanges, all_symbols),
+        },
+    }
 
 
 def slow_execution_accounts(
@@ -176,6 +309,13 @@ def _slow_execution_overrides_from_payload(
             raise ValueError("unlimited_total must be a boolean")
         overrides["unlimited_total"] = payload["unlimited_total"]
 
+    if "block_conflicting_market_maker" in payload:
+        if not isinstance(payload["block_conflicting_market_maker"], bool):
+            raise ValueError("block_conflicting_market_maker must be a boolean")
+        overrides["block_conflicting_market_maker"] = payload[
+            "block_conflicting_market_maker"
+        ]
+
     numeric_fields = {
         "total_base",
         "total_quote",
@@ -249,6 +389,11 @@ def _market_maker_overrides_from_payload(
     overrides: dict[str, Any] = {}
     symbols_by_exchange = symbols_by_exchange or {}
 
+    if "id" in payload:
+        instance_id = str(payload["id"]).strip()
+        if instance_id:
+            overrides["id"] = instance_id
+
     for field in {
         "enabled",
         "live_enabled",
@@ -316,6 +461,52 @@ def _market_maker_overrides_from_payload(
             overrides[field] = _non_negative_float(payload, field)
 
     return overrides
+
+
+def market_maker_config_from_payload(
+    payload: dict[str, Any],
+    *,
+    base_config: MarketMakerConfig | None = None,
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> MarketMakerConfig:
+    overrides = _market_maker_overrides_from_payload(
+        payload,
+        allowed_exchanges=allowed_exchanges,
+        symbols_by_exchange=symbols_by_exchange,
+    )
+    config = replace(base_config or MarketMakerConfig(), **overrides)
+    return market_maker_config_with_id(config)
+
+
+def market_maker_configs_from_payload(
+    payload: Any,
+    *,
+    base_configs: Iterable[MarketMakerConfig] | None = None,
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> list[MarketMakerConfig]:
+    if not isinstance(payload, list):
+        raise ValueError("market_maker instances must be a list")
+    base_by_id = {
+        market_maker_instance_id(config): market_maker_config_with_id(config)
+        for config in (base_configs or [])
+    }
+    configs: list[MarketMakerConfig] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("each market maker instance must be an object")
+        instance_id = str(item.get("id") or "").strip()
+        base_config = base_by_id.get(instance_id) if instance_id else None
+        configs.append(
+            market_maker_config_from_payload(
+                item,
+                base_config=base_config,
+                allowed_exchanges=allowed_exchanges,
+                symbols_by_exchange=symbols_by_exchange,
+            )
+        )
+    return market_maker_configs_with_ids(configs)
 
 
 def _spot_grid_overrides_from_payload(
@@ -834,6 +1025,9 @@ def _risk_overrides_from_payload(
         "max_order_book_age_seconds",
         "max_order_book_gap_bps",
         "max_price_jump_bps",
+        "max_derivative_leverage",
+        "min_liquidation_buffer_pct",
+        "max_margin_usage_pct",
     }
     for field in float_fields:
         if field in payload:

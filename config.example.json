@@ -132,7 +132,35 @@
     "max_contracts": 0.0,
     "max_days_to_expiry": 0.0,
     "risk_free_rate_bps": 0.0,
-    "borrow_rate_bps": 0.0
+    "borrow_rate_bps": 0.0,
+    "min_option_depth_quote": 0.0,
+    "max_option_spread_bps": 0.0,
+    "min_days_to_expiry_open": 0.0,
+    "expiry_reminder_days": 0.0
+  },
+  "contract_strategies": {
+    "enabled": true,
+    "funding_bot_enabled": true,
+    "basis_bot_enabled": true,
+    "futures_grid_enabled": false,
+    "hedge_rebalancer_enabled": false,
+    "live_enabled": false,
+    "spot_exchange": "binance-spot",
+    "spot_symbol": "BTC/USDT",
+    "derivative_exchange": "binance-usdm",
+    "derivative_symbol": "BTC/USDT:USDT",
+    "notional_quote": 1000.0,
+    "funding_min_bps": 1.0,
+    "basis_entry_bps": 15.0,
+    "basis_exit_bps": 3.0,
+    "futures_grid_levels": 6,
+    "futures_grid_band_pct": 2.0,
+    "futures_grid_quote_per_level": 10.0,
+    "futures_grid_max_leverage": 1.0,
+    "hedge_threshold_base": 0.0,
+    "hedge_max_quote": 0.0,
+    "post_only": true,
+    "client_order_prefix": "crypto-arb-contract"
   },
   "triangular_arbitrage": {
     "enabled": false,
@@ -174,7 +202,10 @@
   "strategy_timeline": {
     "enabled": true,
     "path": "data/strategy_timeline.jsonl",
-    "max_recent_events": 100
+    "max_recent_events": 100,
+    "rotate_max_bytes": 268435456,
+    "rotate_keep_files": 12,
+    "rotate_compress": true
   },
   "web_security": {
     "password_env": "CRYPTO_ARB_WEB_PASSWORD",

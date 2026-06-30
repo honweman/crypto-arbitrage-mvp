@@ -22,6 +22,8 @@ from arbitrage_bot.config import (
     ExecutionAlgoConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
+    OptionComboConfig,
+    OptionsArbitrageConfig,
     PortfolioConfig,
     RiskConfig,
     SlowExecutionConfig,
@@ -46,6 +48,7 @@ from arbitrage_bot.web import (
     LoginRateLimiter,
     MonitorState,
     SECURITY_HEADERS,
+    STYLES_CSS,
     _add_security_headers,
     _cookie_secret,
     _filter_state_payload_for_user,
@@ -95,6 +98,9 @@ from arbitrage_bot.web import (
     default_strategy_center_path,
     enrich_recent_trades_with_pnl,
     fetch_account_balances_payload,
+    fetch_derivatives_risk_payload,
+    fetch_funding_basis_payload,
+    fetch_options_arbitrage_payload,
     fetch_order_activity_payload,
     read_recent_web_audit_events,
     slow_execution_accounts,
@@ -104,6 +110,7 @@ from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore, totp_code
+from arbitrage_bot.web_config import strategy_universe_to_dict
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 
 
@@ -113,16 +120,19 @@ HTML = f"{INDEX_HTML}\n{APP_JS}"
 def make_config(
     *,
     market_maker: MarketMakerConfig | None = None,
+    market_makers: list[MarketMakerConfig] | None = None,
     slow_execution: SlowExecutionConfig | None = None,
     spot_grid: SpotGridConfig | None = None,
     dca: DcaConfig | None = None,
     execution_algo: ExecutionAlgoConfig | None = None,
     backtest: BacktestConfig | None = None,
+    options_arbitrage: OptionsArbitrageConfig | None = None,
     portfolio: PortfolioConfig | None = None,
     spot_markets: list[SpotMarketConfig] | None = None,
     spot_exchanges: list[ExchangeConfig] | None = None,
     cash_and_carry_pairs: list[CashAndCarryPair] | None = None,
     derivative_exchanges: list[ExchangeConfig] | None = None,
+    option_combos: list[OptionComboConfig] | None = None,
     risk: RiskConfig | None = None,
     trade_log: TradeLogConfig | None = None,
     strategy_center: StrategyCenterConfig | None = None,
@@ -142,16 +152,19 @@ def make_config(
         quote_rate_sources=[],
         onchain_monitor=OnchainMonitorConfig(),
         market_maker=market_maker or MarketMakerConfig(),
+        market_makers=market_makers or [],
         slow_execution=slow_execution or SlowExecutionConfig(),
         spot_grid=spot_grid or SpotGridConfig(),
         dca=dca or DcaConfig(),
         execution_algo=execution_algo or ExecutionAlgoConfig(),
         backtest=backtest or BacktestConfig(),
+        options_arbitrage=options_arbitrage or OptionsArbitrageConfig(),
         strategy_center=strategy_center or StrategyCenterConfig(),
         portfolio=portfolio or PortfolioConfig(),
         spot_symbols=[],
         spot_markets=spot_markets or [],
         cash_and_carry_pairs=cash_and_carry_pairs or [],
+        option_combos=option_combos or [],
         spot_exchanges=spot_exchanges or [],
         derivative_exchanges=derivative_exchanges or [],
         risk=risk or RiskConfig(),
@@ -164,15 +177,130 @@ def make_config(
 
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
-        self.assertIn('<script src="/static/app.js" defer></script>', INDEX_HTML)
-        self.assertIn('<link rel="stylesheet" href="/static/styles.css">', INDEX_HTML)
+        self.assertIn(
+            '<script src="/static/app.js?v=20260630-hidden-fix" defer></script>',
+            INDEX_HTML,
+        )
+
+    def test_page_supports_korean_language_option(self) -> None:
+        i18n_js = Path("src/arbitrage_bot/web/static/i18n.js").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('<option value="ko">한국어</option>', INDEX_HTML)
+        self.assertIn('"ko"', i18n_js)
+        self.assertIn('"Language": "언어"', i18n_js)
+        self.assertIn('"ko-KR"', i18n_js)
+
+    def test_market_maker_payload_keeps_multiple_instances(self) -> None:
+        coinbase = MarketMakerConfig(
+            id="coinbase-acs",
+            enabled=True,
+            exchange="coinbase-spot",
+            symbol="ACS/USDC",
+            levels=1,
+            quote_per_level=1.0,
+        )
+        upbit = MarketMakerConfig(
+            id="upbit-acs",
+            enabled=True,
+            exchange="upbit-spot",
+            symbol="ACS/USDT",
+            levels=1,
+            quote_per_level=1.0,
+        )
+        cfg = make_config(
+            market_maker=coinbase,
+            market_makers=[coinbase, upbit],
+            spot_exchanges=[
+                ExchangeConfig(id="coinbase", label="coinbase-spot", market_type="spot"),
+                ExchangeConfig(id="upbit", label="upbit-spot", market_type="spot"),
+            ],
+        )
+        books = {
+            ("coinbase-spot", "ACS/USDC"): OrderBookSnapshot(
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+                bids=[BookLevel(price=0.2, amount=100.0)],
+                asks=[BookLevel(price=0.22, amount=100.0)],
+            ),
+            ("upbit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="upbit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.21, amount=100.0)],
+                asks=[BookLevel(price=0.23, amount=100.0)],
+            ),
+        }
+
+        payload = build_market_maker_payload(cfg, books)
+
+        self.assertEqual(payload["instance_count"], 2)
+        self.assertEqual(
+            [item["config"]["id"] for item in payload["instances"]],
+            ["coinbase-acs", "upbit-acs"],
+        )
+        self.assertEqual(payload["instances"][0]["plan"]["symbol"], "ACS/USDC")
+        self.assertEqual(payload["instances"][1]["plan"]["symbol"], "ACS/USDT")
+
+    def test_order_reconciliation_tracks_market_maker_instances(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "open_orders": [
+                    {"exchange": "coinbase-spot", "symbol": "ACS/USDC", "id": "a"},
+                    {"exchange": "upbit-spot", "symbol": "ACS/USDT", "id": "b"},
+                ],
+                "closed_orders": [],
+                "recent_trades": [],
+            },
+            market_maker_runtime={
+                "instances": [
+                    {
+                        "id": "coinbase-acs",
+                        "open_order_exchange": "coinbase-spot",
+                        "open_order_symbol": "ACS/USDC",
+                        "open_order_ids": ["a"],
+                    },
+                    {
+                        "id": "upbit-acs",
+                        "open_order_exchange": "upbit-spot",
+                        "open_order_symbol": "ACS/USDT",
+                        "open_order_ids": ["b"],
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(payload["tracked_order_count"], 2)
+        self.assertEqual(payload["matched_open_count"], 2)
+        self.assertEqual(payload["issue_count"], 0)
+        self.assertIn(
+            '<link rel="stylesheet" href="/static/styles.css?v=20260630-hidden-fix">',
+            INDEX_HTML,
+        )
         self.assertIn("Auto Buy/Sell", HTML)
         self.assertIn("/api/auto-buy-sell", HTML)
         self.assertIn("/api/auto-buy-sell/tasks", HTML)
         self.assertIn('id="slow-create-task"', HTML)
         self.assertIn('id="slow-clear-terminal"', HTML)
+        self.assertIn('id="slow-config-status"', HTML)
+        self.assertIn('id="slow-cleanup-preview"', HTML)
         self.assertIn('id="slow-tasks"', HTML)
         self.assertIn('id="slow-start-price"', HTML)
+        self.assertIn('id="slow-total-base-label"', HTML)
+        self.assertIn('id="slow-total-quote-label"', HTML)
+        self.assertIn('id="slow-slice-min-label"', HTML)
+        self.assertIn('id="slow-slice-max-label"', HTML)
+        self.assertIn('id="slow-start-price-label"', HTML)
+        self.assertIn('id="slow-stop-price-label"', HTML)
+        self.assertIn("Cleanup preview", APP_JS)
+        self.assertIn("Same as default", APP_JS)
+        self.assertIn("config-diff-details", APP_JS)
+        self.assertIn("config-diff-grid", APP_JS)
+        self.assertIn("AutoBuy start: Ask <=", APP_JS)
+        self.assertIn("AutoSell start: Bid >=", APP_JS)
+        self.assertIn("AutoBuy stop: Ask >=", APP_JS)
+        self.assertIn("Ask >=", APP_JS)
+        self.assertIn("AutoBuy stops before each execution", APP_JS)
+        self.assertIn("AutoBuy stop when Ask >= price", APP_JS)
         self.assertNotIn("Slow Execution", HTML)
 
     def test_web_package_exposes_split_modules(self) -> None:
@@ -182,6 +310,59 @@ class WebMonitorTest(unittest.TestCase):
             state_payload_for_view({"status": "running"}, None),
             {"status": "running"},
         )
+
+    def test_state_payload_can_be_limited_to_open_sections(self) -> None:
+        payload = {
+            "status": "running",
+            "config": {"notional_quote": 1, "strategy_universe": {"assets": ["ACS"]}},
+            "operations": {
+                "risk": {"max_order_quote": 5},
+                "web_audit": {"recent_events": [{"id": "audit"}]},
+            },
+            "order_activity": {
+                "open_order_count": 1,
+                "open_orders": [{"id": "order"}],
+            },
+            "strategy_center": {
+                "summary": {"strategy_count": 1},
+                "strategy_instances": [{"id": "mm"}],
+            },
+            "funding_basis": {"status": "ok", "rows": [{"id": "basis"}]},
+            "options_arbitrage": {"status": "ok", "rows": [{"id": "option"}]},
+            "contract_strategies": {"status": "ok", "rows": [{"id": "contract"}]},
+            "derivatives": {"status": "ok", "positions": [{"id": "position"}]},
+            "account_balances": {
+                "status": "ok",
+                "totals": [{"currency": "USDC", "total": 10}],
+                "accounts": [{"id": "coinbase"}],
+            },
+            "markets": [{"exchange": "coinbase-spot"}],
+            "quote_rates": {"USD": 1.0},
+            "readiness": {"actions": [{"id": "risk"}]},
+            "onchain": {
+                "holders": [{"rank": 1}],
+                "history": {"events": [{"id": "wallet"}]},
+            },
+        }
+        status_overview = state_payload_for_view(payload, "status", sections="overview")
+        settings = state_payload_for_view(payload, "settings", sections="risk-form")
+        records = state_payload_for_view(payload, "records", sections="console-strategies")
+
+        self.assertEqual(status_overview["markets"], [])
+        self.assertEqual(status_overview["quote_rates"], {})
+        self.assertEqual(status_overview["readiness"], {})
+        self.assertIn("totals", status_overview["account_balances"])
+        self.assertNotIn("accounts", status_overview["account_balances"])
+        self.assertNotIn("positions", status_overview["derivatives"])
+        self.assertNotIn("rows", status_overview["funding_basis"])
+        self.assertNotIn("rows", status_overview["options_arbitrage"])
+        self.assertNotIn("rows", status_overview["contract_strategies"])
+        self.assertNotIn("holders", status_overview["onchain"])
+        self.assertNotIn("strategy_universe", settings["config"])
+        self.assertNotIn("strategy_instances", settings["strategy_center"])
+        self.assertIn("open_orders", records["order_activity"])
+        self.assertNotIn("web_audit", records["operations"])
+        self.assertNotIn("events", records["onchain"].get("history", {}))
 
     def test_page_uses_generic_dashboard_title(self) -> None:
         self.assertIn("Crypto Trading Dashboard", HTML)
@@ -206,6 +387,37 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="api-account-form"', HTML)
         self.assertIn('id="funding-arb-form"', HTML)
         self.assertIn('id="signal-bot-form"', HTML)
+        self.assertIn('id="strategy-instance-exchange"', HTML)
+        self.assertIn('id="strategy-instance-symbol"', HTML)
+        self.assertIn("renderStrategyInstanceMarketOptions", APP_JS)
+
+    def test_page_hides_temporarily_disabled_modules(self) -> None:
+        self.assertIn('id="overview" data-page="status"', HTML)
+        self.assertIn('data-ui-feature="cash_and_carry" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="market_config" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="readiness" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="scan_status" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="funding_arbitrage" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="signal_bot" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="options_arbitrage derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="contract_strategies derivatives" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="spot_grid" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="dca" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="execution_algo" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="backtest" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="orders_detail" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="strategy_timeline" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="audit_trail" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="quote_rates" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="onchain_monitor" data-ui-hidden-default="true"', HTML)
+        self.assertIn('data-ui-feature="onchain_history" data-ui-hidden-default="true"', HTML)
+        self.assertIn("const HIDDEN_UI_FEATURES = new Set", APP_JS)
+        self.assertIn("function applyFeatureVisibility", APP_JS)
+        self.assertIn('status: [', APP_JS)
+        self.assertIn('.ui-feature-hidden', STYLES_CSS)
+        self.assertIn('[data-page].ui-feature-hidden', STYLES_CSS)
+        self.assertIn('.statusbar[data-page].ui-feature-hidden', STYLES_CSS)
 
     def test_page_has_status_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)
@@ -217,7 +429,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('const PAGE_IDS = new Set(["status", "settings", "records"])', HTML)
         self.assertIn('if (hashPage === "monitor") return "status";', HTML)
         self.assertIn('if (hashPage === "control") return "settings";', HTML)
-        self.assertIn("/api/state?view=", HTML)
+        self.assertIn("new URLSearchParams", HTML)
+        self.assertIn("/api/state?${params.toString()}", HTML)
         self.assertIn("pageStateCache", HTML)
 
     def test_page_softens_initial_state_fetch_failure(self) -> None:
@@ -247,6 +460,26 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
 
+    def test_page_includes_derivatives_risk_panel(self) -> None:
+        self.assertIn("Derivatives Risk", HTML)
+        self.assertIn('id="derivatives-risk"', HTML)
+        self.assertIn('id="derivatives-risk-meta"', HTML)
+        self.assertIn("Funding / Basis", HTML)
+        self.assertIn('id="funding-basis"', HTML)
+        self.assertIn('id="funding-basis-meta"', HTML)
+        self.assertIn("Contract Strategies", HTML)
+        self.assertIn('id="contract-strategies"', HTML)
+        self.assertIn('id="contract-strategies-meta"', HTML)
+        self.assertIn('id="contract-strategies-summary"', HTML)
+        self.assertIn("renderContractStrategies", HTML)
+        self.assertIn("Options Arbitrage", HTML)
+        self.assertIn('id="options-arbitrage"', HTML)
+        self.assertIn('id="options-arbitrage-meta"', HTML)
+        self.assertIn('id="options-risk-summary"', HTML)
+        self.assertIn('id="options-chain"', HTML)
+        self.assertIn("renderOptionsRiskSummary", HTML)
+        self.assertIn("renderOptionsChain", HTML)
+
     def test_page_position_summary_includes_asset_price(self) -> None:
         self.assertIn('id="portfolio-position-detail"', HTML)
         self.assertIn("function formatPositionPrice", HTML)
@@ -265,6 +498,16 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("function setupCompactSections()", HTML)
         self.assertIn("section-open", HTML)
         self.assertIn('aria-expanded', HTML)
+        self.assertIn("renderOpenSection", HTML)
+        self.assertIn("REFRESH_INTERVAL_MS = 2000", HTML)
+        self.assertIn("document.hidden", HTML)
+        self.assertIn("visibilitychange", HTML)
+        self.assertIn(".strategy-overview[data-page].active-page", STYLES_CSS)
+        self.assertIn('renderOpenSection("risk-form"', HTML)
+        self.assertIn('renderOpenSection("strategy-instances"', HTML)
+        self.assertIn('renderOpenSection("console-strategies"', HTML)
+        self.assertIn("function renderRiskEvents", HTML)
+        self.assertIn("function renderAuditTrail", HTML)
 
     def test_page_includes_persisted_onchain_change_log(self) -> None:
         self.assertIn("Holder Change Log", HTML)
@@ -310,6 +553,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="grid-spacing"', HTML)
         self.assertIn('id="grid-auto-rebuild"', HTML)
         self.assertIn('id="grid-orders"', HTML)
+        self.assertIn("data-account-selector", APP_JS)
+        self.assertIn("data-symbol-selector", APP_JS)
         self.assertIn("DCA Bot", HTML)
         self.assertIn("/api/dca", HTML)
         self.assertIn('id="dca-form"', HTML)
@@ -344,6 +589,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="risk-max-exposure"', HTML)
         self.assertIn('id="risk-min-book-depth"', HTML)
         self.assertIn('id="risk-max-slippage"', HTML)
+        self.assertIn('id="risk-max-derivative-leverage"', HTML)
+        self.assertIn('id="risk-min-liquidation-buffer"', HTML)
+        self.assertIn('id="risk-max-margin-usage"', HTML)
 
     def test_page_includes_audit_trail(self) -> None:
         self.assertIn("Audit Trail", HTML)
@@ -750,6 +998,119 @@ class WebMonitorTest(unittest.TestCase):
             20,
         )
 
+    def test_readiness_payload_reports_execution_protection_blockers(self) -> None:
+        cfg = make_config(risk=RiskConfig(allow_live_trading=True))
+
+        payload = build_readiness_payload(
+            cfg,
+            account_balances={"status": "ok", "accounts": []},
+            order_activity={
+                "status": "ok",
+                "accounts": [],
+                "reconciliation": {"status": "ok", "issue_count": 0},
+            },
+            trading_console=build_trading_console_payload(cfg),
+            execution_protection={
+                "status": "blocked",
+                "blocked_count": 1,
+                "warning_count": 1,
+                "manual_review_count": 1,
+                "top_reasons": ["slippage exceeds configured limit"],
+            },
+        )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["summary"]["execution_protection_blocked_count"], 1)
+        self.assertEqual(payload["summary"]["execution_protection_warning_count"], 1)
+        self.assertEqual(
+            payload["summary"]["execution_protection_manual_review_count"],
+            1,
+        )
+        self.assertEqual(payload["summary"]["blocked_count"], 1)
+        self.assertEqual(payload["summary"]["warning_count"], 2)
+        actions = {row["scope"]: row for row in payload["next_actions"]}
+        self.assertEqual(
+            actions["Execution Protection"]["action"],
+            "Review multi-leg paper protection",
+        )
+        self.assertEqual(actions["Execution Protection"]["priority"], "high")
+        self.assertIn(
+            "slippage",
+            actions["Execution Protection"]["detail"],
+        )
+
+    def test_readiness_payload_reports_derivatives_risk_blockers(self) -> None:
+        cfg = make_config(
+            cash_and_carry_pairs=[
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                    api_key_env="BINANCE_API_KEY",
+                    secret_env="BINANCE_SECRET",
+                )
+            ],
+            risk=RiskConfig(allow_live_trading=True),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"BINANCE_API_KEY": "key", "BINANCE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = build_readiness_payload(
+                cfg,
+                account_balances={
+                    "status": "ok",
+                    "accounts": [{"exchange": "binance-swap", "status": "ok"}],
+                },
+                order_activity={
+                    "status": "ok",
+                    "accounts": [{"exchange": "binance-swap", "status": "ok"}],
+                    "reconciliation": {"status": "ok", "issue_count": 0},
+                },
+                derivatives={
+                    "status": "blocked",
+                    "position_count": 1,
+                    "accounts": [
+                        {
+                            "exchange": "binance-swap",
+                            "label": "Binance Futures",
+                            "status": "blocked",
+                            "risk_reasons": ["margin usage 80% > 70%"],
+                            "summary": {
+                                "risk_reasons": ["margin usage 80% > 70%"],
+                            },
+                        }
+                    ],
+                },
+                trading_console=build_trading_console_payload(cfg),
+            )
+
+        accounts = {row["key"]: row for row in payload["accounts"]}
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(accounts["binance-swap"]["status"], "blocked")
+        self.assertEqual(
+            accounts["binance-swap"]["derivatives_status"],
+            "blocked",
+        )
+        self.assertEqual(payload["summary"]["derivative_blocked_account_count"], 1)
+        self.assertEqual(payload["summary"]["derivative_position_count"], 1)
+        self.assertEqual(payload["summary"]["blocked_count"], 1)
+        actions = {row["scope"]: row for row in payload["next_actions"]}
+        self.assertEqual(
+            actions["Derivatives Risk"]["action"],
+            "Review margin and liquidation risk",
+        )
+        self.assertEqual(actions["Derivatives Risk"]["priority"], "high")
+        self.assertIn("margin usage", actions["Derivatives Risk"]["detail"])
+
     def test_build_market_rows_converts_top_of_book(self) -> None:
         markets = [
             SpotMarketConfig(
@@ -932,7 +1293,7 @@ class WebMonitorTest(unittest.TestCase):
                 randomize_slice=False,
                 interval_seconds=30.0,
                 order_ttl_seconds=5.0,
-                stop_price=0.001,
+                stop_price=0.0002,
             )
         )
         books = {
@@ -1006,6 +1367,54 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(accounts[0]["label"], "bybit:spot")
         self.assertEqual(accounts[0]["symbol"], "")
         self.assertEqual(accounts[0]["symbols"], [])
+
+    def test_strategy_universe_lists_selectable_markets(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+                ExchangeConfig(id="binance", label="binance-spot"),
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                )
+            ],
+            spot_markets=[
+                SpotMarketConfig(
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    asset="ACS",
+                    quote_currency="USDC",
+                ),
+                SpotMarketConfig(
+                    exchange="binance-spot",
+                    symbol="BTC/USDT",
+                    asset="BTC",
+                    quote_currency="USDT",
+                ),
+            ],
+            cash_and_carry_pairs=[
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            spot_grid=SpotGridConfig(
+                exchange="binance-spot",
+                symbol="ETH/USDT",
+            ),
+        )
+
+        universe = strategy_universe_to_dict(cfg)
+        grid_accounts = {row["key"]: row for row in universe["grid"]["accounts"]}
+        all_accounts = {row["key"]: row for row in universe["all"]["accounts"]}
+
+        self.assertIn("ACS", universe["assets"])
+        self.assertIn("BTC", universe["assets"])
+        self.assertIn("ETH/USDT", grid_accounts["binance-spot"]["symbols"])
+        self.assertIn("BTC/USDT:USDT", all_accounts["binance-swap"]["symbols"])
 
     def test_build_spot_grid_payload_returns_plan_and_safety(self) -> None:
         cfg = make_config(
@@ -1440,6 +1849,9 @@ class WebMonitorTest(unittest.TestCase):
                 "max_order_book_age_seconds": "60",
                 "max_order_book_gap_bps": "250",
                 "max_price_jump_bps": "80",
+                "max_derivative_leverage": "3",
+                "min_liquidation_buffer_pct": "20",
+                "max_margin_usage_pct": "40",
             },
             allowed_accounts={"coinbase-spot", "bybit-spot"},
             allowed_strategies={"market_maker", "slow_execution"},
@@ -1461,6 +1873,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["max_order_book_age_seconds"], 60.0)
         self.assertEqual(overrides["max_order_book_gap_bps"], 250.0)
         self.assertEqual(overrides["max_price_jump_bps"], 80.0)
+        self.assertEqual(overrides["max_derivative_leverage"], 3.0)
+        self.assertEqual(overrides["min_liquidation_buffer_pct"], 20.0)
+        self.assertEqual(overrides["max_margin_usage_pct"], 40.0)
 
     def test_risk_update_payload_rejects_unknown_account(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown exchange account"):
@@ -3425,6 +3840,431 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "api env vars missing",
         )
 
+    async def test_fetch_derivatives_risk_payload_flags_leverage_and_liquidation(self) -> None:
+        test_case = self
+
+        class FakeDerivativeManager:
+            async def fetch_balance(self, _: ExchangeConfig) -> dict[str, object]:
+                return {
+                    "free": {"USDT": 800.0},
+                    "used": {"USDT": 200.0},
+                    "total": {"USDT": 1000.0},
+                }
+
+            async def fetch_positions(
+                self,
+                _: ExchangeConfig,
+                symbols: list[str],
+            ) -> list[dict[str, object]]:
+                test_case.assertEqual(symbols, ["BTC/USDT:USDT"])
+                return [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1.0,
+                        "contractSize": 1.0,
+                        "markPrice": 100.0,
+                        "entryPrice": 95.0,
+                        "liquidationPrice": 85.0,
+                        "leverage": 5.0,
+                        "notional": 100.0,
+                        "unrealizedPnl": 5.0,
+                    }
+                ]
+
+            async def fetch_funding_rates(
+                self,
+                _: list[ExchangeConfig],
+                __: dict[str, list[str]],
+            ) -> dict[tuple[str, str], float]:
+                return {("binance-swap", "BTC/USDT:USDT"): 0.0001}
+
+        cfg = make_config(
+            cash_and_carry_pairs=[
+                CashAndCarryPair(
+                    spot_symbol="BTC/USDT",
+                    derivative_symbol="BTC/USDT:USDT",
+                )
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                    api_key_env="BINANCE_API_KEY",
+                    secret_env="BINANCE_SECRET",
+                )
+            ],
+            risk=RiskConfig(
+                max_derivative_leverage=3.0,
+                min_liquidation_buffer_pct=20.0,
+                max_margin_usage_pct=10.0,
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"BINANCE_API_KEY": "key", "BINANCE_SECRET": "secret"},
+            clear=True,
+        ):
+            payload = await fetch_derivatives_risk_payload(
+                cfg,
+                FakeDerivativeManager(),
+            )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["checked_account_count"], 1)
+        self.assertEqual(payload["position_count"], 1)
+        account = payload["accounts"][0]
+        self.assertEqual(account["status"], "blocked")
+        self.assertAlmostEqual(account["summary"]["margin_usage_pct"], 20.0)
+        position = account["positions"][0]
+        self.assertEqual(position["status"], "blocked")
+        self.assertAlmostEqual(position["liquidation_buffer_pct"], 15.0)
+        self.assertEqual(position["funding_rate"], 0.0001)
+        self.assertTrue(any("leverage" in reason for reason in position["risk_reasons"]))
+        self.assertTrue(
+            any("liquidation buffer" in reason for reason in position["risk_reasons"])
+        )
+
+    async def test_fetch_funding_basis_payload_uses_strategy_center_settings(self) -> None:
+        class FakeFundingManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                self.last_depth = depth
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        if exchange.key == "binance-spot":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=99.0, amount=10.0)],
+                                asks=[BookLevel(price=101.0, amount=10.0)],
+                            )
+                        if exchange.key == "binance-swap":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=102.0, amount=10.0)],
+                                asks=[BookLevel(price=104.0, amount=10.0)],
+                            )
+                return books
+
+            async def fetch_funding_rates(
+                self,
+                _: list[ExchangeConfig],
+                __: dict[str, set[str]],
+            ) -> dict[tuple[str, str], float]:
+                return {("binance-swap", "BTC/USDT:USDT"): 0.0002}
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=10.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="binance-swap",
+                    market_type="swap",
+                    fee_bps=5.0,
+                )
+            ],
+        )
+        payload = await fetch_funding_basis_payload(
+            cfg,
+            FakeFundingManager(),
+            strategy_center_payload={
+                "funding_arbitrage": {
+                    "enabled": True,
+                    "pair_id": "btc funding",
+                    "spot_exchange": "binance-spot",
+                    "spot_symbol": "BTC/USDT",
+                    "derivative_exchange": "binance-swap",
+                    "derivative_symbol": "BTC/USDT:USDT",
+                    "min_funding_bps": 1.0,
+                    "min_entry_basis_bps": 10.0,
+                }
+            },
+        )
+
+        self.assertEqual(payload["status"], "candidate")
+        self.assertEqual(payload["checked_count"], 1)
+        row = payload["rows"][0]
+        self.assertEqual(row["paper_execution"]["mode"], "paper")
+        self.assertEqual(row["paper_execution"]["state"], "would_open")
+        self.assertFalse(row["paper_execution"]["live_enabled"])
+        self.assertIn("protection", row["paper_execution"])
+        self.assertFalse(row["paper_execution"]["protection"]["live_submit_allowed"])
+
+    async def test_fetch_options_arbitrage_payload_finds_paper_candidate(self) -> None:
+        class FakeOptionsManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        if symbol == "BTC/USDT":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=99.0, amount=10.0)],
+                                asks=[BookLevel(price=100.0, amount=10.0)],
+                            )
+                        elif symbol == "BTC-100-C":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=8.0, amount=10.0)],
+                                asks=[BookLevel(price=8.5, amount=10.0)],
+                            )
+                        elif symbol == "BTC-100-P":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=1.0, amount=10.0)],
+                                asks=[BookLevel(price=1.5, amount=10.0)],
+                            )
+                return books
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=0.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="deribit",
+                    label="deribit-options",
+                    market_type="option",
+                    fee_bps=0.0,
+                )
+            ],
+            option_combos=[
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-100-C",
+                    put_symbol="BTC-100-P",
+                    strike=100.0,
+                    contract_size=1.0,
+                    quote_currency="USDT",
+                )
+            ],
+            options_arbitrage=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=200.0,
+                min_edge_quote=0.1,
+                min_edge_bps=1.0,
+            ),
+        )
+
+        payload = await fetch_options_arbitrage_payload(cfg, FakeOptionsManager())
+
+        self.assertEqual(payload["status"], "candidate")
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["parity_candidate_count"], 1)
+        self.assertEqual(payload["enhanced_candidate_count"], 0)
+        self.assertEqual(payload["checked_count"], 1)
+        self.assertEqual(len(payload["option_chain"]), 2)
+        self.assertEqual(payload["risk"]["status"], "ok")
+        self.assertEqual(payload["risk"]["greeks_available_count"], 0)
+        self.assertFalse(payload["execution_controls"]["auto_submit_live_orders"])
+        row = payload["rows"][0]
+        self.assertEqual(row["status"], "candidate")
+        self.assertEqual(row["paper_execution"]["mode"], "paper")
+        self.assertEqual(row["paper_execution"]["state"], "would_open")
+        self.assertFalse(row["paper_execution"]["live_enabled"])
+        self.assertEqual(row["paper_execution"]["order_ticket"]["order_count"], 3)
+        self.assertTrue(
+            row["paper_execution"]["order_ticket"]["requires_final_confirmation"]
+        )
+        self.assertIn("protection", row["paper_execution"])
+        self.assertTrue(row["paper_execution"]["protection"]["requires_manual_review"])
+        self.assertEqual(
+            [leg["side"] for leg in row["paper_execution"]["suggested_legs"]],
+            ["sell", "buy", "buy"],
+        )
+
+    async def test_fetch_options_arbitrage_payload_blocks_wide_option_spread(self) -> None:
+        class FakeOptionsManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        if symbol == "BTC/USDT":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=99.0, amount=10.0)],
+                                asks=[BookLevel(price=100.0, amount=10.0)],
+                            )
+                        elif symbol == "BTC-100-C":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=8.0, amount=10.0)],
+                                asks=[BookLevel(price=12.0, amount=10.0)],
+                            )
+                        elif symbol == "BTC-100-P":
+                            books[(exchange.key, symbol)] = OrderBookSnapshot(
+                                exchange=exchange.key,
+                                symbol=symbol,
+                                bids=[BookLevel(price=1.0, amount=10.0)],
+                                asks=[BookLevel(price=1.5, amount=10.0)],
+                            )
+                return books
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=0.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="deribit",
+                    label="deribit-options",
+                    market_type="option",
+                    fee_bps=0.0,
+                )
+            ],
+            option_combos=[
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-100-C",
+                    put_symbol="BTC-100-P",
+                    strike=100.0,
+                    contract_size=1.0,
+                    quote_currency="USDT",
+                )
+            ],
+            options_arbitrage=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=200.0,
+                min_edge_quote=0.1,
+                min_edge_bps=1.0,
+                max_option_spread_bps=100.0,
+            ),
+        )
+
+        payload = await fetch_options_arbitrage_payload(cfg, FakeOptionsManager())
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(payload["risk"]["status"], "blocked")
+        self.assertEqual(payload["risk"]["blocked_new_open_count"], 1)
+        row = payload["rows"][0]
+        self.assertEqual(row["status"], "blocked")
+        self.assertIn("call: spread", row["preflight_reasons"][0])
+        self.assertEqual(row["paper_execution"]["state"], "blocked")
+        self.assertEqual(row["paper_execution"]["protection"]["status"], "blocked")
+        self.assertFalse(
+            row["paper_execution"]["protection"]["live_submit_allowed"]
+        )
+
+    async def test_fetch_options_arbitrage_payload_finds_box_spread_candidate(self) -> None:
+        class FakeOptionsManager:
+            async def fetch_order_books(
+                self,
+                configs: list[ExchangeConfig],
+                symbols_by_exchange: dict[str, set[str]],
+                depth: int,
+            ) -> dict[tuple[str, str], OrderBookSnapshot]:
+                quotes = {
+                    "BTC/USDT": (99.0, 100.0),
+                    "BTC-100-C": (7.8, 8.0),
+                    "BTC-100-P": (1.0, 1.2),
+                    "BTC-110-C": (3.0, 3.2),
+                    "BTC-110-P": (3.8, 4.0),
+                }
+                books: dict[tuple[str, str], OrderBookSnapshot] = {}
+                for exchange in configs:
+                    for symbol in symbols_by_exchange.get(exchange.key, set()):
+                        bid, ask = quotes[symbol]
+                        books[(exchange.key, symbol)] = OrderBookSnapshot(
+                            exchange=exchange.key,
+                            symbol=symbol,
+                            bids=[BookLevel(price=bid, amount=10.0)],
+                            asks=[BookLevel(price=ask, amount=10.0)],
+                        )
+                return books
+
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(id="binance", label="binance-spot", fee_bps=0.0)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="deribit",
+                    label="deribit-options",
+                    market_type="option",
+                    fee_bps=0.0,
+                )
+            ],
+            option_combos=[
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-100-C",
+                    put_symbol="BTC-100-P",
+                    strike=100.0,
+                    expiry="2026-12-31",
+                    quote_currency="USDT",
+                ),
+                OptionComboConfig(
+                    underlying="BTC",
+                    spot_exchange="binance-spot",
+                    spot_symbol="BTC/USDT",
+                    option_exchange="deribit-options",
+                    call_symbol="BTC-110-C",
+                    put_symbol="BTC-110-P",
+                    strike=110.0,
+                    expiry="2026-12-31",
+                    quote_currency="USDT",
+                ),
+            ],
+            options_arbitrage=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=200.0,
+                min_edge_quote=0.1,
+                min_edge_bps=1.0,
+            ),
+        )
+
+        payload = await fetch_options_arbitrage_payload(cfg, FakeOptionsManager())
+
+        strategy_types = {
+            row["strategy_type"] for row in payload["strategy_candidates"]
+        }
+        self.assertIn("box_spread", strategy_types)
+        self.assertGreaterEqual(payload["enhanced_candidate_count"], 1)
+        box = next(
+            row
+            for row in payload["strategy_candidates"]
+            if row["strategy_type"] == "box_spread"
+        )
+        self.assertFalse(box["auto_submit_live_orders"])
+        self.assertTrue(box["requires_final_confirmation"])
+        self.assertEqual(len(box["legs"]), 4)
+
     async def test_program_switch_updates_running_state(self) -> None:
         state = MonitorState(make_config(), 1.0)
 
@@ -3470,10 +4310,21 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         records = await state.get(view="records")
 
         self.assertIn("account_balances", full)
+        self.assertIn("derivatives", full)
+        self.assertIn("funding_basis", full)
+        self.assertIn("options_arbitrage", full)
+        self.assertIn("contract_strategies", full)
+        self.assertIn("execution_protection", full)
         self.assertIn("trading_console", full)
         self.assertIn("recent_opportunities", full)
 
         self.assertIn("account_balances", status)
+        self.assertIn("derivatives", status)
+        self.assertIn("funding_basis", status)
+        self.assertIn("options_arbitrage", status)
+        self.assertIn("contract_strategies", status)
+        self.assertIn("rows", status["contract_strategies"])
+        self.assertIn("execution_protection", status)
         self.assertIn("readiness", status)
         self.assertNotIn("trading_console", status)
         self.assertNotIn("recent_opportunities", status)
@@ -3482,6 +4333,15 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("config", settings["market_maker"])
         self.assertIn("spot_markets", settings["config"])
         self.assertNotIn("account_balances", settings)
+        self.assertNotIn("derivatives", settings)
+        self.assertIn("funding_basis", settings)
+        self.assertNotIn("rows", settings["funding_basis"])
+        self.assertIn("options_arbitrage", settings)
+        self.assertNotIn("rows", settings["options_arbitrage"])
+        self.assertIn("contract_strategies", settings)
+        self.assertNotIn("rows", settings["contract_strategies"])
+        self.assertIn("execution_protection", settings)
+        self.assertNotIn("rows", settings["execution_protection"])
         self.assertNotIn("readiness", settings)
         self.assertIn("risk", settings["operations"])
         self.assertNotIn("trade_log", settings["operations"])
@@ -3535,7 +4395,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("known_trade_ids", view_task)
         self.assertNotIn("order_created_at", view_task)
         self.assertEqual(view_task["config"]["exchange"], "coinbase-spot")
-        self.assertNotIn("price_mode", view_task["config"])
+        self.assertEqual(view_task["config"]["price_mode"], "taker")
+        self.assertIn("total_quote", view_task["config"])
 
     async def test_program_state_persists_in_runtime_store(self) -> None:
         cfg = make_config()

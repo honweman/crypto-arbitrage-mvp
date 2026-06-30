@@ -8,7 +8,91 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    let refreshQueued = false;
 	    const pageStateCache = {};
 	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
+	    const REFRESH_INTERVAL_MS = 2000;
+	    const PAGE_SECTION_IDS = {
+	      status: [
+	        "overview",
+	        "readiness-actions",
+	        "markets",
+	        "account-balances",
+	        "derivatives-risk",
+	        "funding-basis",
+	        "contract-strategies",
+	        "options-arbitrage",
+	        "rates",
+	        "opportunities",
+	        "holders",
+	      ],
+	      settings: [
+	        "markets-config",
+	        "carry-config",
+	        "risk-form",
+	        "strategy-instances",
+	        "api-accounts",
+	        "funding-arb-form",
+	        "signal-bot-form",
+	        "mm-orders",
+	        "slow-orders",
+	        "grid-orders",
+	        "dca-orders",
+	        "exec-schedule",
+	        "backtest-points",
+	      ],
+	      records: [
+	        "console-strategies",
+	        "open-orders",
+	        "strategy-timeline",
+	        "audit-events",
+	        "holder-changes",
+	      ],
+	    };
+	    const HIDDEN_UI_FEATURES = new Set([
+	      "api_accounts",
+	      "audit_trail",
+	      "backtest",
+	      "cash_and_carry",
+	      "contract_strategies",
+	      "dca",
+	      "derivatives",
+	      "execution_algo",
+	      "funding_arbitrage",
+	      "funding_basis",
+	      "market_config",
+	      "onchain_history",
+	      "onchain_monitor",
+	      "options_arbitrage",
+	      "orders_detail",
+	      "quote_rates",
+	      "readiness",
+	      "scan_status",
+	      "signal_bot",
+	      "spot_grid",
+	      "strategy_center",
+	      "strategy_timeline",
+	    ]);
 	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
+
+    function uiFeatureNamesFor(el) {
+      return String(el?.dataset?.uiFeature || "")
+        .split(/\s+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+
+    function isUiFeatureHidden(el) {
+      if (!el) return false;
+      const target = el.closest?.("[data-ui-feature]") || el;
+      if (target.dataset?.uiHiddenDefault === "true") return true;
+      return uiFeatureNamesFor(target).some((feature) => HIDDEN_UI_FEATURES.has(feature));
+    }
+
+    function applyFeatureVisibility() {
+      document.querySelectorAll("[data-ui-feature]").forEach((el) => {
+        const hidden = isUiFeatureHidden(el);
+        el.classList.toggle("ui-feature-hidden", hidden);
+        el.setAttribute("aria-hidden", hidden ? "true" : "false");
+      });
+    }
 
     function pageFromLocation() {
       const hashPage = window.location.hash.replace("#", "");
@@ -17,12 +101,13 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return PAGE_IDS.has(hashPage) ? hashPage : "status";
     }
 
-	    function setActivePage(page, options = {}) {
-	      const activePage = PAGE_IDS.has(page) ? page : "status";
-	      currentPage = activePage;
-	      document.querySelectorAll("[data-page]").forEach((el) => {
-	        el.classList.toggle("active-page", el.dataset.page === activePage);
-	      });
+		    function setActivePage(page, options = {}) {
+		      const activePage = PAGE_IDS.has(page) ? page : "status";
+		      currentPage = activePage;
+	      applyFeatureVisibility();
+		      document.querySelectorAll("[data-page]").forEach((el) => {
+		        el.classList.toggle("active-page", el.dataset.page === activePage);
+		      });
       document.querySelectorAll("[data-view-tab]").forEach((tab) => {
         const active = tab.dataset.viewTab === activePage;
         tab.classList.toggle("active", active);
@@ -52,21 +137,54 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         title.setAttribute("tabindex", "0");
         title.addEventListener("click", (event) => {
           if (event.target.closest("a, button, input, label, select, textarea")) return;
+          if (isUiFeatureHidden(section)) return;
           section.classList.toggle("section-open");
           sync();
+          refreshOpenedSection(section);
         });
         title.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
+          if (isUiFeatureHidden(section)) return;
           event.preventDefault();
           section.classList.toggle("section-open");
           sync();
+          refreshOpenedSection(section);
         });
         sync();
       });
     }
 
     function text(id, value) {
-      document.getElementById(id).textContent = value;
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    function isSectionOpenFor(id) {
+      const el = document.getElementById(id);
+      const section = el?.closest(".compact-section");
+      if (section && isUiFeatureHidden(section)) return false;
+      return !section || section.classList.contains("section-open");
+    }
+
+    function renderOpenSection(id, renderFn) {
+      if (!isSectionOpenFor(id)) return;
+      renderFn();
+    }
+
+    function openSectionIdsForPage(page) {
+      return (PAGE_SECTION_IDS[page] || []).filter((id) => isSectionOpenFor(id));
+    }
+
+    function refreshOpenedSection(section) {
+      if (isUiFeatureHidden(section)) return;
+      if (!section.classList.contains("section-open") || section.dataset.page !== currentPage) return;
+      const cachedState = pageStateCache[currentPage] || lastState;
+      if (cachedState) {
+        window.requestAnimationFrame(() => {
+          renderVisiblePage(cachedState, currentPage, { force: true });
+        });
+      }
+      refresh({ force: true });
     }
 
     function formatAge(ts) {
@@ -81,6 +199,10 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 
     function quoteCurrency(symbol) {
       return (String(symbol || "").split("/")[1] || "QUOTE").split(":")[0];
+    }
+
+    function uiText(source) {
+      return window.CryptoArbI18n?.t?.(source) || source;
     }
 
     function formatSymbolQuantity(value, symbol, mode) {
@@ -123,8 +245,17 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return Math.abs(value) >= 1_000_000 ? shortNumber.format(value) : fmt.format(value);
     }
 
+    function formatBps(value) {
+      if (value == null) return "--";
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return "--";
+      return `${numeric.toFixed(2)} bps`;
+    }
+
 function balanceStatusClass(status) {
       if (status === "ok") return "ok";
+      if (status === "candidate") return "ok";
+      if (status === "blocked") return "risk-blocked";
       if (["idle", "starting", "checking"].includes(status)) return "subtle";
       return "missing";
     }
@@ -215,6 +346,323 @@ function balanceStatusClass(status) {
           `;
           body.appendChild(tr);
         }
+      }
+    }
+
+    function renderDerivativesRisk(derivatives) {
+      text(
+        "derivatives-risk-meta",
+        derivatives
+          ? `${derivatives.status || "unknown"} · checked ${derivatives.checked_account_count || 0}/${derivatives.total_account_count || 0} · positions ${derivatives.position_count || 0} · ${formatAge(derivatives.last_finished)}`
+          : ""
+      );
+      const body = document.getElementById("derivatives-risk");
+      body.innerHTML = "";
+      const accounts = derivatives?.accounts || [];
+      if (accounts.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="10">No derivative accounts configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const account of accounts) {
+        const positions = account.positions || [];
+        if (positions.length === 0) {
+          const message = account.error || account.skipped_reason || (account.risk_reasons || []).join(" · ") || "No open positions.";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td colspan="8">${escapeHtml(message)}</td>
+            <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
+          `;
+          body.appendChild(tr);
+          continue;
+        }
+        for (const position of positions) {
+          const funding = position.funding_rate == null ? "--" : `${(Number(position.funding_rate) * 100).toFixed(4)}%`;
+          const buffer = position.liquidation_buffer_pct == null ? "--" : `${Number(position.liquidation_buffer_pct).toFixed(2)}%`;
+          const reasons = (position.risk_reasons || []).join(" · ");
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td>${escapeHtml(position.symbol || "--")}</td>
+            <td class="${position.side === "long" ? "side-buy" : position.side === "short" ? "side-sell" : ""}">${escapeHtml(String(position.side || "--").toUpperCase())}</td>
+            <td class="num">${formatBalanceAmount(position.notional_quote)}</td>
+            <td class="num">${position.leverage == null ? "--" : fmt.format(position.leverage)}</td>
+            <td class="num">${position.mark_price == null ? "--" : fmt.format(position.mark_price)}</td>
+            <td class="num">${position.liquidation_price == null ? "--" : fmt.format(position.liquidation_price)}</td>
+            <td class="num">${buffer}</td>
+            <td class="num">${funding}</td>
+            <td class="${position.status === "blocked" ? "risk-blocked" : "ok"}" title="${escapeHtml(reasons)}">${escapeHtml(position.status || "--")}</td>
+          `;
+          body.appendChild(tr);
+        }
+      }
+    }
+
+    function renderFundingBasis(fundingBasis) {
+      text(
+        "funding-basis-meta",
+        fundingBasis
+          ? `${fundingBasis.status || "unknown"} · candidates ${fundingBasis.candidate_count || 0} · checked ${fundingBasis.checked_count || 0}/${fundingBasis.configured_count || 0} · ${formatAge(fundingBasis.last_finished)}`
+          : ""
+      );
+      const body = document.getElementById("funding-basis");
+      body.innerHTML = "";
+      const rows = fundingBasis?.rows || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No funding/basis pair configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const paper = row.paper_execution || {};
+        const protection = paper.protection || {};
+        const legs = (paper.suggested_legs || [])
+          .map((leg) => `${leg.side} ${leg.symbol} @ ${leg.exchange}`)
+          .join(" / ");
+        const protectionText = protection.status ? ` · protection ${protection.status}` : "";
+        const protectionTitle = [
+          ...(protection.reasons || []),
+          ...(protection.warnings || []),
+          ...((protection.playbooks || []).map((item) => `${item.event}: ${item.action}`)),
+        ].filter(Boolean).join(" · ");
+        const reason = [
+          row.reason,
+          ...(row.warnings || []),
+          protectionTitle,
+        ].filter(Boolean).join(" · ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(row.pair_id || "")}">${escapeHtml(row.pair_id || "--")}</td>
+          <td>${escapeHtml(row.spot_exchange || "--")}<br><span class="subtle">${escapeHtml(row.spot_symbol || "--")}</span><br>${escapeHtml(row.derivative_exchange || "--")}<br><span class="subtle">${escapeHtml(row.derivative_symbol || "--")}</span></td>
+          <td class="num">${row.spot_mid == null ? "--" : fmt.format(row.spot_mid)}</td>
+          <td class="num">${row.derivative_mid == null ? "--" : fmt.format(row.derivative_mid)}</td>
+          <td class="num">${formatBps(row.basis_bps)}</td>
+          <td class="num" title="${row.estimated_apr_pct == null ? "" : `APR ${Number(row.estimated_apr_pct).toFixed(2)}%`}">${formatBps(row.funding_rate_bps)}</td>
+          <td>${escapeHtml(paper.state || "--")}<br><span class="subtle" title="${escapeHtml(protectionTitle)}">${escapeHtml((legs || paper.reason || "--") + protectionText)}</span></td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function contractSignalText(signal) {
+      if (!signal || typeof signal !== "object") return ["--", ""];
+      const primary = signal.primary || "--";
+      if (primary === "funding") {
+        const apr = signal.estimated_apr_pct == null
+          ? "APR --"
+          : `APR ${formatMaybeNumber(signal.estimated_apr_pct)}%`;
+        return [
+          `Funding ${formatBps(signal.funding_rate_bps)}`,
+          `Basis ${formatBps(signal.basis_bps)} · ${apr}`,
+        ];
+      }
+      if (primary === "basis") {
+        return [
+          `Basis ${formatBps(signal.basis_bps)}`,
+          `Entry ${formatBps(signal.threshold_bps)} · Exit ${formatBps(signal.exit_bps)}`,
+        ];
+      }
+      if (primary === "grid") {
+        return [
+          `Mid ${formatMaybeNumber(signal.mid_price)}`,
+          signal.detail || "",
+        ];
+      }
+      if (primary === "delta") {
+        return [
+          `Delta ${formatMaybeNumber(signal.net_mm_delta_base)}`,
+          `Threshold ${formatMaybeNumber(signal.threshold_base)} · fills ${signal.trade_count || 0}`,
+        ];
+      }
+      return [String(primary), signal.detail || ""];
+    }
+
+    function contractPlanText(plan) {
+      if (!plan || typeof plan !== "object") return ["--", ""];
+      const summary = plan.summary || "--";
+      const orderCount = plan.order_count == null ? null : Number(plan.order_count);
+      const detail = [
+        plan.notional_quote == null ? "" : `Notional ${formatMaybeNumber(plan.notional_quote, money)}`,
+        orderCount == null ? "" : `${orderCount} orders`,
+        plan.leverage == null ? "" : `${formatMaybeNumber(plan.leverage)}x`,
+        plan.post_only == null ? "" : (plan.post_only ? "post-only" : "taker"),
+      ].filter(Boolean).join(" · ");
+      return [summary, detail];
+    }
+
+    function renderContractStrategies(contractStrategies) {
+      text(
+        "contract-strategies-meta",
+        contractStrategies
+          ? `${contractStrategies.status || "unknown"} · candidates ${contractStrategies.candidate_count || 0} · blocked ${contractStrategies.blocked_count || 0} · ${formatAge(contractStrategies.last_finished)}`
+          : ""
+      );
+      const summary = document.getElementById("contract-strategies-summary");
+      if (summary) {
+        const items = [
+          ["Funding", contractStrategies?.summary?.funding_bot?.status || "--", `${contractStrategies?.summary?.funding_bot?.candidate_count || 0} candidates`],
+          ["Basis", contractStrategies?.summary?.basis_bot?.status || "--", `${contractStrategies?.summary?.basis_bot?.candidate_count || 0} candidates`],
+          ["Grid", contractStrategies?.summary?.futures_grid?.status || "--", `${contractStrategies?.summary?.futures_grid?.row_count || 0} plans`],
+          ["Hedge", contractStrategies?.summary?.hedge_rebalancer?.status || "--", `${contractStrategies?.summary?.hedge_rebalancer?.candidate_count || 0} hedges`],
+          ["Mode", contractStrategies?.mode || "paper", "auto-submit off"],
+        ];
+        summary.innerHTML = items.map(([label, value, detail]) => `
+          <div class="metric compact">
+            <div class="label">${escapeHtml(label)}</div>
+            <div class="value">${escapeHtml(value)}</div>
+            <div class="detail">${escapeHtml(detail)}</div>
+          </div>
+        `).join("");
+      }
+      const body = document.getElementById("contract-strategies");
+      if (!body) return;
+      body.innerHTML = "";
+      const rows = contractStrategies?.rows || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">No contract strategy rows.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const [signalPrimary, signalDetail] = contractSignalText(row.signal);
+        const [planPrimary, planDetail] = contractPlanText(row.plan);
+        const risk = row.risk || {};
+        const riskMessages = [
+          ...(risk.reasons || []),
+          ...(risk.warnings || []),
+          ...(row.warnings || []),
+        ].filter(Boolean).join(" · ");
+        const reason = [
+          row.reason,
+          riskMessages,
+        ].filter(Boolean).join(" · ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(row.strategy || "--")}<br><span class="subtle">${escapeHtml(row.plan?.mode || "paper")}</span></td>
+          <td title="${escapeHtml(row.market?.label || "")}">${escapeHtml(row.market?.label || "--")}</td>
+          <td>${escapeHtml(signalPrimary)}<br><span class="subtle">${escapeHtml(signalDetail)}</span></td>
+          <td>${escapeHtml(planPrimary)}<br><span class="subtle">${escapeHtml(planDetail)}</span></td>
+          <td class="${risk.status === "blocked" ? "risk-blocked" : risk.status === "warning" ? "missing" : "ok"}" title="${escapeHtml(riskMessages)}">${escapeHtml(risk.status || "--")}</td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function formatMaybeNumber(value, formatter = fmt) {
+      return value == null || !Number.isFinite(Number(value)) ? "--" : formatter.format(Number(value));
+    }
+
+    function renderOptionsRiskSummary(optionsArbitrage) {
+      const container = document.getElementById("options-risk-summary");
+      if (!container) return;
+      const risk = optionsArbitrage?.risk || {};
+      const controls = risk.controls || optionsArbitrage?.execution_controls || {};
+      const expiryReminders = risk.expiry_reminders || [];
+      const items = [
+        ["Risk", risk.status || optionsArbitrage?.status || "--", `${risk.blocked_new_open_count || 0} blocked opens`],
+        ["Delta", formatMaybeNumber(risk.total_delta), `Gamma ${formatMaybeNumber(risk.total_gamma)}`],
+        ["Vega", formatMaybeNumber(risk.total_vega), `Theta ${formatMaybeNumber(risk.total_theta)}`],
+        ["Expiry", `${expiryReminders.length || 0} alerts`, `${(risk.expiry_concentration || []).length || 0} expiries`],
+        ["Payoff", formatMaybeNumber(risk.max_profit_quote, money), `Max loss ${formatMaybeNumber(risk.max_loss_quote, money)}`],
+        ["Liquidity", `${formatMaybeNumber(controls.min_option_depth_quote)} min depth`, `${formatBps(controls.max_option_spread_bps)}`],
+      ];
+      container.innerHTML = items.map(([label, value, detail]) => `
+        <div class="metric compact">
+          <div class="label">${escapeHtml(label)}</div>
+          <div class="value">${escapeHtml(value)}</div>
+          <div class="detail">${escapeHtml(detail)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderOptionsChain(optionsArbitrage) {
+      const body = document.getElementById("options-chain");
+      if (!body) return;
+      body.innerHTML = "";
+      const rows = optionsArbitrage?.option_chain || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No option chain rows.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const reason = (row.reasons || []).join(" · ");
+        const greeks = [
+          `D ${formatMaybeNumber(row.delta)}`,
+          `G ${formatMaybeNumber(row.gamma)}`,
+          `V ${formatMaybeNumber(row.vega)}`,
+          `T ${formatMaybeNumber(row.theta)}`,
+        ].join(" / ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(row.expiry || "--")}<br><span class="subtle">${row.days_to_expiry == null ? "--" : `${Number(row.days_to_expiry).toFixed(1)}d`} · K ${formatMaybeNumber(row.strike)}</span></td>
+          <td>${escapeHtml(row.option_type || "--")}<br><span class="subtle">${escapeHtml(row.symbol || "--")}</span></td>
+          <td class="num">${formatMaybeNumber(row.bid)} / ${formatMaybeNumber(row.ask)}</td>
+          <td class="num">${formatMaybeNumber(row.mark_price)}<br><span class="subtle">${row.iv == null ? "IV --" : `IV ${formatMaybeNumber(row.iv)}`}</span></td>
+          <td class="num">${formatMaybeNumber(row.min_depth_quote, money)}<br><span class="subtle">${formatBps(row.spread_bps)}</span></td>
+          <td class="num">${formatMaybeNumber(row.volume)} / ${formatMaybeNumber(row.open_interest)}</td>
+          <td class="num" title="${escapeHtml(greeks)}">${escapeHtml(greeks)}</td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderOptionsArbitrage(optionsArbitrage) {
+      renderOptionsRiskSummary(optionsArbitrage);
+      renderOptionsChain(optionsArbitrage);
+      text(
+        "options-arbitrage-meta",
+        optionsArbitrage
+          ? `${optionsArbitrage.status || "unknown"} · candidates ${optionsArbitrage.candidate_count || 0} (${optionsArbitrage.parity_candidate_count || 0} parity / ${optionsArbitrage.enhanced_candidate_count || 0} enhanced) · checked ${optionsArbitrage.checked_count || 0}/${optionsArbitrage.configured_count || 0} · ${formatAge(optionsArbitrage.last_finished)}`
+          : ""
+      );
+      const body = document.getElementById("options-arbitrage");
+      body.innerHTML = "";
+      const rows = optionsArbitrage?.rows || [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">No option combo configured.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const paper = row.paper_execution || {};
+        const protection = paper.protection || {};
+        const ticket = paper.order_ticket || {};
+        const opportunity = row.opportunity || {};
+        const edge = opportunity.profit_bps == null ? "" : ` · edge ${formatBps(opportunity.profit_bps)}`;
+        const protectionText = protection.status ? ` · protection ${protection.status}` : "";
+        const ticketText = ticket.order_count ? ` · ticket ${ticket.order_count}` : "";
+        const protectionTitle = [
+          ...(protection.reasons || []),
+          ...(protection.warnings || []),
+          ...((protection.playbooks || []).map((item) => `${item.event}: ${item.action}`)),
+        ].filter(Boolean).join(" · ");
+        const legs = (paper.suggested_legs || [])
+          .map((leg) => `${leg.side} ${leg.symbol}`)
+          .join(" / ");
+        const comboTitle = `${row.underlying || "--"} ${row.expiry || ""} K=${row.strike || "--"}`;
+        const reason = [row.reason, ...(row.reasons || []), protectionTitle].filter(Boolean).join(" · ");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(comboTitle)}">${escapeHtml(row.underlying || "--")}<br><span class="subtle">K ${row.strike || "--"} ${escapeHtml(row.expiry || "")}</span></td>
+          <td>${escapeHtml(row.spot_symbol || "--")}<br><span class="subtle">${escapeHtml(row.call_symbol || "--")} / ${escapeHtml(row.put_symbol || "--")}</span></td>
+          <td class="num">${row.spot_mid == null ? "--" : fmt.format(row.spot_mid)}</td>
+          <td class="num">${row.call_mid == null ? "--" : fmt.format(row.call_mid)}</td>
+          <td class="num">${row.put_mid == null ? "--" : fmt.format(row.put_mid)}</td>
+          <td class="num">${formatBps(row.parity_gap_bps)}</td>
+          <td>${escapeHtml(paper.state || "--")}<br><span class="subtle" title="${escapeHtml(protectionTitle)}">${escapeHtml((legs || paper.reason || "--") + edge + protectionText + ticketText)}</span></td>
+          <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
+        `;
+        body.appendChild(tr);
       }
     }
 
@@ -345,7 +793,7 @@ function balanceStatusClass(status) {
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || "cancel failed");
         if (payload.order_activity) {
-          renderOrderActivity(payload.order_activity);
+          renderOpenSection("open-orders", () => renderOrderActivity(payload.order_activity));
         }
         await refresh();
       } catch (error) {
@@ -510,7 +958,9 @@ function balanceStatusClass(status) {
         });
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "cancel failed");
-        if (result.order_activity) renderOrderActivity(result.order_activity);
+        if (result.order_activity) {
+          renderOpenSection("open-orders", () => renderOrderActivity(result.order_activity));
+        }
         await refresh();
       } catch (error) {
         text("console-meta", `cancel failed: ${error.message || error}`);
@@ -1047,12 +1497,11 @@ function balanceStatusClass(status) {
       }
     }
 
-    function renderOperations(ops) {
+    function renderRiskEvents(ops) {
       const risk = ops?.risk || {};
       const alerts = ops?.alerts || {};
       const tradeLog = ops?.trade_log || {};
       const timeline = ops?.strategy_timeline || {};
-      const audit = ops?.web_audit || {};
       const dailyPnl = ops?.daily_pnl || {};
       const summary = tradeLog.summary || {};
       const timelineSummary = timeline.summary || {};
@@ -1129,7 +1578,10 @@ function balanceStatusClass(status) {
         `;
         body.appendChild(tr);
       }
+    }
 
+    function renderAuditTrail(ops) {
+      const audit = ops?.web_audit || {};
       text(
         "audit-meta",
         `${audit.enabled === false ? "off" : "on"} · ${audit.recent_events?.length || 0} recent · ${audit.error || audit.path || ""}`
@@ -1160,6 +1612,11 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderOperations(ops) {
+      renderRiskEvents(ops);
+      renderAuditTrail(ops);
+    }
+
     function setValueState(id, value, stateClass) {
       const el = document.getElementById(id);
       el.textContent = value;
@@ -1175,6 +1632,7 @@ function balanceStatusClass(status) {
     }
 
     function renderMarketMakerSafety(marketMaker) {
+      marketMaker = selectedMarketMakerInstance(marketMaker) || marketMaker;
       const plan = marketMaker?.plan || {};
       const planOrders = Array.isArray(plan.orders) ? plan.orders : [];
       const safety = marketMaker?.safety || {};
@@ -1282,6 +1740,7 @@ function balanceStatusClass(status) {
     }
 
     function renderMarketMaker(marketMaker) {
+      marketMaker = selectedMarketMakerInstance(marketMaker) || marketMaker;
       const body = document.getElementById("mm-orders");
       body.innerHTML = "";
       if (!marketMaker || !marketMaker.plan || !marketMaker.plan.orders || marketMaker.plan.orders.length === 0) {
@@ -1344,8 +1803,8 @@ function balanceStatusClass(status) {
         <td class="num">${remainingText}</td>
         <td class="num">${plan.interval_seconds}s</td>
         <td class="num">${plan.order_ttl_seconds || 0}s</td>
-        <td class="num">${plan.start_price ? fmt.format(plan.start_price) : "--"}</td>
-        <td class="num">${plan.stop_price ? fmt.format(plan.stop_price) : "--"}</td>
+        <td>${escapeHtml(autoStartGateText(plan))}</td>
+        <td>${escapeHtml(autoStopGateText(plan))}</td>
       `;
       body.appendChild(tr);
     }
@@ -1495,9 +1954,97 @@ function balanceStatusClass(status) {
         .filter(Boolean);
     }
 
+    function strategyUniverseAccounts(kind = "all") {
+      const universe = lastState?.config?.strategy_universe || {};
+      return universe?.[kind]?.accounts || [];
+    }
+
+    function appendOption(select, value, label, title = "") {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      if (title) option.title = title;
+      select.appendChild(option);
+    }
+
+    function setSelectOptions(selectId, rows, selectedValue, placeholder) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const normalizedRows = rows.filter((row) => row && row.value);
+      const signature = JSON.stringify({
+        rows: normalizedRows,
+        selectedValue,
+        placeholder,
+      });
+      if (select.dataset.signature === signature) return;
+      select.dataset.signature = signature;
+      select.innerHTML = "";
+      appendOption(select, "", placeholder);
+      for (const row of normalizedRows) {
+        appendOption(select, row.value, row.label || row.value, row.title || "");
+      }
+      if (selectedValue && !normalizedRows.some((row) => row.value === selectedValue)) {
+        appendOption(select, selectedValue, selectedValue, "Current saved value");
+      }
+      select.value = selectedValue || "";
+    }
+
+    function renderStrategyInstanceAccountOptions(selectedAccountId) {
+      const accounts = lastState?.strategy_center?.user_api_accounts || [];
+      const rows = accounts.map((account) => ({
+        value: account.id,
+        label: `${account.label || account.id} · ${account.exchange || "--"}`,
+        title: `${account.owner_email || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
+      }));
+      setSelectOptions(
+        "strategy-instance-account",
+        rows,
+        selectedAccountId || "",
+        "No API account"
+      );
+    }
+
+    function renderStrategyInstanceMarketOptions(selectedExchange, selectedSymbol) {
+      const accounts = strategyUniverseAccounts("all");
+      const exchangeRows = accounts.map((account) => ({
+        value: account.key,
+        label: `${account.label || account.key} (${account.market_type || "spot"})`,
+        title: `${account.id || account.key} · ${accountSymbols(account).join(", ") || "no symbols"}`,
+      }));
+      setSelectOptions(
+        "strategy-instance-exchange",
+        exchangeRows,
+        selectedExchange || "",
+        "Select exchange"
+      );
+
+      const account = accountForKey(accounts, selectedExchange);
+      const symbolRows = accountSymbols(account).map((symbol) => ({
+        value: symbol,
+        label: symbol,
+      }));
+      const targetSymbol = selectedSymbol || symbolRows[0]?.value || "";
+      setSelectOptions(
+        "strategy-instance-symbol",
+        symbolRows,
+        targetSymbol,
+        "Select symbol"
+      );
+    }
+
+    function syncStrategyInstanceSymbols() {
+      const exchange = document.getElementById("strategy-instance-exchange").value;
+      renderStrategyInstanceMarketOptions(exchange, "");
+      const symbol = document.getElementById("strategy-instance-symbol").value;
+      const asset = document.getElementById("strategy-instance-asset");
+      if (symbol && !asset.value.trim()) asset.value = baseCurrency(symbol);
+    }
+
     function renderStrategyForm(strategy) {
       if (strategyCenterFormDirty || strategyCenterFormBusy) return;
       const authEmail = lastState?.auth?.email || "";
+      renderStrategyInstanceAccountOptions(strategy?.account_id || "");
+      renderStrategyInstanceMarketOptions(strategy?.exchange || "", strategy?.symbol || "");
       setFieldValue("strategy-instance-id", strategy?.id || "");
       setFieldValue("strategy-instance-name", strategy?.name || "");
       setFieldValue("strategy-instance-type", strategy?.strategy_type || "market_maker");
@@ -1722,7 +2269,8 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "api account update failed");
         apiAccountFormDirty = false;
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderApiAccountsPanel(result.strategy_center);
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(result.strategy_center));
       } catch (error) {
         text("api-accounts-meta", `update failed: ${error.message || error}`);
       } finally {
@@ -1743,7 +2291,8 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "delete failed");
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderApiAccountsPanel(result.strategy_center);
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(result.strategy_center));
       } catch (error) {
         text("api-accounts-meta", `delete failed: ${error.message || error}`);
       } finally {
@@ -1803,7 +2352,7 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "funding update failed");
         fundingArbFormDirty = false;
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderFundingArbitragePanel(result.strategy_center);
       } catch (error) {
         text("funding-arb-meta", `update failed: ${error.message || error}`);
       } finally {
@@ -1852,7 +2401,7 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "signal bot update failed");
         signalBotFormDirty = false;
         if (lastState) lastState.strategy_center = result.strategy_center;
-        renderStrategyCenter(result.strategy_center);
+        renderSignalBotPanel(result.strategy_center);
       } catch (error) {
         text("signal-bot-meta", `update failed: ${error.message || error}`);
       } finally {
@@ -1892,21 +2441,30 @@ function balanceStatusClass(status) {
         "strategy-center-meta",
         `${center?.status || "disabled"} · ${summary.strategy_count || 0} strategies · ${summary.api_account_count || 0} accounts · ${summary.recent_signal_count || 0} signals`
       );
+      renderStrategyForm((center?.strategy_instances || [])[0] || null);
+      renderStrategyInstances(center);
+    }
+
+    function renderApiAccountsPanel(center) {
+      renderApiAccountForm((center?.user_api_accounts || [])[0] || null);
+      renderApiAccounts(center);
+    }
+
+    function renderFundingArbitragePanel(center) {
       const funding = center?.funding_arbitrage || {};
       text(
         "funding-arb-meta",
         `${funding.enabled ? "enabled" : "disabled"} · ${funding.spot_symbol || "--"} / ${funding.derivative_symbol || "--"}`
       );
+      renderFundingArbConfig(center?.funding_arbitrage);
+    }
+
+    function renderSignalBotPanel(center) {
       const signalBot = center?.signal_bot || {};
       text(
         "signal-bot-meta",
         `${signalBot.enabled ? "enabled" : "disabled"} · secret ${signalBot.webhook_secret_set ? "set" : "missing"}`
       );
-      renderStrategyForm((center?.strategy_instances || [])[0] || null);
-      renderStrategyInstances(center);
-      renderApiAccountForm((center?.user_api_accounts || [])[0] || null);
-      renderApiAccounts(center);
-      renderFundingArbConfig(center?.funding_arbitrage);
       renderSignalBotConfig(center?.signal_bot);
       renderSignalEvents(center);
     }
@@ -1917,13 +2475,216 @@ function balanceStatusClass(status) {
       return seconds <= 0 ? "due" : `${seconds.toFixed(0)}s`;
     }
 
-    function renderSlowExecutionTasks(taskPayload) {
+    const AUTO_TERMINAL_STATUSES = new Set(["complete", "stopped", "stopped_by_price", "below_min_order_quote"]);
+    const AUTO_CONFIG_COMPARE_FIELDS = [
+      ["exchange", "Account", "string"],
+      ["symbol", "Symbol", "string"],
+      ["side", "Side", "string"],
+      ["price_mode", "Price", "string"],
+      ["price_offset_bps", "Offset", "number"],
+      ["unlimited_total", "Unlimited", "boolean"],
+      ["total_base", "Total Base", "number"],
+      ["total_quote", "Total Quote", "number"],
+      ["slice_mode", "Size Mode", "string"],
+      ["slice_base", "Base/Order", "number"],
+      ["slice_quote", "Quote/Order", "number"],
+      ["slice_base_min", "Min Base", "number"],
+      ["slice_base_max", "Max Base", "number"],
+      ["randomize_slice", "Random", "boolean"],
+      ["interval_seconds", "Place Sec", "number"],
+      ["order_ttl_seconds", "Cancel Sec", "number"],
+      ["start_price", "Start", "number"],
+      ["stop_price", "Stop", "number"],
+      ["block_conflicting_market_maker", "MM Guard", "boolean"],
+    ];
+
+    function normalizeAutoConfigValue(value, type) {
+      if (type === "boolean") return Boolean(value);
+      if (type === "number") {
+        const number = Number(value || 0);
+        return Number.isFinite(number) ? Math.round(number * 1e12) / 1e12 : 0;
+      }
+      return String(value ?? "").trim();
+    }
+
+    function autoConfigValueText(value, type) {
+      if (type === "boolean") return Boolean(value) ? "on" : "off";
+      if (type === "number") return fmt.format(Number(value || 0));
+      return String(value ?? "--") || "--";
+    }
+
+    function autoStartGateText(config) {
+      const start = Number(config?.start_price || 0);
+      if (start <= 0) return "start off";
+      const quote = quoteCurrency(config?.symbol);
+      return config?.side === "sell"
+        ? `AutoSell start: Bid >= ${fmt.format(start)} ${quote}`
+        : `AutoBuy start: Ask <= ${fmt.format(start)} ${quote}`;
+    }
+
+    function autoStopGateText(config) {
+      const stop = Number(config?.stop_price || 0);
+      if (stop <= 0) return "stop off";
+      const quote = quoteCurrency(config?.symbol);
+      return config?.side === "sell"
+        ? `AutoSell stop: Bid <= ${fmt.format(stop)} ${quote}`
+        : `AutoBuy stop: Ask >= ${fmt.format(stop)} ${quote}`;
+    }
+
+    function autoConfigSummary(config) {
+      if (!config) return "No default config";
+      const side = String(config.side || "--").toUpperCase();
+      const total = Number(config.total_quote || 0) > 0
+        ? `${quoteCurrency(config.symbol)} ${fmt.format(config.total_quote)}`
+        : Number(config.total_base || 0) > 0
+        ? `${baseCurrency(config.symbol)} ${fmt.format(config.total_base)}`
+        : (config.unlimited_total ? "Unlimited" : "No target");
+      const slice = config.slice_mode === "top_level"
+        ? "Top level size"
+        : Number(config.slice_base_min || 0) || Number(config.slice_base_max || 0)
+        ? `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base_min || 0)}-${fmt.format(config.slice_base_max || 0)}`
+        : Number(config.slice_quote || 0) > 0
+        ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
+        : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
+      const guard = config.block_conflicting_market_maker === false ? "MM guard off" : "MM guard on";
+      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard}`;
+    }
+
+    function compareAutoTaskConfig(taskConfig, defaultConfig) {
+      if (!taskConfig || !defaultConfig) return [];
+      return AUTO_CONFIG_COMPARE_FIELDS
+        .map(([key, label, type]) => {
+          const taskValue = normalizeAutoConfigValue(taskConfig[key], type);
+          const defaultValue = normalizeAutoConfigValue(defaultConfig[key], type);
+          if (taskValue === defaultValue) return null;
+          return {
+            key,
+            label,
+            task: autoConfigValueText(taskConfig[key], type),
+            default: autoConfigValueText(defaultConfig[key], type),
+          };
+        })
+        .filter(Boolean);
+    }
+
+    function renderSlowConfigStatus(taskPayload, defaultConfig) {
+      const box = document.getElementById("slow-config-status");
+      if (!box) return;
+      const tasks = taskPayload?.tasks || [];
+      const runningTasks = tasks.filter((task) => !AUTO_TERMINAL_STATUSES.has(task.status || ""));
+      const compared = runningTasks.map((task) => ({
+        task,
+        diffs: compareAutoTaskConfig(task.config || {}, defaultConfig || {}),
+      }));
+      const diffTasks = compared.filter((item) => item.diffs.length > 0);
+      const defaultText = autoConfigSummary(defaultConfig);
+      if (runningTasks.length === 0) {
+        box.innerHTML = `
+          <div><span class="config-chip config-neutral">Default</span>${escapeHtml(defaultText)}</div>
+          <div class="subtle">No active Auto Buy/Sell task. New tasks will use the default configuration above.</div>
+        `;
+        return;
+      }
+      const statusClass = diffTasks.length ? "config-diff" : "config-same";
+      const statusText = diffTasks.length
+        ? `${diffTasks.length}/${runningTasks.length} active task(s) differ from defaults`
+        : `${runningTasks.length} active task(s) match defaults`;
+      const details = compared
+        .slice(0, 4)
+        .map(({ task, diffs }) => {
+          const label = `${shortId(task.id)} ${task.config?.exchange || "--"} ${task.config?.symbol || "--"}`;
+          if (!diffs.length) return `<li><strong>${escapeHtml(label)}</strong>: matches default</li>`;
+          const diffText = diffs.slice(0, 5).map((diff) => `${diff.label}: ${diff.task} vs ${diff.default}`).join("; ");
+          const more = diffs.length > 5 ? `; +${diffs.length - 5} more` : "";
+          return `<li><strong>${escapeHtml(label)}</strong>: ${escapeHtml(diffText + more)}</li>`;
+        })
+        .join("");
+      box.innerHTML = `
+        <div><span class="config-chip config-neutral">Default</span>${escapeHtml(defaultText)}</div>
+        <div><span class="config-chip ${statusClass}">${diffTasks.length ? "Different" : "Same"}</span>${escapeHtml(statusText)}</div>
+        <ul>${details}</ul>
+      `;
+    }
+
+    function autoTaskConfigCell(task, defaultConfig) {
+      const diffs = compareAutoTaskConfig(task.config || {}, defaultConfig || {});
+      if (!diffs.length) {
+        return {
+          className: "risk-ok",
+          html: "Same as default",
+          title: "Current running task config matches the default form config",
+        };
+      }
+      const title = diffs
+        .map((diff) => `${diff.label}: task ${diff.task}, default ${diff.default}`)
+        .join("\n");
+      const rows = diffs
+        .map((diff) => `
+          <div class="config-diff-row">
+            <span>${escapeHtml(diff.label)}</span>
+            <span title="Running task">${escapeHtml(diff.task)}</span>
+            <span title="Default form">${escapeHtml(diff.default)}</span>
+          </div>
+        `)
+        .join("");
+      return {
+        className: "missing",
+        html: `
+          <details class="config-diff-details">
+            <summary>${diffs.length} diff${diffs.length === 1 ? "" : "s"}</summary>
+            <div class="config-diff-grid">
+              <div class="config-diff-head">Field</div>
+              <div class="config-diff-head">Task</div>
+              <div class="config-diff-head">Default</div>
+              ${rows}
+            </div>
+          </details>
+        `,
+        title,
+      };
+    }
+
+    function autoTaskLastOrderText(task, config) {
+      const order = task.last_plan?.order || null;
+      const riskReasons = task.last_risk?.reasons || [];
+      if (!order) return riskReasons[0] || task.last_status || "--";
+      const side = String(order.side || config.side || "").toUpperCase();
+      const amount = formatSymbolQuantity(order.amount, config.symbol, "base");
+      const price = order.price == null ? "--" : fmt.format(order.price);
+      return `${side} ${amount} @ ${price}`;
+    }
+
+    function autoTaskDetailTitle(task) {
+      const config = task.config || {};
+      const execution = task.last_execution || {};
+      const orderIds = execution.placed_order_ids || [];
+      const lastOrderId = orderIds.length ? orderIds[orderIds.length - 1] : "";
+      const lastPlan = task.last_plan || {};
+      const parts = [
+        `last status: ${task.last_status || task.status || "--"}`,
+        `placed: ${task.placed_count || 0}`,
+        `canceled: ${task.canceled_count || 0}`,
+        `start: ${task.start_price_triggered ? "triggered" : "waiting"}`,
+        autoStartGateText(config),
+        autoStopGateText(config),
+      ];
+      if (lastPlan.trigger_price != null) parts.push(`trigger: ${fmt.format(lastPlan.trigger_price)}`);
+      if (lastOrderId) parts.push(`last order: ${lastOrderId}`);
+      for (const reason of task.last_risk?.reasons || []) {
+        parts.push(`risk: ${reason}`);
+      }
+      if (task.last_error) parts.push(`error: ${task.last_error}`);
+      return parts.join(" · ");
+    }
+
+    function renderSlowExecutionTasks(taskPayload, defaultConfig) {
       const body = document.getElementById("slow-tasks");
       body.innerHTML = "";
       const tasks = taskPayload?.tasks || [];
+      renderSlowConfigStatus(taskPayload, defaultConfig);
       if (tasks.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="11">No Auto Buy/Sell tasks.</td>`;
+        tr.innerHTML = `<td colspan="12">No Auto Buy/Sell tasks.</td>`;
         body.appendChild(tr);
         return;
       }
@@ -1931,7 +2692,7 @@ function balanceStatusClass(status) {
       for (const task of tasks) {
         const config = task.config || {};
         const status = task.status || "--";
-        const terminal = ["complete", "stopped", "stopped_by_price", "below_min_order_quote"].includes(status);
+        const terminal = AUTO_TERMINAL_STATUSES.has(status);
         const statusClass = status === "complete" ? "risk-ok" : status === "paused" || status === "stopped" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
         const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
         const progressMode = task.progress_mode || ((config.total_quote || 0) > 0 ? "quote" : "base");
@@ -1940,21 +2701,25 @@ function balanceStatusClass(status) {
         const totalValue = progressMode === "quote" ? config.total_quote : config.total_base;
         const remainingValue = progressMode === "quote" ? task.remaining_quote : task.remaining_base;
         const filledText = unlimited
-          ? `${progressLabel} ${formatSymbolQuantity(task.filled_base, config.symbol, "base")} / Unlimited`
+          ? `${progressLabel} ${formatSymbolQuantity(task.filled_base, config.symbol, "base")} · ${formatSymbolQuantity(task.filled_quote, config.symbol, "quote")} / Unlimited`
           : `${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}`;
         const remainingText = unlimited ? "Unlimited" : formatSymbolQuantity(remainingValue, config.symbol, progressMode);
         const progressPct = unlimited ? "--" : `${(task.progress_pct || 0).toFixed(2)}%`;
+        const configCell = autoTaskConfigCell(task, defaultConfig);
+        const detailTitle = autoTaskDetailTitle(task);
+        const lastText = autoTaskLastOrderText(task, config);
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
-          <td class="${statusClass}" title="${escapeHtml(task.last_error || task.last_status || status)}">${escapeHtml(status)}</td>
+          <td class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(status)}</td>
+          <td class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
           <td>${escapeHtml(config.exchange || "--")}</td>
           <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
           <td class="num">${filledText}</td>
           <td class="num">${remainingText}</td>
           <td class="num">${progressPct}</td>
-          <td class="num">${task.open_order_count || 0}</td>
-          <td>${formatAge(task.last_cycle_at)}</td>
+          <td class="num" title="${escapeHtml(detailTitle)}">${task.open_order_count || 0}</td>
+          <td title="${escapeHtml(lastText)}"><div>${formatAge(task.last_cycle_at)}</div><div class="subtle">${escapeHtml(lastText)}</div></td>
           <td>${formatDue(task.next_run_at)}</td>
           <td class="strategy-action"></td>
         `;
@@ -2229,6 +2994,7 @@ function balanceStatusClass(status) {
     let riskFormBusy = false;
     let mmFormDirty = false;
     let mmFormBusy = false;
+    let selectedMarketMakerInstanceId = "";
     let slowFormDirty = false;
     let slowFormBusy = false;
     let gridFormDirty = false;
@@ -2341,6 +3107,9 @@ function balanceStatusClass(status) {
       setNumericField("risk-max-book-age", risk.max_order_book_age_seconds || 0);
       setNumericField("risk-max-book-gap", risk.max_order_book_gap_bps || 0);
       setNumericField("risk-max-price-jump", risk.max_price_jump_bps || 0);
+      setNumericField("risk-max-derivative-leverage", risk.max_derivative_leverage || 0);
+      setNumericField("risk-min-liquidation-buffer", risk.min_liquidation_buffer_pct || 0);
+      setNumericField("risk-max-margin-usage", risk.max_margin_usage_pct || 0);
 
       const accounts = (tradingConsole?.accounts || []).map((account) => ({
         key: account.key,
@@ -2397,6 +3166,9 @@ function balanceStatusClass(status) {
         max_order_book_age_seconds: numericValue("risk-max-book-age"),
         max_order_book_gap_bps: numericValue("risk-max-book-gap"),
         max_price_jump_bps: numericValue("risk-max-price-jump"),
+        max_derivative_leverage: numericValue("risk-max-derivative-leverage"),
+        min_liquidation_buffer_pct: numericValue("risk-min-liquidation-buffer"),
+        max_margin_usage_pct: numericValue("risk-max-margin-usage"),
       };
       try {
         const res = await fetch("/api/risk", {
@@ -2413,20 +3185,33 @@ function balanceStatusClass(status) {
       }
     }
 
-    function selectedMarketMakerAccount() {
-      return document.querySelector('input[name="mm-account"]:checked')?.value || "";
+    function accountSymbols(account) {
+      const symbols = Array.isArray(account?.symbols) ? account.symbols : [];
+      const rows = [...symbols];
+      if (account?.symbol && !rows.includes(account.symbol)) rows.unshift(account.symbol);
+      return rows.filter(Boolean);
     }
 
-    function selectedMarketMakerSymbol() {
-      return document.querySelector('input[name="mm-account"]:checked')?.dataset.symbol || "";
+    function accountSelectorValue(inputName) {
+      return document.querySelector(`[data-account-selector="${inputName}"]`)?.value || "";
     }
 
-    function renderMarketMakerAccounts(accounts, selectedExchange) {
-      const body = document.getElementById("mm-accounts");
+    function symbolSelectorValue(inputName) {
+      return document.querySelector(`[data-symbol-selector="${inputName}"]`)?.value || "";
+    }
+
+    function accountForKey(accounts, key) {
+      const list = Array.isArray(accounts) ? accounts : [];
+      return list.find((account) => account.key === key) || null;
+    }
+
+    function renderAccountSymbolSelectors(containerId, inputName, accounts, selectedExchange, selectedSymbol, onDirty) {
+      const body = document.getElementById(containerId);
       const list = Array.isArray(accounts) ? accounts : [];
       const signature = JSON.stringify({
         accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
         selectedExchange,
+        selectedSymbol,
       });
       if (body.dataset.signature === signature) return;
       body.dataset.signature = signature;
@@ -2439,40 +3224,127 @@ function balanceStatusClass(status) {
         return;
       }
 
+      const wrapper = document.createElement("div");
+      wrapper.className = "account-selector";
+      const accountSelect = document.createElement("select");
+      accountSelect.dataset.accountSelector = inputName;
+      accountSelect.className = "account-select";
+      accountSelect.title = "Exchange account";
+      const accountPlaceholder = document.createElement("option");
+      accountPlaceholder.value = "";
+      accountPlaceholder.textContent = "Select account";
+      accountSelect.appendChild(accountPlaceholder);
       for (const account of list) {
-        const label = document.createElement("label");
-        label.className = "account-option";
-        const symbol = account.symbol || (account.symbols || [])[0] || "";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = "mm-account";
-        checkbox.value = account.key;
-        checkbox.dataset.symbol = symbol;
-        checkbox.checked = account.key === selectedExchange;
-        checkbox.addEventListener("change", (event) => {
-          if (event.target.checked) {
-            document.querySelectorAll('input[name="mm-account"]').forEach((item) => {
-              if (item !== event.target) item.checked = false;
-            });
-          } else if (!selectedMarketMakerAccount()) {
-            event.target.checked = true;
-          }
-          mmFormDirty = true;
-        });
-        const textNode = document.createElement("span");
-        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
-        label.appendChild(checkbox);
-        label.appendChild(textNode);
-        body.appendChild(label);
+        const option = document.createElement("option");
+        option.value = account.key;
+        option.textContent = `${account.label || account.key} (${account.market_type || "spot"})`;
+        option.title = `${account.id || account.key} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
+        accountSelect.appendChild(option);
       }
+      if (selectedExchange && list.some((account) => account.key === selectedExchange)) {
+        accountSelect.value = selectedExchange;
+      }
+
+      const symbolSelect = document.createElement("select");
+      symbolSelect.dataset.symbolSelector = inputName;
+      symbolSelect.className = "account-select";
+      symbolSelect.title = "Trading pair";
+
+      const fillSymbols = (preferredSymbol = "") => {
+        const account = accountForKey(list, accountSelect.value);
+        const symbols = accountSymbols(account);
+        symbolSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = symbols.length ? "Select symbol" : "No symbols";
+        symbolSelect.appendChild(placeholder);
+        for (const symbol of symbols) {
+          const option = document.createElement("option");
+          option.value = symbol;
+          option.textContent = symbol;
+          symbolSelect.appendChild(option);
+        }
+        if (preferredSymbol && symbols.includes(preferredSymbol)) {
+          symbolSelect.value = preferredSymbol;
+        } else if (symbols.length) {
+          symbolSelect.value = symbols[0];
+        }
+      };
+
+      accountSelect.addEventListener("change", () => {
+        fillSymbols("");
+        onDirty();
+      });
+      symbolSelect.addEventListener("change", onDirty);
+      fillSymbols(selectedSymbol || "");
+      wrapper.appendChild(accountSelect);
+      wrapper.appendChild(symbolSelect);
+      body.appendChild(wrapper);
     }
 
-    function renderMarketMakerConfig(config, accounts) {
-      if (!config || mmFormDirty || mmFormBusy) return;
+    function selectedMarketMakerAccount() {
+      return accountSelectorValue("mm-account");
+    }
+
+    function selectedMarketMakerSymbol() {
+      return symbolSelectorValue("mm-account");
+    }
+
+    function renderMarketMakerAccounts(accounts, selectedExchange, selectedSymbol) {
+      renderAccountSymbolSelectors("mm-accounts", "mm-account", accounts, selectedExchange, selectedSymbol, () => {
+        mmFormDirty = true;
+      });
+    }
+
+    function marketMakerInstances(marketMaker) {
+      const instances = Array.isArray(marketMaker?.instances) ? marketMaker.instances : [];
+      if (instances.length) return instances;
+      return marketMaker?.config ? [{ config: marketMaker.config, status: marketMaker.status, mode: marketMaker.mode, runtime: marketMaker.runtime }] : [];
+    }
+
+    function marketMakerInstanceLabel(instance) {
+      const config = instance?.config || {};
+      const status = instance?.runtime?.status || instance?.status || "disabled";
+      return `${config.exchange || "account"} ${config.symbol || "symbol"} · ${status}`;
+    }
+
+    function selectedMarketMakerInstance(marketMaker) {
+      const instances = marketMakerInstances(marketMaker);
+      if (!instances.length) return null;
+      const selected = instances.find((instance) => (instance.config?.id || "") === selectedMarketMakerInstanceId);
+      return selected || instances[0];
+    }
+
+    function renderMarketMakerInstanceSelect(marketMaker) {
+      const select = document.getElementById("mm-instance");
+      if (!select) return;
+      const instances = marketMakerInstances(marketMaker);
+      const ids = instances.map((instance) => instance.config?.id || "").filter(Boolean);
+      if (!selectedMarketMakerInstanceId || !ids.includes(selectedMarketMakerInstanceId)) {
+        selectedMarketMakerInstanceId = ids[0] || "";
+      }
+      select.innerHTML = "";
+      for (const instance of instances) {
+        const config = instance.config || {};
+        const option = document.createElement("option");
+        option.value = config.id || "";
+        option.textContent = marketMakerInstanceLabel(instance);
+        select.appendChild(option);
+      }
+      select.value = selectedMarketMakerInstanceId;
+      document.getElementById("mm-delete").disabled = instances.length <= 1 || mmFormBusy;
+    }
+
+    function renderMarketMakerConfig(marketMaker) {
+      if (!marketMaker || mmFormBusy) return;
+      renderMarketMakerInstanceSelect(marketMaker);
+      if (mmFormDirty) return;
+      const selected = selectedMarketMakerInstance(marketMaker);
+      const config = selected?.config || marketMaker.config;
+      if (!config) return;
       document.getElementById("mm-enabled").checked = Boolean(config.enabled);
       document.getElementById("mm-live-enabled").checked = Boolean(config.live_enabled);
-      renderMarketMakerAccounts(config.accounts || accounts, config.exchange || "");
+      renderMarketMakerAccounts(marketMaker.accounts, config.exchange || "", config.symbol || "");
       setNumericField("mm-levels", config.levels || 1);
       setNumericField("mm-band", config.price_band_pct || 0);
       setNumericField("mm-quote", config.quote_per_level || 0);
@@ -2490,6 +3362,7 @@ function balanceStatusClass(status) {
 
     function marketMakerPayloadFromForm() {
       return {
+        id: selectedMarketMakerInstanceId,
         enabled: document.getElementById("mm-enabled").checked,
         live_enabled: document.getElementById("mm-live-enabled").checked,
         exchange: selectedMarketMakerAccount(),
@@ -2508,6 +3381,61 @@ function balanceStatusClass(status) {
         inventory_max_deviation_base: numericValue("mm-inventory-max"),
         post_only: document.getElementById("mm-post-only").checked,
       };
+    }
+
+    function newMarketMakerId(exchange, symbol) {
+      const seed = `${exchange || "mm"}-${symbol || "symbol"}`.toLowerCase();
+      const normalized = seed.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "mm";
+      return `${normalized}-${Date.now().toString(36)}`;
+    }
+
+    async function saveMarketMakerInstances(instances) {
+      const res = await fetch("/api/market-maker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instances }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "market maker update failed");
+      mmFormDirty = false;
+      await refresh({ force: true });
+    }
+
+    async function addMarketMakerInstance() {
+      if (mmFormBusy) return;
+      mmFormBusy = true;
+      try {
+        const marketMaker = lastState?.market_maker || {};
+        const currentInstances = marketMakerInstances(marketMaker).map((instance) => ({ ...(instance.config || {}) }));
+        const draft = marketMakerPayloadFromForm();
+        draft.id = newMarketMakerId(draft.exchange, draft.symbol);
+        draft.enabled = false;
+        draft.live_enabled = false;
+        currentInstances.push(draft);
+        selectedMarketMakerInstanceId = draft.id;
+        await saveMarketMakerInstances(currentInstances);
+      } catch (error) {
+        text("mm-meta", `add failed: ${error.message || error}`);
+      } finally {
+        mmFormBusy = false;
+      }
+    }
+
+    async function deleteMarketMakerInstance() {
+      if (mmFormBusy || !selectedMarketMakerInstanceId) return;
+      const marketMaker = lastState?.market_maker || {};
+      const currentInstances = marketMakerInstances(marketMaker).map((instance) => ({ ...(instance.config || {}) }));
+      if (currentInstances.length <= 1) return;
+      mmFormBusy = true;
+      try {
+        const remaining = currentInstances.filter((instance) => instance.id !== selectedMarketMakerInstanceId);
+        selectedMarketMakerInstanceId = remaining[0]?.id || "";
+        await saveMarketMakerInstances(remaining);
+      } catch (error) {
+        text("mm-meta", `delete failed: ${error.message || error}`);
+      } finally {
+        mmFormBusy = false;
+      }
     }
 
     async function applyMarketMakerConfig(event) {
@@ -2535,65 +3463,89 @@ function balanceStatusClass(status) {
     }
 
     function selectedSlowAccount() {
-      return document.querySelector('input[name="slow-account"]:checked')?.value || "";
+      return accountSelectorValue("slow-account");
     }
 
     function selectedSlowSymbol() {
-      return document.querySelector('input[name="slow-account"]:checked')?.dataset.symbol || "";
+      return symbolSelectorValue("slow-account");
     }
 
-    function renderSlowExecutionAccounts(accounts, selectedExchange) {
-      const body = document.getElementById("slow-accounts");
-      const list = Array.isArray(accounts) ? accounts : [];
-      const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
-        selectedExchange,
+    function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
+      renderAccountSymbolSelectors("slow-accounts", "slow-account", accounts, selectedExchange, selectedSymbol, () => {
+        slowFormDirty = true;
+        updateSlowLabels();
       });
-      if (body.dataset.signature === signature) return;
-      body.dataset.signature = signature;
-      body.innerHTML = "";
-      if (list.length === 0) {
-        const empty = document.createElement("span");
-        empty.className = "subtle";
-        empty.textContent = "No accounts";
-        body.appendChild(empty);
+    }
+
+    function slowUnitContext() {
+      const symbol = selectedSlowSymbol();
+      const base = baseCurrency(symbol);
+      const quote = quoteCurrency(symbol);
+      const pair = symbol || `${base}/${quote}`;
+      return { base, quote, pair };
+    }
+
+    function setSlowLabel(id, text) {
+      const label = document.getElementById(id);
+      if (label) label.textContent = text;
+    }
+
+    function updateSlowUnitLabels() {
+      const { base, quote } = slowUnitContext();
+      setSlowLabel("slow-total-base-label", `${uiText("Total Base")} (${base})`);
+      setSlowLabel("slow-total-quote-label", `${uiText("Total Quote")} (${quote})`);
+      setSlowLabel("slow-slice-min-label", `${uiText("Min Base/Order")} (${base})`);
+      setSlowLabel("slow-slice-max-label", `${uiText("Max Base/Order")} (${base})`);
+    }
+
+    function updateSlowGateLabels() {
+      const side = document.getElementById("slow-side")?.value || "sell";
+      const startLabel = document.getElementById("slow-start-price-label");
+      const stopLabel = document.getElementById("slow-stop-price-label");
+      const startHelp = document.getElementById("slow-start-price-help");
+      const stopHelp = document.getElementById("slow-stop-price-help");
+      const { pair, quote } = slowUnitContext();
+      const unitText = `${uiText("Unit")}: ${quote}.`;
+      if (side === "buy") {
+        if (startLabel) {
+          startLabel.textContent = `${uiText("Start Gate")} (${uiText("AutoBuy start when Ask <= price")} · ${pair} · ${quote})`;
+        }
+        if (stopLabel) {
+          stopLabel.textContent = `${uiText("Stop Gate")} (${uiText("AutoBuy stop when Ask >= price")} · ${pair} · ${quote})`;
+        }
+        if (startHelp) {
+          startHelp.textContent = `${uiText("AutoBuy starts when best ask is at or below this price.")} ${unitText}`;
+        }
+        if (stopHelp) {
+          stopHelp.textContent = `${uiText("AutoBuy stops before each execution when best ask is at or above this price.")} ${unitText}`;
+        }
         return;
       }
-
-      for (const account of list) {
-        const label = document.createElement("label");
-        label.className = "account-option";
-        const symbol = account.symbol || (account.symbols || [])[0] || "";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = "slow-account";
-        checkbox.value = account.key;
-        checkbox.dataset.symbol = symbol;
-        checkbox.checked = account.key === selectedExchange;
-        checkbox.addEventListener("change", (event) => {
-          if (event.target.checked) {
-            document.querySelectorAll('input[name="slow-account"]').forEach((item) => {
-              if (item !== event.target) item.checked = false;
-            });
-          } else if (!selectedSlowAccount()) {
-            event.target.checked = true;
-          }
-          slowFormDirty = true;
-        });
-        const textNode = document.createElement("span");
-        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
-        label.appendChild(checkbox);
-        label.appendChild(textNode);
-        body.appendChild(label);
+      if (startLabel) {
+        startLabel.textContent = `${uiText("Start Gate")} (${uiText("AutoSell start when Bid >= price")} · ${pair} · ${quote})`;
       }
+      if (stopLabel) {
+        stopLabel.textContent = `${uiText("Stop Gate")} (${uiText("AutoSell stop when Bid <= price")} · ${pair} · ${quote})`;
+      }
+      if (startHelp) {
+        startHelp.textContent = `${uiText("AutoSell starts when best bid is at or above this price.")} ${unitText}`;
+      }
+      if (stopHelp) {
+        stopHelp.textContent = `${uiText("AutoSell stops before each execution when best bid is at or below this price.")} ${unitText}`;
+      }
+    }
+
+    function updateSlowLabels() {
+      updateSlowUnitLabels();
+      updateSlowGateLabels();
     }
 
     function renderSlowExecutionConfig(config, accounts) {
       if (!config || slowFormDirty || slowFormBusy) return;
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
-      renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "");
+      renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
+      updateSlowLabels();
       document.getElementById("slow-price-mode").value = config.price_mode || "taker";
       setNumericField("slow-offset-bps", config.price_offset_bps || 0);
       document.getElementById("slow-unlimited").checked = Boolean(config.unlimited_total);
@@ -2657,65 +3609,22 @@ function balanceStatusClass(status) {
     }
 
     function selectedStrategyAccount(inputName) {
-      return document.querySelector(`input[name="${inputName}"]:checked`)?.value || "";
+      return accountSelectorValue(inputName);
     }
 
     function selectedStrategySymbol(inputName) {
-      return document.querySelector(`input[name="${inputName}"]:checked`)?.dataset.symbol || "";
+      return symbolSelectorValue(inputName);
     }
 
-    function renderStrategyAccounts(containerId, inputName, accounts, selectedExchange, onDirty) {
-      const body = document.getElementById(containerId);
-      const list = Array.isArray(accounts) ? accounts : [];
-      const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
-        selectedExchange,
-      });
-      if (body.dataset.signature === signature) return;
-      body.dataset.signature = signature;
-      body.innerHTML = "";
-      if (list.length === 0) {
-        const empty = document.createElement("span");
-        empty.className = "subtle";
-        empty.textContent = "No accounts";
-        body.appendChild(empty);
-        return;
-      }
-
-      for (const account of list) {
-        const label = document.createElement("label");
-        label.className = "account-option";
-        const symbol = account.symbol || (account.symbols || [])[0] || "";
-        label.title = `${account.id || account.key} · ${account.market_type || "spot"} · ${symbol || "no symbol"}`;
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = inputName;
-        checkbox.value = account.key;
-        checkbox.dataset.symbol = symbol;
-        checkbox.checked = account.key === selectedExchange;
-        checkbox.addEventListener("change", (event) => {
-          if (event.target.checked) {
-            document.querySelectorAll(`input[name="${inputName}"]`).forEach((item) => {
-              if (item !== event.target) item.checked = false;
-            });
-          } else if (!selectedStrategyAccount(inputName)) {
-            event.target.checked = true;
-          }
-          onDirty();
-        });
-        const textNode = document.createElement("span");
-        textNode.textContent = symbol ? `${account.label || account.key} ${symbol}` : (account.label || account.key);
-        label.appendChild(checkbox);
-        label.appendChild(textNode);
-        body.appendChild(label);
-      }
+    function renderStrategyAccounts(containerId, inputName, accounts, selectedExchange, selectedSymbol, onDirty) {
+      renderAccountSymbolSelectors(containerId, inputName, accounts, selectedExchange, selectedSymbol, onDirty);
     }
 
     function renderSpotGridConfig(config, accounts) {
       if (!config || gridFormDirty || gridFormBusy) return;
       document.getElementById("grid-enabled").checked = Boolean(config.enabled);
       document.getElementById("grid-live-enabled").checked = Boolean(config.live_enabled);
-      renderStrategyAccounts("grid-accounts", "grid-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("grid-accounts", "grid-account", accounts, config.exchange || "", config.symbol || "", () => {
         gridFormDirty = true;
       });
       setNumericField("grid-lower", config.lower_price || 0);
@@ -2783,7 +3692,7 @@ function balanceStatusClass(status) {
       if (!config || dcaFormDirty || dcaFormBusy) return;
       document.getElementById("dca-enabled").checked = Boolean(config.enabled);
       document.getElementById("dca-live-enabled").checked = Boolean(config.live_enabled);
-      renderStrategyAccounts("dca-accounts", "dca-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("dca-accounts", "dca-account", accounts, config.exchange || "", config.symbol || "", () => {
         dcaFormDirty = true;
       });
       document.getElementById("dca-side").value = config.side || "buy";
@@ -2849,7 +3758,7 @@ function balanceStatusClass(status) {
       if (!config || execFormDirty || execFormBusy) return;
       document.getElementById("exec-enabled").checked = Boolean(config.enabled);
       document.getElementById("exec-live-enabled").checked = Boolean(config.live_enabled);
-      renderStrategyAccounts("exec-accounts", "exec-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("exec-accounts", "exec-account", accounts, config.exchange || "", config.symbol || "", () => {
         execFormDirty = true;
       });
       document.getElementById("exec-side").value = config.side || "buy";
@@ -2920,7 +3829,7 @@ function balanceStatusClass(status) {
     function renderBacktestConfig(config, accounts) {
       if (!config || backtestFormDirty || backtestFormBusy) return;
       document.getElementById("backtest-enabled").checked = Boolean(config.enabled);
-      renderStrategyAccounts("backtest-accounts", "backtest-account", accounts, config.exchange || "", () => {
+      renderStrategyAccounts("backtest-accounts", "backtest-account", accounts, config.exchange || "", config.symbol || "", () => {
         backtestFormDirty = true;
       });
       document.getElementById("backtest-strategy").value = config.strategy || "spot_grid";
@@ -3017,16 +3926,69 @@ function balanceStatusClass(status) {
       }
     }
 
+    function cleanupTaskLine(task) {
+      const filled = task.progress_mode === "quote"
+        ? formatSymbolQuantity(task.filled_quote, task.symbol, "quote")
+        : formatSymbolQuantity(task.filled_base, task.symbol, "base");
+      const side = String(task.side || "--").toUpperCase();
+      return `${shortId(task.id)} · ${task.status || "--"} · ${task.exchange || "--"} ${task.symbol || "--"} · ${side} · ${filled}`;
+    }
+
+    function renderCleanupPreview(tasks, mode = "preview") {
+      const box = document.getElementById("slow-cleanup-preview");
+      if (!box) return;
+      if (!tasks.length) {
+        box.innerHTML = `<span class="config-chip config-neutral">Cleanup</span>No completed Auto Buy/Sell tasks to delete.`;
+        return;
+      }
+      const lines = tasks
+        .slice(0, 8)
+        .map((task) => `<li>${escapeHtml(cleanupTaskLine(task))}</li>`)
+        .join("");
+      const more = tasks.length > 8 ? `<li>+${tasks.length - 8} more</li>` : "";
+      const label = mode === "deleted" ? "Deleted" : "Cleanup preview";
+      const verb = mode === "deleted" ? "Deleted" : "Will delete";
+      box.innerHTML = `
+        <span class="config-chip ${mode === "deleted" ? "config-same" : "config-diff"}">${label}</span>
+        ${verb} ${tasks.length} completed task record(s):
+        <ul>${lines}${more}</ul>
+      `;
+    }
+
     async function clearTerminalAutoBuySellTasks() {
       const button = document.getElementById("slow-clear-terminal");
       button.disabled = true;
       try {
+        const previewRes = await fetch("/api/auto-buy-sell/tasks/cleanup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ terminal_only: true, preview: true }),
+        });
+        const preview = await previewRes.json();
+        if (!previewRes.ok) throw new Error(preview.error || "task cleanup preview failed");
+        const tasks = preview.removed_tasks || [];
+        renderCleanupPreview(tasks);
+        if (tasks.length === 0) return;
+        const message = [
+          `Cleanup will delete ${tasks.length} completed Auto Buy/Sell task record(s):`,
+          "",
+          ...tasks.slice(0, 12).map((task) => `- ${cleanupTaskLine(task)}`),
+          tasks.length > 12 ? `- +${tasks.length - 12} more` : "",
+          "",
+          "Open orders are not canceled by cleanup. Continue?",
+        ].filter(Boolean).join("\n");
+        if (!window.confirm(message)) {
+          text("slow-meta", "cleanup canceled");
+          return;
+        }
         const res = await fetch("/api/auto-buy-sell/tasks/cleanup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ terminal_only: true }),
         });
-        if (!res.ok) throw new Error("task cleanup failed");
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "task cleanup failed");
+        renderCleanupPreview(result.removed_tasks || [], "deleted");
         await refresh();
       } finally {
         button.disabled = false;
@@ -3093,20 +4055,27 @@ function balanceStatusClass(status) {
       text("common-quote", data.config?.common_quote_currency || "USD");
       text("warnings", (data.warnings || []).join(" · "));
       text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
+      renderAccountBalanceSummary(data.account_balances);
 
-      const mmRuntime = data.market_maker?.runtime || {};
-      const mmPlan = data.market_maker?.plan;
+      const mmSelected = selectedMarketMakerInstance(data.market_maker) || data.market_maker;
+      const mmInstances = marketMakerInstances(data.market_maker);
+      const mmRuntime = mmSelected?.runtime || data.market_maker?.runtime || {};
+      const mmPlan = mmSelected?.plan || data.market_maker?.plan;
       const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
-      const mmMarketData = mmRuntime.market_data || data.market_maker?.market_data || {};
+      const mmMarketData = mmRuntime.market_data || mmSelected?.market_data || data.market_maker?.market_data || {};
       const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
       const mmMarketDataText = mmMarketData.source
         ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(2)}s`}${mmWsText}`
         : mmWsText;
-      const mmQuote = data.market_maker?.quote_conversion;
+      const mmQuote = mmSelected?.quote_conversion || data.market_maker?.quote_conversion;
       const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
-      const mmFeatures = data.market_maker?.exchange_features || {};
+      const mmFeatures = mmSelected?.exchange_features || data.market_maker?.exchange_features || {};
       const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
-      text("mm-meta", mmPlan ? `${data.market_maker.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmPlan.existing_spread_bps.toFixed(2)} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
+      const mmSpreadText = mmPlan?.existing_spread_bps == null
+        ? "--"
+        : Number(mmPlan.existing_spread_bps).toFixed(2);
+      const mmInstanceText = mmInstances.length > 1 ? `${mmInstances.length} instances · ` : "";
+      text("mm-meta", mmPlan ? `${mmInstanceText}${mmSelected?.mode || data.market_maker?.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${mmInstanceText}${mmSelected?.status || data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
 
       const slowPlan = data.slow_execution?.plan;
       const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
@@ -3161,39 +4130,59 @@ function balanceStatusClass(status) {
       }
       lastVisibleRenderAt[activePage] = now;
       if (activePage === "settings") {
-        renderMarketsConfig(data);
-        renderCashCarryConfig(data);
-        renderRiskControls(data.operations, data.trading_console);
-        renderMarketMakerConfig(data.market_maker?.config, data.market_maker?.accounts);
-        renderMarketMakerSafety(data.market_maker);
-        renderMarketMaker(data.market_maker);
-        renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
-        renderSlowExecution(data.slow_execution);
-        renderSlowExecutionTasks(data.slow_execution?.tasks);
-        renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
-        renderSpotGrid(data.spot_grid);
-        renderDcaConfig(data.dca?.config, data.dca?.accounts);
-        renderDca(data.dca);
-        renderExecutionAlgoConfig(data.execution_algo?.config, data.execution_algo?.accounts);
-        renderExecutionAlgo(data.execution_algo);
-        renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
-        renderBacktest(data.backtest);
-        renderStrategyCenter(data.strategy_center);
+        renderOpenSection("markets-config", () => renderMarketsConfig(data));
+        renderOpenSection("carry-config", () => renderCashCarryConfig(data));
+        renderOpenSection("risk-form", () => renderRiskControls(data.operations, data.trading_console));
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(data.strategy_center));
+        renderOpenSection("api-accounts", () => renderApiAccountsPanel(data.strategy_center));
+        renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
+        renderOpenSection("signal-bot-form", () => renderSignalBotPanel(data.strategy_center));
+        renderOpenSection("mm-orders", () => {
+          renderMarketMakerConfig(data.market_maker);
+          renderMarketMakerSafety(data.market_maker);
+          renderMarketMaker(data.market_maker);
+        });
+        renderOpenSection("slow-orders", () => {
+          renderSlowExecutionConfig(data.slow_execution?.config, data.slow_execution?.accounts);
+          renderSlowExecution(data.slow_execution);
+          renderSlowExecutionTasks(data.slow_execution?.tasks, data.slow_execution?.config);
+        });
+        renderOpenSection("grid-orders", () => {
+          renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
+          renderSpotGrid(data.spot_grid);
+        });
+        renderOpenSection("dca-orders", () => {
+          renderDcaConfig(data.dca?.config, data.dca?.accounts);
+          renderDca(data.dca);
+        });
+        renderOpenSection("exec-schedule", () => {
+          renderExecutionAlgoConfig(data.execution_algo?.config, data.execution_algo?.accounts);
+          renderExecutionAlgo(data.execution_algo);
+        });
+        renderOpenSection("backtest-points", () => {
+          renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
+          renderBacktest(data.backtest);
+        });
         return;
       }
       if (activePage === "records") {
-        renderOperations(data.operations);
-        renderOrderActivity(data.order_activity);
-        renderTradingConsole(data.trading_console, data.order_activity);
-        renderHolders(data.onchain);
+        renderOpenSection("console-strategies", () => renderTradingConsole(data.trading_console, data.order_activity));
+        renderOpenSection("open-orders", () => renderOrderActivity(data.order_activity));
+        renderOpenSection("strategy-timeline", () => renderRiskEvents(data.operations));
+        renderOpenSection("audit-events", () => renderAuditTrail(data.operations));
+        renderOpenSection("holder-changes", () => renderHolders(data.onchain));
         return;
       }
-      renderReadiness(data.readiness, data.runtime_store);
-      renderMarkets(data.markets);
-      renderAccountBalances(data.account_balances);
-      renderRates(data.quote_rates);
-      renderOpportunities(data.opportunities);
-      renderHolders(data.onchain);
+      renderOpenSection("readiness-actions", () => renderReadiness(data.readiness, data.runtime_store));
+      renderOpenSection("markets", () => renderMarkets(data.markets));
+      renderOpenSection("account-balances", () => renderAccountBalances(data.account_balances));
+      renderOpenSection("derivatives-risk", () => renderDerivativesRisk(data.derivatives));
+      renderOpenSection("funding-basis", () => renderFundingBasis(data.funding_basis));
+      renderOpenSection("contract-strategies", () => renderContractStrategies(data.contract_strategies));
+      renderOpenSection("options-arbitrage", () => renderOptionsArbitrage(data.options_arbitrage));
+      renderOpenSection("rates", () => renderRates(data.quote_rates));
+      renderOpenSection("opportunities", () => renderOpportunities(data.opportunities));
+      renderOpenSection("holders", () => renderHolders(data.onchain));
     }
 
     async function refresh(options = {}) {
@@ -3204,7 +4193,10 @@ function balanceStatusClass(status) {
       refreshInFlight = true;
       const requestedPage = PAGE_IDS.has(currentPage) ? currentPage : "status";
       try {
-        const stateUrl = `/api/state?view=${encodeURIComponent(requestedPage)}`;
+        const params = new URLSearchParams({ view: requestedPage });
+        const sectionIds = openSectionIdsForPage(requestedPage);
+        if (sectionIds.length > 0) params.set("sections", sectionIds.join(","));
+        const stateUrl = `/api/state?${params.toString()}`;
         const res = await fetchWithTimeout(stateUrl, { cache: "no-store" });
         if (res.status === 401) {
           window.location.assign("/login");
@@ -3248,6 +4240,7 @@ function balanceStatusClass(status) {
       }
     }
 
+    applyFeatureVisibility();
     setupCompactSections();
     setActivePage(pageFromLocation(), { refresh: false });
     window.addEventListener("hashchange", () => {
@@ -3265,32 +4258,70 @@ function balanceStatusClass(status) {
     document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
     document.getElementById("carry-form").addEventListener("submit", addCashCarryPair);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
-    document.getElementById("mm-form").addEventListener("input", () => {
+    document.getElementById("mm-form").addEventListener("input", (event) => {
+      if (event.target?.id === "mm-instance") return;
       mmFormDirty = true;
     });
+    document.getElementById("mm-form").addEventListener("change", (event) => {
+      if (event.target?.id === "mm-instance") return;
+      mmFormDirty = true;
+    });
+    document.getElementById("mm-instance").addEventListener("change", (event) => {
+      selectedMarketMakerInstanceId = event.target.value || "";
+      mmFormDirty = false;
+      renderMarketMakerConfig(lastState?.market_maker);
+    });
+    document.getElementById("mm-add").addEventListener("click", addMarketMakerInstance);
+    document.getElementById("mm-delete").addEventListener("click", deleteMarketMakerInstance);
     document.getElementById("mm-form").addEventListener("submit", applyMarketMakerConfig);
     document.getElementById("slow-form").addEventListener("input", () => {
       slowFormDirty = true;
     });
+    document.getElementById("slow-form").addEventListener("change", () => {
+      slowFormDirty = true;
+    });
+    document.getElementById("slow-side").addEventListener("change", updateSlowLabels);
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
+    window.addEventListener("crypto-arb-language-change", updateSlowLabels);
     document.getElementById("grid-form").addEventListener("input", () => {
+      gridFormDirty = true;
+    });
+    document.getElementById("grid-form").addEventListener("change", () => {
       gridFormDirty = true;
     });
     document.getElementById("grid-form").addEventListener("submit", applySpotGridConfig);
     document.getElementById("dca-form").addEventListener("input", () => {
       dcaFormDirty = true;
     });
+    document.getElementById("dca-form").addEventListener("change", () => {
+      dcaFormDirty = true;
+    });
     document.getElementById("dca-form").addEventListener("submit", applyDcaConfig);
     document.getElementById("exec-form").addEventListener("input", () => {
+      execFormDirty = true;
+    });
+    document.getElementById("exec-form").addEventListener("change", () => {
       execFormDirty = true;
     });
     document.getElementById("exec-form").addEventListener("submit", applyExecutionAlgoConfig);
     document.getElementById("backtest-form").addEventListener("input", () => {
       backtestFormDirty = true;
     });
+    document.getElementById("backtest-form").addEventListener("change", () => {
+      backtestFormDirty = true;
+    });
     document.getElementById("backtest-form").addEventListener("submit", applyBacktestConfig);
     document.getElementById("strategy-center-form").addEventListener("input", () => {
       strategyCenterFormDirty = true;
+    });
+    document.getElementById("strategy-center-form").addEventListener("change", () => {
+      strategyCenterFormDirty = true;
+    });
+    document.getElementById("strategy-instance-exchange").addEventListener("change", syncStrategyInstanceSymbols);
+    document.getElementById("strategy-instance-symbol").addEventListener("change", () => {
+      const asset = document.getElementById("strategy-instance-asset");
+      const symbol = document.getElementById("strategy-instance-symbol").value;
+      if (symbol && !asset.value.trim()) asset.value = baseCurrency(symbol);
     });
     document.getElementById("strategy-center-form").addEventListener("submit", applyStrategyCenterConfig);
     document.getElementById("api-account-form").addEventListener("input", () => {
@@ -3307,4 +4338,9 @@ function balanceStatusClass(status) {
     document.getElementById("signal-bot-form").addEventListener("submit", applySignalBotConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
-    setInterval(refresh, 1000);
+    setInterval(() => {
+      if (!document.hidden) refresh();
+    }, REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refresh({ force: true });
+    });

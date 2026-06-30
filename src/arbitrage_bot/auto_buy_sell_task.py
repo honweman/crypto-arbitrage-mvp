@@ -11,7 +11,7 @@ from typing import Any
 
 from .config import BotConfig, ExchangeConfig, SlowExecutionConfig
 from .exchanges import ExchangeManager
-from .slow_executor import cancel_order_ids, run_cycle
+from .slow_executor import build_plan, cancel_order_ids, run_cycle
 from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
@@ -141,6 +141,33 @@ def _trade_order_id(raw: dict[str, Any]) -> str:
     return str(raw.get("order") or raw.get("order_id") or "")
 
 
+def _order_fill_amounts(raw: dict[str, Any]) -> tuple[float, float]:
+    amount = _float_value(raw.get("filled"))
+    cost = _float_value(raw.get("cost"))
+    if cost <= 0:
+        price = _float_value(raw.get("price"))
+        cost = amount * price if amount > 0 and price > 0 else 0.0
+    return amount, cost
+
+
+def _order_fill_timestamp(raw: dict[str, Any]) -> float | None:
+    timestamp = _float_value(raw.get("timestamp"))
+    if timestamp <= 0:
+        return None
+    return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+
+
+def _is_final_filled_order(raw: dict[str, Any]) -> bool:
+    filled, cost = _order_fill_amounts(raw)
+    if filled <= 0 and cost <= 0:
+        return False
+    status = str(raw.get("status") or "").lower()
+    if status in {"closed", "canceled", "cancelled"}:
+        return True
+    remaining = _float_value(raw.get("remaining"))
+    return remaining <= 0
+
+
 @dataclass
 class AutoBuySellTask:
     id: str
@@ -162,6 +189,7 @@ class AutoBuySellTask:
     placed_order_ids: list[str] = field(default_factory=list)
     open_order_ids: list[str] = field(default_factory=list)
     known_trade_ids: list[str] = field(default_factory=list)
+    known_filled_order_ids: list[str] = field(default_factory=list)
     order_created_at: dict[str, float] = field(default_factory=dict)
     filled_base: float = 0.0
     filled_quote: float = 0.0
@@ -176,6 +204,8 @@ class AutoBuySellTask:
 
     def to_dict(self) -> dict[str, Any]:
         cfg = self.exec_cfg
+        row = asdict(self)
+        row["config"] = asdict(cfg)
         unlimited_total = cfg.unlimited_total
         base_target_enabled = not unlimited_total and cfg.total_base > 0
         quote_target_enabled = not unlimited_total and cfg.total_quote > 0
@@ -208,7 +238,7 @@ class AutoBuySellTask:
             else 0.0
         )
         return {
-            **asdict(self),
+            **row,
             "remaining_base": remaining_base,
             "remaining_quote": remaining_quote,
             "progress_mode": progress_mode,
@@ -216,6 +246,30 @@ class AutoBuySellTask:
             "progress_label": "Bought" if cfg.side == "buy" else "Sold",
             "open_order_count": len(self.open_order_ids),
         }
+
+
+def _cleanup_task_summary(task: AutoBuySellTask) -> dict[str, Any]:
+    row = task.to_dict()
+    config = row.get("config") if isinstance(row.get("config"), dict) else {}
+    return {
+        "id": row.get("id"),
+        "status": row.get("status"),
+        "last_status": row.get("last_status"),
+        "exchange": config.get("exchange"),
+        "symbol": config.get("symbol"),
+        "side": config.get("side"),
+        "filled_base": row.get("filled_base"),
+        "filled_quote": row.get("filled_quote"),
+        "remaining_base": row.get("remaining_base"),
+        "remaining_quote": row.get("remaining_quote"),
+        "progress_mode": row.get("progress_mode"),
+        "progress_pct": row.get("progress_pct"),
+        "open_order_count": row.get("open_order_count"),
+        "placed_count": row.get("placed_count"),
+        "created_at": row.get("created_at"),
+        "finished_at": row.get("finished_at"),
+        "last_error": row.get("last_error"),
+    }
 
 
 class AutoBuySellTaskStore:
@@ -363,8 +417,10 @@ class AutoBuySellTaskService:
 
     async def clear_terminal_tasks(self) -> dict[str, Any]:
         async with self._lock:
-            removed = [
-                task.id for task in self._tasks if task.status in TERMINAL_TASK_STATUSES
+            removed_tasks = [
+                _cleanup_task_summary(task)
+                for task in self._tasks
+                if task.status in TERMINAL_TASK_STATUSES
             ]
             self._tasks = [
                 task for task in self._tasks if task.status not in TERMINAL_TASK_STATUSES
@@ -372,9 +428,23 @@ class AutoBuySellTaskService:
             self.store.save(self._tasks)
             snapshot = self._snapshot_unlocked()
         return {
-            "removed_count": len(removed),
-            "removed_task_ids": removed,
+            "removed_count": len(removed_tasks),
+            "removed_task_ids": [task["id"] for task in removed_tasks],
+            "removed_tasks": removed_tasks,
             "tasks": snapshot,
+        }
+
+    async def preview_terminal_tasks(self) -> dict[str, Any]:
+        async with self._lock:
+            terminal_tasks = [
+                _cleanup_task_summary(task)
+                for task in self._tasks
+                if task.status in TERMINAL_TASK_STATUSES
+            ]
+        return {
+            "removed_count": len(terminal_tasks),
+            "removed_task_ids": [task["id"] for task in terminal_tasks],
+            "removed_tasks": terminal_tasks,
         }
 
     async def snapshot(self) -> dict[str, Any]:
@@ -387,6 +457,7 @@ class AutoBuySellTaskService:
         manager: ExchangeManager,
         *,
         strategy_paused: bool = False,
+        market_maker_paused: bool = False,
         program_running: bool = True,
     ) -> dict[str, Any]:
         async with self._lock:
@@ -409,7 +480,12 @@ class AutoBuySellTaskService:
                 continue
             if task.next_run_at > now:
                 continue
-            await self._run_task_cycle(task, cfg, manager)
+            await self._run_task_cycle(
+                task,
+                cfg,
+                manager,
+                market_maker_paused=market_maker_paused,
+            )
             changed = True
 
         async with self._lock:
@@ -457,6 +533,8 @@ class AutoBuySellTaskService:
         task: AutoBuySellTask,
         cfg: BotConfig,
         manager: ExchangeManager,
+        *,
+        market_maker_paused: bool = False,
     ) -> None:
         task_cfg = task.exec_cfg
         runtime_cfg = replace(cfg, slow_execution=task_cfg)
@@ -471,6 +549,12 @@ class AutoBuySellTaskService:
                 task.finished_at = time.time()
                 task.last_status = "complete"
                 return
+            if await self._stop_task_if_price_limit_reached(
+                task,
+                runtime_cfg,
+                manager,
+            ):
+                return
             if task.open_order_ids:
                 await self._handle_open_orders(task, runtime_cfg, manager)
                 return
@@ -483,6 +567,7 @@ class AutoBuySellTaskService:
                 submitted_base=task.filled_base,
                 submitted_quote=task.filled_quote,
                 start_price_triggered=task.start_price_triggered,
+                market_maker_paused=market_maker_paused,
                 live=True,
                 replace_existing=False,
             )
@@ -530,6 +615,85 @@ class AutoBuySellTaskService:
             task.last_status = "error"
             task.last_error = f"{exc.__class__.__name__}: {exc}"
             task.next_run_at = time.time() + max(1.0, task_cfg.interval_seconds)
+
+    async def _stop_task_if_price_limit_reached(
+        self,
+        task: AutoBuySellTask,
+        cfg: BotConfig,
+        manager: ExchangeManager,
+    ) -> bool:
+        task_cfg = task.exec_cfg
+        if task_cfg.stop_price <= 0:
+            return False
+
+        plan = await build_plan(
+            cfg,
+            manager,
+            submitted_base=task.filled_base,
+            submitted_quote=task.filled_quote,
+            start_price_triggered=task.start_price_triggered,
+        )
+        task.last_plan = plan.to_dict()
+        if plan.status != "stopped_by_price":
+            return False
+
+        open_order_ids = list(task.open_order_ids)
+        now = time.time()
+        if not open_order_ids:
+            task.status = "stopped_by_price"
+            task.last_status = "stopped_by_price"
+            task.last_error = None
+            task.finished_at = now
+            task.updated_at = now
+            task.next_run_at = 0.0
+            return True
+
+        cancel_payload = await cancel_order_ids(cfg, manager, open_order_ids)
+        cancel_payload["task_id"] = task.id
+        cancel_payload["status"] = "stopped_by_price"
+        cancel_payload["reason"] = "stop_price_reached"
+        failed_ids = {
+            str(row.get("order_id"))
+            for row in cancel_payload.get("errors", [])
+            if row.get("order_id")
+        }
+        task.open_order_ids = [
+            order_id for order_id in task.open_order_ids if order_id in failed_ids
+        ]
+        task.canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+        task.last_execution = {
+            "canceled_count": cancel_payload.get("canceled_count", 0),
+            "cancel_requested_order_ids": open_order_ids,
+            "remaining_open_order_ids": list(task.open_order_ids),
+            "errors": cancel_payload.get("errors", []),
+            "reason": "stop_price_reached",
+        }
+        task.updated_at = time.time()
+        write_trade_event(cfg.trade_log, cancel_payload)
+        write_strategy_timeline_from_payload(
+            cfg.strategy_timeline,
+            cancel_payload,
+            source="auto_buy_sell_task",
+        )
+        if task.open_order_ids:
+            task.status = "error"
+            task.last_status = "stop_price_cancel_failed"
+            task.last_error = (
+                "stop price reached; cancel failed for "
+                f"{len(task.open_order_ids)} open order(s)"
+            )
+            task.next_run_at = time.time() + max(
+                1.0,
+                min(5.0, task_cfg.interval_seconds),
+            )
+            return True
+
+        task.status = "stopped_by_price"
+        task.last_status = "stopped_by_price"
+        task.last_error = None
+        task.finished_at = time.time()
+        task.next_run_at = 0.0
+        return True
 
     async def _handle_open_orders(
         self,
@@ -597,8 +761,17 @@ class AutoBuySellTaskService:
         symbol = task.exec_cfg.symbol
         tracked = set(task.placed_order_ids)
         open_orders = await manager.fetch_open_orders(exchange, symbol=symbol)
-        closed_orders = await manager.fetch_closed_orders(exchange, symbol=symbol, limit=100)
-        trades = await manager.fetch_my_trades(exchange, symbol=symbol, limit=100)
+        history_limit = min(max(len(tracked), 100), 1000)
+        closed_orders = await manager.fetch_closed_orders(
+            exchange,
+            symbol=symbol,
+            limit=history_limit,
+        )
+        trades = await manager.fetch_my_trades(
+            exchange,
+            symbol=symbol,
+            limit=history_limit,
+        )
         open_ids = {
             _order_id(order)
             for order in open_orders
@@ -607,8 +780,16 @@ class AutoBuySellTaskService:
         trade_fills: dict[str, dict[str, float]] = {}
         previous_known_trade_ids: set[str] = set(task.known_trade_ids)
         known_trade_ids: set[str] = set(previous_known_trade_ids)
+        previous_known_filled_order_ids: set[str] = set(task.known_filled_order_ids)
+        known_filled_order_ids: set[str] = set(previous_known_filled_order_ids)
+        bootstrap_order_fills = not previous_known_filled_order_ids and (
+            task.filled_base > 0 or task.filled_quote > 0
+        )
         new_trade_base = 0.0
         new_trade_quote = 0.0
+        new_order_fill_base = 0.0
+        new_order_fill_quote = 0.0
+        latest_fill_at = task.last_fill_at or 0.0
         for trade in trades:
             order_id = _trade_order_id(trade)
             if order_id not in tracked:
@@ -624,17 +805,32 @@ class AutoBuySellTaskService:
                     new_trade_base += amount
                     new_trade_quote += cost
                 known_trade_ids.add(trade_id)
-                task.last_fill_at = _float_value(trade.get("timestamp")) / 1000 or time.time()
+                trade_timestamp = _float_value(trade.get("timestamp"))
+                if trade_timestamp > 0:
+                    latest_fill_at = max(latest_fill_at, trade_timestamp / 1000)
+                else:
+                    latest_fill_at = max(latest_fill_at, time.time())
 
         order_fills: dict[str, dict[str, float]] = {}
         for order in [*open_orders, *closed_orders]:
             order_id = _order_id(order)
             if order_id not in tracked:
                 continue
+            amount, cost = _order_fill_amounts(order)
+            existing = order_fills.get(order_id, {"amount": 0.0, "cost": 0.0})
             order_fills[order_id] = {
-                "amount": _float_value(order.get("filled")),
-                "cost": _float_value(order.get("cost")),
+                "amount": max(existing["amount"], amount),
+                "cost": max(existing["cost"], cost),
             }
+            if _is_final_filled_order(order):
+                fill_timestamp = _order_fill_timestamp(order)
+                if fill_timestamp is not None:
+                    latest_fill_at = max(latest_fill_at, fill_timestamp)
+                if order_id not in previous_known_filled_order_ids:
+                    if not bootstrap_order_fills:
+                        new_order_fill_base += amount
+                        new_order_fill_quote += cost
+                    known_filled_order_ids.add(order_id)
 
         filled_base = 0.0
         filled_quote = 0.0
@@ -644,8 +840,14 @@ class AutoBuySellTaskService:
             filled_base += max(trade_fill["amount"], order_fill["amount"])
             filled_quote += max(trade_fill["cost"], order_fill["cost"])
 
-        next_filled_base = max(task.filled_base + new_trade_base, filled_base)
-        next_filled_quote = max(task.filled_quote + new_trade_quote, filled_quote)
+        next_filled_base = max(
+            task.filled_base + new_trade_base + new_order_fill_base,
+            filled_base,
+        )
+        next_filled_quote = max(
+            task.filled_quote + new_trade_quote + new_order_fill_quote,
+            filled_quote,
+        )
         task.filled_base = (
             min(task.exec_cfg.total_base, next_filled_base)
             if task.exec_cfg.total_base > 0
@@ -658,6 +860,8 @@ class AutoBuySellTaskService:
         )
         task.open_order_ids = sorted(open_ids)
         task.known_trade_ids = sorted(known_trade_ids)
+        task.known_filled_order_ids = sorted(known_filled_order_ids)
+        task.last_fill_at = latest_fill_at or task.last_fill_at
 
     def _next_check_time(self, task: AutoBuySellTask) -> float:
         cfg = task.exec_cfg

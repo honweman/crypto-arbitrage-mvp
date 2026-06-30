@@ -385,13 +385,16 @@ def build_slow_execution_plan(
         remaining_quote = 0.0 if quote_target_enabled else remaining_quote
         return make_plan("complete")
 
+    if side == "buy" and _is_stopped_by_price(side, trigger_price, cfg.stop_price):
+        return make_plan("stopped_by_price")
+
     if (
         not start_price_triggered
         and _is_waiting_for_start_price(side, trigger_price, cfg.start_price)
     ):
         return make_plan("waiting_for_start_price")
 
-    if _is_stopped_by_price(side, trigger_price, cfg.stop_price):
+    if side == "sell" and _is_stopped_by_price(side, trigger_price, cfg.stop_price):
         return make_plan("stopped_by_price")
 
     remaining_quote_as_base = (

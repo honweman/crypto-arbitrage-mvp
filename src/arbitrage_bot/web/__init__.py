@@ -20,7 +20,11 @@ from typing import Any
 
 from aiohttp import web
 
-from .render_payloads import STATE_VIEW_IDS, state_payload_for_view
+from .render_payloads import (
+    STATE_VIEW_IDS,
+    state_payload_for_view,
+    strategy_center_payload_for_view,
+)
 from .users import (
     WebUser,
     WebUserStore,
@@ -55,14 +59,19 @@ from ..config import (
     SpotMarketConfig,
     load_config,
 )
+from ..contract_strategies import build_contract_strategies_payload
+from ..derivatives import derivative_account_summary, normalize_derivative_position
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
+from ..funding_basis import funding_basis_payload, funding_settings_from_strategy_center
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
 from ..observability import configure_logging, render_prometheus_metrics
 from ..main import (
     StrategyName,
+    _option_symbols_for_option_combos,
     _quote_rates_from_sources,
+    _spot_symbols_for_option_combos,
     _symbols_for_configured_spot_markets,
     scan_with_manager,
 )
@@ -74,6 +83,7 @@ from ..market_maker import (
     run_cycle as run_market_maker_cycle,
 )
 from ..models import OrderBookSnapshot, Opportunity
+from ..options_monitor import options_arbitrage_payload
 from ..orderbook_cache import OrderBookCache
 from ..order_reconciliation import (
     RECONCILIATION_AUTO_STOP_WARMUP_SECONDS,
@@ -131,6 +141,7 @@ from ..trade_log import (
 from ..web_config import (
     _backtest_overrides_from_payload,
     _cash_and_carry_pairs_from_payload,
+    _derivative_symbols_by_exchange,
     _dca_overrides_from_payload,
     _execution_algo_overrides_from_payload,
     _execution_symbols_by_exchange,
@@ -144,15 +155,22 @@ from ..web_config import (
     _spot_symbols_by_exchange,
     backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
+    contract_strategies_config_to_dict,
     dca_config_to_dict,
     execution_algo_config_to_dict,
     exchange_configs_to_list,
     market_maker_config_to_dict,
+    market_maker_config_from_payload,
+    market_maker_configs_for_runtime,
+    market_maker_configs_from_payload,
+    market_maker_configs_to_list,
+    market_maker_config_with_id,
     risk_config_to_dict,
     slow_execution_accounts,
     slow_execution_config_to_dict,
     spot_grid_config_to_dict,
     spot_markets_to_list,
+    strategy_universe_to_dict,
 )
 
 
@@ -171,6 +189,10 @@ STRATEGY_IDS = {
     "cash_and_carry",
     "triangular_arbitrage",
     "funding_arbitrage",
+    "funding_bot",
+    "basis_bot",
+    "futures_grid",
+    "hedge_rebalancer",
     "options_arbitrage",
     "signal_bot",
 }
@@ -729,6 +751,58 @@ def build_trading_console_payload(
             mode="scan",
         ),
         strategy_row(
+            strategy_id="funding_bot",
+            label="Funding Bot",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.funding_bot_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol or "funding pairs",
+            strategy_allowed=_risk_strategy_enabled(cfg, "funding_bot"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
+            strategy_id="basis_bot",
+            label="Basis Bot",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.basis_bot_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol or "basis pairs",
+            strategy_allowed=_risk_strategy_enabled(cfg, "basis_bot"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
+            strategy_id="futures_grid",
+            label="Futures Grid",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.futures_grid_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "futures_grid"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
+            strategy_id="hedge_rebalancer",
+            label="Hedge Rebalancer",
+            configured=(
+                cfg.contract_strategies.enabled
+                and cfg.contract_strategies.hedge_rebalancer_enabled
+            ),
+            exchange=cfg.contract_strategies.derivative_exchange,
+            symbol=cfg.contract_strategies.derivative_symbol,
+            strategy_allowed=_risk_strategy_enabled(cfg, "hedge_rebalancer"),
+            live_ready=False,
+            mode="paper",
+        ),
+        strategy_row(
             strategy_id="options_arbitrage",
             label="Options Arbitrage",
             configured=bool(cfg.option_combos),
@@ -792,6 +866,19 @@ def _exchange_balance_symbols(
     if cfg.backtest.exchange and cfg.backtest.symbol:
         symbols.setdefault(cfg.backtest.exchange, set()).add(cfg.backtest.symbol)
 
+    if cfg.contract_strategies.spot_exchange and cfg.contract_strategies.spot_symbol:
+        symbols.setdefault(cfg.contract_strategies.spot_exchange, set()).add(
+            cfg.contract_strategies.spot_symbol
+        )
+
+    if (
+        cfg.contract_strategies.derivative_exchange
+        and cfg.contract_strategies.derivative_symbol
+    ):
+        symbols.setdefault(cfg.contract_strategies.derivative_exchange, set()).add(
+            cfg.contract_strategies.derivative_symbol
+        )
+
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
@@ -820,6 +907,60 @@ def _account_payload_messages(account: dict[str, Any]) -> list[str]:
     if error and error not in messages:
         messages.append(str(error))
     return messages
+
+
+def _derivative_account_messages(account: dict[str, Any]) -> list[str]:
+    summary = account.get("summary") if isinstance(account.get("summary"), dict) else {}
+    messages = [
+        str(message)
+        for message in [
+            *list(account.get("risk_reasons", []) or []),
+            *list(summary.get("risk_reasons", []) or []),
+            *list(account.get("errors", []) or []),
+            *list(account.get("warnings", []) or []),
+            account.get("skipped_reason"),
+        ]
+        if message
+    ]
+    return _dedupe_readiness_messages(messages)
+
+
+def _derivatives_readiness_summary(
+    derivatives: dict[str, Any],
+) -> dict[str, Any]:
+    accounts = [
+        account
+        for account in derivatives.get("accounts", []) or []
+        if isinstance(account, dict)
+    ]
+    blocked_accounts = [
+        account for account in accounts if account.get("status") == "blocked"
+    ]
+    warning_accounts = [
+        account for account in accounts if account.get("status") == "warning"
+    ]
+    error_accounts = [
+        account for account in accounts if account.get("status") == "error"
+    ]
+    reasons: list[str] = []
+    for account in [*error_accounts, *blocked_accounts, *warning_accounts]:
+        label = account.get("label") or account.get("exchange") or "derivatives"
+        messages = _derivative_account_messages(account)
+        if messages:
+            reasons.append(f"{label}: {messages[0]}")
+    reasons.extend(str(item) for item in derivatives.get("warnings", []) or [] if item)
+    reasons.extend(str(item) for item in derivatives.get("errors", []) or [] if item)
+    return {
+        "status": derivatives.get("status") or "disabled",
+        "account_count": len(accounts),
+        "blocked_account_count": len(blocked_accounts),
+        "warning_account_count": len(warning_accounts),
+        "error_account_count": len(error_accounts),
+        "position_count": int(derivatives.get("position_count") or 0),
+        "reasons": _dedupe_readiness_messages(reasons)[:6],
+        "has_warnings": bool(derivatives.get("warnings")),
+        "has_errors": bool(derivatives.get("errors")),
+    }
 
 
 def _readiness_message_key(message: str) -> str:
@@ -903,7 +1044,11 @@ def _readiness_strategy_reasons(
         reasons.append("strategy disabled by risk")
     if not strategy.get("account_enabled", True):
         reasons.append("account disabled by risk")
-    if strategy_id != "backtest" and not strategy.get("live_ready", True):
+    if (
+        strategy_id != "backtest"
+        and not strategy.get("live_ready", True)
+        and strategy.get("mode") not in {"paper", "research", "scan", "trigger"}
+    ):
         reasons.append("strategy live switch disabled")
 
     account = account_statuses.get(exchange)
@@ -947,6 +1092,7 @@ def build_readiness_payload(
     *,
     account_balances: dict[str, Any] | None = None,
     order_activity: dict[str, Any] | None = None,
+    derivatives: dict[str, Any] | None = None,
     trading_console: dict[str, Any] | None = None,
     market_maker: dict[str, Any] | None = None,
     slow_execution: dict[str, Any] | None = None,
@@ -954,11 +1100,13 @@ def build_readiness_payload(
     dca: dict[str, Any] | None = None,
     execution_algo: dict[str, Any] | None = None,
     backtest: dict[str, Any] | None = None,
+    execution_protection: dict[str, Any] | None = None,
     markets: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     account_balances = account_balances or {}
     order_activity = order_activity or {}
+    derivatives = derivatives or {}
     trading_console = trading_console or build_trading_console_payload(cfg)
     market_maker = market_maker or {}
     slow_execution = slow_execution or {}
@@ -966,9 +1114,12 @@ def build_readiness_payload(
     dca = dca or {}
     execution_algo = execution_algo or {}
     backtest = backtest or {}
+    execution_protection = execution_protection or {}
     symbols_by_exchange = _exchange_balance_symbols(cfg)
     balance_by_exchange = _account_payload_by_exchange(account_balances)
     order_by_exchange = _account_payload_by_exchange(order_activity)
+    derivative_by_exchange = _account_payload_by_exchange(derivatives)
+    derivative_readiness = _derivatives_readiness_summary(derivatives)
     checking_statuses = {"starting", "checking", "pending"}
 
     account_rows: list[dict[str, Any]] = []
@@ -988,6 +1139,8 @@ def build_readiness_payload(
             or (order_activity.get("status") if order_activity.get("accounts") else "starting")
             or "starting"
         )
+        derivative_account = derivative_by_exchange.get(exchange.key, {})
+        derivative_status = str(derivative_account.get("status") or "")
         risk_enabled = _risk_account_enabled(cfg, exchange.key)
         reasons: list[str] = []
         if not used:
@@ -1006,19 +1159,43 @@ def build_readiness_payload(
             reasons.extend(_account_payload_messages(orders) or ["order activity failed"])
         elif used and order_status == "warning":
             reasons.extend(_account_payload_messages(orders) or ["order activity warning"])
+        if used and derivative_status == "error":
+            reasons.extend(
+                _derivative_account_messages(derivative_account)
+                or ["derivatives risk check failed"]
+            )
+        elif used and derivative_status == "blocked":
+            reasons.extend(
+                _derivative_account_messages(derivative_account)
+                or ["derivatives risk limit breached"]
+            )
+        elif used and derivative_status == "warning":
+            reasons.extend(
+                _derivative_account_messages(derivative_account)
+                or ["derivatives risk warning"]
+            )
 
         if not used:
             status = "idle"
-        elif balance_status in checking_statuses or order_status in checking_statuses:
+        elif (
+            balance_status in checking_statuses
+            or order_status in checking_statuses
+            or derivative_status in checking_statuses
+        ):
             status = "checking"
         elif (
             not auth["private_checks_enabled"]
             or not risk_enabled
             or balance_status == "error"
             or order_status == "error"
+            or derivative_status in {"blocked", "error"}
         ):
             status = "blocked"
-        elif balance_status == "warning" or order_status == "warning":
+        elif (
+            balance_status == "warning"
+            or order_status == "warning"
+            or derivative_status == "warning"
+        ):
             status = "warning"
         else:
             status = "ready"
@@ -1043,6 +1220,7 @@ def build_readiness_payload(
                 ),
                 "balance_status": balance_status,
                 "order_status": order_status,
+                "derivatives_status": derivative_status or "disabled",
                 "risk_enabled": risk_enabled,
                 "status": status,
                 "reasons": deduped[:6],
@@ -1065,7 +1243,13 @@ def build_readiness_payload(
             execution_algo=execution_algo,
             backtest=backtest,
         )
-        if strategy.get("id") == "backtest" and strategy.get("configured"):
+        if (
+            strategy.get("mode") in {"paper", "research"}
+            and strategy.get("configured")
+            and not reasons
+        ):
+            status = str(strategy.get("mode") or "paper")
+        elif strategy.get("id") == "backtest" and strategy.get("configured"):
             status = "research"
         elif strategy.get("live"):
             status = "live"
@@ -1103,27 +1287,55 @@ def build_readiness_payload(
     live_strategies = sum(1 for row in strategy_rows if row["status"] == "live")
     configured_strategies = sum(1 for row in strategy_rows if row.get("configured"))
     blocked_strategies = sum(1 for row in strategy_rows if row["status"] == "blocked")
+    protection_blocked_count = int(execution_protection.get("blocked_count") or 0)
+    protection_warning_count = int(execution_protection.get("warning_count") or 0)
+    protection_manual_review_count = int(
+        execution_protection.get("manual_review_count") or 0
+    )
+    derivative_blocked_count = int(
+        derivative_readiness["blocked_account_count"]
+        + derivative_readiness["error_account_count"]
+    )
+    derivative_warning_count = int(
+        derivative_readiness["warning_account_count"]
+        + (1 if derivative_readiness["has_warnings"] else 0)
+    )
     warning_count = (
         warning_accounts
         + market_missing_count
         + (1 if reconciliation.get("status") == "warning" else 0)
         + (1 if order_activity.get("status") == "warning" else 0)
         + (1 if account_balances.get("status") == "warning" else 0)
+        + protection_warning_count
+        + protection_manual_review_count
+        + (1 if derivative_readiness["has_warnings"] else 0)
     )
 
     account_checks_status = str(account_balances.get("status") or "starting")
     order_checks_status = str(order_activity.get("status") or "starting")
-    if order_activity.get("status") == "error" or account_balances.get("status") == "error":
+    derivative_checks_status = str(derivatives.get("status") or "disabled")
+    if (
+        order_activity.get("status") == "error"
+        or account_balances.get("status") == "error"
+        or derivative_checks_status == "error"
+        or derivative_readiness["has_errors"]
+    ):
         status = "error"
     elif (
         checking_accounts
         or account_checks_status in checking_statuses
         or order_checks_status in checking_statuses
+        or derivative_checks_status in checking_statuses
     ):
         status = "checking"
     elif not (cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading):
         status = "guarded"
-    elif blocked_accounts or blocked_strategies:
+    elif (
+        blocked_accounts
+        or blocked_strategies
+        or protection_blocked_count
+        or derivative_blocked_count
+    ):
         status = "blocked"
     elif warning_count:
         status = "warning"
@@ -1238,6 +1450,36 @@ def build_readiness_payload(
                 ),
             )
         )
+    if protection_blocked_count or protection_warning_count or protection_manual_review_count:
+        protection_reasons = execution_protection.get("top_reasons") or []
+        next_actions.append(
+            _readiness_action(
+                priority="high" if protection_blocked_count else "medium",
+                scope="Execution Protection",
+                action="Review multi-leg paper protection",
+                status=str(execution_protection.get("status") or "warning"),
+                detail=(
+                    str(protection_reasons[0])
+                    if protection_reasons
+                    else "Multi-leg strategy has paper execution protection warnings."
+                ),
+            )
+        )
+    if derivative_blocked_count or derivative_warning_count:
+        derivative_reasons = derivative_readiness.get("reasons") or []
+        next_actions.append(
+            _readiness_action(
+                priority="high" if derivative_blocked_count else "medium",
+                scope="Derivatives Risk",
+                action="Review margin and liquidation risk",
+                status=str(derivative_readiness.get("status") or "warning"),
+                detail=(
+                    str(derivative_reasons[0])
+                    if derivative_reasons
+                    else "Derivative risk checks have warnings."
+                ),
+            )
+        )
 
     action_priority = {"high": 0, "medium": 1, "low": 2}
     action_seen: set[tuple[str, str, str]] = set()
@@ -1297,7 +1539,13 @@ def build_readiness_payload(
             "live_strategies": live_strategies,
             "blocked_strategies": blocked_strategies,
             "paused_strategies": sum(1 for row in strategy_rows if row["status"] == "paused"),
-            "blocked_count": blocked_accounts + blocked_strategies,
+            "execution_protection_blocked_count": protection_blocked_count,
+            "execution_protection_warning_count": protection_warning_count,
+            "execution_protection_manual_review_count": protection_manual_review_count,
+            "derivative_blocked_account_count": derivative_blocked_count,
+            "derivative_warning_account_count": derivative_warning_count,
+            "derivative_position_count": derivative_readiness["position_count"],
+            "blocked_count": blocked_accounts + blocked_strategies + protection_blocked_count,
             "warning_count": warning_count,
             "warning_messages": list(warnings or [])[:6],
             "action_count": len(unique_actions),
@@ -1317,6 +1565,18 @@ def _account_balance_status(accounts: list[dict[str, Any]]) -> str:
     if any(account["status"] == "error" for account in accounts):
         return "error"
     if any(account["status"] == "warning" for account in accounts):
+        return "warning"
+    return "ok"
+
+
+def _derivatives_status(accounts: list[dict[str, Any]]) -> str:
+    if not accounts:
+        return "disabled"
+    if any(account.get("status") == "error" for account in accounts):
+        return "error"
+    if any(account.get("status") == "blocked" for account in accounts):
+        return "blocked"
+    if any(account.get("status") == "warning" for account in accounts):
         return "warning"
     return "ok"
 
@@ -1524,6 +1784,299 @@ async def _fetch_exchange_balance_payload(
         "open_order_reserves": reserve_payload,
     }
     return account
+
+
+async def _fetch_derivative_exchange_risk_payload(
+    manager: ExchangeManager,
+    exchange: ExchangeConfig,
+    symbols: list[str],
+    funding_rates: dict[tuple[str, str], float],
+    risk: RiskConfig,
+) -> dict[str, Any]:
+    auth = _auth_env_status(exchange)
+    account: dict[str, Any] = {
+        "exchange": exchange.key,
+        "label": exchange.label or exchange.key,
+        "id": exchange.id,
+        "market_type": exchange.market_type,
+        "symbols": symbols,
+        "auth": {
+            "configured": auth["configured"],
+            "private_checks_enabled": auth["private_checks_enabled"],
+            "missing_env": auth["missing_env"],
+        },
+        "status": "ok",
+        "checked": False,
+        "skipped_reason": "",
+        "summary": {},
+        "positions": [],
+        "risk_reasons": [],
+        "warnings": [],
+        "errors": [],
+    }
+    if not symbols:
+        account["status"] = "idle"
+        account["skipped_reason"] = "no configured derivative symbols"
+        return account
+    if not auth["configured"]:
+        account["status"] = "warning"
+        account["skipped_reason"] = "api env vars not configured"
+        account["warnings"].append("API env vars are not configured")
+        return account
+    if auth["missing_env"]:
+        account["status"] = "warning"
+        account["skipped_reason"] = "api env vars missing"
+        account["warnings"].append("one or more configured API env vars are not set")
+        return account
+
+    try:
+        balance = await manager.fetch_balance(exchange)
+    except Exception as exc:  # noqa: BLE001
+        message = f"{exc.__class__.__name__}: {exc}"
+        account["status"] = "error"
+        account["errors"].append(message)
+        return account
+
+    try:
+        raw_positions = await manager.fetch_positions(exchange, symbols)
+    except Exception as exc:  # noqa: BLE001
+        message = f"{exc.__class__.__name__}: {exc}"
+        account["status"] = "error"
+        account["errors"].append(message)
+        account["checked"] = True
+        return account
+
+    symbol_set = set(symbols)
+    positions = []
+    for raw in raw_positions:
+        if not isinstance(raw, dict):
+            continue
+        row = normalize_derivative_position(exchange, raw, risk=risk)
+        if row is None:
+            continue
+        if row.get("symbol") and row["symbol"] not in symbol_set:
+            continue
+        row["funding_rate"] = funding_rates.get((exchange.key, row.get("symbol", "")))
+        positions.append(row)
+
+    margin_currencies = _balance_currencies(symbols)
+    summary = derivative_account_summary(
+        balance,
+        positions,
+        currencies=margin_currencies,
+        risk=risk,
+    )
+    account["checked"] = True
+    account["summary"] = summary
+    account["positions"] = positions
+    account["risk_reasons"] = summary.get("risk_reasons", [])
+    if summary.get("status") == "blocked":
+        account["status"] = "blocked"
+    return account
+
+
+async def fetch_derivatives_risk_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+) -> dict[str, Any]:
+    symbols_by_exchange = _derivative_symbols_by_exchange(cfg)
+    try:
+        funding_rates = await manager.fetch_funding_rates(
+            cfg.derivative_exchanges,
+            symbols_by_exchange,
+        )
+        funding_errors: list[str] = []
+    except Exception as exc:  # noqa: BLE001
+        funding_rates = {}
+        funding_errors = [f"funding rate check failed: {exc.__class__.__name__}: {exc}"]
+    accounts = await asyncio.gather(
+        *[
+            _fetch_derivative_exchange_risk_payload(
+                manager,
+                exchange,
+                symbols_by_exchange.get(exchange.key, []),
+                funding_rates,
+                cfg.risk,
+            )
+            for exchange in cfg.derivative_exchanges
+        ]
+    )
+    errors = [
+        f"{account['exchange']}: {error}"
+        for account in accounts
+        for error in account.get("errors", [])
+    ]
+    warnings = [
+        f"{account['exchange']}: {warning}"
+        for account in accounts
+        for warning in account.get("warnings", [])
+    ]
+    warnings.extend(funding_errors)
+    return {
+        "status": _derivatives_status(accounts),
+        "accounts": accounts,
+        "position_count": sum(len(account.get("positions", [])) for account in accounts),
+        "checked_account_count": sum(1 for account in accounts if account.get("checked")),
+        "total_account_count": len(accounts),
+        "funding_rate_count": len(funding_rates),
+        "limits": {
+            "max_derivative_leverage": cfg.risk.max_derivative_leverage,
+            "min_liquidation_buffer_pct": cfg.risk.min_liquidation_buffer_pct,
+            "max_margin_usage_pct": cfg.risk.max_margin_usage_pct,
+        },
+        "last_finished": time.time(),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _configured_exchange_keys(exchanges: Iterable[ExchangeConfig]) -> set[str]:
+    return {exchange.key for exchange in exchanges}
+
+
+async def fetch_funding_basis_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    *,
+    strategy_center_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    settings_rows = funding_settings_from_strategy_center(strategy_center_payload)
+    if not settings_rows:
+        return funding_basis_payload(
+            [],
+            spot_books={},
+            derivative_books={},
+            funding_rates={},
+            notional_quote=cfg.notional_quote,
+            risk=cfg.risk,
+        )
+
+    spot_symbols: dict[str, set[str]] = {}
+    derivative_symbols: dict[str, set[str]] = {}
+    warnings: list[str] = []
+    spot_exchange_keys = _configured_exchange_keys(cfg.spot_exchanges)
+    derivative_exchange_keys = _configured_exchange_keys(cfg.derivative_exchanges)
+    for settings in settings_rows:
+        if settings.spot_exchange and settings.spot_symbol:
+            spot_symbols.setdefault(settings.spot_exchange, set()).add(
+                settings.spot_symbol
+            )
+            if settings.spot_exchange not in spot_exchange_keys:
+                warnings.append(
+                    f"{settings.pair_id or settings.spot_symbol}: spot exchange "
+                    f"{settings.spot_exchange} is not configured"
+                )
+        if settings.derivative_exchange and settings.derivative_symbol:
+            derivative_symbols.setdefault(settings.derivative_exchange, set()).add(
+                settings.derivative_symbol
+            )
+            if settings.derivative_exchange not in derivative_exchange_keys:
+                warnings.append(
+                    f"{settings.pair_id or settings.derivative_symbol}: derivative "
+                    f"exchange {settings.derivative_exchange} is not configured"
+                )
+
+    spot_configs = [
+        exchange for exchange in cfg.spot_exchanges if exchange.key in spot_symbols
+    ]
+    derivative_configs = [
+        exchange
+        for exchange in cfg.derivative_exchanges
+        if exchange.key in derivative_symbols
+    ]
+    spot_task = manager.fetch_order_books(
+        spot_configs,
+        spot_symbols,
+        cfg.order_book_depth,
+    )
+    derivative_task = manager.fetch_order_books(
+        derivative_configs,
+        derivative_symbols,
+        cfg.order_book_depth,
+    )
+    funding_task = manager.fetch_funding_rates(
+        derivative_configs,
+        derivative_symbols,
+    )
+    spot_result, derivative_result, funding_result = await asyncio.gather(
+        spot_task,
+        derivative_task,
+        funding_task,
+        return_exceptions=True,
+    )
+    errors: list[str] = []
+    if isinstance(spot_result, Exception):
+        spot_books = {}
+        errors.append(
+            f"spot order books failed: {spot_result.__class__.__name__}: {spot_result}"
+        )
+    else:
+        spot_books = spot_result
+    if isinstance(derivative_result, Exception):
+        derivative_books = {}
+        errors.append(
+            "derivative order books failed: "
+            f"{derivative_result.__class__.__name__}: {derivative_result}"
+        )
+    else:
+        derivative_books = derivative_result
+    if isinstance(funding_result, Exception):
+        funding_rates = {}
+        errors.append(
+            f"funding rates failed: {funding_result.__class__.__name__}: {funding_result}"
+        )
+    else:
+        funding_rates = funding_result
+
+    payload = funding_basis_payload(
+        settings_rows,
+        spot_books=spot_books,
+        derivative_books=derivative_books,
+        funding_rates=funding_rates,
+        notional_quote=cfg.notional_quote,
+        risk=cfg.risk,
+    )
+    payload["warnings"] = [*payload.get("warnings", []), *warnings]
+    payload["errors"] = [*payload.get("errors", []), *errors]
+    if errors and payload["status"] == "disabled":
+        payload["status"] = "error"
+    return payload
+
+
+async def fetch_options_arbitrage_payload(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+) -> dict[str, Any]:
+    if not cfg.option_combos:
+        return options_arbitrage_payload(cfg, spot_books={}, option_books={})
+    if not cfg.options_arbitrage.enabled:
+        return options_arbitrage_payload(cfg, spot_books={}, option_books={})
+
+    try:
+        spot_books, option_books = await asyncio.gather(
+            manager.fetch_order_books(
+                cfg.spot_exchanges,
+                _spot_symbols_for_option_combos(cfg.option_combos),
+                cfg.order_book_depth,
+            ),
+            manager.fetch_order_books(
+                cfg.derivative_exchanges,
+                _option_symbols_for_option_combos(cfg.option_combos),
+                cfg.order_book_depth,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            **options_arbitrage_payload(cfg, spot_books={}, option_books={}),
+            "status": "error",
+            "last_finished": time.time(),
+            "errors": [f"{exc.__class__.__name__}: {exc}"],
+        }
+    return options_arbitrage_payload(
+        cfg,
+        spot_books=spot_books,
+        option_books=option_books,
+    )
 
 
 def _aggregate_account_balance_totals(
@@ -2457,6 +3010,18 @@ def _save_runtime_overrides(path: Path, payload: dict[str, Any]) -> str | None:
 
 
 def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any]:
+    maker_configs = market_maker_configs_for_runtime(cfg)
+    primary_maker = maker_configs[0] if maker_configs else cfg.market_maker
+    primary_conversion = (
+        market_maker_quote_conversion(cfg, primary_maker.symbol)
+        if primary_maker.symbol
+        else {
+            "quote_currency": "",
+            "common_quote_currency": cfg.common_quote_currency,
+            "quote_to_common_rate": None,
+            "available": False,
+        }
+    )
     return {
         "status": "starting",
         "config": {
@@ -2470,10 +3035,14 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 cfg.cash_and_carry_pairs
             ),
             "triangular_arbitrage": asdict(cfg.triangular_arbitrage),
+            "contract_strategies": contract_strategies_config_to_dict(
+                cfg.contract_strategies
+            ),
             "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
             "derivative_exchanges": exchange_configs_to_list(
                 cfg.derivative_exchanges
             ),
+            "strategy_universe": strategy_universe_to_dict(cfg),
         },
         "scan": {
             "count": 0,
@@ -2493,6 +3062,113 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "total_account_count": len(_all_account_exchanges(cfg)),
             "last_finished": None,
             "errors": [],
+        },
+        "derivatives": {
+            "status": "disabled" if not cfg.derivative_exchanges else "starting",
+            "accounts": [],
+            "position_count": 0,
+            "checked_account_count": 0,
+            "total_account_count": len(cfg.derivative_exchanges),
+            "funding_rate_count": 0,
+            "limits": {
+                "max_derivative_leverage": cfg.risk.max_derivative_leverage,
+                "min_liquidation_buffer_pct": cfg.risk.min_liquidation_buffer_pct,
+                "max_margin_usage_pct": cfg.risk.max_margin_usage_pct,
+            },
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
+        },
+        "funding_basis": {
+            "status": "disabled",
+            "mode": "paper",
+            "rows": [],
+            "candidate_count": 0,
+            "configured_count": 0,
+            "checked_count": 0,
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
+        },
+        "options_arbitrage": {
+            "status": "disabled" if not cfg.option_combos else "starting",
+            "mode": "paper",
+            "rows": [],
+            "option_chain": [],
+            "strategy_candidates": [],
+            "risk": {
+                "status": "disabled" if not cfg.option_combos else "starting",
+                "total_delta": None,
+                "total_gamma": None,
+                "total_vega": None,
+                "total_theta": None,
+                "greeks_available_count": 0,
+                "chain_option_count": 0,
+                "expiry_concentration": [],
+                "expiry_reminders": [],
+                "blocked_new_open_count": 0,
+                "max_loss_quote": None,
+                "max_profit_quote": None,
+                "break_even_points": [],
+                "controls": {
+                    "min_option_depth_quote": cfg.options_arbitrage.min_option_depth_quote,
+                    "max_option_spread_bps": cfg.options_arbitrage.max_option_spread_bps,
+                    "min_days_to_expiry_open": cfg.options_arbitrage.min_days_to_expiry_open,
+                    "expiry_reminder_days": cfg.options_arbitrage.expiry_reminder_days,
+                    "paper_mode_only": True,
+                    "auto_submit_live_orders": False,
+                },
+                "updated_at": None,
+            },
+            "execution_controls": {
+                "min_option_depth_quote": cfg.options_arbitrage.min_option_depth_quote,
+                "max_option_spread_bps": cfg.options_arbitrage.max_option_spread_bps,
+                "min_days_to_expiry_open": cfg.options_arbitrage.min_days_to_expiry_open,
+                "expiry_reminder_days": cfg.options_arbitrage.expiry_reminder_days,
+                "paper_mode_only": True,
+                "auto_submit_live_orders": False,
+            },
+            "opportunities": [],
+            "candidate_count": 0,
+            "parity_candidate_count": 0,
+            "enhanced_candidate_count": 0,
+            "configured_count": len(cfg.option_combos),
+            "checked_count": 0,
+            "thresholds": {
+                "notional_quote": cfg.options_arbitrage.notional_quote,
+                "min_edge_quote": cfg.options_arbitrage.min_edge_quote,
+                "min_edge_bps": cfg.options_arbitrage.min_edge_bps,
+                "max_contracts": cfg.options_arbitrage.max_contracts,
+                "max_days_to_expiry": cfg.options_arbitrage.max_days_to_expiry,
+                "min_option_depth_quote": cfg.options_arbitrage.min_option_depth_quote,
+                "max_option_spread_bps": cfg.options_arbitrage.max_option_spread_bps,
+                "min_days_to_expiry_open": cfg.options_arbitrage.min_days_to_expiry_open,
+                "expiry_reminder_days": cfg.options_arbitrage.expiry_reminder_days,
+            },
+            "last_finished": None,
+            "errors": [],
+            "warnings": [],
+        },
+        "contract_strategies": build_contract_strategies_payload(
+            cfg,
+            funding_basis={},
+            derivatives={},
+            market_maker={},
+            order_activity={},
+        ),
+        "execution_protection": {
+            "status": "disabled",
+            "mode": "paper",
+            "protection_count": 0,
+            "ok_count": 0,
+            "blocked_count": 0,
+            "warning_count": 0,
+            "manual_review_count": 0,
+            "slippage_block_count": 0,
+            "stale_block_count": 0,
+            "rows": [],
+            "top_reasons": [],
+            "updated_at": None,
         },
         "order_activity": {
             "status": "starting",
@@ -2595,35 +3271,17 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "status": "disabled",
             "mode": "dry_run",
             "plan": None,
-            "config": market_maker_config_to_dict(cfg.market_maker),
+            "config": market_maker_config_to_dict(primary_maker),
+            "instances": market_maker_configs_to_list(maker_configs),
             "accounts": slow_execution_accounts(
                 _all_account_exchanges(cfg),
                 _market_maker_symbols_by_exchange(cfg),
             ),
-            "quote_conversion": market_maker_quote_conversion(
-                cfg,
-                cfg.market_maker.symbol,
-            )
-            if cfg.market_maker.symbol
-            else {
-                "quote_currency": "",
-                "common_quote_currency": cfg.common_quote_currency,
-                "quote_to_common_rate": None,
-                "available": False,
-            },
+            "quote_conversion": primary_conversion,
             "safety": build_market_maker_safety_payload(
                 cfg,
                 None,
-                (
-                    market_maker_quote_conversion(cfg, cfg.market_maker.symbol)
-                    if cfg.market_maker.symbol
-                    else {
-                        "quote_currency": "",
-                        "common_quote_currency": cfg.common_quote_currency,
-                        "quote_to_common_rate": None,
-                        "available": False,
-                    }
-                ),
+                primary_conversion,
             ),
             "runtime": {},
             "quality": {},
@@ -2929,15 +3587,13 @@ def build_market_maker_safety_payload(
     }
 
 
-def build_market_maker_payload(
+def _build_market_maker_instance_payload(
     cfg: BotConfig,
+    maker_cfg: MarketMakerConfig,
     books: dict[tuple[str, str], OrderBookSnapshot],
+    accounts: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    maker_cfg = cfg.market_maker
-    accounts = slow_execution_accounts(
-        _all_account_exchanges(cfg),
-        _market_maker_symbols_by_exchange(cfg),
-    )
+    instance_cfg = replace(cfg, market_maker=maker_cfg)
     config_payload = market_maker_config_to_dict(maker_cfg)
     conversion = (
         market_maker_quote_conversion(cfg, maker_cfg.symbol)
@@ -2969,7 +3625,7 @@ def build_market_maker_payload(
             "accounts": accounts,
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
-            "safety": build_market_maker_safety_payload(cfg, None, conversion),
+            "safety": build_market_maker_safety_payload(instance_cfg, None, conversion),
             "market_data": None,
             "runtime": {},
             "error": None,
@@ -2986,7 +3642,7 @@ def build_market_maker_payload(
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
             "safety": build_market_maker_safety_payload(
-                cfg,
+                instance_cfg,
                 None,
                 conversion,
                 error=f"Missing {maker_cfg.exchange} {maker_cfg.symbol}",
@@ -3015,7 +3671,7 @@ def build_market_maker_payload(
             "quote_conversion": conversion,
             "exchange_features": exchange_features,
             "safety": build_market_maker_safety_payload(
-                cfg,
+                instance_cfg,
                 None,
                 conversion,
                 error=str(exc),
@@ -3025,7 +3681,7 @@ def build_market_maker_payload(
             "error": str(exc),
         }
 
-    safety = build_market_maker_safety_payload(cfg, plan, conversion)
+    safety = build_market_maker_safety_payload(instance_cfg, plan, conversion)
     return {
         "status": "planned",
         "mode": "dry_run",
@@ -3039,6 +3695,33 @@ def build_market_maker_payload(
         "runtime": {},
         "error": None,
     }
+
+
+def build_market_maker_payload(
+    cfg: BotConfig,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> dict[str, Any]:
+    maker_configs = market_maker_configs_for_runtime(cfg)
+    accounts = slow_execution_accounts(
+        _all_account_exchanges(cfg),
+        _market_maker_symbols_by_exchange(cfg),
+    )
+    instances = [
+        _build_market_maker_instance_payload(cfg, maker_cfg, books, accounts)
+        for maker_cfg in maker_configs
+    ]
+    if not instances:
+        maker_cfg = market_maker_config_with_id(cfg.market_maker)
+        instances = [
+            _build_market_maker_instance_payload(cfg, maker_cfg, books, accounts)
+        ]
+    primary = dict(instances[0])
+    primary["instances"] = instances
+    primary["instance_count"] = len(instances)
+    primary["active_instance_count"] = sum(
+        1 for item in instances if item.get("status") not in {"disabled", "paused"}
+    )
+    return primary
 
 
 def build_slow_execution_payload(
@@ -4460,13 +5143,18 @@ async def api_state(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     view = request.query.get("view")
-    payload = await state.get(view=view)
+    sections = request.query.get("sections")
+    payload = await state.get(view=view, sections=sections)
     runtime_cfg = await state.runtime_config(cfg)
     requesting_user = _request_user(request)
-    payload["strategy_center"] = build_strategy_center_payload(
-        runtime_cfg,
-        request.app["strategy_center_store"],
-        user=requesting_user,
+    payload["strategy_center"] = strategy_center_payload_for_view(
+        build_strategy_center_payload(
+            runtime_cfg,
+            request.app["strategy_center_store"],
+            user=requesting_user,
+        ),
+        view=view,
+        sections=sections,
     )
     if (
         requesting_user is not None
@@ -5298,38 +5986,91 @@ async def api_market_maker(request: web.Request) -> web.Response:
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _market_maker_symbols_by_exchange(runtime_cfg)
-        overrides = _market_maker_overrides_from_payload(
-            payload,
-            allowed_exchanges={
-                exchange.key for exchange in _all_account_exchanges(runtime_cfg)
-            },
-            symbols_by_exchange=symbols_by_exchange,
+        allowed_exchanges = {
+            exchange.key for exchange in _all_account_exchanges(runtime_cfg)
+        }
+        current_instances = market_maker_configs_for_runtime(runtime_cfg)
+        action = "upsert"
+        if isinstance(payload, dict) and "instances" in payload:
+            updated_instances = market_maker_configs_from_payload(
+                payload["instances"],
+                base_configs=current_instances,
+                allowed_exchanges=allowed_exchanges,
+                symbols_by_exchange=symbols_by_exchange,
+            )
+            action = "replace"
+        elif isinstance(payload, dict) and payload.get("delete_id"):
+            delete_id = str(payload["delete_id"]).strip()
+            updated_instances = [
+                instance
+                for instance in current_instances
+                if instance.id != delete_id
+            ]
+            action = "delete"
+        else:
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
+            target_id = str(payload.get("id") or "").strip()
+            base_config = next(
+                (
+                    instance
+                    for instance in current_instances
+                    if instance.id == target_id
+                ),
+                current_instances[0] if current_instances else None,
+            )
+            updated_config = market_maker_config_from_payload(
+                payload,
+                base_config=base_config,
+                allowed_exchanges=allowed_exchanges,
+                symbols_by_exchange=symbols_by_exchange,
+            )
+            replaced_instance = False
+            updated_instances = []
+            for instance in current_instances:
+                if instance.id == updated_config.id:
+                    updated_instances.append(updated_config)
+                    replaced_instance = True
+                else:
+                    updated_instances.append(instance)
+            if not replaced_instance:
+                updated_instances.append(updated_config)
+        _require_user_assets(
+            _request_user(request),
+            [
+                _base_asset_from_symbol(instance.symbol)
+                for instance in updated_instances
+                if instance.symbol
+            ],
         )
-        current_config = await state.market_maker_config(runtime_cfg.market_maker)
-        target_symbol = str(overrides.get("symbol") or current_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_market_maker_overrides(overrides, cfg=cfg)
-    current_config = await state.market_maker_config(cfg.market_maker)
+    update = await state.set_market_maker_instances(updated_instances, cfg=cfg)
     runtime_cfg = await state.runtime_config(cfg)
+    current_instances = market_maker_configs_for_runtime(runtime_cfg)
+    current_config = current_instances[0] if current_instances else runtime_cfg.market_maker
     write_web_audit_event(
         runtime_cfg,
         request,
         action="market_maker_config",
-        target=f"{current_config.exchange} {current_config.symbol}".strip(),
-        detail="updated Market Maker config",
-        payload=overrides,
+        target=", ".join(
+            f"{instance.id}:{instance.exchange} {instance.symbol}".strip()
+            for instance in current_instances
+        ),
+        detail=f"{action} Market Maker config",
+        payload={
+            "action": action,
+            "instances": market_maker_configs_to_list(current_instances),
+        },
     )
     return web.json_response(
         {
             "ok": True,
             "config": market_maker_config_to_dict(current_config),
+            "instances": market_maker_configs_to_list(current_instances),
             **update,
         }
     )
@@ -5529,10 +6270,15 @@ async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
         payload = await request.json()
         if not bool(payload.get("terminal_only", True)):
             raise ValueError("only terminal task cleanup is supported")
+        preview_only = bool(payload.get("preview") or payload.get("dry_run"))
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
+
+    if preview_only:
+        result = await tasks.preview_terminal_tasks()
+        return web.json_response({"ok": True, "preview": True, **result})
 
     result = await tasks.clear_terminal_tasks()
     await state.set_auto_buy_sell_tasks(result["tasks"])
@@ -5753,7 +6499,15 @@ def create_app(
     app["login_rate_limiter"] = LoginRateLimiter()
 
     async def monitor_context(app_: web.Application) -> Any:
-        monitor_task = asyncio.create_task(monitor_loop(cfg, strategy, state, interval))
+        monitor_task = asyncio.create_task(
+            monitor_loop(
+                cfg,
+                strategy,
+                state,
+                interval,
+                strategy_center_store=strategy_center_store,
+            )
+        )
         mm_task = asyncio.create_task(market_maker_task_loop(cfg, state))
         grid_task = asyncio.create_task(spot_grid_task_loop(cfg, state))
         auto_task = asyncio.create_task(

@@ -334,7 +334,7 @@ The Settings page also includes TWAP/VWAP/POV and Backtest/Paper panels. TWAP/VW
 
 The control page also exposes runtime market setup. `Markets` configures spot arbitrage symbols per account, while `Cash & Carry Pairs` configures spot-vs-contract symbols for basis scanning. Cash & Carry now scans both positive basis (`buy spot + sell contract`) and negative basis (`sell/borrow spot + buy contract`) opportunities. For Binance USDT perpetuals and Bybit USDT perpetuals, ccxt symbols usually look like `BTC/USDT:USDT` or `ETH/USDT:USDT`; the spot side remains `BTC/USDT` or `ETH/USDT`. The ACS example config includes `binance-spot`, `binance-swap` (`binanceusdm`), and `bybit-swap`, but does not assume ACS is listed on those venues. Add only the symbols that actually exist on the target exchange.
 
-Options arbitrage is available as a dry-run scanner with `option_combos` and `options_arbitrage`. Each combo links a spot market to a same-strike call/put pair, then checks put-call parity for conversion and reverse-conversion opportunities. It reports option contracts, underlying size, discounted strike, synthetic forward reference, edge quote, and edge bps. It does not place option orders; before live use, add assignment/expiry handling, margin checks, instrument-specific contract sizing, and exchange-specific option symbol validation.
+Options arbitrage is available as a dry-run scanner with `option_combos` and `options_arbitrage`. Each combo links a spot market to a same-strike call/put pair, then checks put-call parity for conversion and reverse-conversion opportunities. The status page also shows an option chain table with expiry, strike, call/put, bid/ask, mark, spread, depth, volume/open interest, and Greeks when the exchange feed provides them. `min_option_depth_quote`, `max_option_spread_bps`, `min_days_to_expiry_open`, and `expiry_reminder_days` act as paper execution controls: thin depth, wide spreads, or near-expiry contracts block new paper order tickets before live order generation is allowed. With multiple configured strikes/expiries, the scanner also reports paper candidates for box spreads, vertical spreads, calendar spreads, and IV anomalies when enough market data is available. It does not place option orders; generated order tickets are paper-only and require explicit final confirmation before any future live workflow.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m arbitrage_bot.main \
@@ -343,7 +343,7 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.main \
   --once
 ```
 
-For `start_price`, a sell schedule waits until the best bid is at or above the start price before placing the first marketable sell order. A buy schedule waits until the best ask is at or below the start price before placing the first marketable buy order. After an Auto Buy/Sell task has triggered, it keeps running until the configured amount is filled or `stop_price` is hit. For `stop_price`, a sell schedule stops when the best bid is at or below the stop price. A buy schedule stops when the best ask is at or above the stop price.
+For `start_price`, a sell schedule waits until the best bid is at or above the start price before placing the first marketable sell order. A buy schedule waits until the best ask is at or below the start price before placing the first marketable buy order. For `stop_price`, a sell schedule stops when the best bid is at or below the stop price, and a buy schedule stops when the best ask is at or below the stop price. Buy stop checks run before the start gate, so a buy task with `stop_price` above `start_price` stops before placing an order once the ask reaches or passes the stop level.
 
 To preview the next slice without placing anything:
 
@@ -477,7 +477,10 @@ Every market maker and Auto Buy/Sell cycle is written to JSONL when `trade_log.e
 "trade_log": {
   "enabled": true,
   "path": "data/trade_events.jsonl",
-  "max_recent_events": 50
+  "max_recent_events": 50,
+  "rotate_max_bytes": 268435456,
+  "rotate_keep_files": 12,
+  "rotate_compress": true
 }
 ```
 
@@ -487,9 +490,17 @@ The strategy timeline is a separate structured JSONL stream focused on decisions
 "strategy_timeline": {
   "enabled": true,
   "path": "data/strategy_timeline.jsonl",
-  "max_recent_events": 100
+  "max_recent_events": 100,
+  "rotate_max_bytes": 268435456,
+  "rotate_keep_files": 12,
+  "rotate_compress": true
 }
 ```
+
+When either JSONL file reaches `rotate_max_bytes`, the active file is moved to a
+timestamped archive, a fresh active file is opened, and the archive is gzipped in
+the background. `rotate_keep_files` limits the number of archived files kept per
+log stream.
 
 The monitor shows the current risk settings, strategy timeline, and normalized trade log rows in the `Risk & Events` table. You can also inspect the trade log from the command line:
 
@@ -531,6 +542,14 @@ Keep `data/` and local config files out of Git. The `alerts` block is reserved f
 ## Cloud deployment and per-account IPs
 
 For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.
+
+Use the deployment helper to sync code to a systemd-based VM without overwriting runtime secrets, data, or logs:
+
+```bash
+CRYPTO_ARB_DEPLOY_HOST=root@example.com scripts/deploy_cloud.sh
+```
+
+The helper excludes `.venv`, `data`, `logs`, `config.json`, `config.acs.json`, `.DS_Store`, and Mac `._*` metadata files, then creates a timestamped backup under the remote `data/` directory before restarting the service.
 
 The config `label` is the account identity used by the rest of the bot. Multiple accounts on the same exchange should be configured as separate exchange entries with the same `id` and different labels:
 

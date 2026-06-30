@@ -25,6 +25,7 @@ from .strategies.spot_spread import (
     find_spot_spread_opportunities,
 )
 from .strategies.triangular import find_triangular_arbitrage_opportunities
+from .web_config import market_maker_configs_for_runtime
 
 
 StrategyName = str
@@ -46,10 +47,11 @@ def _symbols_for_configured_spot_markets(cfg: BotConfig) -> dict[str, set[str]]:
         symbols_by_exchange.setdefault(market.exchange, set()).add(market.symbol)
     for source in cfg.quote_rate_sources:
         symbols_by_exchange.setdefault(source.exchange, set()).add(source.symbol)
-    if cfg.market_maker.enabled and cfg.market_maker.exchange and cfg.market_maker.symbol:
-        symbols_by_exchange.setdefault(cfg.market_maker.exchange, set()).add(
-            cfg.market_maker.symbol
-        )
+    for maker_cfg in market_maker_configs_for_runtime(cfg):
+        if maker_cfg.enabled and maker_cfg.exchange and maker_cfg.symbol:
+            symbols_by_exchange.setdefault(maker_cfg.exchange, set()).add(
+                maker_cfg.symbol
+            )
     if (
         cfg.slow_execution.enabled
         and cfg.slow_execution.exchange

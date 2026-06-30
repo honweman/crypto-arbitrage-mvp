@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import tempfile
@@ -7,6 +9,7 @@ from unittest.mock import patch
 
 from arbitrage_bot.config import ExchangeConfig, load_config
 from arbitrage_bot.exchanges import (
+    BithumbV2Client,
     ExchangeManager,
     _bithumb_market_code,
     _bithumb_query_string,
@@ -261,6 +264,52 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_bithumb_v2_fetch_closed_orders_paginates_requested_limit(
+        self,
+    ) -> None:
+        cfg = ExchangeConfig(id="bithumb", label="bithumb-spot")
+        client = BithumbV2Client(cfg, object(), api_key="key", secret="secret")
+        requests: list[dict[str, object]] = []
+
+        async def fake_request(
+            _method: str,
+            _path: str,
+            *,
+            params: dict[str, object] | None = None,
+            json_body: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            self.assertIsNone(json_body)
+            params = dict(params or {})
+            requests.append(params)
+            page = int(params.get("page") or 1)
+            if page == 1:
+                start, count = 0, 100
+            elif page == 2:
+                start, count = 100, 50
+            else:
+                return []
+            return [
+                {
+                    "order_id": f"order-{index}",
+                    "market": "KRW-ACS",
+                    "side": "bid",
+                    "state": "done",
+                    "price": "0.22",
+                    "volume": "10",
+                    "executed_volume": "10",
+                    "executed_funds": "2.2",
+                }
+                for index in range(start, start + count)
+            ]
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        rows = await client.fetch_closed_orders("ACS/KRW", limit=150)
+
+        self.assertEqual(len(rows), 150)
+        self.assertEqual([request["page"] for request in requests], [1, 2])
+        self.assertEqual([request["limit"] for request in requests], [100, 50])
+
     async def test_prepare_limit_orders_loads_markets_once(self) -> None:
         class FakeClient:
             def __init__(self) -> None:

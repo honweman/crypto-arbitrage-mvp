@@ -59,19 +59,32 @@ def _tracked_orders_from_local_state(
 ) -> list[dict[str, Any]]:
     tracked: list[dict[str, Any]] = []
     runtime = market_maker_runtime or {}
-    mm_exchange = str(runtime.get("open_order_exchange") or "")
-    mm_symbol = str(runtime.get("open_order_symbol") or "")
-    for order_id in runtime.get("open_order_ids", []) or []:
-        row = _tracked_order_row(
-            strategy="market_maker",
-            exchange=mm_exchange,
-            symbol=mm_symbol,
-            order_id=str(order_id),
-            source_id="market_maker_runtime",
-            expected_open=True,
-        )
-        if row is not None:
-            tracked.append(row)
+    mm_instances = runtime.get("instances") if isinstance(runtime, dict) else None
+    if isinstance(mm_instances, dict):
+        instance_rows = list(mm_instances.values())
+    elif isinstance(mm_instances, list):
+        instance_rows = mm_instances
+    else:
+        instance_rows = []
+    if not instance_rows:
+        instance_rows = [runtime]
+    for instance_runtime in instance_rows:
+        if not isinstance(instance_runtime, dict):
+            continue
+        mm_exchange = str(instance_runtime.get("open_order_exchange") or "")
+        mm_symbol = str(instance_runtime.get("open_order_symbol") or "")
+        source_id = str(instance_runtime.get("id") or "market_maker_runtime")
+        for order_id in instance_runtime.get("open_order_ids", []) or []:
+            row = _tracked_order_row(
+                strategy="market_maker",
+                exchange=mm_exchange,
+                symbol=mm_symbol,
+                order_id=str(order_id),
+                source_id=source_id,
+                expected_open=True,
+            )
+            if row is not None:
+                tracked.append(row)
 
     for task in (auto_buy_sell_tasks or {}).get("tasks", []) or []:
         if not isinstance(task, dict):

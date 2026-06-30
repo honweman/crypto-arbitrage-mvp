@@ -532,19 +532,41 @@ class BithumbV2Client:
         since: Any = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        params = {
-            "market": _bithumb_market_code(symbol),
-            "state": "done",
-            "limit": max(1, min(int(limit or 20), 100)),
-            "order_by": "desc",
-        }
-        payload = await self._request("GET", "/v1/orders", params=params)
-        rows = payload if isinstance(payload, list) else []
-        return [
-            _normalize_bithumb_v2_order(row, symbol)
-            for row in rows
-            if isinstance(row, dict)
-        ]
+        target_limit = max(1, int(limit or 20))
+        orders: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        page = 1
+        while len(orders) < target_limit:
+            request_limit = min(100, target_limit - len(orders))
+            params = {
+                "market": _bithumb_market_code(symbol),
+                "state": "done",
+                "limit": request_limit,
+                "page": page,
+                "order_by": "desc",
+            }
+            payload = await self._request("GET", "/v1/orders", params=params)
+            rows = payload if isinstance(payload, list) else []
+            if not rows:
+                break
+            added = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                order = _normalize_bithumb_v2_order(row, symbol)
+                order_id = str(order.get("id") or "")
+                if order_id and order_id in seen_ids:
+                    continue
+                if order_id:
+                    seen_ids.add(order_id)
+                orders.append(order)
+                added += 1
+                if len(orders) >= target_limit:
+                    break
+            if len(rows) < request_limit or added == 0:
+                break
+            page += 1
+        return orders
 
     async def fetch_my_trades(
         self,
@@ -1040,6 +1062,23 @@ class ExchangeManager:
         if fetcher is None:
             return []
         return await fetcher(symbol, None, limit)
+
+    async def fetch_positions(
+        self,
+        cfg: ExchangeConfig,
+        symbols: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        if capabilities.get("fetchPositions") is False:
+            return []
+        fetcher = getattr(client, "fetch_positions", None)
+        if fetcher is None:
+            return []
+        symbols_list = sorted({symbol for symbol in symbols or [] if symbol})
+        if symbols_list:
+            return await fetcher(symbols_list)
+        return await fetcher()
 
     async def fetch_balance(self, cfg: ExchangeConfig) -> dict[str, Any]:
         client = self.client(cfg)

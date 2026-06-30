@@ -87,7 +87,8 @@
     "min_order_quote": 0.1,
     "post_only": false,
     "cancel_existing_orders": false,
-    "client_order_prefix": "crypto-arb-slow"
+    "client_order_prefix": "crypto-arb-slow",
+    "block_conflicting_market_maker": true
   },
   "spot_grid": {
     "enabled": false,
@@ -183,7 +184,35 @@
     "max_contracts": 0.0,
     "max_days_to_expiry": 0.0,
     "risk_free_rate_bps": 0.0,
-    "borrow_rate_bps": 0.0
+    "borrow_rate_bps": 0.0,
+    "min_option_depth_quote": 0.0,
+    "max_option_spread_bps": 0.0,
+    "min_days_to_expiry_open": 0.0,
+    "expiry_reminder_days": 0.0
+  },
+  "contract_strategies": {
+    "enabled": true,
+    "funding_bot_enabled": true,
+    "basis_bot_enabled": true,
+    "futures_grid_enabled": false,
+    "hedge_rebalancer_enabled": false,
+    "live_enabled": false,
+    "spot_exchange": "bybit-spot",
+    "spot_symbol": "ACS/USDT",
+    "derivative_exchange": "",
+    "derivative_symbol": "",
+    "notional_quote": 200.0,
+    "funding_min_bps": 0.0,
+    "basis_entry_bps": 15.0,
+    "basis_exit_bps": 0.0,
+    "futures_grid_levels": 6,
+    "futures_grid_band_pct": 2.0,
+    "futures_grid_quote_per_level": 5.0,
+    "futures_grid_max_leverage": 1.0,
+    "hedge_threshold_base": 0.0,
+    "hedge_max_quote": 0.0,
+    "post_only": true,
+    "client_order_prefix": "crypto-arb-contract"
   },
   "triangular_arbitrage": {
     "enabled": false,
@@ -233,6 +262,10 @@
       "cash_and_carry": true,
       "triangular_arbitrage": true,
       "funding_arbitrage": true,
+      "funding_bot": true,
+      "basis_bot": true,
+      "futures_grid": true,
+      "hedge_rebalancer": true,
       "options_arbitrage": true,
       "signal_bot": true
     },
@@ -270,6 +303,9 @@
     "max_plan_age_seconds": 5.0,
     "max_order_book_age_seconds": 10.0,
     "require_order_book_timestamp": false,
+    "max_derivative_leverage": 0.0,
+    "min_liquidation_buffer_pct": 0.0,
+    "max_margin_usage_pct": 0.0,
     "allowed_exchanges": [],
     "blocked_exchanges": [],
     "allowed_symbols": [],
@@ -278,12 +314,18 @@
   "trade_log": {
     "enabled": true,
     "path": "data/trade_events.jsonl",
-    "max_recent_events": 50
+    "max_recent_events": 50,
+    "rotate_max_bytes": 268435456,
+    "rotate_keep_files": 12,
+    "rotate_compress": true
   },
   "strategy_timeline": {
     "enabled": true,
     "path": "data/strategy_timeline.jsonl",
-    "max_recent_events": 100
+    "max_recent_events": 100,
+    "rotate_max_bytes": 268435456,
+    "rotate_keep_files": 12,
+    "rotate_compress": true
   },
   "pnl_store": {
     "enabled": true,

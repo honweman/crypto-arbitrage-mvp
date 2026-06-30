@@ -50,6 +50,7 @@ from ..spot_grid_executor import (
     tracked_orders_from_state,
     tracked_orders_from_sync,
 )
+from ..strategy_center import StrategyCenterStore
 from ..strategy_timeline import (
     strategy_timeline_event_from_payload,
     strategy_timeline_fingerprint,
@@ -66,6 +67,7 @@ from ..web_config import (
     dca_config_to_dict,
     execution_algo_config_to_dict,
     market_maker_config_to_dict,
+    market_maker_configs_for_runtime,
     slow_execution_accounts,
     slow_execution_config_to_dict,
     spot_grid_config_to_dict,
@@ -92,7 +94,10 @@ from . import (
     build_spot_grid_payload,
     build_trading_console_payload,
     fetch_account_balances_payload,
+    fetch_derivatives_risk_payload,
+    fetch_funding_basis_payload,
     fetch_onchain_payload,
+    fetch_options_arbitrage_payload,
     fetch_order_activity_payload,
     write_system_web_audit_event,
 )
@@ -174,6 +179,7 @@ async def monitor_loop(
     strategy: StrategyName,
     state: MonitorState,
     poll_seconds: float,
+    strategy_center_store: StrategyCenterStore | None = None,
 ) -> None:
     manager = ExchangeManager()
     solana_client = (
@@ -187,6 +193,13 @@ async def monitor_loop(
     )
     account_balances_payload = _build_initial_payload(cfg, poll_seconds)[
         "account_balances"
+    ]
+    derivatives_payload = _build_initial_payload(cfg, poll_seconds)["derivatives"]
+    funding_basis_payload = _build_initial_payload(cfg, poll_seconds)[
+        "funding_basis"
+    ]
+    options_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
+        "options_arbitrage"
     ]
     order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
         "order_activity"
@@ -220,6 +233,12 @@ async def monitor_loop(
     loop_started_monotonic = time.monotonic()
     try:
         while True:
+            strategy_center_store_payload: dict[str, Any] = {}
+            if strategy_center_store is not None and cfg.strategy_center.enabled:
+                try:
+                    strategy_center_store_payload = strategy_center_store.read()
+                except Exception:  # noqa: BLE001
+                    strategy_center_store_payload = {}
             if not await state.is_running():
                 now = time.monotonic()
                 if now >= next_balance_scan or now >= next_order_activity_scan:
@@ -242,6 +261,51 @@ async def monitor_loop(
                                 "total_account_count": len(
                                     _all_account_exchanges(runtime_cfg)
                                 ),
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
+                        try:
+                            derivatives_payload = await fetch_derivatives_risk_payload(
+                                runtime_cfg,
+                                manager,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            derivatives_payload = {
+                                **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                    "derivatives"
+                                ],
+                                "status": "error",
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
+                        try:
+                            funding_basis_payload = await fetch_funding_basis_payload(
+                                runtime_cfg,
+                                manager,
+                                strategy_center_payload=strategy_center_store_payload,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            funding_basis_payload = {
+                                **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                    "funding_basis"
+                                ],
+                                "status": "error",
+                                "last_finished": time.time(),
+                                "errors": [str(exc)],
+                            }
+                        try:
+                            options_arbitrage_payload = (
+                                await fetch_options_arbitrage_payload(
+                                    runtime_cfg,
+                                    manager,
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            options_arbitrage_payload = {
+                                **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                    "options_arbitrage"
+                                ],
+                                "status": "error",
                                 "last_finished": time.time(),
                                 "errors": [str(exc)],
                             }
@@ -305,14 +369,37 @@ async def monitor_loop(
                     if account_balances_payload.get("status") == "error":
                         errors = account_balances_payload.get("errors") or ["unavailable"]
                         readonly_warnings.append(f"Account balances: {errors[0]}")
+                    if derivatives_payload.get("status") == "error":
+                        errors = derivatives_payload.get("errors") or ["unavailable"]
+                        readonly_warnings.append(f"Derivatives: {errors[0]}")
+                    elif derivatives_payload.get("status") == "blocked":
+                        reasons = [
+                            reason
+                            for account in derivatives_payload.get("accounts", [])
+                            for reason in account.get("risk_reasons", [])
+                        ]
+                        readonly_warnings.append(
+                            f"Derivatives: {reasons[0] if reasons else 'risk limit breached'}"
+                        )
                     if order_activity_payload.get("status") == "error":
                         errors = order_activity_payload.get("errors") or ["unavailable"]
                         readonly_warnings.append(f"Orders: {errors[0]}")
+                    if funding_basis_payload.get("status") == "error":
+                        errors = funding_basis_payload.get("errors") or ["unavailable"]
+                        readonly_warnings.append(f"Funding/Basis: {errors[0]}")
+                    if options_arbitrage_payload.get("status") == "error":
+                        errors = options_arbitrage_payload.get("errors") or [
+                            "unavailable"
+                        ]
+                        readonly_warnings.append(f"Options: {errors[0]}")
                     await state.set_readonly_health(
                         cfg=runtime_cfg,
                         exec_cfg=runtime_slow_execution,
                         account_balances=account_balances_payload,
                         order_activity=order_activity_payload,
+                        derivatives=derivatives_payload,
+                        funding_basis=funding_basis_payload,
+                        options_arbitrage=options_arbitrage_payload,
                         warnings=readonly_warnings,
                     )
                 else:
@@ -531,12 +618,12 @@ async def monitor_loop(
                             )
                     warnings = [*_missing_market_warnings(rows), *extra_warnings]
                     if strategy_pauses.get("market_maker", False):
-                        market_maker_payload = {
-                            "status": "paused",
-                            "mode": "paused",
-                            "plan": None,
-                            "error": None,
-                        }
+                        market_maker_payload = build_market_maker_payload(
+                            runtime_cfg,
+                            books,
+                        )
+                        market_maker_payload["status"] = "paused"
+                        market_maker_payload["mode"] = "paused"
                     else:
                         market_maker_payload = build_market_maker_payload(
                             runtime_cfg,
@@ -803,6 +890,51 @@ async def monitor_loop(
                             "last_finished": time.time(),
                             "errors": [str(exc)],
                         }
+                    try:
+                        derivatives_payload = await fetch_derivatives_risk_payload(
+                            runtime_cfg,
+                            manager,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        derivatives_payload = {
+                            **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                "derivatives"
+                            ],
+                            "status": "error",
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
+                    try:
+                        funding_basis_payload = await fetch_funding_basis_payload(
+                            runtime_cfg,
+                            manager,
+                            strategy_center_payload=strategy_center_store_payload,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        funding_basis_payload = {
+                            **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                "funding_basis"
+                            ],
+                            "status": "error",
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
+                    try:
+                        options_arbitrage_payload = (
+                            await fetch_options_arbitrage_payload(
+                                runtime_cfg,
+                                manager,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        options_arbitrage_payload = {
+                            **_build_initial_payload(runtime_cfg, poll_seconds)[
+                                "options_arbitrage"
+                            ],
+                            "status": "error",
+                            "last_finished": time.time(),
+                            "errors": [str(exc)],
+                        }
                     next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
 
                 if now >= next_order_activity_scan:
@@ -942,6 +1074,19 @@ async def monitor_loop(
                         order_activity_payload=order_activity_payload,
                     ),
                 ]
+                if derivatives_payload.get("status") == "error":
+                    errors = derivatives_payload.get("errors") or ["unavailable"]
+                    warnings = [*warnings, f"Derivatives: {errors[0]}"]
+                elif derivatives_payload.get("status") == "blocked":
+                    reasons = [
+                        reason
+                        for account in derivatives_payload.get("accounts", [])
+                        for reason in account.get("risk_reasons", [])
+                    ]
+                    warnings = [
+                        *warnings,
+                        f"Derivatives: {reasons[0] if reasons else 'risk limit breached'}",
+                    ]
                 reconciliation_payload = (
                     order_activity_payload.get("reconciliation")
                     if isinstance(order_activity_payload.get("reconciliation"), dict)
@@ -1010,6 +1155,22 @@ async def monitor_loop(
                     warnings = [
                         *warnings,
                         f"Backtest: {backtest_payload.get('error')}",
+                    ]
+                if funding_basis_payload.get("status") == "error":
+                    funding_errors = funding_basis_payload.get("errors") or [
+                        "unavailable"
+                    ]
+                    warnings = [
+                        *warnings,
+                        f"Funding/Basis: {funding_errors[0]}",
+                    ]
+                if options_arbitrage_payload.get("status") == "error":
+                    option_errors = options_arbitrage_payload.get("errors") or [
+                        "unavailable"
+                    ]
+                    warnings = [
+                        *warnings,
+                        f"Options: {option_errors[0]}",
                     ]
                 if spot_arbitrage_payload.get("status") in {
                     "blocked_by_plan",
@@ -1081,6 +1242,9 @@ async def monitor_loop(
                     opportunities=opportunities,
                     warnings=warnings,
                     account_balances=account_balances_payload,
+                    derivatives=derivatives_payload,
+                    funding_basis=funding_basis_payload,
+                    options_arbitrage=options_arbitrage_payload,
                     order_activity=order_activity_payload,
                     onchain=onchain_payload,
                     market_maker=market_maker_payload,
@@ -1249,6 +1413,7 @@ async def auto_buy_sell_task_loop(
                 runtime_cfg,
                 manager,
                 strategy_paused=strategy_pauses.get("slow_execution", False),
+                market_maker_paused=strategy_pauses.get("market_maker", False),
                 program_running=await state.is_running(),
             )
             await state.set_auto_buy_sell_tasks(payload)
@@ -2251,9 +2416,10 @@ async def spot_grid_task_loop(
         await manager.close()
 
 
-async def market_maker_task_loop(
+async def _market_maker_instance_task_loop(
     cfg: BotConfig,
     state: MonitorState,
+    instance_id: str,
 ) -> None:
     manager = ExchangeManager()
     orderbook_cache = OrderBookCache(manager)
@@ -2266,7 +2432,9 @@ async def market_maker_task_loop(
     last_cancel_at: float | None = None
     previous_mid_price: float | None = None
     previous_plan: dict[str, Any] | None = None
+    last_maker_cfg = None
     runtime: dict[str, Any] = {
+        "id": instance_id,
         "status": "starting",
         "mode": "dry_run",
         "open_order_ids": [],
@@ -2282,10 +2450,66 @@ async def market_maker_task_loop(
         "updated_at": time.time(),
     }
     try:
-        await state.set_market_maker_runtime(runtime)
+        await state.set_market_maker_instance_runtime(instance_id, runtime)
         while True:
             runtime_cfg = await state.runtime_config(cfg)
-            maker_cfg = runtime_cfg.market_maker
+            maker_cfg = next(
+                (
+                    item
+                    for item in market_maker_configs_for_runtime(runtime_cfg)
+                    if item.id == instance_id
+                ),
+                None,
+            )
+            if maker_cfg is None:
+                cancel_payload = None
+                if open_order_ids and last_maker_cfg is not None:
+                    cancel_cfg = replace(
+                        runtime_cfg,
+                        market_maker=replace(
+                            last_maker_cfg,
+                            exchange=open_order_exchange,
+                            symbol=open_order_symbol,
+                        ),
+                        market_makers=[last_maker_cfg],
+                    )
+                    cancel_payload = await cancel_market_maker_order_ids(
+                        cancel_cfg,
+                        manager,
+                        open_order_ids,
+                    )
+                    canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+                    write_trade_event(cancel_cfg.trade_log, cancel_payload)
+                    write_strategy_timeline_from_payload(
+                        cancel_cfg.strategy_timeline,
+                        cancel_payload,
+                        source="market_maker_task",
+                    )
+                    open_order_ids = []
+                    open_order_exchange = ""
+                    open_order_symbol = ""
+                runtime = {
+                    **runtime,
+                    "id": instance_id,
+                    "status": "removed",
+                    "mode": "paused",
+                    "reason": "market maker instance removed",
+                    "open_order_ids": [],
+                    "open_order_count": 0,
+                    "placed_count": placed_count,
+                    "canceled_count": canceled_count,
+                    "last_execution": cancel_payload,
+                    "updated_at": time.time(),
+                }
+                await state.set_market_maker_instance_runtime(instance_id, runtime)
+                return
+            maker_cfg = replace(maker_cfg, id=instance_id)
+            last_maker_cfg = maker_cfg
+            runtime_cfg = replace(
+                runtime_cfg,
+                market_maker=maker_cfg,
+                market_makers=[maker_cfg],
+            )
             interval = max(1.0, maker_cfg.poll_seconds)
             started = time.monotonic()
             strategy_pauses = await state.strategy_pauses()
@@ -2405,7 +2629,7 @@ async def market_maker_task_loop(
                         "market_data": None,
                         "updated_at": time.time(),
                     }
-                    await state.set_market_maker_runtime(runtime)
+                    await state.set_market_maker_instance_runtime(instance_id, runtime)
                 else:
                     if open_order_snapshot.get("error"):
                         cycle_count += 1
@@ -2428,7 +2652,7 @@ async def market_maker_task_loop(
                             "market_data": None,
                             "updated_at": time.time(),
                         }
-                        await state.set_market_maker_runtime(runtime)
+                        await state.set_market_maker_instance_runtime(instance_id, runtime)
                         sleep_for = max(0.0, interval - (time.monotonic() - started))
                         if sleep_for > 0:
                             await asyncio.sleep(sleep_for)
@@ -2555,7 +2779,7 @@ async def market_maker_task_loop(
                         "market_data": payload.get("market_data"),
                         "updated_at": time.time(),
                     }
-                    await state.set_market_maker_runtime(runtime)
+                    await state.set_market_maker_instance_runtime(instance_id, runtime)
             except Exception as exc:  # noqa: BLE001
                 runtime = {
                     **runtime,
@@ -2564,7 +2788,7 @@ async def market_maker_task_loop(
                     "last_error": f"{exc.__class__.__name__}: {exc}",
                     "updated_at": time.time(),
                 }
-                await state.set_market_maker_runtime(runtime)
+                await state.set_market_maker_instance_runtime(instance_id, runtime)
 
             sleep_for = max(0.0, interval - (time.monotonic() - started))
             if sleep_for > 0:
@@ -2572,6 +2796,72 @@ async def market_maker_task_loop(
     finally:
         await orderbook_cache.close()
         await manager.close()
+
+
+async def market_maker_task_loop(
+    cfg: BotConfig,
+    state: MonitorState,
+) -> None:
+    tasks: dict[str, asyncio.Task[None]] = {}
+    await state.set_market_maker_runtime(
+        {
+            "status": "starting",
+            "mode": "dry_run",
+            "instances": [],
+            "instance_count": 0,
+            "active_instance_count": 0,
+            "open_order_count": 0,
+            "placed_count": 0,
+            "canceled_count": 0,
+            "cycle_count": 0,
+            "updated_at": time.time(),
+        }
+    )
+    try:
+        while True:
+            runtime_cfg = await state.runtime_config(cfg)
+            maker_configs = market_maker_configs_for_runtime(runtime_cfg)
+            configured_ids = {maker_cfg.id for maker_cfg in maker_configs}
+
+            for instance_id, task in list(tasks.items()):
+                if not task.done():
+                    continue
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    await state.set_market_maker_instance_runtime(
+                        instance_id,
+                        {
+                            "id": instance_id,
+                            "status": "error",
+                            "mode": "dry_run",
+                            "last_error": f"{exc.__class__.__name__}: {exc}",
+                            "open_order_ids": [],
+                            "open_order_count": 0,
+                            "updated_at": time.time(),
+                        },
+                    )
+                del tasks[instance_id]
+
+            for maker_cfg in maker_configs:
+                if maker_cfg.id in tasks:
+                    continue
+                tasks[maker_cfg.id] = asyncio.create_task(
+                    _market_maker_instance_task_loop(cfg, state, maker_cfg.id)
+                )
+
+            for instance_id in list(tasks):
+                if instance_id not in configured_ids and tasks[instance_id].done():
+                    del tasks[instance_id]
+
+            await asyncio.sleep(1.0)
+    finally:
+        for task in tasks.values():
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
 
 
 __all__ = [

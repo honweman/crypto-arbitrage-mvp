@@ -9,7 +9,9 @@ from arbitrage_bot.config import (
     TriangleRouteConfig,
     TriangularArbitrageConfig,
 )
+from arbitrage_bot.funding_basis import funding_basis_payload
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
+from arbitrage_bot.strategy_center import FundingArbitrageSettings
 from arbitrage_bot.strategies.cash_and_carry import find_cash_and_carry_opportunities
 from arbitrage_bot.strategies.options_arbitrage import (
     find_options_arbitrage_opportunities,
@@ -130,6 +132,84 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(len(opportunities), 1)
         self.assertLess(opportunities[0].metadata["basis_bps"], 0)
         self.assertEqual(opportunities[0].metadata["direction"], "negative_basis")
+
+    def test_funding_basis_marks_candidate_with_paper_legs(self) -> None:
+        payload = funding_basis_payload(
+            [
+                FundingArbitrageSettings(
+                    enabled=True,
+                    pair_id="btc funding",
+                    spot_exchange="spot",
+                    spot_symbol="BTC/USDT",
+                    derivative_exchange="perp",
+                    derivative_symbol="BTC/USDT:USDT",
+                    min_funding_bps=1.0,
+                    min_entry_basis_bps=10.0,
+                )
+            ],
+            spot_books={
+                ("spot", "BTC/USDT"): book("spot", "BTC/USDT", bid=99, ask=101),
+            },
+            derivative_books={
+                ("perp", "BTC/USDT:USDT"): book(
+                    "perp",
+                    "BTC/USDT:USDT",
+                    bid=102,
+                    ask=104,
+                ),
+            },
+            funding_rates={("perp", "BTC/USDT:USDT"): 0.0002},
+            notional_quote=200,
+            now=1000.0,
+        )
+
+        self.assertEqual(payload["status"], "candidate")
+        self.assertEqual(payload["candidate_count"], 1)
+        row = payload["rows"][0]
+        self.assertEqual(row["direction"], "long_spot_short_perp")
+        self.assertGreater(row["basis_bps"], 10.0)
+        self.assertEqual(row["paper_execution"]["state"], "would_open")
+        self.assertIn("protection", row["paper_execution"])
+        self.assertIn(row["paper_execution"]["protection"]["status"], {"ok", "warning"})
+        self.assertEqual(
+            [leg["side"] for leg in row["paper_execution"]["suggested_legs"]],
+            ["buy", "sell"],
+        )
+
+    def test_funding_basis_explains_why_it_is_waiting(self) -> None:
+        payload = funding_basis_payload(
+            [
+                FundingArbitrageSettings(
+                    enabled=True,
+                    pair_id="btc funding",
+                    spot_exchange="spot",
+                    spot_symbol="BTC/USDT",
+                    derivative_exchange="perp",
+                    derivative_symbol="BTC/USDT:USDT",
+                    min_funding_bps=5.0,
+                    min_entry_basis_bps=10.0,
+                )
+            ],
+            spot_books={
+                ("spot", "BTC/USDT"): book("spot", "BTC/USDT", bid=99, ask=101),
+            },
+            derivative_books={
+                ("perp", "BTC/USDT:USDT"): book(
+                    "perp",
+                    "BTC/USDT:USDT",
+                    bid=100,
+                    ask=101,
+                ),
+            },
+            funding_rates={("perp", "BTC/USDT:USDT"): 0.0001},
+            notional_quote=200,
+            now=1000.0,
+        )
+
+        self.assertEqual(payload["status"], "watching")
+        row = payload["rows"][0]
+        self.assertEqual(row["paper_execution"]["state"], "blocked")
+        self.assertIn("funding", row["reason"])
 
     def test_converted_spot_spread_compares_different_quote_currencies(self) -> None:
         exchanges = [
@@ -287,6 +367,57 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(len(opportunities), 1)
         self.assertEqual(opportunities[0].metadata["direction"], "reverse_conversion")
         self.assertGreater(opportunities[0].profit_quote, 0)
+
+    def test_options_arbitrage_filters_illiquid_options(self) -> None:
+        spot_exchanges = [ExchangeConfig(id="spot", label="spot", fee_bps=0)]
+        option_exchanges = [
+            ExchangeConfig(id="deribit", label="deribit-options", market_type="option", fee_bps=0)
+        ]
+        combo = OptionComboConfig(
+            underlying="BTC",
+            spot_exchange="spot",
+            spot_symbol="BTC/USDT",
+            option_exchange="deribit-options",
+            call_symbol="BTC-100-C",
+            put_symbol="BTC-100-P",
+            strike=100.0,
+            contract_size=1.0,
+            quote_currency="USDT",
+        )
+        spot_books = {
+            ("spot", "BTC/USDT"): book("spot", "BTC/USDT", bid=99.0, ask=100.0),
+        }
+        option_books = {
+            ("deribit-options", "BTC-100-C"): book(
+                "deribit-options",
+                "BTC-100-C",
+                bid=8.0,
+                ask=12.0,
+            ),
+            ("deribit-options", "BTC-100-P"): book(
+                "deribit-options",
+                "BTC-100-P",
+                bid=1.0,
+                ask=1.5,
+            ),
+        }
+
+        opportunities = find_options_arbitrage_opportunities(
+            spot_books=spot_books,
+            option_books=option_books,
+            spot_exchanges=spot_exchanges,
+            option_exchanges=option_exchanges,
+            combos=[combo],
+            cfg=OptionsArbitrageConfig(
+                enabled=True,
+                notional_quote=1000.0,
+                min_edge_quote=1.0,
+                min_edge_bps=1.0,
+                max_option_spread_bps=100.0,
+            ),
+        )
+
+        self.assertEqual(opportunities, [])
 
     def test_triangular_arbitrage_finds_single_exchange_cycle(self) -> None:
         exchanges = [ExchangeConfig(id="binance", label="binance-spot", fee_bps=0)]

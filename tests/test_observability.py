@@ -38,6 +38,29 @@ class ObservabilityTest(unittest.TestCase):
                         "open_order_count": 5,
                     }
                 },
+                "derivatives": {
+                    "status": "blocked",
+                    "position_count": 1,
+                    "checked_account_count": 1,
+                    "accounts": [
+                        {
+                            "exchange": "binance-swap",
+                            "status": "blocked",
+                            "summary": {
+                                "margin_usage_pct": 80.0,
+                                "min_liquidation_buffer_pct": 12.5,
+                                "position_notional_quote": 1500.0,
+                            },
+                        }
+                    ],
+                },
+                "execution_protection": {
+                    "status": "warning",
+                    "protection_count": 2,
+                    "blocked_count": 1,
+                    "warning_count": 1,
+                    "manual_review_count": 1,
+                },
                 "readiness": {
                     "status": "blocked",
                     "summary": {
@@ -107,6 +130,45 @@ class ObservabilityTest(unittest.TestCase):
         self.assertIn('crypto_arb_strategy_paused{strategy="slow_execution"} 1', text)
         self.assertIn('crypto_arb_market_maker_open_orders{mode="live"} 4', text)
         self.assertIn('crypto_arb_spot_grid_open_orders{mode="dry_run"} 5', text)
+        self.assertIn(
+            'crypto_arb_derivatives_risk_status{status="blocked"} 1',
+            text,
+        )
+        self.assertIn("crypto_arb_derivatives_position_count 1", text)
+        self.assertIn("crypto_arb_derivatives_checked_account_count 1", text)
+        self.assertIn("crypto_arb_derivatives_blocked_account_count 1", text)
+        self.assertIn(
+            (
+                'crypto_arb_derivatives_account_status{account="binance-swap",'
+                'status="blocked"} 1'
+            ),
+            text,
+        )
+        self.assertIn(
+            'crypto_arb_derivatives_margin_usage_pct{account="binance-swap"} 80',
+            text,
+        )
+        self.assertIn(
+            (
+                'crypto_arb_derivatives_min_liquidation_buffer_pct'
+                '{account="binance-swap"} 12.5'
+            ),
+            text,
+        )
+        self.assertIn(
+            (
+                'crypto_arb_derivatives_position_notional_quote'
+                '{account="binance-swap"} 1500'
+            ),
+            text,
+        )
+        self.assertIn(
+            'crypto_arb_execution_protection_count{status="warning"} 2',
+            text,
+        )
+        self.assertIn("crypto_arb_execution_protection_blocked_count 1", text)
+        self.assertIn("crypto_arb_execution_protection_warning_count 1", text)
+        self.assertIn("crypto_arb_execution_protection_manual_review_count 1", text)
         self.assertIn(
             (
                 'crypto_arb_runtime_status{mode="dry_run",'

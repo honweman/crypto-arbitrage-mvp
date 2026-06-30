@@ -376,6 +376,28 @@ class TradeLogTest(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["three", "two"])
         self.assertTrue(all("logged_at" in event for event in events))
 
+    def test_trade_log_rotates_large_jsonl_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            cfg = TradeLogConfig(
+                enabled=True,
+                path=str(path),
+                max_recent_events=10,
+                rotate_max_bytes=1,
+                rotate_keep_files=3,
+                rotate_compress=False,
+            )
+
+            write_trade_event(cfg, {"type": "one"})
+            write_trade_event(cfg, {"type": "two"})
+            events = read_recent_trade_events(cfg)
+            rotated = sorted(Path(tmp).glob("events.jsonl.*"))
+            rotated_text = rotated[0].read_text(encoding="utf-8")
+
+        self.assertEqual([event["type"] for event in events], ["two"])
+        self.assertEqual(len(rotated), 1)
+        self.assertIn('"type": "one"', rotated_text)
+
     def test_reads_normalized_entries_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = TradeLogConfig(

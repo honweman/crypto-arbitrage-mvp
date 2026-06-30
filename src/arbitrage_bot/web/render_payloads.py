@@ -7,6 +7,22 @@ from typing import Any
 STATE_VIEW_IDS = {"status", "settings", "records"}
 
 
+def _section_set(sections: Iterable[str] | str | None) -> set[str] | None:
+    if sections is None:
+        return None
+    if isinstance(sections, str):
+        rows = sections.split(",")
+    else:
+        rows = sections
+    return {str(row).strip() for row in rows if str(row).strip()}
+
+
+def _section_open(section_ids: set[str] | None, *ids: str) -> bool:
+    if section_ids is None:
+        return True
+    return any(id_ in section_ids for id_ in ids)
+
+
 def _copy_payload_keys(
     payload: dict[str, Any] | None,
     keys: Iterable[str],
@@ -28,6 +44,7 @@ def _compact_config_payload(config: dict[str, Any], *, full: bool = False) -> di
             "min_profit_bps",
             "common_quote_currency",
             "triangular_arbitrage",
+            "contract_strategies",
         ),
     )
 
@@ -75,6 +92,11 @@ def _compact_market_maker_payload(
             "quote_conversion",
             "exchange_features",
             "error",
+            "accounts",
+            "config",
+            "instances",
+            "instance_count",
+            "active_instance_count",
         ),
     )
     result["runtime"] = _compact_market_maker_runtime(
@@ -101,9 +123,54 @@ def _compact_slow_execution_payload(
                 "exchange",
                 "symbol",
                 "side",
+                "price_mode",
+                "price_offset_bps",
                 "total_base",
                 "total_quote",
                 "unlimited_total",
+                "slice_mode",
+                "slice_base",
+                "slice_quote",
+                "slice_base_min",
+                "slice_base_max",
+                "randomize_slice",
+                "interval_seconds",
+                "order_ttl_seconds",
+                "start_price",
+                "stop_price",
+                "block_conflicting_market_maker",
+            ),
+        )
+
+    def compact_task_plan(plan: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(plan, dict):
+            return None
+        return _copy_payload_keys(
+            plan,
+            (
+                "status",
+                "best_bid",
+                "best_ask",
+                "mid_price",
+                "trigger_price",
+                "order",
+                "observed_at",
+            ),
+        )
+
+    def compact_task_execution(
+        execution: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(execution, dict):
+            return None
+        return _copy_payload_keys(
+            execution,
+            (
+                "placed_count",
+                "canceled_count",
+                "placed_order_ids",
+                "canceled_order_ids",
+                "errors",
             ),
         )
 
@@ -123,6 +190,9 @@ def _compact_slow_execution_payload(
                 "progress_mode",
                 "progress_pct",
                 "open_order_count",
+                "placed_count",
+                "canceled_count",
+                "start_price_triggered",
                 "last_cycle_at",
                 "next_run_at",
                 "last_fill_at",
@@ -133,6 +203,9 @@ def _compact_slow_execution_payload(
             ),
         )
         compact["config"] = compact_task_config(task.get("config"))
+        compact["last_plan"] = compact_task_plan(task.get("last_plan"))
+        compact["last_risk"] = task.get("last_risk")
+        compact["last_execution"] = compact_task_execution(task.get("last_execution"))
         return compact
 
     def compact_tasks(task_payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -222,9 +295,132 @@ def _compact_account_balances_payload(
             "status",
             "checked_account_count",
             "total_account_count",
+            "totals",
             "last_finished",
             "errors",
             "warnings",
+        ),
+    )
+
+
+def _compact_derivatives_payload(
+    derivatives: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return derivatives
+    return _copy_payload_keys(
+        derivatives,
+        (
+            "status",
+            "position_count",
+            "checked_account_count",
+            "total_account_count",
+            "funding_rate_count",
+            "limits",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_funding_basis_payload(
+    funding_basis: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return funding_basis
+    return _copy_payload_keys(
+        funding_basis,
+        (
+            "status",
+            "mode",
+            "candidate_count",
+            "configured_count",
+            "checked_count",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_options_arbitrage_payload(
+    options_arbitrage: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return options_arbitrage
+    return _copy_payload_keys(
+        options_arbitrage,
+        (
+            "status",
+            "mode",
+            "candidate_count",
+            "parity_candidate_count",
+            "enhanced_candidate_count",
+            "configured_count",
+            "checked_count",
+            "thresholds",
+            "risk",
+            "execution_controls",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_contract_strategies_payload(
+    contract_strategies: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return contract_strategies
+    return _copy_payload_keys(
+        contract_strategies,
+        (
+            "status",
+            "mode",
+            "summary",
+            "candidate_count",
+            "blocked_count",
+            "configured_count",
+            "derivative_status",
+            "execution_controls",
+            "last_finished",
+            "errors",
+            "warnings",
+        ),
+    )
+
+
+def _compact_execution_protection_payload(
+    execution_protection: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    if full:
+        return execution_protection
+    return _copy_payload_keys(
+        execution_protection,
+        (
+            "status",
+            "mode",
+            "protection_count",
+            "ok_count",
+            "blocked_count",
+            "warning_count",
+            "manual_review_count",
+            "slippage_block_count",
+            "stale_block_count",
+            "top_reasons",
+            "updated_at",
         ),
     )
 
@@ -283,6 +479,7 @@ def _compact_strategy_center_payload(
 def state_payload_for_view(
     payload: dict[str, Any],
     view: str | None = None,
+    sections: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     if view not in STATE_VIEW_IDS:
         return payload
@@ -290,12 +487,74 @@ def state_payload_for_view(
     is_status = view == "status"
     is_settings = view == "settings"
     is_records = view == "records"
+    section_ids = _section_set(sections)
+    status_account_balances_full = is_status and _section_open(
+        section_ids,
+        "account-balances",
+    )
+    status_derivatives_full = is_status and _section_open(
+        section_ids,
+        "derivatives-risk",
+    )
+    status_funding_basis_full = is_status and _section_open(
+        section_ids,
+        "funding-basis",
+    )
+    status_options_full = is_status and _section_open(
+        section_ids,
+        "options-arbitrage",
+    )
+    status_contracts_full = is_status and _section_open(
+        section_ids,
+        "contract-strategies",
+    )
+    status_markets_full = is_status and _section_open(section_ids, "markets")
+    status_rates_full = is_status and _section_open(section_ids, "rates")
+    status_readiness_full = is_status and _section_open(
+        section_ids,
+        "readiness-actions",
+    )
+
+    config_full = is_settings and _section_open(
+        section_ids,
+        "markets-config",
+        "carry-config",
+        "strategy-instances",
+    )
+    market_maker_full = is_settings and _section_open(section_ids, "mm-orders")
+    slow_execution_full = is_settings and _section_open(section_ids, "slow-orders")
+    spot_grid_full = is_settings and _section_open(section_ids, "grid-orders")
+    dca_full = is_settings and _section_open(section_ids, "dca-orders")
+    execution_algo_full = is_settings and _section_open(section_ids, "exec-schedule")
+    backtest_full = is_settings and _section_open(section_ids, "backtest-points")
+    strategy_center_full = is_settings and _section_open(
+        section_ids,
+        "strategy-instances",
+        "api-accounts",
+        "funding-arb-form",
+        "signal-bot-form",
+    )
+    operations_full = is_records and _section_open(
+        section_ids,
+        "strategy-timeline",
+        "audit-events",
+    )
+    order_activity_full = is_records and _section_open(
+        section_ids,
+        "console-strategies",
+        "open-orders",
+    )
+    onchain_full = is_status or (
+        is_records and _section_open(section_ids, "holder-changes")
+    )
+    if is_status:
+        onchain_full = _section_open(section_ids, "holders")
 
     result: dict[str, Any] = {
         "status": payload.get("status"),
         "config": _compact_config_payload(
             payload.get("config", {}),
-            full=is_settings,
+            full=config_full,
         ),
         "scan": payload.get("scan", {}),
         "opportunities": payload.get("opportunities", []),
@@ -304,23 +563,23 @@ def state_payload_for_view(
         "warnings": payload.get("warnings", []),
         "market_maker": _compact_market_maker_payload(
             payload.get("market_maker", {}),
-            full=is_settings,
+            full=market_maker_full,
         ),
         "slow_execution": _compact_slow_execution_payload(
             payload.get("slow_execution", {}),
-            full=is_settings,
+            full=slow_execution_full,
         ),
         "spot_grid": _compact_strategy_plan_payload(
             payload.get("spot_grid", {}),
-            full=is_settings,
+            full=spot_grid_full,
         ),
         "dca": _compact_strategy_plan_payload(
             payload.get("dca", {}),
-            full=is_settings,
+            full=dca_full,
         ),
         "execution_algo": _compact_strategy_plan_payload(
             payload.get("execution_algo", {}),
-            full=is_settings,
+            full=execution_algo_full,
         ),
         "backtest": _copy_payload_keys(
             payload.get("backtest", {}),
@@ -334,7 +593,7 @@ def state_payload_for_view(
                 "error",
             ),
         )
-        if is_settings
+        if backtest_full
         else _copy_payload_keys(
             payload.get("backtest", {}),
             ("status", "mode", "result", "error"),
@@ -342,38 +601,78 @@ def state_payload_for_view(
         "spot_arbitrage": payload.get("spot_arbitrage", {}),
         "operations": _compact_operations_payload(
             payload.get("operations", {}),
-            full=is_records,
+            full=operations_full,
         ),
         "strategy_center": _compact_strategy_center_payload(
             payload.get("strategy_center", {}),
-            full=is_settings,
+            full=strategy_center_full,
+        ),
+        "funding_basis": _compact_funding_basis_payload(
+            payload.get("funding_basis", {}),
+            full=status_funding_basis_full,
+        ),
+        "options_arbitrage": _compact_options_arbitrage_payload(
+            payload.get("options_arbitrage", {}),
+            full=status_options_full,
+        ),
+        "contract_strategies": _compact_contract_strategies_payload(
+            payload.get("contract_strategies", {}),
+            full=status_contracts_full,
+        ),
+        "execution_protection": _compact_execution_protection_payload(
+            payload.get("execution_protection", {}),
+            full=is_status,
         ),
         "order_activity": _compact_order_activity_payload(
             payload.get("order_activity", {}),
-            full=is_records,
+            full=order_activity_full,
         ),
         "onchain": _compact_onchain_payload(
             payload.get("onchain", {}),
-            full=is_status or is_records,
+            full=onchain_full,
         ),
     }
 
     if is_status:
         result.update(
             {
-                "markets": payload.get("markets", []),
-                "quote_rates": payload.get("quote_rates", {}),
+                "markets": payload.get("markets", []) if status_markets_full else [],
+                "quote_rates": payload.get("quote_rates", {})
+                if status_rates_full
+                else {},
                 "account_balances": _compact_account_balances_payload(
                     payload.get("account_balances", {}),
-                    full=True,
+                    full=status_account_balances_full,
                 ),
-                "readiness": payload.get("readiness", {}),
+                "derivatives": _compact_derivatives_payload(
+                    payload.get("derivatives", {}),
+                    full=status_derivatives_full,
+                ),
+                "readiness": payload.get("readiness", {})
+                if status_readiness_full
+                else {},
                 "runtime_store": payload.get("runtime_store", {}),
             }
         )
-    elif is_settings:
+    elif is_settings and _section_open(section_ids, "risk-form"):
         result["trading_console"] = payload.get("trading_console", {})
     elif is_records:
         result["trading_console"] = payload.get("trading_console", {})
 
     return result
+
+
+def strategy_center_payload_for_view(
+    strategy_center: dict[str, Any],
+    view: str | None = None,
+    sections: Iterable[str] | str | None = None,
+) -> dict[str, Any]:
+    section_ids = _section_set(sections)
+    full = view == "settings" and _section_open(
+        section_ids,
+        "strategy-instances",
+        "api-accounts",
+        "funding-arb-form",
+        "signal-bot-form",
+    )
+    return _compact_strategy_center_payload(strategy_center, full=full)
