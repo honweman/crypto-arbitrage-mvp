@@ -79,6 +79,7 @@ from ..market_making import MarketMakerPlan, build_symmetric_market_maker_plan
 from ..market_maker import (
     cancel_order_ids as cancel_market_maker_order_ids,
     market_maker_quote_conversion,
+    market_maker_risk_config,
     order_book_market_data,
     run_cycle as run_market_maker_cycle,
 )
@@ -3485,20 +3486,21 @@ def build_market_maker_safety_payload(
     *,
     error: str | None = None,
 ) -> dict[str, Any]:
+    risk_cfg = market_maker_risk_config(cfg)
     limits = {
-        "max_order_quote": cfg.risk.max_order_quote,
-        "max_cycle_quote": cfg.risk.max_cycle_quote,
-        "max_orders_per_cycle": cfg.risk.max_orders_per_cycle,
-        "max_open_orders": cfg.risk.max_open_orders,
-        "max_cancels_per_cycle": cfg.risk.max_cancels_per_cycle,
-        "min_seconds_between_cancels": cfg.risk.min_seconds_between_cancels,
-        "max_daily_loss_quote": cfg.risk.max_daily_loss_quote,
-        "max_exposure_quote": cfg.risk.max_exposure_quote,
-        "min_order_book_depth_quote": cfg.risk.min_order_book_depth_quote,
-        "max_slippage_bps": cfg.risk.max_slippage_bps,
-        "max_order_book_age_seconds": cfg.risk.max_order_book_age_seconds,
-        "max_order_book_gap_bps": cfg.risk.max_order_book_gap_bps,
-        "max_price_jump_bps": cfg.risk.max_price_jump_bps,
+        "max_order_quote": risk_cfg.max_order_quote,
+        "max_cycle_quote": risk_cfg.max_cycle_quote,
+        "max_orders_per_cycle": risk_cfg.max_orders_per_cycle,
+        "max_open_orders": risk_cfg.max_open_orders,
+        "max_cancels_per_cycle": risk_cfg.max_cancels_per_cycle,
+        "min_seconds_between_cancels": risk_cfg.min_seconds_between_cancels,
+        "max_daily_loss_quote": risk_cfg.max_daily_loss_quote,
+        "max_exposure_quote": risk_cfg.max_exposure_quote,
+        "min_order_book_depth_quote": risk_cfg.min_order_book_depth_quote,
+        "max_slippage_bps": risk_cfg.max_slippage_bps,
+        "max_order_book_age_seconds": risk_cfg.max_order_book_age_seconds,
+        "max_order_book_gap_bps": risk_cfg.max_order_book_gap_bps,
+        "max_price_jump_bps": risk_cfg.max_price_jump_bps,
     }
     base_payload: dict[str, Any] = {
         "approved": False,
@@ -3550,7 +3552,7 @@ def build_market_maker_safety_payload(
         order_book_received_at=plan.order_book_received_at,
     )
     risk = evaluate_order_batch(
-        cfg.risk,
+        risk_cfg,
         risk_orders,
         strategy="market_maker",
         live=True,

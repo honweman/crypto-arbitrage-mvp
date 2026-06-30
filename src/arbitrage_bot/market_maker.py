@@ -5,9 +5,10 @@ import asyncio
 import json
 import sys
 import time
+from dataclasses import replace
 from typing import Any
 
-from .config import BotConfig, ExchangeConfig, load_config
+from .config import BotConfig, ExchangeConfig, RiskConfig, load_config
 from .exchanges import (
     ExchangeManager,
     limit_order_capability_errors,
@@ -78,6 +79,13 @@ def market_maker_quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]
         "quote_to_common_rate": rate,
         "available": rate is not None,
     }
+
+
+def market_maker_risk_config(cfg: BotConfig) -> RiskConfig:
+    override = float(getattr(cfg.market_maker, "max_order_book_gap_bps", 0.0) or 0.0)
+    if override > 0:
+        return replace(cfg.risk, max_order_book_gap_bps=override)
+    return cfg.risk
 
 
 def _scaled_market_context(
@@ -711,6 +719,7 @@ async def run_cycle(
     payload["quote_conversion"] = conversion
     quote_rate = conversion.get("quote_to_common_rate")
     quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
+    risk_cfg = market_maker_risk_config(cfg)
     risk_orders = [
         RiskOrder(
             strategy="market_maker",
@@ -733,9 +742,9 @@ async def run_cycle(
     )
     should_cancel_tracked = bool(replace_order_ids)
     if live and (
-        cfg.risk.max_open_orders > 0
-        or cfg.risk.max_cancels_per_cycle > 0
-        or cfg.risk.min_seconds_between_cancels > 0
+        risk_cfg.max_open_orders > 0
+        or risk_cfg.max_cancels_per_cycle > 0
+        or risk_cfg.min_seconds_between_cancels > 0
     ):
         try:
             existing_open_order_count = len(
@@ -753,7 +762,7 @@ async def run_cycle(
     )
     market = _scaled_market_context(plan, quote_rate=quote_rate_for_risk)
     risk = evaluate_order_batch(
-        cfg.risk,
+        risk_cfg,
         risk_orders,
         strategy="market_maker",
         live=live,

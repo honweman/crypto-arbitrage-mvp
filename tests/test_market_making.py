@@ -1,10 +1,19 @@
+import asyncio
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 import time
 from typing import Optional
 
-from arbitrage_bot.config import BotConfig, ExchangeConfig, MarketMakerConfig, RiskConfig
+from arbitrage_bot.config import (
+    BotConfig,
+    ExchangeConfig,
+    MarketMakerConfig,
+    OnchainMonitorConfig,
+    PortfolioConfig,
+    RiskConfig,
+    SlowExecutionConfig,
+)
 from arbitrage_bot.config import TradeLogConfig
 from arbitrage_bot.market_maker import (
     cancel_order_ids,
@@ -173,6 +182,71 @@ class MarketMakingTest(unittest.TestCase):
         self.assertAlmostEqual(low_inventory.inventory_sell_multiplier, 0.5)
         self.assertAlmostEqual(low_buy.quote_notional, 150.0)
         self.assertAlmostEqual(low_sell.quote_notional, 50.0)
+
+    def test_run_cycle_uses_instance_gap_override(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="upbit-spot",
+                    symbol="ACS/USDT",
+                    bids=[
+                        BookLevel(price=0.20, amount=100_000),
+                        BookLevel(price=0.08, amount=100_000),
+                    ],
+                    asks=[
+                        BookLevel(price=0.21, amount=100_000),
+                        BookLevel(price=0.34, amount=100_000),
+                    ],
+                )
+
+        payload = asyncio.run(
+            run_cycle(
+                BotConfig(
+                    poll_seconds=1.0,
+                    order_book_depth=20,
+                    notional_quote=200.0,
+                    min_profit_quote=0.1,
+                    min_profit_bps=1.0,
+                    min_basis_bps=15.0,
+                    common_quote_currency="USD",
+                    quote_rates={"USD": 1.0, "USDT": 1.0},
+                    quote_rate_sources=[],
+                    onchain_monitor=OnchainMonitorConfig(),
+                    market_maker=MarketMakerConfig(
+                        enabled=True,
+                        exchange="upbit-spot",
+                        symbol="ACS/USDT",
+                        levels=1,
+                        price_band_pct=1.0,
+                        quote_per_level=1.0,
+                        max_order_book_gap_bps=10_000.0,
+                    ),
+                    slow_execution=SlowExecutionConfig(),
+                    portfolio=PortfolioConfig(),
+                    spot_symbols=[],
+                    spot_markets=[],
+                    cash_and_carry_pairs=[],
+                    spot_exchanges=[ExchangeConfig(id="upbit", label="upbit-spot")],
+                    derivative_exchanges=[],
+                    risk=RiskConfig(
+                        allow_live_trading=True,
+                        max_order_book_gap_bps=5_000.0,
+                    ),
+                    trade_log=TradeLogConfig(enabled=False),
+                ),
+                FakeManager(),  # type: ignore[arg-type]
+                live=False,
+                replace_existing=False,
+            )
+        )
+
+        self.assertTrue(payload["risk"]["approved"])
+        self.assertGreater(payload["plan"]["max_level_gap_bps"], 5_000.0)
+        self.assertEqual(payload["risk"]["reasons"], [])
 
     def test_plan_keeps_order_book_received_time_for_freshness_checks(self) -> None:
         received_at = time.time()

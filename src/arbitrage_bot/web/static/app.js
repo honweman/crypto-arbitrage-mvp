@@ -1697,7 +1697,7 @@ function balanceStatusClass(status) {
       );
       text(
         "mm-safety-market-detail",
-        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${(market.max_level_gap_bps || 0).toFixed ? market.max_level_gap_bps.toFixed(1) : market.max_level_gap_bps || 0} bps · age ${age == null ? "--" : age.toFixed(1) + "s"}`
+        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${(market.max_level_gap_bps || 0).toFixed ? market.max_level_gap_bps.toFixed(1) : market.max_level_gap_bps || 0}/${limits.max_order_book_gap_bps || "--"} bps · age ${age == null ? "--" : age.toFixed(1) + "s"}`
       );
       renderMarketMakerQuality(marketMaker);
     }
@@ -3429,6 +3429,7 @@ function balanceStatusClass(status) {
       setNumericField("mm-min-distance", config.min_distance_bps || 0);
       setNumericField("mm-reprice", config.reprice_threshold_bps || 0);
       setNumericField("mm-poll", config.poll_seconds || 1);
+      setNumericField("mm-max-gap", config.max_order_book_gap_bps || 0);
       document.getElementById("mm-inventory-enabled").checked = Boolean(config.inventory_control_enabled);
       setNumericField("mm-inventory-target", config.inventory_target_base || 0);
       setNumericField("mm-inventory-band", config.inventory_band_base || 0);
@@ -3451,6 +3452,7 @@ function balanceStatusClass(status) {
         min_distance_bps: numericValue("mm-min-distance"),
         reprice_threshold_bps: numericValue("mm-reprice"),
         poll_seconds: numericValue("mm-poll"),
+        max_order_book_gap_bps: numericValue("mm-max-gap"),
         inventory_control_enabled: document.getElementById("mm-inventory-enabled").checked,
         inventory_target_base: numericValue("mm-inventory-target"),
         inventory_band_base: numericValue("mm-inventory-band"),

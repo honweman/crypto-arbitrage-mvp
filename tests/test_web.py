@@ -140,6 +140,7 @@ def make_config(
     strategy_timeline: StrategyTimelineConfig | None = None,
     alerts: AlertConfig | None = None,
     web_security: WebSecurityConfig | None = None,
+    quote_rates: dict[str, float] | None = None,
 ) -> BotConfig:
     return BotConfig(
         poll_seconds=1.0,
@@ -149,7 +150,7 @@ def make_config(
         min_profit_bps=1.0,
         min_basis_bps=15.0,
         common_quote_currency="USD",
-        quote_rates={"USD": 1.0},
+        quote_rates=quote_rates or {"USD": 1.0},
         quote_rate_sources=[],
         onchain_monitor=OnchainMonitorConfig(),
         market_maker=market_maker or MarketMakerConfig(),
@@ -179,7 +180,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260630-mm-status" defer></script>',
+            '<script src="/static/app.js?v=20260701-mm-gap" defer></script>',
             INDEX_HTML,
         )
 
@@ -274,7 +275,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260630-mm-status">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260701-mm-gap">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -1248,6 +1249,48 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["safety"]["limits"]["max_cycle_quote"], 25.0)
         self.assertIn("risk.allow_live_trading is false", payload["safety"]["reasons"])
 
+    def test_market_maker_safety_uses_instance_gap_override(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="upbit-spot",
+                symbol="ACS/USDT",
+                levels=1,
+                price_band_pct=1.0,
+                quote_per_level=1.0,
+                max_order_book_gap_bps=10_000.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_order_book_gap_bps=5_000.0,
+            ),
+            quote_rates={"USD": 1.0, "USDT": 1.0},
+        )
+        books = {
+            ("upbit-spot", "ACS/USDT"): OrderBookSnapshot(
+                exchange="upbit-spot",
+                symbol="ACS/USDT",
+                bids=[
+                    BookLevel(price=0.20, amount=100_000),
+                    BookLevel(price=0.08, amount=100_000),
+                ],
+                asks=[
+                    BookLevel(price=0.21, amount=100_000),
+                    BookLevel(price=0.34, amount=100_000),
+                ],
+            )
+        }
+
+        payload = build_market_maker_payload(cfg, books)
+
+        self.assertTrue(payload["safety"]["approved"])
+        self.assertEqual(
+            payload["safety"]["limits"]["max_order_book_gap_bps"],
+            10_000.0,
+        )
+        self.assertGreater(payload["safety"]["market"]["max_level_gap_bps"], 5_000.0)
+        self.assertEqual(payload["safety"]["reasons"], [])
+
     def test_build_market_maker_quality_payload_summarizes_recent_fills(self) -> None:
         payload = build_market_maker_quality_payload(
             {
@@ -1868,6 +1911,7 @@ class WebMonitorTest(unittest.TestCase):
                 "min_order_quote": "0.5",
                 "min_distance_bps": "20",
                 "reprice_threshold_bps": "2.5",
+                "max_order_book_gap_bps": "10000",
                 "poll_seconds": "1",
                 "inventory_control_enabled": True,
                 "inventory_target_base": "100000",
@@ -1890,6 +1934,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["min_order_quote"], 0.5)
         self.assertEqual(overrides["min_distance_bps"], 20.0)
         self.assertEqual(overrides["reprice_threshold_bps"], 2.5)
+        self.assertEqual(overrides["max_order_book_gap_bps"], 10000.0)
         self.assertEqual(overrides["poll_seconds"], 1.0)
         self.assertTrue(overrides["inventory_control_enabled"])
         self.assertEqual(overrides["inventory_target_base"], 100000.0)

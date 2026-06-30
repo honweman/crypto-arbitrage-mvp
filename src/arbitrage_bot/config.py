@@ -89,6 +89,7 @@ class MarketMakerConfig:
     min_order_quote: float = 0.0
     min_distance_bps: float = 0.0
     reprice_threshold_bps: float = 0.0
+    max_order_book_gap_bps: float = 0.0
     poll_seconds: float = 1.0
     post_only: bool = True
     cancel_existing_orders: bool = False
@@ -511,6 +512,7 @@ def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
         min_order_quote=float(raw.get("min_order_quote", 0.0)),
         min_distance_bps=float(raw.get("min_distance_bps", 0.0)),
         reprice_threshold_bps=float(raw.get("reprice_threshold_bps", 0.0)),
+        max_order_book_gap_bps=float(raw.get("max_order_book_gap_bps", 0.0)),
         poll_seconds=float(raw.get("poll_seconds", 1.0)),
         post_only=bool(raw.get("post_only", True)),
         cancel_existing_orders=bool(raw.get("cancel_existing_orders", False)),

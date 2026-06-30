@@ -469,6 +469,7 @@ def _market_maker_overrides_from_payload(
         "min_order_quote",
         "min_distance_bps",
         "reprice_threshold_bps",
+        "max_order_book_gap_bps",
         "inventory_target_base",
         "inventory_band_base",
         "inventory_max_deviation_base",
