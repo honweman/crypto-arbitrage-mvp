@@ -2455,6 +2455,14 @@ async def market_maker_task_loop(
                         maker_cfg.symbol,
                         cfg=runtime_cfg,
                     )
+                    # When force-replacing (fills detected) don't pass open_orders:
+                    # _previous_plan_from_open_orders would otherwise reconstruct a
+                    # "previous plan" from whatever orders remain, which can trick
+                    # the reprice-threshold check into returning "unchanged" and
+                    # skipping the full-grid rebuild we explicitly want.
+                    existing_open_orders_for_cycle = (
+                        None if force_replace else open_order_snapshot.get("open_orders")
+                    )
                     payload = await run_market_maker_cycle(
                         runtime_cfg,
                         manager,
@@ -2462,7 +2470,7 @@ async def market_maker_task_loop(
                         replace_existing=False,
                         replace_order_ids=open_order_ids,
                         previous_plan=previous_plan_for_cycle,
-                        existing_open_orders=open_order_snapshot.get("open_orders"),
+                        existing_open_orders=existing_open_orders_for_cycle,
                         previous_mid_price=previous_mid_price,
                         last_cancel_at=last_cancel_at,
                         order_book=order_book,
