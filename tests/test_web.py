@@ -177,7 +177,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260627-essential-ui" defer></script>',
+            '<script src="/static/app.js?v=20260630-hidden-fix" defer></script>',
             INDEX_HTML,
         )
 
@@ -272,7 +272,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260627-essential-ui">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260630-hidden-fix">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -415,6 +415,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("function applyFeatureVisibility", APP_JS)
         self.assertIn('status: [', APP_JS)
         self.assertIn('.ui-feature-hidden', STYLES_CSS)
+        self.assertIn('[data-page].ui-feature-hidden', STYLES_CSS)
+        self.assertIn('.statusbar[data-page].ui-feature-hidden', STYLES_CSS)
 
     def test_page_has_status_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)

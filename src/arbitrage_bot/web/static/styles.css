@@ -350,17 +350,25 @@ section {
   display: block !important;
 }
 
-[data-ui-hidden-default="true"],
-.ui-feature-hidden {
-  display: none !important;
-}
-
 .portfolio-bar[data-page].active-page,
 .statusbar[data-page].active-page {
   display: grid !important;
 }
 
 .strategy-overview[data-page].active-page {
+  display: none !important;
+}
+
+[data-page][data-ui-hidden-default="true"],
+[data-page].ui-feature-hidden,
+.portfolio-bar[data-page][data-ui-hidden-default="true"],
+.portfolio-bar[data-page].ui-feature-hidden,
+.statusbar[data-page][data-ui-hidden-default="true"],
+.statusbar[data-page].ui-feature-hidden,
+.strategy-overview[data-page][data-ui-hidden-default="true"],
+.strategy-overview[data-page].ui-feature-hidden,
+[data-ui-hidden-default="true"],
+.ui-feature-hidden {
   display: none !important;
 }
 
