@@ -1063,7 +1063,7 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
                 )
 
             async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
-                return [{"id": "old-mm-1"}]
+                return [{"id": f"old-mm-{index}"} for index in range(1, 5)]
 
             async def prepare_limit_orders(self, *_: object, **__: object) -> None:
                 raise AssertionError("unchanged plan should not validate orders")
@@ -1103,7 +1103,7 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
             FakeManager(),  # type: ignore[arg-type]
             live=True,
             replace_existing=False,
-            replace_order_ids=["old-mm-1"],
+            replace_order_ids=[f"old-mm-{index}" for index in range(1, 5)],
             previous_plan=previous_plan,
         )
 
@@ -1111,6 +1111,117 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["execution"]["placed_count"], 0)
         self.assertEqual(payload["execution"]["canceled_count"], 0)
         self.assertAlmostEqual(payload["reprice_bps"], 0.0)
+
+    async def test_live_cycle_rebuilds_when_tracked_orders_are_missing(self) -> None:
+        class FakeManager:
+            def __init__(self) -> None:
+                self.created = 0
+                self.open_order_ids = ["old-mm-1", "old-mm-2", "old-mm-3"]
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    bids=[BookLevel(price=0.00014, amount=100_000)],
+                    asks=[BookLevel(price=0.00016, amount=100_000)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [{"id": order_id} for order_id in self.open_order_ids]
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, object]:
+                self.open_order_ids = [
+                    item for item in self.open_order_ids if item != order_id
+                ]
+                return {"id": order_id, "status": "canceled"}
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": float(order["amount"]) * float(order["price"]),
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, str]:
+                self.created += 1
+                return {"id": f"new-mm-{self.created}"}
+
+        cfg = self._cfg(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                levels=2,
+                quote_per_level=1.0,
+                depth_shape="flat",
+                reprice_threshold_bps=2.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        previous_plan = build_symmetric_market_maker_plan(
+            OrderBookSnapshot(
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                bids=[BookLevel(price=0.00014, amount=100_000)],
+                asks=[BookLevel(price=0.00016, amount=100_000)],
+            ),
+            cfg.market_maker,
+        ).to_dict()
+        manager = FakeManager()
+
+        payload = await run_cycle(
+            cfg,
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=["old-mm-1", "old-mm-2", "old-mm-3"],
+            previous_plan=previous_plan,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertEqual(payload["tracked_open_order_count"], 3)
+        self.assertEqual(payload["expected_open_order_count"], 4)
+        self.assertIn("rebuilding ladder", payload["reprice_skip_blocked_reason"])
+        self.assertEqual(payload["execution"]["canceled_count"], 3)
+        self.assertEqual(payload["execution"]["placed_count"], 4)
+        self.assertEqual(len(payload["execution"]["placed_order_ids"]), 4)
 
     async def test_live_cycle_reprices_when_plan_change_exceeds_threshold(self) -> None:
         class FakeManager:

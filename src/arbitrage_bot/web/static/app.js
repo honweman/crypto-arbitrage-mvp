@@ -3253,6 +3253,9 @@ function balanceStatusClass(status) {
       const fillSymbols = (preferredSymbol = "") => {
         const account = accountForKey(list, accountSelect.value);
         const symbols = accountSymbols(account);
+        if (account && preferredSymbol && !symbols.includes(preferredSymbol)) {
+          symbols.unshift(preferredSymbol);
+        }
         symbolSelect.innerHTML = "";
         const placeholder = document.createElement("option");
         placeholder.value = "";

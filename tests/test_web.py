@@ -178,7 +178,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260630-hidden-fix" defer></script>',
+            '<script src="/static/app.js?v=20260630-mm-restore" defer></script>',
             INDEX_HTML,
         )
 
@@ -273,7 +273,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260630-hidden-fix">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260630-mm-restore">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -448,6 +448,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="markets-form"', HTML)
         self.assertIn('id="market-symbol"', HTML)
         self.assertIn('id="markets-config"', HTML)
+
+    def test_account_symbol_selector_preserves_configured_symbol(self) -> None:
+        self.assertIn(
+            "preferredSymbol && !symbols.includes(preferredSymbol)",
+            HTML,
+        )
+        self.assertIn("symbols.unshift(preferredSymbol)", HTML)
 
     def test_page_includes_cash_and_carry_config_controls(self) -> None:
         self.assertIn("Cash & Carry Pairs", HTML)
@@ -4461,6 +4468,23 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             update["market_maker"]["accounts"][0]["symbols"],
             ["BTC/USDT"],
         )
+
+    async def test_market_maker_payload_includes_configured_bybit_symbol(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            spot_markets=[],
+        )
+
+        payload = build_market_maker_payload(cfg, {})
+        accounts = {row["key"]: row for row in payload["accounts"]}
+
+        self.assertIn("bybit-spot", accounts)
+        self.assertIn("ACS/USDT", accounts["bybit-spot"]["symbols"])
 
     async def test_grid_and_dca_runtime_overrides_persist(self) -> None:
         cfg = make_config(

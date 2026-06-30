@@ -799,11 +799,24 @@ async def run_cycle(
         payload["reprice_bps"] = reprice_bps
         if adopted_existing_open_orders:
             payload["adopted_existing_open_orders"] = True
+        expected_open_order_count = len(plan.orders)
+        tracked_open_order_count = len(replace_order_ids)
+        tracked_order_count_matches_plan = (
+            not replace_order_ids
+            or tracked_open_order_count == expected_open_order_count
+        )
+        if replace_order_ids and not tracked_order_count_matches_plan:
+            payload["tracked_open_order_count"] = tracked_open_order_count
+            payload["expected_open_order_count"] = expected_open_order_count
+            payload["reprice_skip_blocked_reason"] = (
+                "tracked open order count does not match the MM plan; rebuilding ladder"
+            )
         if (
             cfg.market_maker.reprice_threshold_bps > 0
             and reprice_bps is not None
             and reprice_bps < cfg.market_maker.reprice_threshold_bps
             and replace_order_ids
+            and tracked_order_count_matches_plan
         ):
             payload["status"] = "unchanged"
             payload["execution"] = {
