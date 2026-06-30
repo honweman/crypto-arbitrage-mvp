@@ -120,6 +120,49 @@ main {
   margin-bottom: 10px;
 }
 
+.instance-status-list {
+  display: grid;
+  gap: 6px;
+}
+
+.instance-status-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(92px, auto) minmax(130px, auto) minmax(0, 2fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  font-size: 12px;
+}
+
+.instance-status-name {
+  min-width: 0;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-status-pill {
+  justify-self: start;
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-weight: 700;
+}
+
+.instance-status-detail,
+.instance-status-reason {
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metric.compact {
   min-height: 60px;
   box-shadow: none;
@@ -1048,6 +1091,9 @@ tbody tr:last-child td {
   .audit-table { min-width: 920px; }
   .control-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mini-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .instance-status-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .instance-status-detail,
+  .instance-status-reason { grid-column: 1 / -1; }
   .console-actions { grid-template-columns: 1fr; }
   .account-field { grid-column: 1 / -1; }
   .opportunity { grid-template-columns: 1fr; }
@@ -1091,6 +1137,11 @@ tbody tr:last-child td {
   .control-panel { grid-template-columns: 1fr; }
   .account-selector { grid-template-columns: 1fr; }
   .mini-grid { grid-template-columns: 1fr; }
+  .instance-status-row { grid-template-columns: 1fr; }
+  .instance-status-pill { justify-self: start; }
+  .instance-status-name,
+  .instance-status-detail,
+  .instance-status-reason { white-space: normal; }
   .table-wrap {
     margin-right: -14px;
     margin-left: -14px;

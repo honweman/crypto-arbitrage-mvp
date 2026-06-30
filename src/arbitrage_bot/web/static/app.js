@@ -1406,12 +1406,13 @@ function balanceStatusClass(status) {
       const mmPlan = marketMaker.plan || mmRuntime.last_plan || null;
       const mmStatus = mmRuntime.status || marketMaker.status || "disabled";
       const mmMode = mmRuntime.mode || marketMaker.mode || "dry_run";
-      text("monitor-mm-summary", `${mmMode} · ${mmStatus}`);
+      const mmProblems = Number(mmRuntime.problem_instance_count ?? marketMaker.problem_instance_count ?? 0);
+      text("monitor-mm-summary", `${mmMode} · ${mmStatus}${mmProblems ? ` · ${mmProblems} attention` : ""}`);
       text(
         "monitor-mm-detail",
         mmPlan
-          ? `${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · open ${mmRuntime.open_order_count || 0}`
-          : marketMaker.error || mmRuntime.reason || "--"
+          ? `${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · open ${mmRuntime.open_order_count ?? 0}${marketMakerStatusReason(marketMaker) ? ` · ${marketMakerStatusReason(marketMaker)}` : ""}`
+          : marketMakerStatusReason(marketMaker) || marketMaker.error || mmRuntime.reason || "--"
       );
 
       const auto = data.slow_execution || {};
@@ -1649,15 +1650,21 @@ function balanceStatusClass(status) {
       const largestOrder = safety.max_order_quote_notional ?? Math.max(0, ...planOrders.map((order) => Number(order.quote_notional || 0) * quoteRateValue));
       const orderCount = safety.order_count ?? risk.order_count ?? planOrders.length;
       const approved = risk.approved === true || safety.approved === true;
-      const statusText = marketMaker?.status === "disabled"
+      const runtimeStatus = marketMaker?.runtime?.status || marketMaker?.status || "";
+      const statusReason = marketMakerStatusReason(marketMaker);
+      const statusText = runtimeStatus === "disabled"
         ? "Disabled"
-        : approved ? "Ready" : "Blocked";
-      const statusClass = marketMaker?.status === "disabled"
+        : ["error", "open_order_sync_error", "execution_error", "cancel_retry"].includes(runtimeStatus)
+          ? runtimeStatus
+          : approved ? "Ready" : "Blocked";
+      const statusClass = runtimeStatus === "disabled"
         ? "risk-off"
-        : approved ? "risk-ok" : "risk-blocked";
+        : ["error", "open_order_sync_error", "execution_error", "cancel_retry", "blocked_by_risk"].includes(runtimeStatus)
+          ? "risk-blocked"
+          : approved ? "risk-ok" : "risk-blocked";
 
       setValueState("mm-safety-status", statusText, statusClass);
-      text("mm-safety-reason", firstRiskMessage(risk));
+      text("mm-safety-reason", statusReason || firstRiskMessage(risk));
       setValueState(
         "mm-safety-orders",
         `${orderCount}/${limits.max_orders_per_cycle || "--"}`,
@@ -3311,6 +3318,42 @@ function balanceStatusClass(status) {
       return `${config.exchange || "account"} ${config.symbol || "symbol"} · ${status}`;
     }
 
+    function firstListText(items) {
+      if (!Array.isArray(items)) return "";
+      const item = items.find((value) => String(value || "").trim());
+      return item == null ? "" : String(item);
+    }
+
+    function marketMakerStatusReason(instance) {
+      const runtime = instance?.runtime || {};
+      const risk = runtime.last_risk || instance?.safety?.risk || instance?.safety || {};
+      const execution = runtime.last_execution || {};
+      return (
+        instance?.status_reason ||
+        instance?.error ||
+        runtime.last_error ||
+        runtime.open_order_sync_error ||
+        runtime.reason ||
+        firstListText(risk.reasons) ||
+        firstListText(risk.warnings) ||
+        execution.reason ||
+        firstListText(execution.reasons) ||
+        firstListText(execution.warnings) ||
+        ""
+      );
+    }
+
+    function marketMakerStatusClass(status) {
+      if (["placed", "unchanged", "planned"].includes(status)) return "risk-ok";
+      if (["disabled", "paused", "starting"].includes(status)) return "risk-off";
+      return "risk-blocked";
+    }
+
+    function marketMakerInstanceName(instance) {
+      const config = instance?.config || {};
+      return instance?.display_name || `${config.exchange || "account"} ${config.symbol || "symbol"}`;
+    }
+
     function selectedMarketMakerInstance(marketMaker) {
       const instances = marketMakerInstances(marketMaker);
       if (!instances.length) return null;
@@ -3338,9 +3381,39 @@ function balanceStatusClass(status) {
       document.getElementById("mm-delete").disabled = instances.length <= 1 || mmFormBusy;
     }
 
+    function renderMarketMakerInstanceStatus(marketMaker) {
+      const body = document.getElementById("mm-instance-status");
+      if (!body) return;
+      const instances = marketMakerInstances(marketMaker);
+      body.innerHTML = "";
+      if (!instances.length) {
+        const row = document.createElement("div");
+        row.className = "instance-status-row";
+        row.textContent = "No market maker instances";
+        body.appendChild(row);
+        return;
+      }
+      for (const instance of instances) {
+        const status = instance?.runtime?.status || instance?.status || "disabled";
+        const runtime = instance?.runtime || {};
+        const row = document.createElement("div");
+        row.className = "instance-status-row";
+        const detail = `${instance?.mode || runtime.mode || "dry_run"} · open ${runtime.open_order_count ?? 0} · placed ${runtime.placed_count ?? 0} · canceled ${runtime.canceled_count ?? 0}`;
+        const reason = marketMakerStatusReason(instance) || "--";
+        row.innerHTML = `
+          <div class="instance-status-name" title="${escapeHtml(marketMakerInstanceName(instance))}">${escapeHtml(marketMakerInstanceName(instance))}</div>
+          <div class="instance-status-pill ${marketMakerStatusClass(status)}">${escapeHtml(status)}</div>
+          <div class="instance-status-detail">${escapeHtml(detail)}</div>
+          <div class="instance-status-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</div>
+        `;
+        body.appendChild(row);
+      }
+    }
+
     function renderMarketMakerConfig(marketMaker) {
       if (!marketMaker || mmFormBusy) return;
       renderMarketMakerInstanceSelect(marketMaker);
+      renderMarketMakerInstanceStatus(marketMaker);
       if (mmFormDirty) return;
       const selected = selectedMarketMakerInstance(marketMaker);
       const config = selected?.config || marketMaker.config;
@@ -4064,7 +4137,7 @@ function balanceStatusClass(status) {
       const mmInstances = marketMakerInstances(data.market_maker);
       const mmRuntime = mmSelected?.runtime || data.market_maker?.runtime || {};
       const mmPlan = mmSelected?.plan || data.market_maker?.plan;
-      const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count || 0} · placed ${mmRuntime.placed_count || 0} · canceled ${mmRuntime.canceled_count || 0}` : "";
+      const mmRuntimeText = mmRuntime.status ? ` · ${mmRuntime.status} · open ${mmRuntime.open_order_count ?? 0} · placed ${mmRuntime.placed_count ?? 0} · canceled ${mmRuntime.canceled_count ?? 0}` : "";
       const mmMarketData = mmRuntime.market_data || mmSelected?.market_data || data.market_maker?.market_data || {};
       const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
       const mmMarketDataText = mmMarketData.source
@@ -4078,7 +4151,9 @@ function balanceStatusClass(status) {
         ? "--"
         : Number(mmPlan.existing_spread_bps).toFixed(2);
       const mmInstanceText = mmInstances.length > 1 ? `${mmInstances.length} instances · ` : "";
-      text("mm-meta", mmPlan ? `${mmInstanceText}${mmSelected?.mode || data.market_maker?.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}` : `${mmInstanceText}${mmSelected?.status || data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}`);
+      const mmReason = marketMakerStatusReason(mmSelected) || marketMakerStatusReason(data.market_maker);
+      const mmReasonText = mmReason ? ` · ${mmReason}` : "";
+      text("mm-meta", mmPlan ? `${mmInstanceText}${mmSelected?.mode || data.market_maker?.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}${mmReasonText}` : `${mmInstanceText}${mmSelected?.status || data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}${mmReasonText}`);
 
       const slowPlan = data.slow_execution?.plan;
       const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");

@@ -70,6 +70,153 @@ def _execution_protection_from_payloads(payload: dict[str, Any]) -> dict[str, An
     )
 
 
+_MARKET_MAKER_STATUS_PRIORITY = [
+    "error",
+    "open_order_sync_error",
+    "execution_error",
+    "cancel_retry",
+    "blocked_by_risk",
+    "placed",
+    "unchanged",
+    "planned",
+    "starting",
+    "disabled",
+    "paused",
+]
+
+_MARKET_MAKER_PROBLEM_STATUSES = {
+    "error",
+    "open_order_sync_error",
+    "execution_error",
+    "cancel_retry",
+    "blocked_by_risk",
+}
+
+
+def _first_text(items: Any) -> str | None:
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        text = str(item or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _market_maker_runtime_reason(runtime: dict[str, Any]) -> str | None:
+    for field in ("last_error", "open_order_sync_error", "reason"):
+        text = str(runtime.get(field) or "").strip()
+        if text:
+            return text
+
+    last_risk = runtime.get("last_risk")
+    if isinstance(last_risk, dict):
+        text = _first_text(last_risk.get("reasons")) or _first_text(
+            last_risk.get("warnings")
+        )
+        if text:
+            return text
+
+    last_execution = runtime.get("last_execution")
+    if isinstance(last_execution, dict):
+        text = str(last_execution.get("reason") or "").strip()
+        if text:
+            return text
+        text = _first_text(last_execution.get("reasons")) or _first_text(
+            last_execution.get("warnings")
+        )
+        if text:
+            return text
+
+    return None
+
+
+def _market_maker_payload_reason(instance: dict[str, Any]) -> str | None:
+    runtime = instance.get("runtime")
+    if isinstance(runtime, dict):
+        text = _market_maker_runtime_reason(runtime)
+        if text:
+            return text
+
+    for field in (
+        "last_error",
+        "open_order_sync_error",
+        "error",
+        "status_reason",
+        "reason",
+    ):
+        text = str(instance.get(field) or "").strip()
+        if text:
+            return text
+
+    last_risk = instance.get("last_risk")
+    if isinstance(last_risk, dict):
+        text = _first_text(last_risk.get("reasons")) or _first_text(
+            last_risk.get("warnings")
+        )
+        if text:
+            return text
+
+    last_execution = instance.get("last_execution")
+    if isinstance(last_execution, dict):
+        text = str(last_execution.get("reason") or "").strip()
+        if text:
+            return text
+        text = _first_text(last_execution.get("reasons")) or _first_text(
+            last_execution.get("warnings")
+        )
+        if text:
+            return text
+
+    safety = instance.get("safety")
+    if isinstance(safety, dict):
+        text = _first_text(safety.get("reasons")) or _first_text(
+            safety.get("warnings")
+        )
+        if text:
+            return text
+
+    return None
+
+
+def _market_maker_display_name(instance: dict[str, Any]) -> str:
+    config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
+    exchange = str(config.get("exchange") or instance.get("exchange") or "account")
+    symbol = str(config.get("symbol") or instance.get("symbol") or "symbol")
+    return f"{exchange} {symbol}".strip()
+
+
+def _market_maker_status_priority(status: Any) -> int:
+    text = str(status or "")
+    try:
+        return _MARKET_MAKER_STATUS_PRIORITY.index(text)
+    except ValueError:
+        return len(_MARKET_MAKER_STATUS_PRIORITY)
+
+
+def _annotate_market_maker_instance(
+    instance: dict[str, Any],
+    *,
+    runtime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    runtime = runtime if runtime is not None else instance.get("runtime")
+    annotated = dict(instance)
+    if isinstance(runtime, dict):
+        annotated["runtime"] = runtime
+        annotated["status"] = runtime.get("status", annotated.get("status"))
+        annotated["mode"] = runtime.get("mode", annotated.get("mode"))
+        if isinstance(runtime.get("last_plan"), dict):
+            annotated["plan"] = runtime["last_plan"]
+        runtime_error = runtime.get("last_error") or runtime.get(
+            "open_order_sync_error"
+        )
+        if runtime_error:
+            annotated["error"] = runtime_error
+    annotated["display_name"] = _market_maker_display_name(annotated)
+    annotated["status_reason"] = _market_maker_payload_reason(annotated)
+    return annotated
+
+
 class MonitorState:
     def __init__(
         self,
@@ -1013,43 +1160,47 @@ class MonitorState:
                     self._payload["market_maker"]["mode"] = runtime["mode"]
                 if runtime.get("status"):
                     self._payload["market_maker"]["status"] = runtime["status"]
-                self._payload["market_maker"]["error"] = runtime.get("last_error")
+                self._payload["market_maker"]["status_reason"] = runtime.get(
+                    "status_reason"
+                )
+                self._payload["market_maker"]["error"] = runtime.get(
+                    "last_error"
+                ) or runtime.get("status_reason")
 
     def _aggregate_market_maker_runtime_unlocked(
         self,
         instances: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        instances = [_annotate_market_maker_instance(item) for item in instances]
         active_instances = [
             item
             for item in instances
             if item.get("status") not in {"disabled", "paused"}
         ]
-        selected = active_instances[0] if active_instances else (instances[0] if instances else {})
-        status_priority = [
-            "error",
-            "open_order_sync_error",
-            "execution_error",
-            "cancel_retry",
-            "blocked_by_risk",
-            "placed",
-            "unchanged",
-            "planned",
-            "starting",
-            "disabled",
-            "paused",
+        selected = min(
+            instances,
+            key=lambda item: _market_maker_status_priority(item.get("status")),
+            default={},
+        )
+        aggregate_status = str(selected.get("status") or "disabled")
+        problem_instances = [
+            {
+                "id": item.get("id"),
+                "display_name": item.get("display_name"),
+                "status": item.get("status"),
+                "reason": item.get("status_reason"),
+            }
+            for item in instances
+            if item.get("status") in _MARKET_MAKER_PROBLEM_STATUSES
         ]
-        statuses = {str(item.get("status") or "") for item in instances}
-        aggregate_status = "disabled"
-        for status in status_priority:
-            if status in statuses:
-                aggregate_status = status
-                break
         return {
             "status": aggregate_status,
             "mode": "live" if any(item.get("mode") == "live" for item in instances) else selected.get("mode", "dry_run"),
             "instances": instances,
             "instance_count": len(instances),
             "active_instance_count": len(active_instances),
+            "problem_instance_count": len(problem_instances),
+            "problem_instances": problem_instances,
             "open_order_count": sum(
                 int(item.get("open_order_count", 0) or 0) for item in instances
             ),
@@ -1066,6 +1217,7 @@ class MonitorState:
             "last_risk": selected.get("last_risk"),
             "last_execution": selected.get("last_execution"),
             "last_error": selected.get("last_error"),
+            "status_reason": selected.get("status_reason"),
             "market_data": selected.get("market_data"),
             "updated_at": time.time(),
         }
@@ -1084,7 +1236,10 @@ class MonitorState:
             market_maker["mode"] = runtime["mode"]
         if runtime.get("status"):
             market_maker["status"] = runtime["status"]
-        market_maker["error"] = runtime.get("last_error")
+        market_maker["status_reason"] = runtime.get("status_reason")
+        market_maker["error"] = runtime.get("last_error") or runtime.get(
+            "status_reason"
+        )
         runtime_by_id = {
             str(item.get("id") or ""): item
             for item in runtime.get("instances", [])
@@ -1100,18 +1255,16 @@ class MonitorState:
                 instance_id = str(config.get("id") or instance.get("id") or "")
                 instance_runtime = runtime_by_id.get(instance_id)
                 if instance_runtime is not None:
-                    merged = {
-                        **instance,
-                        "runtime": instance_runtime,
-                        "status": instance_runtime.get("status", instance.get("status")),
-                        "mode": instance_runtime.get("mode", instance.get("mode")),
-                        "error": instance_runtime.get("last_error"),
-                    }
-                    if isinstance(instance_runtime.get("last_plan"), dict):
-                        merged["plan"] = instance_runtime["last_plan"]
-                    updated_instances.append(merged)
+                    updated_instances.append(
+                        _annotate_market_maker_instance(
+                            instance,
+                            runtime=instance_runtime,
+                        )
+                    )
                 else:
-                    updated_instances.append(instance)
+                    updated_instances.append(
+                        _annotate_market_maker_instance(instance)
+                    )
             market_maker["instances"] = updated_instances
 
     async def set_market_maker_instance_runtime(
@@ -1210,8 +1363,16 @@ class MonitorState:
                 market_maker["mode"] = self._market_maker_runtime["mode"]
             if self._market_maker_runtime.get("status"):
                 market_maker["status"] = self._market_maker_runtime["status"]
-            if self._market_maker_runtime.get("last_error"):
-                market_maker["error"] = self._market_maker_runtime["last_error"]
+            market_maker["status_reason"] = self._market_maker_runtime.get(
+                "status_reason"
+            )
+            if (
+                self._market_maker_runtime.get("last_error")
+                or self._market_maker_runtime.get("status_reason")
+            ):
+                market_maker["error"] = self._market_maker_runtime.get(
+                    "last_error"
+                ) or self._market_maker_runtime.get("status_reason")
             runtime_by_id = {
                 str(item.get("id") or ""): item
                 for item in self._market_maker_runtime.get("instances", [])
@@ -1230,21 +1391,16 @@ class MonitorState:
                     instance_id = str(config.get("id") or instance.get("id") or "")
                     instance_runtime = runtime_by_id.get(instance_id)
                     if instance_runtime is None:
-                        merged_instances.append(instance)
+                        merged_instances.append(
+                            _annotate_market_maker_instance(instance)
+                        )
                         continue
-                    merged = {
-                        **instance,
-                        "runtime": instance_runtime,
-                        "status": instance_runtime.get(
-                            "status",
-                            instance.get("status"),
-                        ),
-                        "mode": instance_runtime.get("mode", instance.get("mode")),
-                        "error": instance_runtime.get("last_error"),
-                    }
-                    if isinstance(instance_runtime.get("last_plan"), dict):
-                        merged["plan"] = instance_runtime["last_plan"]
-                    merged_instances.append(merged)
+                    merged_instances.append(
+                        _annotate_market_maker_instance(
+                            instance,
+                            runtime=instance_runtime,
+                        )
+                    )
                 market_maker["instances"] = merged_instances
             market_maker["quality"] = build_market_maker_quality_payload(
                 order_activity,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -178,7 +179,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260630-mm-restore" defer></script>',
+            '<script src="/static/app.js?v=20260630-mm-status" defer></script>',
             INDEX_HTML,
         )
 
@@ -273,7 +274,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260630-mm-restore">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260630-mm-status">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -302,6 +303,81 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("AutoBuy stops before each execution", APP_JS)
         self.assertIn("AutoBuy stop when Ask >= price", APP_JS)
         self.assertNotIn("Slow Execution", HTML)
+
+    def test_market_maker_runtime_surfaces_problem_instance_reason(self) -> None:
+        async def run() -> None:
+            cfg = make_config(
+                market_makers=[
+                    MarketMakerConfig(
+                        id="coinbase-acs",
+                        exchange="coinbase-spot",
+                        symbol="ACS/USDC",
+                        enabled=True,
+                        live_enabled=True,
+                    ),
+                    MarketMakerConfig(
+                        id="bybit-acs",
+                        exchange="bybit-spot",
+                        symbol="ACS/USDT",
+                        enabled=True,
+                        live_enabled=True,
+                    ),
+                    MarketMakerConfig(
+                        id="upbit-acs",
+                        exchange="upbit-spot",
+                        symbol="ACS/USDT",
+                        enabled=True,
+                        live_enabled=True,
+                    ),
+                ],
+            )
+            state = MonitorState(cfg, 1.0)
+
+            await state.set_market_maker_instance_runtime(
+                "coinbase-acs",
+                {
+                    "status": "unchanged",
+                    "mode": "live",
+                    "open_order_count": 40,
+                    "placed_count": 40,
+                    "canceled_count": 0,
+                },
+            )
+            await state.set_market_maker_instance_runtime(
+                "bybit-acs",
+                {
+                    "status": "open_order_sync_error",
+                    "mode": "live",
+                    "open_order_sync_error": 'AuthenticationError: bybit requires "apiKey" credential',
+                },
+            )
+            await state.set_market_maker_instance_runtime(
+                "upbit-acs",
+                {
+                    "status": "blocked_by_risk",
+                    "mode": "live",
+                    "last_risk": {
+                        "reasons": [
+                            "order book gap 6648.98 bps exceeds max_order_book_gap_bps 5000.00"
+                        ]
+                    },
+                },
+            )
+
+            runtime = await state.market_maker_runtime()
+            self.assertEqual(runtime["status"], "open_order_sync_error")
+            self.assertEqual(runtime["problem_instance_count"], 2)
+            self.assertIn("apiKey", runtime["status_reason"])
+            bybit = next(
+                item for item in runtime["instances"] if item["id"] == "bybit-acs"
+            )
+            upbit = next(
+                item for item in runtime["instances"] if item["id"] == "upbit-acs"
+            )
+            self.assertIn("apiKey", bybit["status_reason"])
+            self.assertIn("order book gap", upbit["status_reason"])
+
+        asyncio.run(run())
 
     def test_web_package_exposes_split_modules(self) -> None:
         self.assertIs(SplitMonitorState, MonitorState)
