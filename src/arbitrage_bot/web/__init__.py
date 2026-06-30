@@ -2938,6 +2938,21 @@ def _load_runtime_overrides(path: Path, cfg: BotConfig) -> dict[str, Any]:
             if key in STRATEGY_IDS
         },
     }
+    if raw.get("market_maker_instances") is not None:
+        try:
+            data["market_maker_instances"] = market_maker_configs_to_list(
+                market_maker_configs_from_payload(
+                    raw.get("market_maker_instances"),
+                    base_configs=market_maker_configs_for_runtime(cfg),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            return {
+                "loaded": False,
+                "path": str(path),
+                "error": f"invalid market_maker_instances in runtime store: {exc}",
+                "data": {},
+            }
     program = raw.get("program")
     if isinstance(program, dict):
         program_state: dict[str, Any] = {}

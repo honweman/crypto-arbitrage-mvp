@@ -4884,6 +4884,72 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
         self.assertTrue(strategies["market_maker"]["live"])
 
+    async def test_market_maker_instances_persist_across_state_restart(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                id="bybit-acs",
+                enabled=True,
+                live_enabled=False,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[
+                ExchangeConfig(id="bybit", label="bybit-spot"),
+                ExchangeConfig(id="coinbase", label="coinbase-spot"),
+            ],
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                ),
+            ],
+        )
+        instances = [
+            MarketMakerConfig(
+                id="coinbase-acs",
+                enabled=True,
+                live_enabled=True,
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+                levels=20,
+                quote_per_level=100.0,
+            ),
+            MarketMakerConfig(
+                id="bybit-acs",
+                enabled=True,
+                live_enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                levels=20,
+                quote_per_level=50.0,
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = os.path.join(tmp, "web_runtime_overrides.json")
+            state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            await state.set_market_maker_instances(instances, cfg=cfg)
+
+            restored = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            runtime_cfg = await restored.runtime_config(cfg)
+            payload = await restored.get()
+
+        self.assertEqual(
+            [(item.exchange, item.symbol) for item in runtime_cfg.market_makers],
+            [("coinbase-spot", "ACS/USDC"), ("bybit-spot", "ACS/USDT")],
+        )
+        self.assertEqual(len(payload["market_maker"]["instances"]), 2)
+        self.assertTrue(payload["runtime_store"]["loaded"])
+        self.assertIsNone(payload["runtime_store"]["error"])
+
     async def test_runtime_overrides_persist_across_state_restart(self) -> None:
         cfg = make_config(
             market_maker=MarketMakerConfig(
