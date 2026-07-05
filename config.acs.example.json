@@ -315,16 +315,16 @@
     "enabled": true,
     "path": "data/trade_events.jsonl",
     "max_recent_events": 50,
-    "rotate_max_bytes": 268435456,
-    "rotate_keep_files": 12,
+    "rotate_max_bytes": 67108864,
+    "rotate_keep_files": 8,
     "rotate_compress": true
   },
   "strategy_timeline": {
     "enabled": true,
     "path": "data/strategy_timeline.jsonl",
     "max_recent_events": 100,
-    "rotate_max_bytes": 268435456,
-    "rotate_keep_files": 12,
+    "rotate_max_bytes": 67108864,
+    "rotate_keep_files": 8,
     "rotate_compress": true
   },
   "pnl_store": {

@@ -66,6 +66,7 @@ from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
 from ..funding_basis import funding_basis_payload, funding_settings_from_strategy_center
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
+from ..jsonl_rotation import rotate_jsonl_log_if_needed
 from ..observability import configure_logging, render_prometheus_metrics
 from ..main import (
     StrategyName,
@@ -2865,6 +2866,12 @@ def write_system_web_audit_event(
     path = Path(default_web_audit_path(cfg))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_jsonl_log_if_needed(
+            path,
+            max_bytes=cfg.trade_log.rotate_max_bytes,
+            keep_files=cfg.trade_log.rotate_keep_files,
+            compress=cfg.trade_log.rotate_compress,
+        )
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=True, sort_keys=True))
             handle.write("\n")

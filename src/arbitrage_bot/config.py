@@ -365,8 +365,8 @@ class TradeLogConfig:
     enabled: bool = True
     path: str = "data/trade_events.jsonl"
     max_recent_events: int = 50
-    rotate_max_bytes: int = 256 * 1024 * 1024
-    rotate_keep_files: int = 12
+    rotate_max_bytes: int = 64 * 1024 * 1024
+    rotate_keep_files: int = 8
     rotate_compress: bool = True
 
 
@@ -375,8 +375,8 @@ class StrategyTimelineConfig:
     enabled: bool = True
     path: str = "data/strategy_timeline.jsonl"
     max_recent_events: int = 100
-    rotate_max_bytes: int = 256 * 1024 * 1024
-    rotate_keep_files: int = 12
+    rotate_max_bytes: int = 64 * 1024 * 1024
+    rotate_keep_files: int = 8
     rotate_compress: bool = True
 
 
@@ -1162,9 +1162,9 @@ def load_config(path: str | Path) -> BotConfig:
             path=str(trade_log_raw.get("path", "data/trade_events.jsonl")),
             max_recent_events=int(trade_log_raw.get("max_recent_events", 50)),
             rotate_max_bytes=int(
-                trade_log_raw.get("rotate_max_bytes", 256 * 1024 * 1024)
+                trade_log_raw.get("rotate_max_bytes", 64 * 1024 * 1024)
             ),
-            rotate_keep_files=int(trade_log_raw.get("rotate_keep_files", 12)),
+            rotate_keep_files=int(trade_log_raw.get("rotate_keep_files", 8)),
             rotate_compress=bool(trade_log_raw.get("rotate_compress", True)),
         ),
         strategy_timeline=StrategyTimelineConfig(
@@ -1179,10 +1179,10 @@ def load_config(path: str | Path) -> BotConfig:
                 strategy_timeline_raw.get("max_recent_events", 100)
             ),
             rotate_max_bytes=int(
-                strategy_timeline_raw.get("rotate_max_bytes", 256 * 1024 * 1024)
+                strategy_timeline_raw.get("rotate_max_bytes", 64 * 1024 * 1024)
             ),
             rotate_keep_files=int(
-                strategy_timeline_raw.get("rotate_keep_files", 12)
+                strategy_timeline_raw.get("rotate_keep_files", 8)
             ),
             rotate_compress=bool(
                 strategy_timeline_raw.get("rotate_compress", True)

@@ -2804,6 +2804,40 @@ class WebMonitorTest(unittest.TestCase):
             events[0]["event_id"],
         )
 
+    def test_web_audit_events_rotate_with_trade_log_settings(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/risk"
+            method = "POST"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                trade_log=TradeLogConfig(
+                    enabled=True,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                    rotate_max_bytes=1,
+                    rotate_keep_files=2,
+                    rotate_compress=False,
+                )
+            )
+            write_web_audit_event(
+                cfg,
+                FakeRequest(),  # type: ignore[arg-type]
+                action="first",
+            )
+            write_web_audit_event(
+                cfg,
+                FakeRequest(),  # type: ignore[arg-type]
+                action="second",
+            )
+            audit_path = Path(default_web_audit_path(cfg))
+            rotated = sorted(audit_path.parent.glob("web_audit_events.jsonl.*"))
+            rotated_text = rotated[0].read_text(encoding="utf-8")
+
+            self.assertEqual(len(rotated), 1)
+            self.assertIn('"action": "first"', rotated_text)
+
     def test_build_portfolio_pnl_splits_sources(self) -> None:
         cfg = make_config(
             portfolio=PortfolioConfig(

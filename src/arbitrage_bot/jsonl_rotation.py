@@ -42,6 +42,20 @@ def _cleanup_rotated_logs(path: Path, keep_files: int) -> None:
             continue
 
 
+def prune_rotated_jsonl_logs(path: Path, *, keep_files: int) -> int:
+    if keep_files < 0:
+        keep_files = 0
+    candidates = _rotated_candidates(path)
+    removed = 0
+    for candidate in candidates[keep_files:]:
+        try:
+            candidate.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _compress_rotated_log(path: Path, base_path: Path, keep_files: int) -> None:
     if not path.exists() or path.name.endswith(".gz"):
         return
