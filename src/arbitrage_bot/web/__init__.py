@@ -6051,6 +6051,7 @@ async def api_market_maker(request: web.Request) -> web.Response:
                 base_configs=current_instances,
                 allowed_exchanges=allowed_exchanges,
                 symbols_by_exchange=symbols_by_exchange,
+                repair_stale_identity_id=True,
             )
             action = "replace"
         elif isinstance(payload, dict) and payload.get("delete_id"):
@@ -6078,11 +6079,14 @@ async def api_market_maker(request: web.Request) -> web.Response:
                 base_config=base_config,
                 allowed_exchanges=allowed_exchanges,
                 symbols_by_exchange=symbols_by_exchange,
+                repair_stale_identity_id=True,
             )
             replaced_instance = False
             updated_instances = []
             for instance in current_instances:
-                if instance.id == updated_config.id:
+                if (target_id and instance.id == target_id) or (
+                    not target_id and instance.id == updated_config.id
+                ):
                     updated_instances.append(updated_config)
                     replaced_instance = True
                 else:

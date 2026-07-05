@@ -111,7 +111,11 @@ from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore, totp_code
-from arbitrage_bot.web_config import strategy_universe_to_dict
+from arbitrage_bot.web_config import (
+    market_maker_config_from_payload,
+    market_maker_configs_from_payload,
+    strategy_universe_to_dict,
+)
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 
 
@@ -2028,6 +2032,113 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["inventory_band_base"], 5000.0)
         self.assertEqual(overrides["inventory_max_deviation_base"], 20000.0)
         self.assertTrue(overrides["post_only"])
+
+    def test_market_maker_update_repairs_stale_market_identity_id(self) -> None:
+        base = MarketMakerConfig(
+            id="bybit-spot-acs-usdt",
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            levels=20,
+        )
+
+        updated = market_maker_config_from_payload(
+            {
+                "id": "bybit-spot-acs-usdt",
+                "exchange": "coinbase-spot",
+                "symbol": "ACS/USDC",
+                "levels": 20,
+            },
+            base_config=base,
+            allowed_exchanges={"bybit-spot", "coinbase-spot"},
+            symbols_by_exchange={
+                "bybit-spot": ["ACS/USDT"],
+                "coinbase-spot": ["ACS/USDC"],
+            },
+            repair_stale_identity_id=True,
+        )
+
+        self.assertEqual(updated.exchange, "coinbase-spot")
+        self.assertEqual(updated.symbol, "ACS/USDC")
+        self.assertEqual(updated.id, "coinbase-spot-acs-usdc")
+
+    def test_market_maker_update_keeps_existing_id_when_market_identity_unchanged(
+        self,
+    ) -> None:
+        base = MarketMakerConfig(
+            id="upbit-spot-acs-usdt-mr0dsmi7",
+            enabled=True,
+            exchange="upbit-spot",
+            symbol="ACS/USDT",
+            levels=20,
+        )
+
+        updated = market_maker_config_from_payload(
+            {
+                "id": "upbit-spot-acs-usdt-mr0dsmi7",
+                "levels": 10,
+                "quote_per_level": 40,
+            },
+            base_config=base,
+            allowed_exchanges={"upbit-spot"},
+            symbols_by_exchange={"upbit-spot": ["ACS/USDT"]},
+            repair_stale_identity_id=True,
+        )
+
+        self.assertEqual(updated.id, "upbit-spot-acs-usdt-mr0dsmi7")
+        self.assertEqual(updated.exchange, "upbit-spot")
+        self.assertEqual(updated.symbol, "ACS/USDT")
+        self.assertEqual(updated.levels, 10)
+        self.assertEqual(updated.quote_per_level, 40.0)
+
+    def test_market_maker_replace_list_repairs_only_changed_market_id(self) -> None:
+        base_configs = [
+            MarketMakerConfig(
+                id="bybit-spot-acs-usdt",
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            MarketMakerConfig(
+                id="upbit-spot-acs-usdt-mr0dsmi7",
+                enabled=True,
+                exchange="upbit-spot",
+                symbol="ACS/USDT",
+            ),
+        ]
+
+        updated = market_maker_configs_from_payload(
+            [
+                {
+                    "id": "bybit-spot-acs-usdt",
+                    "enabled": True,
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                },
+                {
+                    "id": "upbit-spot-acs-usdt-mr0dsmi7",
+                    "enabled": True,
+                    "exchange": "upbit-spot",
+                    "symbol": "ACS/USDT",
+                },
+            ],
+            base_configs=base_configs,
+            allowed_exchanges={"bybit-spot", "coinbase-spot", "upbit-spot"},
+            symbols_by_exchange={
+                "bybit-spot": ["ACS/USDT"],
+                "coinbase-spot": ["ACS/USDC"],
+                "upbit-spot": ["ACS/USDT"],
+            },
+            repair_stale_identity_id=True,
+        )
+
+        self.assertEqual(
+            [(config.id, config.exchange, config.symbol) for config in updated],
+            [
+                ("coinbase-spot-acs-usdc", "coinbase-spot", "ACS/USDC"),
+                ("upbit-spot-acs-usdt-mr0dsmi7", "upbit-spot", "ACS/USDT"),
+            ],
+        )
 
     def test_market_maker_update_payload_rejects_wrong_symbol(self) -> None:
         with self.assertRaisesRegex(ValueError, "symbol is not configured"):
