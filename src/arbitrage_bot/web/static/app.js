@@ -1002,7 +1002,7 @@ function balanceStatusClass(status) {
       if (accounts.length === 0) {
         const empty = document.createElement("span");
         empty.className = "subtle";
-        empty.textContent = "No accounts";
+        empty.textContent = uiText("No accounts");
         body.appendChild(empty);
         return;
       }
@@ -3199,8 +3199,64 @@ function balanceStatusClass(status) {
       return rows.filter(Boolean);
     }
 
+    function accountMarkets(account) {
+      const markets = Array.isArray(account?.markets) ? account.markets : [];
+      if (markets.length) {
+        return markets
+          .map((market) => ({
+            accountKey: account.key,
+            accountLabel: account.label || account.key,
+            asset: String(market.asset || market.project || baseCurrency(market.symbol)).toUpperCase(),
+            exchange: market.exchange || account.key,
+            exchangeId: market.exchange_id || account.id || account.key,
+            exchangeLabel: market.exchange_label || account.label || account.key,
+            marketType: market.market_type || account.market_type || "spot",
+            symbol: market.symbol || "",
+            quoteCurrency: market.quote_currency || quoteCurrency(market.symbol),
+          }))
+          .filter((market) => market.symbol);
+      }
+      return accountSymbols(account).map((symbol) => ({
+        accountKey: account?.key || "",
+        accountLabel: account?.label || account?.key || "",
+        asset: baseCurrency(symbol).toUpperCase(),
+        exchange: account?.key || "",
+        exchangeId: account?.id || account?.key || "",
+        exchangeLabel: account?.label || account?.key || "",
+        marketType: account?.market_type || "spot",
+        symbol,
+        quoteCurrency: quoteCurrency(symbol),
+      }));
+    }
+
+    function allAccountMarkets(accounts) {
+      return (Array.isArray(accounts) ? accounts : []).flatMap((account) => accountMarkets(account));
+    }
+
+    function uniqueBy(items, keyFn) {
+      const seen = new Set();
+      const rows = [];
+      for (const item of items) {
+        const key = keyFn(item);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        rows.push(item);
+      }
+      return rows;
+    }
+
+    function selectedProjectForSymbol(accounts, selectedSymbol) {
+      if (!selectedSymbol) return "";
+      const market = allAccountMarkets(accounts).find((row) => row.symbol === selectedSymbol);
+      return market?.asset || baseCurrency(selectedSymbol).toUpperCase();
+    }
+
     function accountSelectorValue(inputName) {
       return document.querySelector(`[data-account-selector="${inputName}"]`)?.value || "";
+    }
+
+    function projectSelectorValue(inputName) {
+      return document.querySelector(`[data-project-selector="${inputName}"]`)?.value || "";
     }
 
     function symbolSelectorValue(inputName) {
@@ -3216,7 +3272,7 @@ function balanceStatusClass(status) {
       const body = document.getElementById(containerId);
       const list = Array.isArray(accounts) ? accounts : [];
       const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols]),
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols, account.projects, account.markets]),
         selectedExchange,
         selectedSymbol,
       });
@@ -3233,13 +3289,14 @@ function balanceStatusClass(status) {
 
       const wrapper = document.createElement("div");
       wrapper.className = "account-selector";
+
       const accountSelect = document.createElement("select");
       accountSelect.dataset.accountSelector = inputName;
       accountSelect.className = "account-select";
-      accountSelect.title = "Exchange account";
+      accountSelect.title = uiText("Exchange account");
       const accountPlaceholder = document.createElement("option");
       accountPlaceholder.value = "";
-      accountPlaceholder.textContent = "Select account";
+      accountPlaceholder.textContent = uiText("Select account");
       accountSelect.appendChild(accountPlaceholder);
       for (const account of list) {
         const option = document.createElement("option");
@@ -3252,21 +3309,97 @@ function balanceStatusClass(status) {
         accountSelect.value = selectedExchange;
       }
 
+      const projectSelect = document.createElement("select");
+      projectSelect.dataset.projectSelector = inputName;
+      projectSelect.className = "account-select";
+      projectSelect.title = uiText("Project");
+
+      const exchangeSelect = document.createElement("select");
+      exchangeSelect.dataset.exchangeSelector = inputName;
+      exchangeSelect.className = "account-select";
+      exchangeSelect.title = uiText("Exchange");
+
       const symbolSelect = document.createElement("select");
       symbolSelect.dataset.symbolSelector = inputName;
       symbolSelect.className = "account-select";
-      symbolSelect.title = "Trading pair";
+      symbolSelect.title = uiText("Trading pair");
+
+      const fillProjects = (preferredProject = "") => {
+        const account = accountForKey(list, accountSelect.value);
+        const sourceMarkets = account ? accountMarkets(account) : allAccountMarkets(list);
+        const projects = uniqueBy(sourceMarkets, (market) => market.asset)
+          .map((market) => market.asset)
+          .sort();
+        if (preferredProject && !projects.includes(preferredProject)) {
+          projects.unshift(preferredProject);
+        }
+        projectSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = projects.length ? uiText("Select project") : uiText("No projects");
+        projectSelect.appendChild(placeholder);
+        for (const project of projects) {
+          const option = document.createElement("option");
+          option.value = project;
+          option.textContent = project;
+          projectSelect.appendChild(option);
+        }
+        if (preferredProject && projects.includes(preferredProject)) {
+          projectSelect.value = preferredProject;
+        } else if (projects.length) {
+          projectSelect.value = projects[0];
+        }
+      };
+
+      const fillExchanges = (preferredExchange = "") => {
+        const project = projectSelect.value;
+        const markets = allAccountMarkets(list).filter((market) => !project || market.asset === project);
+        const exchangeRows = uniqueBy(markets, (market) => market.accountKey);
+        if (preferredExchange && !exchangeRows.some((market) => market.accountKey === preferredExchange)) {
+          const account = accountForKey(list, preferredExchange);
+          const preferredMarkets = accountMarkets(account).filter(
+            (market) => !project || market.asset === project,
+          );
+          if (account && preferredMarkets.length) {
+            exchangeRows.unshift(preferredMarkets[0] || {
+              accountKey: account.key,
+              exchangeId: account.id || account.key,
+              exchangeLabel: account.label || account.key,
+              marketType: account.market_type || "spot",
+            });
+          }
+        }
+        exchangeSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = exchangeRows.length ? uiText("Select exchange") : uiText("No exchanges");
+        exchangeSelect.appendChild(placeholder);
+        for (const market of exchangeRows) {
+          const option = document.createElement("option");
+          option.value = market.accountKey;
+          option.textContent = `${market.exchangeLabel || market.exchangeId} (${market.marketType || "spot"})`;
+          option.title = market.accountKey;
+          exchangeSelect.appendChild(option);
+        }
+        if (preferredExchange && exchangeRows.some((market) => market.accountKey === preferredExchange)) {
+          exchangeSelect.value = preferredExchange;
+        } else if (exchangeRows.length) {
+          exchangeSelect.value = exchangeRows[0].accountKey;
+          accountSelect.value = exchangeSelect.value;
+        }
+      };
 
       const fillSymbols = (preferredSymbol = "") => {
+        const project = projectSelect.value;
         const account = accountForKey(list, accountSelect.value);
-        const symbols = accountSymbols(account);
-        if (account && preferredSymbol && !symbols.includes(preferredSymbol)) {
-          symbols.unshift(preferredSymbol);
-        }
+        let markets = accountMarkets(account);
+        if (project) markets = markets.filter((market) => market.asset === project);
+        let symbols = uniqueBy(markets, (market) => market.symbol).map((market) => market.symbol);
+        if (account && preferredSymbol && !symbols.includes(preferredSymbol)) symbols.unshift(preferredSymbol);
         symbolSelect.innerHTML = "";
         const placeholder = document.createElement("option");
         placeholder.value = "";
-        placeholder.textContent = symbols.length ? "Select symbol" : "No symbols";
+        placeholder.textContent = symbols.length ? uiText("Select pair") : uiText("No pairs");
         symbolSelect.appendChild(placeholder);
         for (const symbol of symbols) {
           const option = document.createElement("option");
@@ -3282,12 +3415,30 @@ function balanceStatusClass(status) {
       };
 
       accountSelect.addEventListener("change", () => {
+        fillProjects(projectSelectorValue(inputName));
+        fillExchanges(accountSelect.value);
+        fillSymbols("");
+        onDirty();
+      });
+      projectSelect.addEventListener("change", () => {
+        fillExchanges(accountSelect.value);
+        if (exchangeSelect.value) accountSelect.value = exchangeSelect.value;
+        fillSymbols("");
+        onDirty();
+      });
+      exchangeSelect.addEventListener("change", () => {
+        if (exchangeSelect.value) accountSelect.value = exchangeSelect.value;
+        fillProjects(projectSelect.value);
         fillSymbols("");
         onDirty();
       });
       symbolSelect.addEventListener("change", onDirty);
+      fillProjects(selectedProjectForSymbol(list, selectedSymbol));
+      fillExchanges(selectedExchange || accountSelect.value);
       fillSymbols(selectedSymbol || "");
       wrapper.appendChild(accountSelect);
+      wrapper.appendChild(projectSelect);
+      wrapper.appendChild(exchangeSelect);
       wrapper.appendChild(symbolSelect);
       body.appendChild(wrapper);
     }

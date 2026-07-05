@@ -914,7 +914,7 @@ tbody tr:last-child td {
 
 .account-selector {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   width: 100%;
 }
@@ -1096,6 +1096,7 @@ tbody tr:last-child td {
   .instance-status-reason { grid-column: 1 / -1; }
   .console-actions { grid-template-columns: 1fr; }
   .account-field { grid-column: 1 / -1; }
+  .account-selector { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .opportunity { grid-template-columns: 1fr; }
 }
 

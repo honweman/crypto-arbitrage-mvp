@@ -3293,6 +3293,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "accounts": slow_execution_accounts(
                 _all_account_exchanges(cfg),
                 _market_maker_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
             ),
             "quote_conversion": primary_conversion,
             "safety": build_market_maker_safety_payload(
@@ -3312,6 +3313,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "accounts": slow_execution_accounts(
                 cfg.spot_exchanges,
                 _spot_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
             ),
             "tasks": {
                 "status": "ok",
@@ -3331,6 +3333,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "accounts": slow_execution_accounts(
                 cfg.spot_exchanges,
                 _grid_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
             ),
             "quote_conversion": (
                 market_maker_quote_conversion(cfg, cfg.spot_grid.symbol)
@@ -3353,6 +3356,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "accounts": slow_execution_accounts(
                 cfg.spot_exchanges,
                 _grid_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
             ),
             "quote_conversion": (
                 market_maker_quote_conversion(cfg, cfg.dca.symbol)
@@ -3375,6 +3379,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "accounts": slow_execution_accounts(
                 cfg.spot_exchanges,
                 _execution_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
             ),
             "quote_conversion": (
                 market_maker_quote_conversion(cfg, cfg.execution_algo.symbol)
@@ -3397,6 +3402,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "accounts": slow_execution_accounts(
                 cfg.spot_exchanges,
                 _execution_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
             ),
             "quote_conversion": (
                 market_maker_quote_conversion(cfg, cfg.backtest.symbol)
@@ -3725,6 +3731,7 @@ def build_market_maker_payload(
     accounts = slow_execution_accounts(
         _all_account_exchanges(cfg),
         market_maker_symbols_for_accounts(cfg, base_cfg=base_cfg),
+        spot_markets=cfg.spot_markets,
     )
     instances = [
         _build_market_maker_instance_payload(cfg, maker_cfg, books, accounts)
@@ -3751,7 +3758,11 @@ def build_slow_execution_payload(
 ) -> dict[str, Any]:
     exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     config_payload = slow_execution_config_to_dict(exec_cfg)
-    accounts = slow_execution_accounts(cfg.spot_exchanges, _spot_symbols_by_exchange(cfg))
+    accounts = slow_execution_accounts(
+        cfg.spot_exchanges,
+        _spot_symbols_by_exchange(cfg),
+        spot_markets=cfg.spot_markets,
+    )
     if not exec_cfg.enabled:
         return {
             "status": "disabled",
@@ -4192,7 +4203,11 @@ def build_spot_grid_payload(
 ) -> dict[str, Any]:
     grid_cfg = cfg.spot_grid
     config_payload = spot_grid_config_to_dict(grid_cfg)
-    accounts = slow_execution_accounts(cfg.spot_exchanges, _grid_symbols_by_exchange(cfg))
+    accounts = slow_execution_accounts(
+        cfg.spot_exchanges,
+        _grid_symbols_by_exchange(cfg),
+        spot_markets=cfg.spot_markets,
+    )
     conversion = _strategy_quote_conversion(cfg, grid_cfg.symbol)
     if not grid_cfg.enabled:
         return {
@@ -4257,7 +4272,11 @@ def build_dca_payload(
 ) -> dict[str, Any]:
     dca_cfg = cfg.dca
     config_payload = dca_config_to_dict(dca_cfg)
-    accounts = slow_execution_accounts(cfg.spot_exchanges, _grid_symbols_by_exchange(cfg))
+    accounts = slow_execution_accounts(
+        cfg.spot_exchanges,
+        _grid_symbols_by_exchange(cfg),
+        spot_markets=cfg.spot_markets,
+    )
     conversion = _strategy_quote_conversion(cfg, dca_cfg.symbol)
     if not dca_cfg.enabled:
         return {
@@ -4325,6 +4344,7 @@ def build_execution_algo_payload(
     accounts = slow_execution_accounts(
         cfg.spot_exchanges,
         _execution_symbols_by_exchange(cfg),
+        spot_markets=cfg.spot_markets,
     )
     conversion = _strategy_quote_conversion(cfg, exec_cfg.symbol)
     if not exec_cfg.enabled:
@@ -4398,6 +4418,7 @@ def build_backtest_payload(
     accounts = slow_execution_accounts(
         cfg.spot_exchanges,
         _execution_symbols_by_exchange(cfg),
+        spot_markets=cfg.spot_markets,
     )
     conversion = _strategy_quote_conversion(cfg, backtest_cfg.symbol)
     if not backtest_cfg.enabled:
@@ -5381,6 +5402,7 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         accounts = slow_execution_accounts(
             runtime_cfg.spot_exchanges,
             symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
         )
         allowed_exchanges = {account["key"] for account in accounts}
         overrides = _slow_execution_overrides_from_payload(
@@ -5416,6 +5438,7 @@ async def api_slow_execution(request: web.Request) -> web.Response:
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
                 _spot_symbols_by_exchange(runtime_cfg),
+                spot_markets=runtime_cfg.spot_markets,
             ),
         }
     )
@@ -5431,6 +5454,7 @@ async def api_spot_grid(request: web.Request) -> web.Response:
         accounts = slow_execution_accounts(
             runtime_cfg.spot_exchanges,
             symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
         )
         overrides = _spot_grid_overrides_from_payload(
             payload,
@@ -5465,6 +5489,7 @@ async def api_spot_grid(request: web.Request) -> web.Response:
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
                 _grid_symbols_by_exchange(runtime_cfg),
+                spot_markets=runtime_cfg.spot_markets,
             ),
             **update,
         }
@@ -5481,6 +5506,7 @@ async def api_dca(request: web.Request) -> web.Response:
         accounts = slow_execution_accounts(
             runtime_cfg.spot_exchanges,
             symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
         )
         overrides = _dca_overrides_from_payload(
             payload,
@@ -5515,6 +5541,7 @@ async def api_dca(request: web.Request) -> web.Response:
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
                 _grid_symbols_by_exchange(runtime_cfg),
+                spot_markets=runtime_cfg.spot_markets,
             ),
             **update,
         }
@@ -5531,6 +5558,7 @@ async def api_execution_algo(request: web.Request) -> web.Response:
         accounts = slow_execution_accounts(
             runtime_cfg.spot_exchanges,
             symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
         )
         overrides = _execution_algo_overrides_from_payload(
             payload,
@@ -5567,6 +5595,7 @@ async def api_execution_algo(request: web.Request) -> web.Response:
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
                 _execution_symbols_by_exchange(runtime_cfg),
+                spot_markets=runtime_cfg.spot_markets,
             ),
             **update,
         }
@@ -5583,6 +5612,7 @@ async def api_backtest(request: web.Request) -> web.Response:
         accounts = slow_execution_accounts(
             runtime_cfg.spot_exchanges,
             symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
         )
         overrides = _backtest_overrides_from_payload(
             payload,
@@ -5617,6 +5647,7 @@ async def api_backtest(request: web.Request) -> web.Response:
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
                 _execution_symbols_by_exchange(runtime_cfg),
+                spot_markets=runtime_cfg.spot_markets,
             ),
             **update,
         }
@@ -6168,6 +6199,7 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         accounts = slow_execution_accounts(
             runtime_cfg.spot_exchanges,
             symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
         )
         allowed_exchanges = {account["key"] for account in accounts}
         overrides = _slow_execution_overrides_from_payload(

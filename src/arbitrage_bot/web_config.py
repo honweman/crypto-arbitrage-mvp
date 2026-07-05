@@ -199,6 +199,52 @@ def _symbol_asset(symbol: str) -> str:
     return str(symbol or "").split("/", 1)[0].split(":", 1)[0].upper()
 
 
+def _symbol_quote(symbol: str) -> str:
+    if "/" not in str(symbol or ""):
+        return ""
+    return str(symbol).split("/", 1)[1].split(":", 1)[0].upper()
+
+
+def _spot_market_lookup(
+    spot_markets: Iterable[SpotMarketConfig] | None,
+) -> dict[tuple[str, str], SpotMarketConfig]:
+    lookup: dict[tuple[str, str], SpotMarketConfig] = {}
+    for market in spot_markets or []:
+        lookup[(market.exchange, market.symbol)] = market
+    return lookup
+
+
+def _account_market_rows(
+    exchange: ExchangeConfig,
+    symbols: list[str],
+    *,
+    spot_markets: Iterable[SpotMarketConfig] | None = None,
+) -> list[dict[str, Any]]:
+    lookup = _spot_market_lookup(spot_markets)
+    rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        market = lookup.get((exchange.key, symbol))
+        asset = market.asset.upper() if market and market.asset else _symbol_asset(symbol)
+        quote = (
+            market.quote_currency.upper()
+            if market and market.quote_currency
+            else _symbol_quote(symbol)
+        )
+        rows.append(
+            {
+                "asset": asset,
+                "project": asset,
+                "exchange": exchange.key,
+                "exchange_id": exchange.id,
+                "exchange_label": exchange.label or exchange.key,
+                "market_type": exchange.market_type,
+                "symbol": symbol,
+                "quote_currency": quote,
+            }
+        )
+    return rows
+
+
 def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
     spot_symbols = _spot_symbols_by_exchange(cfg)
     grid_symbols = _grid_symbols_by_exchange(cfg)
@@ -223,21 +269,31 @@ def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
     return {
         "assets": sorted(item for item in assets if item),
         "spot": {
-            "accounts": slow_execution_accounts(cfg.spot_exchanges, spot_symbols),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                spot_symbols,
+                spot_markets=cfg.spot_markets,
+            ),
         },
         "grid": {
-            "accounts": slow_execution_accounts(cfg.spot_exchanges, grid_symbols),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                grid_symbols,
+                spot_markets=cfg.spot_markets,
+            ),
         },
         "execution": {
             "accounts": slow_execution_accounts(
                 cfg.spot_exchanges,
                 execution_symbols,
+                spot_markets=cfg.spot_markets,
             ),
         },
         "market_maker": {
             "accounts": slow_execution_accounts(
                 all_exchanges,
                 market_maker_symbols,
+                spot_markets=cfg.spot_markets,
             ),
         },
         "derivative": {
@@ -247,7 +303,11 @@ def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
             ),
         },
         "all": {
-            "accounts": slow_execution_accounts(all_exchanges, all_symbols),
+            "accounts": slow_execution_accounts(
+                all_exchanges,
+                all_symbols,
+                spot_markets=cfg.spot_markets,
+            ),
         },
     }
 
@@ -255,11 +315,18 @@ def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
 def slow_execution_accounts(
     exchanges: Iterable[ExchangeConfig],
     symbols_by_exchange: dict[str, list[str]] | None = None,
+    *,
+    spot_markets: Iterable[SpotMarketConfig] | None = None,
 ) -> list[dict[str, Any]]:
     symbols_by_exchange = symbols_by_exchange or {}
     rows = []
     for exchange in exchanges:
         symbols = symbols_by_exchange.get(exchange.key, [])
+        markets = _account_market_rows(
+            exchange,
+            symbols,
+            spot_markets=spot_markets,
+        )
         rows.append(
             {
                 "key": exchange.key,
@@ -268,6 +335,8 @@ def slow_execution_accounts(
                 "market_type": exchange.market_type,
                 "symbol": symbols[0] if symbols else "",
                 "symbols": symbols,
+                "projects": sorted({row["asset"] for row in markets if row["asset"]}),
+                "markets": markets,
             }
         )
     return rows

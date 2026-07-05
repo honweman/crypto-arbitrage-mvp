@@ -641,6 +641,7 @@ async def monitor_loop(
                             "accounts": slow_execution_accounts(
                                 runtime_cfg.spot_exchanges,
                                 _grid_symbols_by_exchange(runtime_cfg),
+                                spot_markets=runtime_cfg.spot_markets,
                             ),
                             "error": None,
                         }
@@ -658,6 +659,7 @@ async def monitor_loop(
                             "accounts": slow_execution_accounts(
                                 runtime_cfg.spot_exchanges,
                                 _grid_symbols_by_exchange(runtime_cfg),
+                                spot_markets=runtime_cfg.spot_markets,
                             ),
                             "error": None,
                         }
@@ -677,6 +679,7 @@ async def monitor_loop(
                             "accounts": slow_execution_accounts(
                                 runtime_cfg.spot_exchanges,
                                 _execution_symbols_by_exchange(runtime_cfg),
+                                spot_markets=runtime_cfg.spot_markets,
                             ),
                             "error": None,
                         }
@@ -694,6 +697,7 @@ async def monitor_loop(
                             "accounts": slow_execution_accounts(
                                 runtime_cfg.spot_exchanges,
                                 _execution_symbols_by_exchange(runtime_cfg),
+                                spot_markets=runtime_cfg.spot_markets,
                             ),
                             "error": None,
                         }
@@ -710,6 +714,7 @@ async def monitor_loop(
                             "accounts": slow_execution_accounts(
                                 runtime_cfg.spot_exchanges,
                                 _spot_symbols_by_exchange(runtime_cfg),
+                                spot_markets=runtime_cfg.spot_markets,
                             ),
                             "error": None,
                         }
@@ -815,6 +820,7 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _spot_symbols_by_exchange(runtime_cfg),
+                            spot_markets=runtime_cfg.spot_markets,
                         ),
                         "error": None,
                     }
@@ -826,6 +832,7 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _grid_symbols_by_exchange(runtime_cfg),
+                            spot_markets=runtime_cfg.spot_markets,
                         ),
                         "error": None,
                     }
@@ -837,6 +844,7 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _grid_symbols_by_exchange(runtime_cfg),
+                            spot_markets=runtime_cfg.spot_markets,
                         ),
                         "error": None,
                     }
@@ -850,6 +858,7 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _execution_symbols_by_exchange(runtime_cfg),
+                            spot_markets=runtime_cfg.spot_markets,
                         ),
                         "error": None,
                     }
@@ -861,6 +870,7 @@ async def monitor_loop(
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _execution_symbols_by_exchange(runtime_cfg),
+                            spot_markets=runtime_cfg.spot_markets,
                         ),
                         "error": None,
                     }

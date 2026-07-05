@@ -331,6 +331,7 @@ class MonitorState:
             self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                 _all_account_exchanges(runtime_cfg),
                 market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
+                spot_markets=runtime_cfg.spot_markets,
             )
         if not self._program_running:
             if self._auto_stopped:
@@ -603,6 +604,7 @@ class MonitorState:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["config"]["strategy_universe"] = (
                 strategy_universe_to_dict(runtime_cfg)
@@ -654,6 +656,7 @@ class MonitorState:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["config"]["strategy_universe"] = (
                 strategy_universe_to_dict(runtime_cfg)
@@ -697,6 +700,7 @@ class MonitorState:
                 self._payload["spot_grid"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _grid_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -732,6 +736,7 @@ class MonitorState:
                 self._payload["dca"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _grid_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -767,6 +772,7 @@ class MonitorState:
                 self._payload["execution_algo"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _execution_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -804,6 +810,7 @@ class MonitorState:
                 self._payload["backtest"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _execution_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -851,6 +858,7 @@ class MonitorState:
                     self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
                         runtime_cfg.spot_exchanges,
                         _spot_symbols_by_exchange(runtime_cfg),
+                        spot_markets=runtime_cfg.spot_markets,
                     )
             self._save_runtime_store_unlocked()
 
@@ -878,31 +886,37 @@ class MonitorState:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     symbols_by_exchange,
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             if "spot_grid" in self._payload:
                 self._payload["spot_grid"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _grid_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             if "dca" in self._payload:
                 self._payload["dca"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _grid_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             if "execution_algo" in self._payload:
                 self._payload["execution_algo"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _execution_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             if "backtest" in self._payload:
                 self._payload["backtest"]["accounts"] = slow_execution_accounts(
                     runtime_cfg.spot_exchanges,
                     _execution_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
@@ -950,6 +964,7 @@ class MonitorState:
                 self._payload["market_maker"]["accounts"] = slow_execution_accounts(
                     _all_account_exchanges(runtime_cfg),
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
+                    spot_markets=runtime_cfg.spot_markets,
                 )
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
@@ -1362,6 +1377,7 @@ class MonitorState:
             market_maker["accounts"] = slow_execution_accounts(
                 _all_account_exchanges(cfg),
                 market_maker_symbols_for_accounts(cfg, base_cfg=self._base_cfg),
+                spot_markets=cfg.spot_markets,
             )
             market_maker["runtime"] = self._market_maker_runtime
             if isinstance(self._market_maker_runtime.get("last_plan"), dict):

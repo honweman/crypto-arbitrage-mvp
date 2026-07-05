@@ -180,7 +180,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260705-mm-risk" defer></script>',
+            '<script src="/static/app.js?v=20260705-selector" defer></script>',
+            INDEX_HTML,
+        )
+        self.assertIn(
+            '<script src="/static/i18n.js?v=20260705-selector" defer></script>',
             INDEX_HTML,
         )
 
@@ -191,6 +195,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('<option value="ko">한국어</option>', INDEX_HTML)
         self.assertIn('"ko"', i18n_js)
         self.assertIn('"Language": "언어"', i18n_js)
+        self.assertIn('"Account / Project / Exchange / Pair"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
 
     def test_market_maker_payload_keeps_multiple_instances(self) -> None:
@@ -275,7 +280,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260705-mm-risk">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260705-selector">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -667,7 +672,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="grid-auto-rebuild"', HTML)
         self.assertIn('id="grid-orders"', HTML)
         self.assertIn("data-account-selector", APP_JS)
+        self.assertIn("data-project-selector", APP_JS)
+        self.assertIn("exchangeSelector", APP_JS)
         self.assertIn("data-symbol-selector", APP_JS)
+        self.assertIn("Account / Project / Exchange / Pair", HTML)
         self.assertIn("DCA Bot", HTML)
         self.assertIn("/api/dca", HTML)
         self.assertIn('id="dca-form"', HTML)
@@ -1514,27 +1522,17 @@ class WebMonitorTest(unittest.TestCase):
 
         payload = build_slow_execution_payload(cfg, {})
 
-        self.assertEqual(
-            payload["accounts"],
-            [
-                {
-                    "key": "bybit-spot",
-                    "label": "bybit-spot",
-                    "id": "bybit",
-                    "market_type": "spot",
-                    "symbol": "ACS/USDT",
-                    "symbols": ["ACS/USDT"],
-                },
-                {
-                    "key": "coinbase-spot",
-                    "label": "coinbase-spot",
-                    "id": "coinbase",
-                    "market_type": "spot",
-                    "symbol": "ACS/USDC",
-                    "symbols": ["ACS/USDC"],
-                },
-            ],
-        )
+        self.assertEqual(len(payload["accounts"]), 2)
+        self.assertEqual(payload["accounts"][0]["key"], "bybit-spot")
+        self.assertEqual(payload["accounts"][0]["symbol"], "ACS/USDT")
+        self.assertEqual(payload["accounts"][0]["symbols"], ["ACS/USDT"])
+        self.assertEqual(payload["accounts"][0]["projects"], ["ACS"])
+        self.assertEqual(payload["accounts"][0]["markets"][0]["quote_currency"], "USDT")
+        self.assertEqual(payload["accounts"][1]["key"], "coinbase-spot")
+        self.assertEqual(payload["accounts"][1]["symbol"], "ACS/USDC")
+        self.assertEqual(payload["accounts"][1]["symbols"], ["ACS/USDC"])
+        self.assertEqual(payload["accounts"][1]["projects"], ["ACS"])
+        self.assertEqual(payload["accounts"][1]["markets"][0]["quote_currency"], "USDC")
 
     def test_slow_execution_accounts_uses_key_fallback(self) -> None:
         accounts = slow_execution_accounts([ExchangeConfig(id="bybit")])
@@ -1543,6 +1541,28 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(accounts[0]["label"], "bybit:spot")
         self.assertEqual(accounts[0]["symbol"], "")
         self.assertEqual(accounts[0]["symbols"], [])
+        self.assertEqual(accounts[0]["projects"], [])
+        self.assertEqual(accounts[0]["markets"], [])
+
+    def test_slow_execution_accounts_include_market_selector_metadata(self) -> None:
+        accounts = slow_execution_accounts(
+            [ExchangeConfig(id="coinbase", label="coinbase-spot")],
+            {"coinbase-spot": ["ACS/USDC", "BTC/USDC"]},
+            spot_markets=[
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    quote_currency="USDC",
+                )
+            ],
+        )
+
+        self.assertEqual(accounts[0]["projects"], ["ACS", "BTC"])
+        self.assertEqual(accounts[0]["markets"][0]["asset"], "ACS")
+        self.assertEqual(accounts[0]["markets"][0]["exchange_id"], "coinbase")
+        self.assertEqual(accounts[0]["markets"][0]["symbol"], "ACS/USDC")
+        self.assertEqual(accounts[0]["markets"][1]["asset"], "BTC")
 
     def test_strategy_universe_lists_selectable_markets(self) -> None:
         cfg = make_config(
