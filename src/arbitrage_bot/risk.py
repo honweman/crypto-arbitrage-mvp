@@ -1,12 +1,32 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import time
 from typing import Any
 
 from .config import BotConfig, PortfolioConfig, RiskConfig
 from .fill_store import load_daily_pnl_summary
 from .models import Side
+
+
+_STRATEGY_OVERRIDE_FIELDS = {
+    "max_order_quote",
+    "max_cycle_quote",
+    "max_exposure_quote",
+    "max_daily_loss_quote",
+    "max_orders_per_cycle",
+    "max_open_orders",
+    "max_cancels_per_cycle",
+    "min_seconds_between_cancels",
+    "max_existing_spread_bps",
+    "max_price_distance_bps",
+    "max_slippage_bps",
+    "min_order_book_depth_quote",
+    "max_order_book_gap_bps",
+    "max_price_jump_bps",
+    "max_plan_age_seconds",
+    "max_order_book_age_seconds",
+}
 
 
 @dataclass(frozen=True)
@@ -115,6 +135,22 @@ def _asset_limit(default_limit: float, by_asset: dict[str, float], asset: str) -
     return by_asset.get(asset.upper(), default_limit)
 
 
+def risk_config_for_strategy(cfg: RiskConfig, strategy: str) -> RiskConfig:
+    overrides = cfg.strategy_overrides.get(strategy)
+    if not overrides:
+        return cfg
+    clean = {
+        field_name: value
+        for field_name, value in overrides.items()
+        if field_name in _STRATEGY_OVERRIDE_FIELDS
+        and isinstance(value, (int, float))
+        and value >= 0
+    }
+    if not clean:
+        return cfg
+    return replace(cfg, strategy_overrides={}, **clean)
+
+
 def _adverse_slippage_bps(order: RiskOrder, market: RiskMarketContext | None) -> float:
     if market is None or market.mid_price <= 0:
         return order.slippage_bps
@@ -186,6 +222,7 @@ def evaluate_order_batch(
     open_order_error: str | None = None,
     post_only: bool = True,
 ) -> RiskDecision:
+    cfg = risk_config_for_strategy(cfg, strategy)
     if not cfg.enabled:
         return RiskDecision(
             approved=True,

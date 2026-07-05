@@ -22,6 +22,7 @@ from .risk import (
     current_daily_pnl_quote,
     evaluate_order_batch,
     portfolio_positions_base,
+    risk_config_for_strategy,
 )
 from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
@@ -82,10 +83,26 @@ def market_maker_quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]
 
 
 def market_maker_risk_config(cfg: BotConfig) -> RiskConfig:
-    override = float(getattr(cfg.market_maker, "max_order_book_gap_bps", 0.0) or 0.0)
-    if override > 0:
-        return replace(cfg.risk, max_order_book_gap_bps=override)
-    return cfg.risk
+    maker_cfg = cfg.market_maker
+    risk_cfg = risk_config_for_strategy(cfg.risk, "market_maker")
+    overrides: dict[str, float | int] = {}
+    for field_name in (
+        "max_order_quote",
+        "max_cycle_quote",
+        "max_slippage_bps",
+        "max_order_book_gap_bps",
+        "max_order_book_age_seconds",
+    ):
+        value = float(getattr(maker_cfg, field_name, 0.0) or 0.0)
+        if value > 0:
+            overrides[field_name] = value
+    for field_name in ("max_open_orders", "max_cancels_per_cycle"):
+        value = int(getattr(maker_cfg, field_name, 0) or 0)
+        if value > 0:
+            overrides[field_name] = value
+    if overrides:
+        return replace(risk_cfg, strategy_overrides={}, **overrides)
+    return risk_cfg
 
 
 def _scaled_market_context(

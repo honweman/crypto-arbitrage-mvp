@@ -74,6 +74,23 @@ def _compact_market_maker_runtime(
             result["last_plan"],
             include_orders=include_orders,
         )
+    if not include_orders:
+        result.pop("open_order_ids", None)
+        execution = result.get("last_execution")
+        if isinstance(execution, dict):
+            result["last_execution"] = _copy_payload_keys(
+                execution,
+                (
+                    "placed_count",
+                    "canceled_count",
+                    "reason",
+                    "cancel_retry_required",
+                    "cancel_error_count",
+                    "create_error_count",
+                    "errors",
+                    "warnings",
+                ),
+            )
     return result
 
 

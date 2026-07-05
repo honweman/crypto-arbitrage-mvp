@@ -4,7 +4,12 @@ import time
 import unittest
 
 from arbitrage_bot.config import RiskConfig, TradeLogConfig
-from arbitrage_bot.risk import RiskMarketContext, RiskOrder, evaluate_order_batch
+from arbitrage_bot.risk import (
+    RiskMarketContext,
+    RiskOrder,
+    evaluate_order_batch,
+    risk_config_for_strategy,
+)
 from arbitrage_bot.trade_log import (
     normalize_trade_event,
     read_recent_trade_entries,
@@ -75,6 +80,38 @@ class RiskTest(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("exceeds max_order_quote", decision.reasons[0])
+
+    def test_strategy_override_applies_only_to_matching_strategy(self) -> None:
+        cfg = RiskConfig(
+            allow_live_trading=True,
+            max_order_quote=5.0,
+            strategy_overrides={
+                "market_maker": {
+                    "max_order_quote": 10.0,
+                    "max_open_orders": 20,
+                },
+            },
+        )
+
+        slow_decision = evaluate_order_batch(
+            cfg,
+            [self._order(quote_notional=6.0)],
+            strategy="slow_execution",
+            live=True,
+        )
+        maker_decision = evaluate_order_batch(
+            cfg,
+            [self._order(quote_notional=6.0)],
+            strategy="market_maker",
+            live=True,
+            existing_open_order_count=19,
+        )
+        maker_cfg = risk_config_for_strategy(cfg, "market_maker")
+
+        self.assertFalse(slow_decision.approved)
+        self.assertTrue(maker_decision.approved)
+        self.assertEqual(maker_cfg.max_order_quote, 10.0)
+        self.assertEqual(maker_cfg.max_open_orders, 20)
 
     def test_disabled_risk_approves_batch(self) -> None:
         decision = evaluate_order_batch(

@@ -47,13 +47,15 @@ def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
 
 
 def market_maker_config_to_dict(cfg: MarketMakerConfig) -> dict[str, Any]:
-    return asdict(market_maker_config_with_id(cfg))
+    config = market_maker_config_with_id(cfg)
+    payload = asdict(config)
+    expected_id = market_maker_expected_instance_id(config)
+    payload["expected_id"] = expected_id
+    payload["id_mismatch"] = bool(config.id and config.id != expected_id)
+    return payload
 
 
-def market_maker_instance_id(cfg: MarketMakerConfig) -> str:
-    configured = str(cfg.id or "").strip()
-    if configured:
-        return configured
+def market_maker_expected_instance_id(cfg: MarketMakerConfig) -> str:
     seed = f"{cfg.exchange}-{cfg.symbol}" if cfg.exchange and cfg.symbol else "default"
     normalized = "".join(
         character.lower() if character.isalnum() else "-"
@@ -61,6 +63,13 @@ def market_maker_instance_id(cfg: MarketMakerConfig) -> str:
     )
     normalized = "-".join(part for part in normalized.split("-") if part)
     return normalized or "default"
+
+
+def market_maker_instance_id(cfg: MarketMakerConfig) -> str:
+    configured = str(cfg.id or "").strip()
+    if configured:
+        return configured
+    return market_maker_expected_instance_id(cfg)
 
 
 def market_maker_config_with_id(cfg: MarketMakerConfig) -> MarketMakerConfig:
@@ -469,7 +478,11 @@ def _market_maker_overrides_from_payload(
         "min_order_quote",
         "min_distance_bps",
         "reprice_threshold_bps",
+        "max_order_quote",
+        "max_cycle_quote",
+        "max_slippage_bps",
         "max_order_book_gap_bps",
+        "max_order_book_age_seconds",
         "inventory_target_base",
         "inventory_band_base",
         "inventory_max_deviation_base",
@@ -477,6 +490,10 @@ def _market_maker_overrides_from_payload(
     for field in non_negative_float_fields:
         if field in payload:
             overrides[field] = _non_negative_float(payload, field)
+
+    for field in {"max_open_orders", "max_cancels_per_cycle"}:
+        if field in payload:
+            overrides[field] = _non_negative_int(payload, field)
 
     return overrides
 
@@ -999,6 +1016,58 @@ def _bool_map_from_payload(
     return clean
 
 
+_RISK_OVERRIDE_FLOAT_FIELDS = {
+    "max_order_quote",
+    "max_cycle_quote",
+    "max_exposure_quote",
+    "max_daily_loss_quote",
+    "min_seconds_between_cancels",
+    "max_existing_spread_bps",
+    "max_price_distance_bps",
+    "max_slippage_bps",
+    "min_order_book_depth_quote",
+    "max_order_book_gap_bps",
+    "max_price_jump_bps",
+    "max_plan_age_seconds",
+    "max_order_book_age_seconds",
+}
+
+_RISK_OVERRIDE_INT_FIELDS = {
+    "max_orders_per_cycle",
+    "max_open_orders",
+    "max_cancels_per_cycle",
+}
+
+
+def _strategy_overrides_from_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_strategies: set[str],
+) -> dict[str, dict[str, float | int]] | None:
+    if "strategy_overrides" not in payload:
+        return None
+    raw = payload["strategy_overrides"]
+    if not isinstance(raw, dict):
+        raise ValueError("strategy_overrides must be an object")
+    clean: dict[str, dict[str, float | int]] = {}
+    for strategy, values in raw.items():
+        strategy_name = str(strategy).strip()
+        if strategy_name not in allowed_strategies:
+            raise ValueError(f"unknown strategy: {strategy_name}")
+        if not isinstance(values, dict):
+            raise ValueError(f"strategy_overrides.{strategy_name} must be an object")
+        strategy_clean: dict[str, float | int] = {}
+        for field in _RISK_OVERRIDE_FLOAT_FIELDS:
+            if field in values:
+                strategy_clean[field] = _non_negative_float(values, field)
+        for field in _RISK_OVERRIDE_INT_FIELDS:
+            if field in values:
+                strategy_clean[field] = _non_negative_int(values, field)
+        if strategy_clean:
+            clean[strategy_name] = strategy_clean
+    return clean
+
+
 def _risk_overrides_from_payload(
     payload: dict[str, Any],
     *,
@@ -1031,6 +1100,13 @@ def _risk_overrides_from_payload(
     )
     if strategy_enabled is not None:
         overrides["strategy_enabled"] = strategy_enabled
+
+    strategy_overrides = _strategy_overrides_from_payload(
+        payload,
+        allowed_strategies=allowed_strategies,
+    )
+    if strategy_overrides is not None:
+        overrides["strategy_overrides"] = strategy_overrides
 
     float_fields = {
         "max_order_quote",

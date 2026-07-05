@@ -223,6 +223,8 @@ class MarketMakingTest(unittest.TestCase):
                         levels=1,
                         price_band_pct=1.0,
                         quote_per_level=1.0,
+                        max_order_quote=2.0,
+                        max_cycle_quote=3.0,
                         max_order_book_gap_bps=10_000.0,
                     ),
                     slow_execution=SlowExecutionConfig(),
@@ -234,6 +236,8 @@ class MarketMakingTest(unittest.TestCase):
                     derivative_exchanges=[],
                     risk=RiskConfig(
                         allow_live_trading=True,
+                        max_order_quote=0.5,
+                        max_cycle_quote=1.0,
                         max_order_book_gap_bps=5_000.0,
                     ),
                     trade_log=TradeLogConfig(enabled=False),

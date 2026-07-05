@@ -176,6 +176,13 @@ def _market_maker_payload_reason(instance: dict[str, Any]) -> str | None:
         if text:
             return text
 
+    config = instance.get("config")
+    if isinstance(config, dict) and config.get("id_mismatch"):
+        instance_id = str(config.get("id") or "").strip()
+        expected_id = str(config.get("expected_id") or "").strip()
+        if instance_id and expected_id:
+            return f"ID mismatch: {instance_id} should be {expected_id}"
+
     return None
 
 

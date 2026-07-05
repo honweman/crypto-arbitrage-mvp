@@ -248,6 +248,28 @@ def _metrics(
         for key, value in payload["timing"].items():
             if isinstance(value, (int, float)):
                 metrics[key] = value
+    plan_orders = _plan_orders(plan)
+    if plan_orders:
+        metrics["plan_order_count"] = len(plan_orders)
+        metrics["plan_buy_order_count"] = sum(
+            1 for order in plan_orders if str(order.get("side") or "") == "buy"
+        )
+        metrics["plan_sell_order_count"] = sum(
+            1 for order in plan_orders if str(order.get("side") or "") == "sell"
+        )
+    for key in (
+        "existing_spread_bps",
+        "max_level_gap_bps",
+        "bid_depth_quote",
+        "ask_depth_quote",
+        "mid_price",
+    ):
+        value = _as_float(plan.get(key))
+        if value is not None:
+            metrics[key] = value
+    reprice_bps = _as_float(payload.get("reprice_bps"))
+    if reprice_bps is not None:
+        metrics["reprice_bps"] = reprice_bps
     protection = payload.get("protection")
     if isinstance(protection, dict):
         for key in (

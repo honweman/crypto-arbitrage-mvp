@@ -3334,6 +3334,9 @@ function balanceStatusClass(status) {
         runtime.last_error ||
         runtime.open_order_sync_error ||
         runtime.reason ||
+        (instance?.config?.id_mismatch
+          ? `ID mismatch: ${instance.config.id} should be ${instance.config.expected_id}`
+          : "") ||
         firstListText(risk.reasons) ||
         firstListText(risk.warnings) ||
         execution.reason ||
@@ -3429,7 +3432,13 @@ function balanceStatusClass(status) {
       setNumericField("mm-min-distance", config.min_distance_bps || 0);
       setNumericField("mm-reprice", config.reprice_threshold_bps || 0);
       setNumericField("mm-poll", config.poll_seconds || 1);
+      setNumericField("mm-max-order", config.max_order_quote || 0);
+      setNumericField("mm-max-cycle", config.max_cycle_quote || 0);
+      setNumericField("mm-max-open-orders", config.max_open_orders || 0);
+      setNumericField("mm-max-cancels", config.max_cancels_per_cycle || 0);
+      setNumericField("mm-max-slippage", config.max_slippage_bps || 0);
       setNumericField("mm-max-gap", config.max_order_book_gap_bps || 0);
+      setNumericField("mm-max-book-age", config.max_order_book_age_seconds || 0);
       document.getElementById("mm-inventory-enabled").checked = Boolean(config.inventory_control_enabled);
       setNumericField("mm-inventory-target", config.inventory_target_base || 0);
       setNumericField("mm-inventory-band", config.inventory_band_base || 0);
@@ -3452,7 +3461,13 @@ function balanceStatusClass(status) {
         min_distance_bps: numericValue("mm-min-distance"),
         reprice_threshold_bps: numericValue("mm-reprice"),
         poll_seconds: numericValue("mm-poll"),
+        max_order_quote: numericValue("mm-max-order"),
+        max_cycle_quote: numericValue("mm-max-cycle"),
+        max_open_orders: numericValue("mm-max-open-orders"),
+        max_cancels_per_cycle: numericValue("mm-max-cancels"),
+        max_slippage_bps: numericValue("mm-max-slippage"),
         max_order_book_gap_bps: numericValue("mm-max-gap"),
+        max_order_book_age_seconds: numericValue("mm-max-book-age"),
         inventory_control_enabled: document.getElementById("mm-inventory-enabled").checked,
         inventory_target_base: numericValue("mm-inventory-target"),
         inventory_band_base: numericValue("mm-inventory-band"),

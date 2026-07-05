@@ -89,7 +89,13 @@ class MarketMakerConfig:
     min_order_quote: float = 0.0
     min_distance_bps: float = 0.0
     reprice_threshold_bps: float = 0.0
+    max_order_quote: float = 0.0
+    max_cycle_quote: float = 0.0
+    max_open_orders: int = 0
+    max_cancels_per_cycle: int = 0
+    max_slippage_bps: float = 0.0
     max_order_book_gap_bps: float = 0.0
+    max_order_book_age_seconds: float = 0.0
     poll_seconds: float = 1.0
     post_only: bool = True
     cancel_existing_orders: bool = False
@@ -320,6 +326,9 @@ class RiskConfig:
     allow_market_maker: bool = True
     allow_slow_execution: bool = True
     strategy_enabled: dict[str, bool] = field(default_factory=dict)
+    strategy_overrides: dict[str, dict[str, float | int]] = field(
+        default_factory=dict
+    )
     account_enabled: dict[str, bool] = field(default_factory=dict)
     require_post_only: bool = True
     max_order_quote: float = 5.0
@@ -512,7 +521,15 @@ def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
         min_order_quote=float(raw.get("min_order_quote", 0.0)),
         min_distance_bps=float(raw.get("min_distance_bps", 0.0)),
         reprice_threshold_bps=float(raw.get("reprice_threshold_bps", 0.0)),
+        max_order_quote=float(raw.get("max_order_quote", 0.0)),
+        max_cycle_quote=float(raw.get("max_cycle_quote", 0.0)),
+        max_open_orders=int(raw.get("max_open_orders", 0)),
+        max_cancels_per_cycle=int(raw.get("max_cancels_per_cycle", 0)),
+        max_slippage_bps=float(raw.get("max_slippage_bps", 0.0)),
         max_order_book_gap_bps=float(raw.get("max_order_book_gap_bps", 0.0)),
+        max_order_book_age_seconds=float(
+            raw.get("max_order_book_age_seconds", 0.0)
+        ),
         poll_seconds=float(raw.get("poll_seconds", 1.0)),
         post_only=bool(raw.get("post_only", True)),
         cancel_existing_orders=bool(raw.get("cancel_existing_orders", False)),
@@ -565,6 +582,58 @@ def _bool_dict(raw: Any) -> dict[str, bool]:
 
 def _float_dict(raw: Any) -> dict[str, float]:
     return {str(key).upper(): float(value) for key, value in (raw or {}).items()}
+
+
+_RISK_STRATEGY_OVERRIDE_FLOAT_FIELDS = {
+    "max_order_quote",
+    "max_cycle_quote",
+    "max_exposure_quote",
+    "max_daily_loss_quote",
+    "min_seconds_between_cancels",
+    "max_existing_spread_bps",
+    "max_price_distance_bps",
+    "max_slippage_bps",
+    "min_order_book_depth_quote",
+    "max_order_book_gap_bps",
+    "max_price_jump_bps",
+    "max_plan_age_seconds",
+    "max_order_book_age_seconds",
+}
+
+_RISK_STRATEGY_OVERRIDE_INT_FIELDS = {
+    "max_orders_per_cycle",
+    "max_open_orders",
+    "max_cancels_per_cycle",
+}
+
+
+def _risk_strategy_overrides_from_dict(raw: Any) -> dict[str, dict[str, float | int]]:
+    if not isinstance(raw, dict):
+        return {}
+    clean: dict[str, dict[str, float | int]] = {}
+    allowed_fields = (
+        _RISK_STRATEGY_OVERRIDE_FLOAT_FIELDS | _RISK_STRATEGY_OVERRIDE_INT_FIELDS
+    )
+    for strategy, values in raw.items():
+        strategy_name = str(strategy).strip()
+        if not strategy_name or not isinstance(values, dict):
+            continue
+        strategy_values: dict[str, float | int] = {}
+        for field_name, value in values.items():
+            field = str(field_name).strip()
+            if field not in allowed_fields:
+                continue
+            if field in _RISK_STRATEGY_OVERRIDE_INT_FIELDS:
+                parsed = int(float(value))
+                if parsed >= 0:
+                    strategy_values[field] = parsed
+            else:
+                parsed = float(value)
+                if parsed >= 0:
+                    strategy_values[field] = parsed
+        if strategy_values:
+            clean[strategy_name] = strategy_values
+    return clean
 
 
 def _normalize_rpc_urls(
@@ -1033,6 +1102,9 @@ def load_config(path: str | Path) -> BotConfig:
             allow_market_maker=bool(risk_raw.get("allow_market_maker", True)),
             allow_slow_execution=bool(risk_raw.get("allow_slow_execution", True)),
             strategy_enabled=_bool_dict(risk_raw.get("strategy_enabled", {})),
+            strategy_overrides=_risk_strategy_overrides_from_dict(
+                risk_raw.get("strategy_overrides", {})
+            ),
             account_enabled=_bool_dict(risk_raw.get("account_enabled", {})),
             require_post_only=bool(risk_raw.get("require_post_only", True)),
             max_order_quote=float(risk_raw.get("max_order_quote", 5.0)),

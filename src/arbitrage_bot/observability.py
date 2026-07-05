@@ -149,6 +149,18 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
             _number(mm_runtime.get("open_order_count")),
             {"mode": mm_runtime.get("mode", "unknown")},
         ),
+        "# HELP crypto_arb_market_maker_instance_status Market maker instance status by account and symbol.",
+        "# TYPE crypto_arb_market_maker_instance_status gauge",
+        "# HELP crypto_arb_market_maker_instance_open_orders Tracked market maker open orders by instance.",
+        "# TYPE crypto_arb_market_maker_instance_open_orders gauge",
+        "# HELP crypto_arb_market_maker_instance_placed_count Market maker placed order count by instance since task start.",
+        "# TYPE crypto_arb_market_maker_instance_placed_count counter",
+        "# HELP crypto_arb_market_maker_instance_canceled_count Market maker canceled order count by instance since task start.",
+        "# TYPE crypto_arb_market_maker_instance_canceled_count counter",
+        "# HELP crypto_arb_market_maker_instance_cycle_count Market maker cycle count by instance since task start.",
+        "# TYPE crypto_arb_market_maker_instance_cycle_count counter",
+        "# HELP crypto_arb_market_maker_instance_id_mismatch Market maker configured ID mismatch flag.",
+        "# TYPE crypto_arb_market_maker_instance_id_mismatch gauge",
         "# HELP crypto_arb_spot_grid_open_orders Tracked spot grid open orders.",
         "# TYPE crypto_arb_spot_grid_open_orders gauge",
         _line(
@@ -232,6 +244,53 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
             _number(execution_protection.get("manual_review_count")),
         ),
     ]
+
+    for instance in _list_items(market_maker.get("instances")):
+        if not isinstance(instance, dict):
+            continue
+        config = _dict(instance.get("config"))
+        runtime = _dict(instance.get("runtime"))
+        instance_id = config.get("id") or instance.get("id") or "unknown"
+        labels = {
+            "id": instance_id,
+            "exchange": config.get("exchange", "unknown"),
+            "symbol": config.get("symbol", "unknown"),
+            "mode": runtime.get("mode") or instance.get("mode") or "unknown",
+            "status": runtime.get("status") or instance.get("status") or "unknown",
+        }
+        lines.extend(
+            [
+                _line("crypto_arb_market_maker_instance_status", 1.0, labels),
+                _line(
+                    "crypto_arb_market_maker_instance_open_orders",
+                    _number(runtime.get("open_order_count")),
+                    labels,
+                ),
+                _line(
+                    "crypto_arb_market_maker_instance_placed_count",
+                    _number(runtime.get("placed_count")),
+                    labels,
+                ),
+                _line(
+                    "crypto_arb_market_maker_instance_canceled_count",
+                    _number(runtime.get("canceled_count")),
+                    labels,
+                ),
+                _line(
+                    "crypto_arb_market_maker_instance_cycle_count",
+                    _number(runtime.get("cycle_count")),
+                    labels,
+                ),
+                _line(
+                    "crypto_arb_market_maker_instance_id_mismatch",
+                    _flag(config.get("id_mismatch")),
+                    {
+                        "id": instance_id,
+                        "expected_id": config.get("expected_id", ""),
+                    },
+                ),
+            ]
+        )
 
     lines.extend(
         [

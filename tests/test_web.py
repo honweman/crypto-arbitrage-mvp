@@ -180,7 +180,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260701-mm-gap" defer></script>',
+            '<script src="/static/app.js?v=20260705-mm-risk" defer></script>',
             INDEX_HTML,
         )
 
@@ -275,7 +275,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260701-mm-gap">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260705-mm-risk">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -1287,11 +1287,23 @@ class WebMonitorTest(unittest.TestCase):
                 levels=1,
                 price_band_pct=1.0,
                 quote_per_level=1.0,
+                max_order_quote=3.0,
+                max_cycle_quote=12.0,
+                max_open_orders=44,
+                max_cancels_per_cycle=22,
+                max_slippage_bps=75.0,
                 max_order_book_gap_bps=10_000.0,
+                max_order_book_age_seconds=4.0,
             ),
             risk=RiskConfig(
                 allow_live_trading=True,
+                max_order_quote=1.0,
+                max_cycle_quote=2.0,
+                max_open_orders=5,
+                max_cancels_per_cycle=5,
+                max_slippage_bps=10.0,
                 max_order_book_gap_bps=5_000.0,
+                max_order_book_age_seconds=10.0,
             ),
             quote_rates={"USD": 1.0, "USDT": 1.0},
         )
@@ -1316,6 +1328,15 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(
             payload["safety"]["limits"]["max_order_book_gap_bps"],
             10_000.0,
+        )
+        self.assertEqual(payload["safety"]["limits"]["max_order_quote"], 3.0)
+        self.assertEqual(payload["safety"]["limits"]["max_cycle_quote"], 12.0)
+        self.assertEqual(payload["safety"]["limits"]["max_open_orders"], 44)
+        self.assertEqual(payload["safety"]["limits"]["max_cancels_per_cycle"], 22)
+        self.assertEqual(payload["safety"]["limits"]["max_slippage_bps"], 75.0)
+        self.assertEqual(
+            payload["safety"]["limits"]["max_order_book_age_seconds"],
+            4.0,
         )
         self.assertGreater(payload["safety"]["market"]["max_level_gap_bps"], 5_000.0)
         self.assertEqual(payload["safety"]["reasons"], [])
@@ -1940,7 +1961,13 @@ class WebMonitorTest(unittest.TestCase):
                 "min_order_quote": "0.5",
                 "min_distance_bps": "20",
                 "reprice_threshold_bps": "2.5",
+                "max_order_quote": "3.5",
+                "max_cycle_quote": "70",
+                "max_open_orders": "40",
+                "max_cancels_per_cycle": "12",
+                "max_slippage_bps": "15",
                 "max_order_book_gap_bps": "10000",
+                "max_order_book_age_seconds": "3",
                 "poll_seconds": "1",
                 "inventory_control_enabled": True,
                 "inventory_target_base": "100000",
@@ -1963,7 +1990,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["min_order_quote"], 0.5)
         self.assertEqual(overrides["min_distance_bps"], 20.0)
         self.assertEqual(overrides["reprice_threshold_bps"], 2.5)
+        self.assertEqual(overrides["max_order_quote"], 3.5)
+        self.assertEqual(overrides["max_cycle_quote"], 70.0)
+        self.assertEqual(overrides["max_open_orders"], 40)
+        self.assertEqual(overrides["max_cancels_per_cycle"], 12)
+        self.assertEqual(overrides["max_slippage_bps"], 15.0)
         self.assertEqual(overrides["max_order_book_gap_bps"], 10000.0)
+        self.assertEqual(overrides["max_order_book_age_seconds"], 3.0)
         self.assertEqual(overrides["poll_seconds"], 1.0)
         self.assertTrue(overrides["inventory_control_enabled"])
         self.assertEqual(overrides["inventory_target_base"], 100000.0)
@@ -1993,6 +2026,12 @@ class WebMonitorTest(unittest.TestCase):
                 "allow_live_trading": True,
                 "account_enabled": {"coinbase-spot": True, "bybit-spot": False},
                 "strategy_enabled": {"market_maker": True, "slow_execution": False},
+                "strategy_overrides": {
+                    "market_maker": {
+                        "max_order_quote": "25",
+                        "max_open_orders": "80",
+                    }
+                },
                 "max_order_quote": "5.5",
                 "max_cycle_quote": "25",
                 "max_exposure_quote": "250",
@@ -2017,6 +2056,14 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(overrides["allow_live_trading"])
         self.assertFalse(overrides["account_enabled"]["bybit-spot"])
         self.assertFalse(overrides["strategy_enabled"]["slow_execution"])
+        self.assertEqual(
+            overrides["strategy_overrides"]["market_maker"]["max_order_quote"],
+            25.0,
+        )
+        self.assertEqual(
+            overrides["strategy_overrides"]["market_maker"]["max_open_orders"],
+            80,
+        )
         self.assertEqual(overrides["max_order_quote"], 5.5)
         self.assertEqual(overrides["max_cycle_quote"], 25.0)
         self.assertEqual(overrides["max_exposure_quote"], 250.0)

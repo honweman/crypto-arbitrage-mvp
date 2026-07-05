@@ -29,7 +29,26 @@ class ObservabilityTest(unittest.TestCase):
                         "status": "running",
                         "mode": "live",
                         "open_order_count": 4,
-                    }
+                    },
+                    "instances": [
+                        {
+                            "config": {
+                                "id": "coinbase-acs-usdc",
+                                "exchange": "coinbase-spot",
+                                "symbol": "ACS/USDC",
+                                "expected_id": "coinbase-spot-acs-usdc",
+                                "id_mismatch": True,
+                            },
+                            "runtime": {
+                                "status": "placed",
+                                "mode": "live",
+                                "open_order_count": 4,
+                                "placed_count": 8,
+                                "canceled_count": 4,
+                                "cycle_count": 3,
+                            },
+                        }
+                    ],
                 },
                 "spot_grid": {
                     "runtime": {
@@ -129,6 +148,21 @@ class ObservabilityTest(unittest.TestCase):
         )
         self.assertIn('crypto_arb_strategy_paused{strategy="slow_execution"} 1', text)
         self.assertIn('crypto_arb_market_maker_open_orders{mode="live"} 4', text)
+        self.assertIn(
+            (
+                'crypto_arb_market_maker_instance_open_orders'
+                '{exchange="coinbase-spot",id="coinbase-acs-usdc",'
+                'mode="live",status="placed",symbol="ACS/USDC"} 4'
+            ),
+            text,
+        )
+        self.assertIn(
+            (
+                'crypto_arb_market_maker_instance_id_mismatch'
+                '{expected_id="coinbase-spot-acs-usdc",id="coinbase-acs-usdc"} 1'
+            ),
+            text,
+        )
         self.assertIn('crypto_arb_spot_grid_open_orders{mode="dry_run"} 5', text)
         self.assertIn(
             'crypto_arb_derivatives_risk_status{status="blocked"} 1',
