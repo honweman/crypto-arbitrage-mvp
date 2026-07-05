@@ -62,6 +62,25 @@ from . import (
     build_trading_console_payload,
 )
 
+_STATE_VIEW_CACHE_TTL_SECONDS = 0.75
+
+
+def _state_view_cache_key(
+    view: str | None,
+    sections: str | None,
+) -> tuple[str, str]:
+    section_text = str(sections or "")
+    normalized_sections = ",".join(
+        sorted(
+            {
+                item.strip()
+                for item in section_text.split(",")
+                if item.strip()
+            }
+        )
+    )
+    return (str(view or ""), normalized_sections)
+
 
 def _execution_protection_from_payloads(payload: dict[str, Any]) -> dict[str, Any]:
     return summarize_multileg_execution_protections(
@@ -359,6 +378,7 @@ class MonitorState:
         )
         self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
+        self._state_view_cache: dict[tuple[str, str], tuple[float, str]] = {}
 
     def _runtime_store_status_unlocked(self) -> dict[str, Any]:
         return {
@@ -369,6 +389,9 @@ class MonitorState:
             "saved_at": self._runtime_store_saved_at,
             "error": self._runtime_store_error,
         }
+
+    def _clear_state_view_cache_unlocked(self) -> None:
+        self._state_view_cache.clear()
 
     def _runtime_store_payload_unlocked(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -410,6 +433,7 @@ class MonitorState:
             self._runtime_store_saved_at = time.time()
         if "runtime_store" in self._payload:
             self._payload["runtime_store"] = self._runtime_store_status_unlocked()
+        self._clear_state_view_cache_unlocked()
 
     def _program_payload_unlocked(self) -> dict[str, Any]:
         return {
@@ -480,9 +504,24 @@ class MonitorState:
         view: str | None = None,
         sections: str | None = None,
     ) -> dict[str, Any]:
+        cache_key = _state_view_cache_key(view, sections)
+        now = time.monotonic()
         async with self._lock:
-            payload = state_payload_for_view(self._payload, view, sections=sections)
-            return json.loads(json.dumps(payload))
+            cached = self._state_view_cache.get(cache_key)
+            if (
+                cached is not None
+                and now - cached[0] <= _STATE_VIEW_CACHE_TTL_SECONDS
+            ):
+                payload_text = cached[1]
+            else:
+                payload = state_payload_for_view(
+                    self._payload,
+                    view,
+                    sections=sections,
+                )
+                payload_text = json.dumps(payload, separators=(",", ":"))
+                self._state_view_cache[cache_key] = (now, payload_text)
+        return json.loads(payload_text)
 
     async def portfolio_payload(self) -> dict[str, Any]:
         async with self._lock:
@@ -1061,6 +1100,7 @@ class MonitorState:
                 self._payload["warnings"] = ["Program paused"]
             self._payload["program"] = self._program_payload_unlocked()
             self._save_runtime_store_unlocked()
+            self._clear_state_view_cache_unlocked()
             return json.loads(json.dumps(self._payload))
 
     async def set_auto_stopped(
@@ -1079,6 +1119,7 @@ class MonitorState:
             self._payload["program"] = self._program_payload_unlocked()
             self._payload["warnings"] = list(warnings or [reason])
             self._save_runtime_store_unlocked()
+            self._clear_state_view_cache_unlocked()
             return json.loads(json.dumps(self._payload))
 
     async def set_paused(self) -> None:
@@ -1088,13 +1129,16 @@ class MonitorState:
                 self._payload["status"] = "auto_stopped"
                 if self._auto_stop_reason:
                     self._payload["warnings"] = [self._auto_stop_reason]
+                self._clear_state_view_cache_unlocked()
                 return
             self._payload["status"] = "paused"
             self._payload["warnings"] = ["Program paused"]
+            self._clear_state_view_cache_unlocked()
 
     async def set_order_activity(self, order_activity: dict[str, Any]) -> None:
         async with self._lock:
             self._payload["order_activity"] = order_activity
+            self._clear_state_view_cache_unlocked()
 
     async def set_readonly_health(
         self,
@@ -1170,6 +1214,7 @@ class MonitorState:
             elif not self._program_running:
                 self._payload["status"] = "paused"
                 self._payload["warnings"] = ["Program paused", *warning_messages]
+            self._clear_state_view_cache_unlocked()
 
     async def set_market_maker_runtime(self, runtime: dict[str, Any]) -> None:
         async with self._lock:
@@ -1188,6 +1233,7 @@ class MonitorState:
                 self._payload["market_maker"]["error"] = runtime.get(
                     "last_error"
                 ) or runtime.get("status_reason")
+            self._clear_state_view_cache_unlocked()
 
     def _aggregate_market_maker_runtime_unlocked(
         self,
@@ -1307,6 +1353,7 @@ class MonitorState:
             aggregate = self._aggregate_market_maker_runtime_unlocked(instances)
             self._market_maker_runtime = aggregate
             self._sync_market_maker_payload_runtime_unlocked(aggregate)
+            self._clear_state_view_cache_unlocked()
 
     async def market_maker_runtime(self) -> dict[str, Any]:
         async with self._lock:
@@ -1324,6 +1371,7 @@ class MonitorState:
                 if runtime.get("status"):
                     self._payload["spot_grid"]["status"] = runtime["status"]
                 self._payload["spot_grid"]["error"] = runtime.get("last_error")
+            self._clear_state_view_cache_unlocked()
 
     async def spot_grid_runtime(self) -> dict[str, Any]:
         async with self._lock:
@@ -1334,6 +1382,7 @@ class MonitorState:
             self._auto_buy_sell_tasks = tasks
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["tasks"] = tasks
+            self._clear_state_view_cache_unlocked()
 
     async def auto_buy_sell_tasks(self) -> dict[str, Any]:
         async with self._lock:
@@ -1520,6 +1569,7 @@ class MonitorState:
                 "operations": build_operations_payload(cfg),
                 "warnings": warnings,
             }
+            self._clear_state_view_cache_unlocked()
 
     async def set_error(
         self,
@@ -1568,6 +1618,7 @@ class MonitorState:
                     "operations": build_operations_payload(cfg),
                 }
             )
+            self._clear_state_view_cache_unlocked()
 
 
 __all__ = ["MonitorState"]

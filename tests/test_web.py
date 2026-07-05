@@ -184,11 +184,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260705-ux8" defer></script>',
+            '<script src="/static/app.js?v=20260705-perf1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260705-ux8" defer></script>',
+            '<script src="/static/i18n.js?v=20260705-perf1" defer></script>',
             INDEX_HTML,
         )
 
@@ -284,7 +284,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260705-ux8">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260705-perf1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -479,6 +479,33 @@ class WebMonitorTest(unittest.TestCase):
         self.assertNotIn("web_audit", records["operations"])
         self.assertNotIn("events", records["onchain"].get("history", {}))
 
+    def test_monitor_state_caches_view_payloads_and_invalidates_on_update(self) -> None:
+        cfg = make_config()
+
+        async def run() -> None:
+            state = SplitMonitorState(cfg, cfg.poll_seconds)
+            with patch(
+                "arbitrage_bot.web.state.state_payload_for_view",
+                wraps=state_payload_for_view,
+            ) as mocked_payload_for_view:
+                first = await state.get(view="status", sections="overview")
+                second = await state.get(view="status", sections="overview")
+                await state.set_order_activity(
+                    {
+                        "status": "ok",
+                        "open_order_count": 2,
+                        "open_orders": [],
+                    }
+                )
+                third = await state.get(view="status", sections="overview")
+
+            self.assertEqual(first["status"], "starting")
+            self.assertEqual(second["status"], "starting")
+            self.assertEqual(third["order_activity"]["open_order_count"], 2)
+            self.assertEqual(mocked_payload_for_view.call_count, 2)
+
+        asyncio.run(run())
+
     def test_page_uses_generic_dashboard_title(self) -> None:
         self.assertIn("Crypto Trading Dashboard", HTML)
         self.assertIn("Multi-asset arbitrage", HTML)
@@ -621,7 +648,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("section-open", HTML)
         self.assertIn('aria-expanded', HTML)
         self.assertIn("renderOpenSection", HTML)
-        self.assertIn("REFRESH_INTERVAL_MS = 2000", HTML)
+        self.assertIn("PAGE_REFRESH_INTERVAL_MS", HTML)
+        self.assertIn("REFRESH_FAILURE_BACKOFF_MS", HTML)
+        self.assertIn("scheduleNextRefresh", HTML)
+        self.assertNotIn("setInterval(() =>", HTML)
         self.assertIn("document.hidden", HTML)
         self.assertIn("visibilitychange", HTML)
         self.assertIn(".strategy-overview[data-page].active-page", STYLES_CSS)

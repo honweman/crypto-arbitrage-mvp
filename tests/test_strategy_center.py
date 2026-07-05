@@ -74,6 +74,31 @@ class StrategyCenterTest(unittest.TestCase):
             ["COINBASE_API_KEY", "COINBASE_SECRET"],
         )
 
+    def test_store_read_cache_is_short_lived_and_write_invalidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "strategy_center.json"
+            store = StrategyCenterStore(path)
+            first = store.read()
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "strategy_instances": [self._sample_strategy().to_dict()],
+                        "user_api_accounts": [],
+                        "signals": [],
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+            cached = store.read()
+            store.upsert_strategy(self._sample_strategy())
+            fresh = store.read()
+
+        self.assertEqual(first["strategy_instances"], [])
+        self.assertEqual(cached["strategy_instances"], [])
+        self.assertEqual(fresh["strategy_instances"][0]["name"], "ACS Coinbase MM")
+
     def test_sqlite_store_roundtrip_and_signal_trim(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = StrategyCenterStore(

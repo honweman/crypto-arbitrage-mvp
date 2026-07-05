@@ -34,6 +34,7 @@ SECRET_FIELD_RE = re.compile(
     r"(^|_)(api[_-]?key|secret|password|passphrase|token|private[_-]?key)($|_)",
     re.IGNORECASE,
 )
+STRATEGY_CENTER_READ_CACHE_TTL_SECONDS = 0.75
 
 
 def _now() -> float:
@@ -584,11 +585,25 @@ class StrategyCenterStore:
         self.path = Path(path)
         self.max_recent_signals = max(1, int(max_recent_signals))
         self._sqlite_ready = False
+        self._read_cache: tuple[float, str] | None = None
+
+    def _clear_read_cache(self) -> None:
+        self._read_cache = None
+
+    def _read_fresh(self) -> dict[str, Any]:
+        payload = self._read_sqlite() if self._is_sqlite else self._read_json()
+        payload_text = json.dumps(payload, separators=(",", ":"))
+        self._read_cache = (time.monotonic(), payload_text)
+        return json.loads(payload_text)
 
     def read(self) -> dict[str, Any]:
-        if self._is_sqlite:
-            return self._read_sqlite()
-        return self._read_json()
+        now = time.monotonic()
+        if (
+            self._read_cache is not None
+            and now - self._read_cache[0] <= STRATEGY_CENTER_READ_CACHE_TTL_SECONDS
+        ):
+            return json.loads(self._read_cache[1])
+        return self._read_fresh()
 
     def _read_json(self) -> dict[str, Any]:
         try:
@@ -602,10 +617,13 @@ class StrategyCenterStore:
         return self._normalize_payload(raw)
 
     def write(self, payload: dict[str, Any]) -> None:
-        if self._is_sqlite:
-            self._write_sqlite(payload)
-            return
-        self._write_json(payload)
+        try:
+            if self._is_sqlite:
+                self._write_sqlite(payload)
+                return
+            self._write_json(payload)
+        finally:
+            self._clear_read_cache()
 
     def _write_json(self, payload: dict[str, Any]) -> None:
         normalized = self._normalize_payload(payload)
@@ -1000,8 +1018,8 @@ class StrategyCenterStore:
                 self._upsert_strategy_sqlite_unlocked(connection, strategy)
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         rows = [
             item
             for item in payload["strategy_instances"]
@@ -1010,7 +1028,7 @@ class StrategyCenterStore:
         rows.append(strategy.to_dict())
         payload["strategy_instances"] = rows
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
     def delete_strategy(self, strategy_id: str) -> dict[str, Any]:
         if self._is_sqlite:
@@ -1023,15 +1041,15 @@ class StrategyCenterStore:
                 )
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         payload["strategy_instances"] = [
             item
             for item in payload["strategy_instances"]
             if item.get("id") != strategy_id
         ]
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
     def upsert_api_account(self, account: UserApiAccount) -> dict[str, Any]:
         if self._is_sqlite:
@@ -1044,8 +1062,8 @@ class StrategyCenterStore:
                 self._upsert_api_account_sqlite_unlocked(connection, account)
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         rows = [
             item
             for item in payload["user_api_accounts"]
@@ -1054,7 +1072,7 @@ class StrategyCenterStore:
         rows.append(account.to_dict())
         payload["user_api_accounts"] = rows
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
     def delete_api_account(self, account_id: str) -> dict[str, Any]:
         if self._is_sqlite:
@@ -1067,15 +1085,15 @@ class StrategyCenterStore:
                 )
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         payload["user_api_accounts"] = [
             item
             for item in payload["user_api_accounts"]
             if item.get("id") != account_id
         ]
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
     def update_funding(self, settings: FundingArbitrageSettings) -> dict[str, Any]:
         if self._is_sqlite:
@@ -1094,11 +1112,11 @@ class StrategyCenterStore:
                 )
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         payload["funding_arbitrage"] = settings.to_dict()
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
     def update_signal_bot(self, settings: SignalBotSettings) -> dict[str, Any]:
         if self._is_sqlite:
@@ -1117,11 +1135,11 @@ class StrategyCenterStore:
                 )
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         payload["signal_bot"] = settings.to_dict()
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
     def append_signal(self, event: SignalEvent) -> dict[str, Any]:
         if self._is_sqlite:
@@ -1145,8 +1163,8 @@ class StrategyCenterStore:
                 self._trim_signals_sqlite_unlocked(connection)
                 self._set_updated_at_sqlite(connection, updated_at)
                 connection.commit()
-            return self.read()
-        payload = self.read()
+            return self._read_fresh()
+        payload = self._read_fresh()
         rows = [item for item in payload.get("signals", []) if item.get("id") != event.id]
         rows.append(event.to_dict())
         payload["signals"] = rows[-self.max_recent_signals :]
@@ -1158,7 +1176,7 @@ class StrategyCenterStore:
                 strategies.append(item)
             payload["strategy_instances"] = strategies
         self.write(payload)
-        return self.read()
+        return self._read_fresh()
 
 
 def build_strategy_center_public_payload(

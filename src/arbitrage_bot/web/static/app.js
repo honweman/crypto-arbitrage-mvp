@@ -8,7 +8,11 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    let refreshQueued = false;
 	    const pageStateCache = {};
 	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
-	    const REFRESH_INTERVAL_MS = 2000;
+	    const PAGE_REFRESH_INTERVAL_MS = { status: 2000, settings: 5000, records: 3500 };
+	    const REFRESH_INTERVAL_MS = PAGE_REFRESH_INTERVAL_MS.status;
+	    const REFRESH_FAILURE_BACKOFF_MS = 15000;
+	    const REFRESH_JITTER_MS = 300;
+	    let refreshTimer = null;
 	    const PAGE_SECTION_IDS = {
 	      status: [
 	        "overview",
@@ -105,6 +109,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 		    function setActivePage(page, options = {}) {
 		      const activePage = PAGE_IDS.has(page) ? page : "status";
 		      currentPage = activePage;
+	      clearRefreshTimer();
 	      applyFeatureVisibility();
 		      document.querySelectorAll("[data-page]").forEach((el) => {
 		        el.classList.toggle("active-page", el.dataset.page === activePage);
@@ -4522,6 +4527,32 @@ function balanceStatusClass(status) {
       }
     }
 
+    function clearRefreshTimer() {
+      if (refreshTimer) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = null;
+      }
+    }
+
+    function nextRefreshDelayMs() {
+      const base = PAGE_REFRESH_INTERVAL_MS[currentPage] || REFRESH_INTERVAL_MS;
+      const multiplier = refreshFailureCount > 0
+        ? Math.min(6, refreshFailureCount + 1)
+        : 1;
+      const jitter = Math.random() * REFRESH_JITTER_MS;
+      return Math.min(REFRESH_FAILURE_BACKOFF_MS, base * multiplier + jitter);
+    }
+
+    function scheduleNextRefresh(delayMs) {
+      clearRefreshTimer();
+      if (document.hidden) return;
+      const delay = typeof delayMs === "number" ? delayMs : nextRefreshDelayMs();
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        refresh();
+      }, delay);
+    }
+
     function renderCommonState(data) {
       setHeaderStatus(data.status || "starting");
       renderAuthProfile(data.auth);
@@ -4684,6 +4715,7 @@ function balanceStatusClass(status) {
         return;
       }
       refreshInFlight = true;
+      let redirecting = false;
       const requestedPage = PAGE_IDS.has(currentPage) ? currentPage : "status";
       try {
         const params = new URLSearchParams({ view: requestedPage });
@@ -4692,6 +4724,7 @@ function balanceStatusClass(status) {
         const stateUrl = `/api/state?${params.toString()}`;
         const res = await fetchWithTimeout(stateUrl, { cache: "no-store" });
         if (res.status === 401) {
+          redirecting = true;
           window.location.assign("/login");
           return;
         }
@@ -4729,6 +4762,8 @@ function balanceStatusClass(status) {
         if (refreshQueued) {
           refreshQueued = false;
           refresh({ force: true });
+        } else if (!redirecting) {
+          scheduleNextRefresh();
         }
       }
     }
@@ -4829,9 +4864,10 @@ function balanceStatusClass(status) {
     document.getElementById("signal-bot-form").addEventListener("submit", applySignalBotConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
-    setInterval(() => {
-      if (!document.hidden) refresh();
-    }, REFRESH_INTERVAL_MS);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) refresh({ force: true });
+      if (document.hidden) {
+        clearRefreshTimer();
+      } else {
+        refresh({ force: true });
+      }
     });

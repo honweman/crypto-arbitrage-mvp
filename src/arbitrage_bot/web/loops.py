@@ -188,40 +188,25 @@ async def monitor_loop(
         if cfg.onchain_monitor.enabled
         else None
     )
+    initial_payload = _build_initial_payload(cfg, poll_seconds)
     onchain_payload = (
         _cached_onchain_payload(cfg)
-        or _build_initial_payload(cfg, poll_seconds)["onchain"]
+        or initial_payload["onchain"]
     )
-    account_balances_payload = _build_initial_payload(cfg, poll_seconds)[
-        "account_balances"
-    ]
-    derivatives_payload = _build_initial_payload(cfg, poll_seconds)["derivatives"]
-    funding_basis_payload = _build_initial_payload(cfg, poll_seconds)[
-        "funding_basis"
-    ]
-    options_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
-        "options_arbitrage"
-    ]
-    order_activity_payload = _build_initial_payload(cfg, poll_seconds)[
-        "order_activity"
-    ]
-    trading_console_payload = _build_initial_payload(cfg, poll_seconds)[
-        "trading_console"
-    ]
-    market_maker_payload = _build_initial_payload(cfg, poll_seconds)["market_maker"]
-    slow_execution_payload = _build_initial_payload(cfg, poll_seconds)[
-        "slow_execution"
-    ]
-    spot_grid_payload = _build_initial_payload(cfg, poll_seconds)["spot_grid"]
-    dca_payload = _build_initial_payload(cfg, poll_seconds)["dca"]
-    execution_algo_payload = _build_initial_payload(cfg, poll_seconds)[
-        "execution_algo"
-    ]
-    backtest_payload = _build_initial_payload(cfg, poll_seconds)["backtest"]
-    spot_arbitrage_payload = _build_initial_payload(cfg, poll_seconds)[
-        "spot_arbitrage"
-    ]
-    portfolio_payload = _build_initial_payload(cfg, poll_seconds)["portfolio"]
+    account_balances_payload = initial_payload["account_balances"]
+    derivatives_payload = initial_payload["derivatives"]
+    funding_basis_payload = initial_payload["funding_basis"]
+    options_arbitrage_payload = initial_payload["options_arbitrage"]
+    order_activity_payload = initial_payload["order_activity"]
+    trading_console_payload = initial_payload["trading_console"]
+    market_maker_payload = initial_payload["market_maker"]
+    slow_execution_payload = initial_payload["slow_execution"]
+    spot_grid_payload = initial_payload["spot_grid"]
+    dca_payload = initial_payload["dca"]
+    execution_algo_payload = initial_payload["execution_algo"]
+    backtest_payload = initial_payload["backtest"]
+    spot_arbitrage_payload = initial_payload["spot_arbitrage"]
+    portfolio_payload = initial_payload["portfolio"]
     alert_service = AlertService(cfg.alerts)
     next_onchain_scan = 0.0
     next_balance_scan = 0.0
