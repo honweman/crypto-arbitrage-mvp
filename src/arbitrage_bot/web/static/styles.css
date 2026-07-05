@@ -216,6 +216,43 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+.status-reasons-section {
+  display: none;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.status-reasons-section.has-items {
+  display: grid;
+}
+
+.status-reason {
+  display: grid;
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.status-reason strong {
+  color: var(--amber);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.status-reason span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .subtle {
   color: var(--muted);
   font-size: 12px;
@@ -476,6 +513,33 @@ section {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.compact-section.has-unsaved {
+  border-color: #e7c480;
+}
+
+.dirty-badge {
+  display: none;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border: 1px solid #e7c480;
+  border-radius: 999px;
+  color: var(--amber);
+  background: #fff8e8;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.compact-section.has-unsaved .dirty-badge {
+  display: inline-flex;
+}
+
+.control-button.is-saving,
+.ghost-button.is-saving,
+.danger-button.is-saving {
+  opacity: 0.72;
 }
 
 [data-page][data-ui-hidden-default="true"],

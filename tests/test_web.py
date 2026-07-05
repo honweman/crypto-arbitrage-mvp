@@ -184,11 +184,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260705-ux" defer></script>',
+            '<script src="/static/app.js?v=20260705-ux8" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260705-ux" defer></script>',
+            '<script src="/static/i18n.js?v=20260705-ux8" defer></script>',
             INDEX_HTML,
         )
 
@@ -284,7 +284,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260705-ux">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260705-ux8">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -682,7 +682,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("Account / Project / Exchange / Pair", HTML)
         self.assertIn('id="strategy-settings-section"', HTML)
         self.assertIn('id="strategy-settings-cards"', HTML)
+        self.assertIn('id="status-reasons-section"', HTML)
         self.assertIn("renderStrategySettingCards", APP_JS)
+        self.assertIn("renderStatusReasons", APP_JS)
+        self.assertIn("applyMobileTableLabels", APP_JS)
+        self.assertIn("dirty-badge", STYLES_CSS)
         self.assertIn("mobile-card-table", HTML)
         self.assertIn("Confirm cancel open orders?", APP_JS)
         self.assertIn("DCA Bot", HTML)

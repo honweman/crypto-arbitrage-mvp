@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260705-ux">
+  <link rel="stylesheet" href="/static/styles.css?v=20260705-ux8">
 
 </head>
 <body>
@@ -125,6 +125,8 @@
       </div>
     </section>
 
+    <section id="status-reasons-section" data-page="status" class="status-reasons-section"></section>
+
     <div class="strategy-overview" data-page="status">
       <div class="strategy-tile">
         <div class="label">Market Maker</div>
@@ -176,7 +178,7 @@
         </div>
       </div>
       <div class="table-wrap">
-        <table class="readiness-table">
+        <table class="readiness-table mobile-card-table">
           <thead>
             <tr>
               <th>Priority</th>
@@ -190,7 +192,7 @@
         </table>
       </div>
       <div class="table-wrap stacked-table">
-        <table class="readiness-table">
+        <table class="readiness-table mobile-card-table">
           <thead>
             <tr>
               <th>Account</th>
@@ -208,7 +210,7 @@
         </table>
       </div>
       <div class="table-wrap stacked-table">
-        <table class="readiness-table">
+        <table class="readiness-table mobile-card-table">
           <thead>
             <tr>
               <th>Strategy</th>
@@ -344,7 +346,7 @@
         <button id="market-add" class="control-button" type="submit">Add Market</button>
       </form>
       <div class="table-wrap">
-        <table class="markets-config-table">
+        <table class="markets-config-table mobile-card-table">
           <thead>
             <tr>
               <th>Asset</th>
@@ -376,7 +378,7 @@
         <button id="carry-add" class="control-button" type="submit">Add Pair</button>
       </form>
       <div class="table-wrap">
-        <table class="markets-config-table">
+        <table class="markets-config-table mobile-card-table">
           <thead>
             <tr>
               <th>Spot Symbol</th>
@@ -556,7 +558,7 @@
         <button id="strategy-center-apply" class="control-button" type="submit">Save Strategy</button>
       </form>
       <div class="table-wrap stacked-table">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Name</th>
@@ -636,7 +638,7 @@
         <button id="api-account-apply" class="control-button" type="submit">Save Account</button>
       </form>
       <div class="table-wrap stacked-table">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Label</th>
@@ -752,7 +754,7 @@
         <code id="signal-webhook-url">/api/signal/tradingview</code>
       </div>
       <div class="table-wrap stacked-table">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Time</th>
@@ -775,7 +777,7 @@
         <span id="derivatives-risk-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table class="derivatives-table">
+        <table class="derivatives-table mobile-card-table">
           <thead>
             <tr>
               <th>Account</th>
@@ -801,7 +803,7 @@
         <span id="funding-basis-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table class="funding-basis-table">
+        <table class="funding-basis-table mobile-card-table">
           <thead>
             <tr>
               <th>Pair</th>
@@ -826,7 +828,7 @@
       </div>
       <div id="contract-strategies-summary" class="metric-grid compact-metrics"></div>
       <div class="table-wrap">
-        <table class="contract-strategies-table">
+        <table class="contract-strategies-table mobile-card-table">
           <thead>
             <tr>
               <th>Strategy</th>
@@ -849,7 +851,7 @@
       </div>
       <div id="options-risk-summary" class="metric-grid compact-metrics"></div>
       <div class="table-wrap">
-        <table class="options-chain-table">
+        <table class="options-chain-table mobile-card-table">
           <thead>
             <tr>
               <th>Expiry / Strike</th>
@@ -866,7 +868,7 @@
         </table>
       </div>
       <div class="table-wrap">
-        <table class="options-arbitrage-table">
+        <table class="options-arbitrage-table mobile-card-table">
           <thead>
             <tr>
               <th>Combo</th>
@@ -890,7 +892,7 @@
         <span id="audit-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table class="audit-table">
+        <table class="audit-table mobile-card-table">
           <thead>
             <tr>
               <th>Time</th>
@@ -912,7 +914,7 @@
         <span id="account-balances-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table class="balance-table">
+        <table class="balance-table mobile-card-table">
           <thead>
             <tr>
               <th>Account</th>
@@ -934,7 +936,7 @@
         <span id="orders-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table class="orders-table">
+        <table class="orders-table mobile-card-table">
           <thead>
             <tr>
               <th>Account</th>
@@ -953,7 +955,7 @@
         </table>
       </div>
       <div class="table-wrap stacked-table">
-        <table class="fills-table">
+        <table class="fills-table mobile-card-table">
           <thead>
             <tr>
               <th>Account</th>
@@ -973,7 +975,7 @@
         </table>
       </div>
       <div class="table-wrap stacked-table">
-        <table class="reconciliation-table">
+        <table class="reconciliation-table mobile-card-table">
           <thead>
             <tr>
               <th>Level</th>
@@ -996,7 +998,7 @@
         <span id="risk-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table class="timeline-table">
+        <table class="timeline-table mobile-card-table">
           <thead>
             <tr>
               <th>Time</th>
@@ -1014,7 +1016,7 @@
         </table>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>ID</th>
@@ -1044,7 +1046,7 @@
         <span id="warnings" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Exchange</th>
@@ -1285,7 +1287,7 @@
         <button id="grid-apply" class="control-button" type="submit">Apply</button>
       </form>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Side</th>
@@ -1379,7 +1381,7 @@
         <button id="dca-apply" class="control-button" type="submit">Apply</button>
       </form>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th class="num">Order</th>
@@ -1489,7 +1491,7 @@
         <button id="exec-apply" class="control-button" type="submit">Apply</button>
       </form>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th class="num">Slice</th>
@@ -1579,7 +1581,7 @@
         <div class="mini-card"><span>Fill Rate</span><strong id="backtest-fill-rate">--</strong></div>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th class="num">Step</th>
@@ -1768,7 +1770,7 @@
         <h2>Quote Rates</h2>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Currency</th>
@@ -1786,7 +1788,7 @@
         <span id="onchain-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Rank</th>
@@ -1811,7 +1813,7 @@
         <span id="onchain-history-meta" class="subtle"></span>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="mobile-card-table">
           <thead>
             <tr>
               <th>Time</th>
@@ -1830,8 +1832,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260705-ux" defer></script>
-  <script src="/static/app.js?v=20260705-ux" defer></script>
+  <script src="/static/i18n.js?v=20260705-ux8" defer></script>
+  <script src="/static/app.js?v=20260705-ux8" defer></script>
 
 </body>
 </html>
