@@ -43,6 +43,7 @@ def _compact_config_payload(config: dict[str, Any], *, full: bool = False) -> di
             "min_profit_quote",
             "min_profit_bps",
             "common_quote_currency",
+            "risk",
             "triangular_arbitrage",
             "contract_strategies",
         ),

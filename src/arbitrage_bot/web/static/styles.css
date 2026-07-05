@@ -402,6 +402,82 @@ section {
   display: none !important;
 }
 
+.strategy-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-settings-card {
+  display: grid;
+  gap: 8px;
+  min-height: 118px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.strategy-settings-card:hover {
+  border-color: var(--focus);
+  background: var(--surface);
+}
+
+.strategy-settings-card:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.strategy-settings-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 800;
+}
+
+.strategy-settings-card-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.strategy-settings-card-status.live,
+.strategy-settings-card-status.ok {
+  color: var(--green);
+  border-color: #b8dccb;
+  background: #edf7f1;
+}
+
+.strategy-settings-card-status.blocked,
+.strategy-settings-card-status.error {
+  color: var(--red);
+  border-color: #f1c0bd;
+  background: #fff0ef;
+}
+
+.strategy-settings-card-summary {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.strategy-settings-card-detail {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 [data-page][data-ui-hidden-default="true"],
 [data-page].ui-feature-hidden,
 .portfolio-bar[data-page][data-ui-hidden-default="true"],
@@ -1083,6 +1159,7 @@ tbody tr:last-child td {
   .statusbar,
   .readiness-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .strategy-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .balance-table { min-width: 620px; }
   .orders-table { min-width: 960px; }
   .fills-table { min-width: 1080px; }
@@ -1138,6 +1215,7 @@ tbody tr:last-child td {
   .control-panel { grid-template-columns: 1fr; }
   .account-selector { grid-template-columns: 1fr; }
   .mini-grid { grid-template-columns: 1fr; }
+  .strategy-settings-grid { grid-template-columns: 1fr; }
   .instance-status-row { grid-template-columns: 1fr; }
   .instance-status-pill { justify-self: start; }
   .instance-status-name,
@@ -1160,5 +1238,50 @@ tbody tr:last-child td {
   th, td {
     padding: 9px 10px;
     font-size: 12px;
+  }
+  .mobile-card-table {
+    min-width: 0;
+    border-collapse: separate;
+    border-spacing: 0 8px;
+  }
+  .mobile-card-table thead {
+    display: none;
+  }
+  .mobile-card-table tbody,
+  .mobile-card-table tr,
+  .mobile-card-table td {
+    display: block;
+    width: 100%;
+  }
+  .mobile-card-table tr {
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  .mobile-card-table td {
+    display: grid;
+    grid-template-columns: minmax(88px, 38%) minmax(0, 1fr);
+    gap: 10px;
+    padding: 5px 0;
+    border-bottom: 0;
+    white-space: normal;
+    text-align: left;
+  }
+  .mobile-card-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+  .mobile-card-table td[colspan] {
+    display: block;
+  }
+  .mobile-card-table td[colspan]::before {
+    content: "";
+  }
+  .mobile-card-table .num {
+    text-align: left;
   }
 }

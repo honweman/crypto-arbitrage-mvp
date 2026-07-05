@@ -24,6 +24,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "holders",
 	      ],
 	      settings: [
+	        "strategy-settings-cards",
 	        "markets-config",
 	        "carry-config",
 	        "risk-form",
@@ -185,6 +186,22 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         });
       }
       refresh({ force: true });
+    }
+
+    function openSettingsSection(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (!section || isUiFeatureHidden(section)) return;
+      if (currentPage !== "settings") setActivePage("settings", { refresh: false });
+      section.classList.add("section-open");
+      const title = section.querySelector(".section-title");
+      if (title) title.setAttribute("aria-expanded", "true");
+      refreshOpenedSection(section);
+      section.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    function dangerConfirm(message, detail = "") {
+      const fullMessage = detail ? `${uiText(message)}\n\n${detail}` : uiText(message);
+      return window.confirm(fullMessage);
     }
 
     function formatAge(ts) {
@@ -777,6 +794,8 @@ function balanceStatusClass(status) {
     async function cancelOrder(order, button) {
       const key = `${order.exchange}:${order.symbol}:${order.id}`;
       if (cancelOrderBusy.has(key)) return;
+      const detail = `${order.label || order.exchange} · ${order.symbol || "--"} · ${String(order.side || "--").toUpperCase()} · ${order.id || "--"}`;
+      if (!dangerConfirm("Confirm cancel this order?", detail)) return;
       cancelOrderBusy.add(key);
       button.disabled = true;
       button.textContent = "Canceling";
@@ -820,16 +839,16 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         const actionCell = showActions ? `<td class="order-action"></td>` : "";
         tr.innerHTML = `
-          <td>${escapeHtml(order.label || order.exchange)}</td>
-          <td>${escapeHtml(order.symbol || "--")}</td>
-          <td class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
-          <td>${escapeHtml(order.status || "--")}</td>
-          <td class="num">${order.price == null ? "--" : fmt.format(order.price)}</td>
-          <td class="num">${formatBalanceAmount(order.amount)}</td>
-          <td class="num">${formatBalanceAmount(order.filled)}</td>
-          <td class="num">${formatBalanceAmount(order.remaining)}</td>
-          <td class="num">${formatBalanceAmount(order.cost)}</td>
-          <td>${formatTimestamp(order.timestamp)}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(order.label || order.exchange)}</td>
+          <td data-label="${uiText("Symbol")}">${escapeHtml(order.symbol || "--")}</td>
+          <td data-label="${uiText("Side")}" class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
+          <td data-label="${uiText("Status")}">${escapeHtml(order.status || "--")}</td>
+          <td data-label="${uiText("Price")}" class="num">${order.price == null ? "--" : fmt.format(order.price)}</td>
+          <td data-label="${uiText("Amount")}" class="num">${formatBalanceAmount(order.amount)}</td>
+          <td data-label="${uiText("Filled")}" class="num">${formatBalanceAmount(order.filled)}</td>
+          <td data-label="${uiText("Remaining")}" class="num">${formatBalanceAmount(order.remaining)}</td>
+          <td data-label="${uiText("Cost")}" class="num">${formatBalanceAmount(order.cost)}</td>
+          <td data-label="${uiText("Updated")}">${formatTimestamp(order.timestamp)}</td>
           ${actionCell}
         `;
         if (showActions) {
@@ -841,6 +860,7 @@ function balanceStatusClass(status) {
           button.disabled = !order.id;
           button.title = order.id || "";
           button.addEventListener("click", () => cancelOrder(order, button));
+          action.dataset.label = uiText("Action");
           action.appendChild(button);
         }
         body.appendChild(tr);
@@ -861,17 +881,17 @@ function balanceStatusClass(status) {
       for (const fill of fills) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${escapeHtml(fill.label || fill.exchange)}</td>
-          <td>${escapeHtml(fill.symbol || "--")}</td>
-          <td class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
-          <td>${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
-          <td class="num">${fill.price == null ? "--" : fmt.format(fill.price)}</td>
-          <td class="num">${formatBalanceAmount(fill.amount)}</td>
-          <td class="num">${formatBalanceAmount(fill.cost)}</td>
-          <td class="num ${pnlClass(fill.realized_pnl_common)}">${formatPnlValue(fill.realized_pnl_common)}</td>
-          <td>${escapeHtml(formatFee(fill.fee))}</td>
-          <td title="${escapeHtml(fill.order_id || "")}">${escapeHtml(shortId(fill.order_id))}</td>
-          <td>${formatTimestamp(fill.timestamp)}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(fill.label || fill.exchange)}</td>
+          <td data-label="${uiText("Symbol")}">${escapeHtml(fill.symbol || "--")}</td>
+          <td data-label="${uiText("Side")}" class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
+          <td data-label="${uiText("Source")}">${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
+          <td data-label="${uiText("Price")}" class="num">${fill.price == null ? "--" : fmt.format(fill.price)}</td>
+          <td data-label="${uiText("Amount")}" class="num">${formatBalanceAmount(fill.amount)}</td>
+          <td data-label="${uiText("Cost")}" class="num">${formatBalanceAmount(fill.cost)}</td>
+          <td data-label="${uiText("P/L")}" class="num ${pnlClass(fill.realized_pnl_common)}">${formatPnlValue(fill.realized_pnl_common)}</td>
+          <td data-label="${uiText("Fee")}">${escapeHtml(formatFee(fill.fee))}</td>
+          <td data-label="${uiText("Order")}" title="${escapeHtml(fill.order_id || "")}">${escapeHtml(shortId(fill.order_id))}</td>
+          <td data-label="${uiText("Time")}">${formatTimestamp(fill.timestamp)}</td>
         `;
         body.appendChild(tr);
       }
@@ -946,6 +966,10 @@ function balanceStatusClass(status) {
 
     async function cancelBulkOrders(payload, button) {
       if (consoleActionBusy) return;
+      const detail = payload?.scope === "all"
+        ? uiText("All accounts")
+        : `${uiText("Account")}: ${payload?.exchange || "--"}`;
+      if (!dangerConfirm("Confirm cancel open orders?", detail)) return;
       consoleActionBusy = true;
       const originalText = button.textContent;
       button.disabled = true;
@@ -1033,13 +1057,13 @@ function balanceStatusClass(status) {
       for (const strategy of strategies) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${escapeHtml(strategy.label || strategy.id)}</td>
-          <td class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled")}</td>
-          <td class="${strategy.live ? "ok" : "missing"}">${strategy.live ? "YES" : "NO"}</td>
-          <td>${escapeHtml(strategy.exchange || "--")}</td>
-          <td>${escapeHtml(strategy.symbol || "--")}</td>
-          <td>${escapeHtml(strategy.mode || "--")}</td>
-          <td class="strategy-action"></td>
+          <td data-label="${uiText("Strategy")}">${escapeHtml(strategy.label || strategy.id)}</td>
+          <td data-label="${uiText("Status")}" class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled")}</td>
+          <td data-label="${uiText("Live")}" class="${strategy.live ? "ok" : "missing"}">${strategy.live ? "YES" : "NO"}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(strategy.exchange || "--")}</td>
+          <td data-label="${uiText("Symbol")}">${escapeHtml(strategy.symbol || "--")}</td>
+          <td data-label="${uiText("Mode")}">${escapeHtml(strategy.mode || "--")}</td>
+          <td data-label="${uiText("Action")}" class="strategy-action"></td>
         `;
         const action = tr.querySelector(".strategy-action");
         const button = document.createElement("button");
@@ -1428,7 +1452,7 @@ function balanceStatusClass(status) {
       text("monitor-auto-summary", autoStatus);
       text("monitor-auto-detail", autoDetail);
 
-      const risk = data.operations?.risk || {};
+      const risk = data.operations?.risk || data.config?.risk || {};
       const riskSummary = risk.allow_live_trading ? "Live allowed" : "Live blocked";
       const riskDetail = `order $${money.format(risk.max_order_quote || 0)} · exposure $${money.format(risk.max_exposure_quote || 0)} · open ${risk.max_open_orders || 0}`;
       text("monitor-risk-summary", riskSummary);
@@ -1466,6 +1490,77 @@ function balanceStatusClass(status) {
         "overview-risk",
         `${riskSummary} · max $${money.format(risk.max_order_quote || 0)}`
       );
+    }
+
+    function strategySettingsStatusClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (["live", "running", "unchanged", "placed", "ready", "ok", "enabled"].includes(value)) return "ok";
+      if (["blocked", "blocked_by_risk", "error", "sync_error", "open_order_sync_error"].includes(value)) return "blocked";
+      return "";
+    }
+
+    function renderStrategySettingsCard({ title, status, summary, detail, target }) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "strategy-settings-card";
+      card.innerHTML = `
+        <div class="strategy-settings-card-title">
+          <span>${escapeHtml(uiText(title))}</span>
+          <span class="strategy-settings-card-status ${strategySettingsStatusClass(status)}">${escapeHtml(status || "--")}</span>
+        </div>
+        <div class="strategy-settings-card-summary">${escapeHtml(summary || "--")}</div>
+        <div class="strategy-settings-card-detail">${escapeHtml(detail || "--")}</div>
+      `;
+      card.addEventListener("click", () => openSettingsSection(target));
+      return card;
+    }
+
+    function renderStrategySettingCards(data) {
+      const body = document.getElementById("strategy-settings-cards");
+      if (!body) return;
+      body.innerHTML = "";
+      const risk = data.operations?.risk || data.config?.risk || {};
+      const mm = data.market_maker || {};
+      const mmRuntime = mm.runtime || {};
+      const mmPlan = mm.plan || mmRuntime.last_plan || null;
+      const mmStatus = mmRuntime.mode === "live" || mm.mode === "live"
+        ? (mmRuntime.status || mm.status || "live")
+        : (mm.status || "dry_run");
+      const auto = data.slow_execution || {};
+      const tasks = auto.tasks?.tasks || [];
+      const activeTasks = tasks.filter((task) => !AUTO_TERMINAL_STATUSES.has(task.status || ""));
+      const firstTask = activeTasks[0] || tasks[0];
+      const cards = [
+        {
+          title: "Risk Controls",
+          status: risk.allow_live_trading ? "live" : "blocked",
+          summary: risk.allow_live_trading ? "Live trading allowed" : "Live trading blocked",
+          detail: `max/order $${money.format(risk.max_order_quote || 0)} · max open ${risk.max_open_orders || 0}`,
+          target: "risk-section",
+        },
+        {
+          title: "Auto Buy/Sell",
+          status: activeTasks.length ? "running" : (auto.status || "disabled"),
+          summary: activeTasks.length ? `${activeTasks.length}/${tasks.length} active task(s)` : (auto.status || "disabled"),
+          detail: firstTask
+            ? `${firstTask.config?.exchange || "--"} ${firstTask.config?.symbol || "--"} · ${String(firstTask.config?.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"}`
+            : "Open to create or edit a task",
+          target: "slow-section",
+        },
+        {
+          title: "Market Maker",
+          status: mmStatus,
+          summary: mmPlan
+            ? `${mmPlan.exchange || "--"} ${mmPlan.symbol || "--"}`
+            : `${marketMakerInstances(mm).length || 0} instance(s)`,
+          detail: mmPlan
+            ? `mid ${fmt.format(mmPlan.mid_price)} · open ${mmRuntime.open_order_count || 0}`
+            : marketMakerStatusReason(mm) || "Open to edit ladder and risk",
+          target: "mm-section",
+        },
+      ];
+      for (const card of cards) body.appendChild(renderStrategySettingsCard(card));
+      text("strategy-settings-meta", `${cards.length} ${uiText("core controls")}`);
     }
 
     function renderOpportunities(items) {
@@ -1763,12 +1858,12 @@ function balanceStatusClass(status) {
         const commonQuote = rate == null ? "--" : `${common} ${money.format(order.quote_notional * rate)}`;
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
-          <td class="num">${order.level}</td>
-          <td class="num">${fmt.format(order.price)}</td>
-          <td class="num">${compact.format(order.amount)}</td>
-          <td class="num" title="${commonQuote}">${formatSymbolQuantity(order.quote_notional, marketMaker.plan.symbol, "quote")}</td>
-          <td class="num">${order.distance_bps.toFixed(2)} bps</td>
+          <td data-label="${uiText("Side")}" class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
+          <td data-label="${uiText("Level")}" class="num">${order.level}</td>
+          <td data-label="${uiText("Price")}" class="num">${fmt.format(order.price)}</td>
+          <td data-label="${uiText("Amount")}" class="num">${compact.format(order.amount)}</td>
+          <td data-label="${uiText("Quote")}" class="num" title="${commonQuote}">${formatSymbolQuantity(order.quote_notional, marketMaker.plan.symbol, "quote")}</td>
+          <td data-label="${uiText("Distance")}" class="num">${order.distance_bps.toFixed(2)} bps</td>
         `;
         body.appendChild(tr);
       }
@@ -1800,18 +1895,18 @@ function balanceStatusClass(status) {
         : formatSymbolQuantity(plan.remaining_base, plan.symbol, "base");
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
-        <td>${plan.exchange}</td>
-        <td>${plan.symbol}</td>
-        <td class="num">${fmt.format(order.price)}</td>
-        <td class="num">${compact.format(order.amount)}</td>
-        <td class="num">${money.format(order.quote_notional)}</td>
-        <td class="num">${submittedText}</td>
-        <td class="num">${remainingText}</td>
-        <td class="num">${plan.interval_seconds}s</td>
-        <td class="num">${plan.order_ttl_seconds || 0}s</td>
-        <td>${escapeHtml(autoStartGateText(plan))}</td>
-        <td>${escapeHtml(autoStopGateText(plan))}</td>
+        <td data-label="${uiText("Side")}" class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
+        <td data-label="${uiText("Exchange")}">${plan.exchange}</td>
+        <td data-label="${uiText("Symbol")}">${plan.symbol}</td>
+        <td data-label="${uiText("Order Price")}" class="num">${fmt.format(order.price)}</td>
+        <td data-label="${uiText("Slice Amount")}" class="num">${compact.format(order.amount)}</td>
+        <td data-label="${uiText("Quote")}" class="num">${money.format(order.quote_notional)}</td>
+        <td data-label="${uiText("Submitted")}" class="num">${submittedText}</td>
+        <td data-label="${uiText("Remaining")}" class="num">${remainingText}</td>
+        <td data-label="${uiText("Interval")}" class="num">${plan.interval_seconds}s</td>
+        <td data-label="${uiText("Cancel")}" class="num">${plan.order_ttl_seconds || 0}s</td>
+        <td data-label="${uiText("Start Gate")}">${escapeHtml(autoStartGateText(plan))}</td>
+        <td data-label="${uiText("Stop Gate")}">${escapeHtml(autoStopGateText(plan))}</td>
       `;
       body.appendChild(tr);
     }
@@ -2717,18 +2812,18 @@ function balanceStatusClass(status) {
         const lastText = autoTaskLastOrderText(task, config);
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
-          <td class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(status)}</td>
-          <td class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
-          <td>${escapeHtml(config.exchange || "--")}</td>
-          <td class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
-          <td class="num">${filledText}</td>
-          <td class="num">${remainingText}</td>
-          <td class="num">${progressPct}</td>
-          <td class="num" title="${escapeHtml(detailTitle)}">${task.open_order_count || 0}</td>
-          <td title="${escapeHtml(lastText)}"><div>${formatAge(task.last_cycle_at)}</div><div class="subtle">${escapeHtml(lastText)}</div></td>
-          <td>${formatDue(task.next_run_at)}</td>
-          <td class="strategy-action"></td>
+          <td data-label="${uiText("Task")}" title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
+          <td data-label="${uiText("Status")}" class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(status)}</td>
+          <td data-label="${uiText("Config")}" class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(config.exchange || "--")}</td>
+          <td data-label="${uiText("Side")}" class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
+          <td data-label="${uiText("Filled")}" class="num">${filledText}</td>
+          <td data-label="${uiText("Remaining")}" class="num">${remainingText}</td>
+          <td data-label="${uiText("Progress")}" class="num">${progressPct}</td>
+          <td data-label="${uiText("Open")}" class="num" title="${escapeHtml(detailTitle)}">${task.open_order_count || 0}</td>
+          <td data-label="${uiText("Last")}" title="${escapeHtml(lastText)}"><div>${formatAge(task.last_cycle_at)}</div><div class="subtle">${escapeHtml(lastText)}</div></td>
+          <td data-label="${uiText("Next")}">${formatDue(task.next_run_at)}</td>
+          <td data-label="${uiText("Action")}" class="strategy-action"></td>
         `;
         const action = tr.querySelector(".strategy-action");
         if (!terminal) {
@@ -4376,9 +4471,10 @@ function balanceStatusClass(status) {
       }
       lastVisibleRenderAt[activePage] = now;
       if (activePage === "settings") {
+        renderOpenSection("strategy-settings-cards", () => renderStrategySettingCards(data));
         renderOpenSection("markets-config", () => renderMarketsConfig(data));
         renderOpenSection("carry-config", () => renderCashCarryConfig(data));
-        renderOpenSection("risk-form", () => renderRiskControls(data.operations, data.trading_console));
+        renderOpenSection("risk-form", () => renderRiskControls(data.operations || { risk: data.config?.risk }, data.trading_console));
         renderOpenSection("strategy-instances", () => renderStrategyCenter(data.strategy_center));
         renderOpenSection("api-accounts", () => renderApiAccountsPanel(data.strategy_center));
         renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
