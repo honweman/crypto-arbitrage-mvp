@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from .state import MonitorState
+from .market_maker_alerts import market_maker_problem_warnings
 
 from ..alerts import AlertService
 from ..auto_buy_sell_task import AutoBuySellTaskService
@@ -172,39 +173,6 @@ def build_daily_report_message(
             *source_lines,
         ]
     )
-
-
-_MARKET_MAKER_ALERT_STATUSES = {
-    "blocked_by_risk",
-    "cancel_retry",
-    "execution_error",
-    "open_order_sync_error",
-    "error",
-}
-
-
-def _market_maker_problem_warnings(runtime: dict[str, Any]) -> list[str]:
-    warnings: list[str] = []
-    for instance in runtime.get("instances", []) or []:
-        if not isinstance(instance, dict):
-            continue
-        status = str(instance.get("status") or "")
-        if status not in _MARKET_MAKER_ALERT_STATUSES:
-            continue
-        name = str(
-            instance.get("display_name")
-            or instance.get("id")
-            or "market maker"
-        )
-        reason = str(
-            instance.get("status_reason")
-            or instance.get("reason")
-            or instance.get("last_error")
-            or instance.get("open_order_sync_error")
-            or status
-        )
-        warnings.append(f"Market maker {name}: {status} ({reason})")
-    return warnings
 
 
 async def monitor_loop(
@@ -1122,7 +1090,7 @@ async def monitor_loop(
                         *warnings,
                         f"Derivatives: {reasons[0] if reasons else 'risk limit breached'}",
                     ]
-                market_maker_runtime_warnings = _market_maker_problem_warnings(
+                market_maker_runtime_warnings = market_maker_problem_warnings(
                     await state.market_maker_runtime()
                 )
                 if market_maker_runtime_warnings:
