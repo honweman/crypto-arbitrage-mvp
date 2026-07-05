@@ -1,0 +1,10 @@
+[Unit]
+Description=Compact Crypto Arbitrage JSONL logs
+
+[Service]
+Type=oneshot
+User=cryptoarb
+Group=cryptoarb
+WorkingDirectory=/opt/crypto-arbitrage-mvp
+Environment=PYTHONPATH=/opt/crypto-arbitrage-mvp/src
+ExecStart=/opt/crypto-arbitrage-mvp/.venv/bin/python /opt/crypto-arbitrage-mvp/scripts/compact_logs.py --config /opt/crypto-arbitrage-mvp/config.acs.json
