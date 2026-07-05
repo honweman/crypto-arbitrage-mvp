@@ -76,6 +76,39 @@ def _compact_market_maker_runtime(
         )
     return result
 
+
+def _compact_market_maker_instance_payload(
+    instance: dict[str, Any],
+    *,
+    include_orders: bool,
+) -> dict[str, Any]:
+    result = _copy_payload_keys(
+        instance,
+        (
+            "status",
+            "mode",
+            "market_data",
+            "quote_conversion",
+            "exchange_features",
+            "error",
+            "status_reason",
+            "config",
+            "safety",
+            "display_name",
+        ),
+    )
+    result["runtime"] = _compact_market_maker_runtime(
+        instance.get("runtime"),
+        include_orders=include_orders,
+    )
+    plan = instance.get("plan")
+    if not isinstance(plan, dict):
+        runtime_plan = result.get("runtime", {}).get("last_plan")
+        plan = runtime_plan if isinstance(runtime_plan, dict) else None
+    result["plan"] = _compact_plan_payload(plan, include_orders=include_orders)
+    return result
+
+
 def _compact_market_maker_payload(
     market_maker: dict[str, Any],
     *,
@@ -94,11 +127,15 @@ def _compact_market_maker_payload(
             "error",
             "accounts",
             "config",
-            "instances",
             "instance_count",
             "active_instance_count",
         ),
     )
+    result["instances"] = [
+        _compact_market_maker_instance_payload(instance, include_orders=False)
+        for instance in market_maker.get("instances", [])
+        if isinstance(instance, dict)
+    ]
     result["runtime"] = _compact_market_maker_runtime(
         market_maker.get("runtime"),
         include_orders=False,
@@ -542,6 +579,8 @@ def state_payload_for_view(
     order_activity_full = is_records and _section_open(
         section_ids,
         "console-strategies",
+        "console-open-orders",
+        "console-recent-fills",
         "open-orders",
     )
     onchain_full = is_status or (

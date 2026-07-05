@@ -400,6 +400,21 @@ class WebMonitorTest(unittest.TestCase):
                 "open_order_count": 1,
                 "open_orders": [{"id": "order"}],
             },
+            "market_maker": {
+                "status": "planned",
+                "instances": [
+                    {
+                        "config": {"id": "coinbase"},
+                        "plan": {"orders": [{"id": "mm-order"}], "mid_price": 1.0},
+                        "runtime": {
+                            "last_plan": {
+                                "orders": [{"id": "runtime-order"}],
+                                "mid_price": 1.0,
+                            }
+                        },
+                    }
+                ],
+            },
             "strategy_center": {
                 "summary": {"strategy_count": 1},
                 "strategy_instances": [{"id": "mm"}],
@@ -424,6 +439,11 @@ class WebMonitorTest(unittest.TestCase):
         status_overview = state_payload_for_view(payload, "status", sections="overview")
         settings = state_payload_for_view(payload, "settings", sections="risk-form")
         records = state_payload_for_view(payload, "records", sections="console-strategies")
+        records_open_orders = state_payload_for_view(
+            payload,
+            "records",
+            sections="console-open-orders",
+        )
 
         self.assertEqual(status_overview["markets"], [])
         self.assertEqual(status_overview["quote_rates"], {})
@@ -431,6 +451,14 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("totals", status_overview["account_balances"])
         self.assertNotIn("accounts", status_overview["account_balances"])
         self.assertNotIn("positions", status_overview["derivatives"])
+        self.assertNotIn(
+            "orders",
+            status_overview["market_maker"]["instances"][0]["plan"],
+        )
+        self.assertNotIn(
+            "orders",
+            status_overview["market_maker"]["instances"][0]["runtime"]["last_plan"],
+        )
         self.assertNotIn("rows", status_overview["funding_basis"])
         self.assertNotIn("rows", status_overview["options_arbitrage"])
         self.assertNotIn("rows", status_overview["contract_strategies"])
@@ -438,6 +466,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertNotIn("strategy_universe", settings["config"])
         self.assertNotIn("strategy_instances", settings["strategy_center"])
         self.assertIn("open_orders", records["order_activity"])
+        self.assertIn("open_orders", records_open_orders["order_activity"])
         self.assertNotIn("web_audit", records["operations"])
         self.assertNotIn("events", records["onchain"].get("history", {}))
 
