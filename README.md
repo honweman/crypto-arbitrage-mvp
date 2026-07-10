@@ -602,6 +602,8 @@ The web monitor can be protected with a password and an IP allowlist without sto
   "trust_proxy_headers": true,
   "cookie_secure": true,
   "user_store_path": "data/web_users.json",
+  "user_workspace_path": "data/user_workspace.sqlite3",
+  "credential_master_key_env": "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
   "registration_enabled": true,
   "bootstrap_admin_email_env": "CRYPTO_ARB_WEB_ADMIN_EMAIL",
   "verification_code_ttl_seconds": 600,
@@ -613,6 +615,16 @@ The web monitor can be protected with a password and an IP allowlist without sto
 Set `CRYPTO_ARB_WEB_PASSWORD` and `CRYPTO_ARB_WEB_ALLOWED_IPS` in the server environment file. `CRYPTO_ARB_WEB_ALLOWED_IPS` accepts comma-separated IPs or CIDR ranges. When nginx terminates HTTPS, bind the Python app to `127.0.0.1` and pass `X-Real-IP` / `X-Forwarded-Proto` headers:
 
 When `registration_enabled` is true, users register with an email verification code and choose a unique username. Passwords must be at least eight characters and contain a letter, a number, and a special character. Subsequent logins use username and password. Password reset codes are sent to the registered email. Set `CRYPTO_ARB_WEB_ADMIN_EMAIL` before opening registration: only that address may create the first administrator account. Later accounts start without asset permissions until an administrator assigns them. Existing email users are given a compatible username based on the part before `@`.
+
+Each registered user gets an isolated project workspace. A user creates a project for an asset and quote currency, then adds exchange accounts with trade-only API credentials. New user projects remain pending until an administrator approves the asset. Accounts cannot be enabled until the project is approved, credentials are configured, and the user confirms that withdrawal permission is disabled. API secrets are write-only in the browser and encrypted at rest with AES-GCM; neither state APIs nor audit records return the secret values.
+
+Generate the credential encryption key once on the server and store it in the protected service environment file:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Assign that value to `CRYPTO_ARB_CREDENTIAL_MASTER_KEY`. Back it up in a secret manager and do not rotate or delete it without first migrating the encrypted credential database. The environment file and `data/user_workspace.sqlite3` must never be committed to Git.
 
 ```nginx
 location / {
@@ -652,7 +664,7 @@ Email registration and password recovery reuse `email_from_env`, `smtp_host_env`
 
 Auto-stop pauses the program after repeated degraded/error cycles, or immediately when the daily P/L breaches `risk.max_daily_loss_quote`. Daily reports are sent through the configured alert channels once per local day.
 
-Do not commit API keys, proxy URLs, or IP allowlist secrets. Put those values in local shell env vars, Docker/Kubernetes secrets, or the cloud secret manager for each account runner.
+Do not commit API keys, credential encryption keys, proxy URLs, or IP allowlist secrets. Put those values in local shell env vars, Docker/Kubernetes secrets, or the cloud secret manager for each account runner.
 
 The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, cumulative balance changes since the first stored baseline, and a persisted holder change log. The change history is saved under `onchain_monitor.history_path`, so browser refreshes and service restarts do not reset the displayed wallet changes.
 

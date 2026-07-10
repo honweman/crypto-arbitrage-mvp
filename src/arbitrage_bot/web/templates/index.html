@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260705-perf1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260710-workspace1">
 
 </head>
 <body>
@@ -394,7 +394,105 @@
       </div>
     </section>
 
-    <section id="strategy-settings-section" data-page="settings" class="compact-section section-open">
+    <section id="user-workspace-section" data-page="settings" class="compact-section section-open" data-ui-feature="user_workspace">
+      <div class="section-title">
+        <h2>Projects & Exchange Accounts</h2>
+        <span id="user-workspace-meta" class="subtle"></span>
+      </div>
+      <div class="form-divider">Projects</div>
+      <form id="user-project-form" class="control-panel">
+        <input id="user-project-id" type="hidden">
+        <div class="field">
+          <label for="user-project-name">Project Name</label>
+          <input id="user-project-name" type="text" maxlength="80" placeholder="ACS Trading" required>
+        </div>
+        <div class="field">
+          <label for="user-project-asset">Asset</label>
+          <input id="user-project-asset" type="text" maxlength="20" placeholder="ACS" required>
+        </div>
+        <div class="field">
+          <label for="user-project-quote">Quote Currency</label>
+          <input id="user-project-quote" type="text" maxlength="20" placeholder="USDC" required>
+        </div>
+        <button id="user-project-save" class="control-button" type="submit">Save Project</button>
+        <button id="user-project-new" class="ghost-button" type="button">New</button>
+      </form>
+      <div class="table-wrap stacked-table">
+        <table class="mobile-card-table">
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Owner</th>
+              <th>Pair</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="user-projects"></tbody>
+        </table>
+      </div>
+
+      <div class="form-divider">Exchange API Account</div>
+      <form id="user-exchange-account-form" class="control-panel">
+        <input id="user-exchange-account-id" type="hidden">
+        <div class="field">
+          <label for="user-exchange-project">Project</label>
+          <select id="user-exchange-project" required></select>
+        </div>
+        <div class="field">
+          <label for="user-exchange-label">Account Name</label>
+          <input id="user-exchange-label" type="text" maxlength="80" placeholder="Coinbase Main" required>
+        </div>
+        <div class="field">
+          <label for="user-exchange-id">Exchange</label>
+          <select id="user-exchange-id" required></select>
+        </div>
+        <div class="field">
+          <label for="user-exchange-market-type">Market</label>
+          <select id="user-exchange-market-type" required></select>
+        </div>
+        <div class="field wide-field">
+          <label for="user-exchange-api-key">API Key</label>
+          <textarea id="user-exchange-api-key" rows="2" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
+        </div>
+        <div class="field wide-field">
+          <label for="user-exchange-secret">API Secret / Private Key</label>
+          <textarea id="user-exchange-secret" rows="3" autocomplete="new-password" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
+        </div>
+        <div class="field" id="user-exchange-passphrase-field">
+          <label for="user-exchange-passphrase">Passphrase</label>
+          <input id="user-exchange-passphrase" type="password" autocomplete="new-password" placeholder="Optional">
+        </div>
+        <label class="check-field">
+          <input id="user-exchange-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label class="check-field wide-field workspace-safety-confirm">
+          <input id="user-exchange-no-withdraw" type="checkbox">
+          I confirm withdrawal permission is disabled for this API key
+        </label>
+        <div class="subtle wide-field">Use a trade-only API key. Credentials are encrypted and never shown again.</div>
+        <button id="user-exchange-save" class="control-button" type="submit">Save Account</button>
+        <button id="user-exchange-new" class="ghost-button" type="button">New</button>
+      </form>
+      <div class="table-wrap stacked-table">
+        <table class="mobile-card-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Project</th>
+              <th>Exchange</th>
+              <th>Credentials</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="user-exchange-accounts"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="strategy-settings-section" data-page="settings" class="compact-section">
       <div class="section-title">
         <h2>Strategy Settings</h2>
         <span id="strategy-settings-meta" class="subtle"></span>
@@ -1836,8 +1934,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260705-perf1" defer></script>
-  <script src="/static/app.js?v=20260705-perf1" defer></script>
+  <script src="/static/i18n.js?v=20260710-workspace1" defer></script>
+  <script src="/static/app.js?v=20260710-workspace1" defer></script>
 
 </body>
 </html>

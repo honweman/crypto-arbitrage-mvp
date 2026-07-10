@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import tempfile
@@ -183,11 +184,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260705-perf1" defer></script>',
+            '<script src="/static/app.js?v=20260710-workspace1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260705-perf1" defer></script>',
+            '<script src="/static/i18n.js?v=20260710-workspace1" defer></script>',
             INDEX_HTML,
         )
 
@@ -283,7 +284,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260705-perf1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260710-workspace1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -5808,6 +5809,210 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reset_response.status, 200)
         self.assertEqual(expired_session_response.status, 401)
         self.assertEqual(new_login_response.status, 200)
+
+    async def test_user_workspace_project_approval_and_encrypted_account_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            admin = user_store.create_user(
+                email="admin@example.com",
+                username="admin01",
+                password="Strong-pass-1!",
+            )
+            member = user_store.create_user(
+                email="member@example.com",
+                username="member01",
+                password="Strong-pass-2!",
+            )
+            workspace_path = data_dir / "user_workspace.sqlite3"
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(workspace_path),
+                    credential_master_key_env="TEST_CREDENTIAL_MASTER_KEY",
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=True,
+                    path=str(data_dir / "trade_events.jsonl"),
+                ),
+            )
+            master_key = base64.urlsafe_b64encode(b"m" * 32).decode("ascii")
+            with patch.dict(
+                os.environ,
+                {"TEST_CREDENTIAL_MASTER_KEY": master_key},
+                clear=False,
+            ):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": member.username,
+                            "password": "Strong-pass-2!",
+                        },
+                    )
+                    project_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_project",
+                            "project": {
+                                "name": "ACS Project",
+                                "asset": "ACS",
+                                "quote_currency": "USDC",
+                            },
+                        },
+                    )
+                    project_payload = await project_response.json()
+                    project = project_payload["workspace"]["projects"][0]
+
+                    account_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_account",
+                            "account": {
+                                "project_id": project["id"],
+                                "label": "Coinbase Main",
+                                "exchange": "coinbase",
+                                "market_type": "spot",
+                                "enabled": False,
+                                "connection_status": "healthy",
+                                "withdrawal_disabled_confirmed": True,
+                                "credentials": {
+                                    "api_key": "test-api-key-value",
+                                    "secret": "test-secret-value",
+                                },
+                            },
+                        },
+                    )
+                    account_payload = await account_response.json()
+                    account = account_payload["workspace"]["accounts"][0]
+
+                    premature_enable_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_account",
+                            "account": {"id": account["id"], "enabled": True},
+                        },
+                    )
+                    member_approve_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "approve_project",
+                            "project_id": project["id"],
+                        },
+                    )
+
+                    await client.get("/logout")
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": admin.username,
+                            "password": "Strong-pass-1!",
+                        },
+                    )
+                    approve_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "approve_project",
+                            "project_id": project["id"],
+                        },
+                    )
+                    approve_payload = await approve_response.json()
+                    unregistered_owner_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_project",
+                            "project": {
+                                "owner_email": "missing@example.com",
+                                "name": "Missing Owner",
+                                "asset": "BTC",
+                                "quote_currency": "USDT",
+                            },
+                        },
+                    )
+                    unregistered_owner_payload = await unregistered_owner_response.json()
+
+                    await client.get("/logout")
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": member.username,
+                            "password": "Strong-pass-2!",
+                        },
+                    )
+                    enable_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_account",
+                            "account": {"id": account["id"], "enabled": True},
+                        },
+                    )
+                    enable_payload = await enable_response.json()
+
+                    exchange_change_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_account",
+                            "account": {
+                                "id": account["id"],
+                                "exchange": "bybit",
+                                "enabled": False,
+                            },
+                        },
+                    )
+                    exchange_change_payload = await exchange_change_response.json()
+
+                    scope_change_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_project",
+                            "project": {
+                                "id": project["id"],
+                                "asset": "BTC",
+                            },
+                        },
+                    )
+                    scope_change_payload = await scope_change_response.json()
+                    settings_state = await (
+                        await client.get("/api/state?view=settings")
+                    ).json()
+                finally:
+                    await client.close()
+
+            persisted_member = user_store.get_user(member.email)
+            database_bytes = workspace_path.read_bytes()
+
+        self.assertEqual(project_response.status, 200, project_payload)
+        self.assertEqual(project["status"], "pending")
+        self.assertEqual(account_response.status, 200, account_payload)
+        self.assertTrue(account["credentials"]["configured"])
+        self.assertEqual(account["connection_status"], "unverified")
+        self.assertNotIn("api_key", account)
+        self.assertNotIn("secret", account)
+        self.assertEqual(premature_enable_response.status, 403)
+        self.assertEqual(member_approve_response.status, 403)
+        self.assertEqual(approve_response.status, 200, approve_payload)
+        self.assertEqual(approve_payload["workspace"]["projects"][0]["status"], "active")
+        self.assertEqual(unregistered_owner_response.status, 400, unregistered_owner_payload)
+        self.assertIn("not a registered user", unregistered_owner_payload["error"])
+        self.assertIn("ACS", persisted_member.allowed_assets)
+        self.assertEqual(enable_response.status, 200, enable_payload)
+        self.assertTrue(enable_payload["workspace"]["accounts"][0]["enabled"])
+        self.assertEqual(exchange_change_response.status, 400, exchange_change_payload)
+        self.assertIn("re-enter API key", exchange_change_payload["error"])
+        self.assertEqual(scope_change_response.status, 200, scope_change_payload)
+        self.assertEqual(scope_change_payload["workspace"]["projects"][0]["status"], "pending")
+        self.assertFalse(scope_change_payload["workspace"]["accounts"][0]["enabled"])
+        self.assertEqual(settings_state["user_workspace"]["summary"]["project_count"], 1)
+        self.assertNotIn(b"test-api-key-value", database_bytes)
+        self.assertNotIn(b"test-secret-value", database_bytes)
 
 if __name__ == "__main__":
     unittest.main()

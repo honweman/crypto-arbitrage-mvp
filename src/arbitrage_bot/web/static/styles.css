@@ -651,6 +651,30 @@ h2 {
   margin-top: 10px;
 }
 
+#user-workspace-section table {
+  min-width: 760px;
+}
+
+.workspace-safety-confirm {
+  border-color: #d8c38f;
+  background: #fff9e8;
+  color: #705816;
+  text-transform: none;
+}
+
+.workspace-table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-table-actions .control-button,
+.workspace-table-actions .ghost-button,
+.workspace-table-actions .danger-button {
+  min-height: 28px;
+  padding: 5px 9px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -962,6 +986,10 @@ tbody tr:last-child td {
   gap: 5px;
   min-width: 0;
   align-self: end;
+}
+
+.field[hidden] {
+  display: none !important;
 }
 
 .field label,
@@ -1325,6 +1353,9 @@ tbody tr:last-child td {
     min-width: 0;
     border-collapse: separate;
     border-spacing: 0 8px;
+  }
+  #user-workspace-section table {
+    min-width: 0;
   }
   .mobile-card-table thead {
     display: none;

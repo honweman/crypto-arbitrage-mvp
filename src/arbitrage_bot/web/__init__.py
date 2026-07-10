@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import secrets
+import sqlite3
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -154,6 +155,11 @@ from ..trade_log import (
     read_recent_trade_entries,
     summarize_trade_entries,
     write_trade_event,
+)
+from ..user_workspace import (
+    UserExchangeAccount,
+    UserProject,
+    UserWorkspaceStore,
 )
 from ..web_config import (
     _backtest_overrides_from_payload,
@@ -2601,10 +2607,57 @@ def default_web_user_store_path(cfg: BotConfig) -> str:
     )
 
 
+def default_user_workspace_path(cfg: BotConfig) -> str:
+    return cfg.web_security.user_workspace_path or str(
+        Path(cfg.trade_log.path).with_name("user_workspace.sqlite3")
+    )
+
+
 def default_strategy_center_path(cfg: BotConfig) -> str:
     return cfg.strategy_center.path or str(
         Path(cfg.trade_log.path).with_name("strategy_center.sqlite3")
     )
+
+
+def build_user_workspace_payload(
+    store: UserWorkspaceStore,
+    *,
+    user: WebUser | None,
+) -> dict[str, Any]:
+    if user is None:
+        return {
+            "status": "user_account_required",
+            "projects": [],
+            "accounts": [],
+            "exchange_catalog": [],
+            "vault_available": store.cipher.available,
+            "summary": {
+                "project_count": 0,
+                "pending_project_count": 0,
+                "account_count": 0,
+                "configured_account_count": 0,
+            },
+        }
+    try:
+        return store.public_payload(
+            owner_email=user.email,
+            is_admin=user.role == "admin",
+        )
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "projects": [],
+            "accounts": [],
+            "exchange_catalog": [],
+            "vault_available": store.cipher.available,
+            "summary": {
+                "project_count": 0,
+                "pending_project_count": 0,
+                "account_count": 0,
+                "configured_account_count": 0,
+            },
+        }
 
 
 def build_strategy_center_payload(
@@ -4646,6 +4699,10 @@ def _verification_email_sender(request: web.Request) -> VerificationEmailSender:
     return request.app["verification_email_sender"]
 
 
+def _user_workspace_store(request: web.Request) -> UserWorkspaceStore:
+    return request.app["user_workspace_store"]
+
+
 def _strategy_center_store(request: web.Request) -> StrategyCenterStore:
     return request.app["strategy_center_store"]
 
@@ -5317,6 +5374,11 @@ async def api_state(request: web.Request) -> web.Response:
         view=view,
         sections=sections,
     )
+    if view in (None, "settings"):
+        payload["user_workspace"] = build_user_workspace_payload(
+            _user_workspace_store(request),
+            user=requesting_user,
+        )
     if (
         requesting_user is not None
         and requesting_user.role == "admin"
@@ -5841,6 +5903,238 @@ def _api_account_payload_from_request(
     _require_owner_or_admin(user, account.owner_email)
     _require_user_assets(user, account.asset_scope)
     return account
+
+
+def _require_workspace_user(user: WebUser | None) -> WebUser:
+    if user is None:
+        raise PermissionError("registered user account is required")
+    return user
+
+
+def _workspace_owner(
+    raw: dict[str, Any],
+    *,
+    user: WebUser,
+    existing_owner: str = "",
+) -> str:
+    if existing_owner:
+        owner = existing_owner
+    elif user.role == "admin":
+        owner = str(raw.get("owner_email") or user.email).strip().lower()
+    else:
+        owner = user.email
+    _require_owner_or_admin(user, owner)
+    return owner
+
+
+async def api_user_workspace(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    store = _user_workspace_store(request)
+    try:
+        user = _require_workspace_user(_request_user(request))
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        action = str(payload.get("action") or "").strip().lower()
+        if not action:
+            raise ValueError("action is required")
+
+        audit_target = ""
+        audit_detail = ""
+        audit_payload: dict[str, Any] = {}
+
+        if action == "upsert_project":
+            raw = dict(
+                payload.get("project")
+                if isinstance(payload.get("project"), dict)
+                else payload
+            )
+            project_id = str(raw.get("id") or "").strip()
+            existing = store.get_project(project_id) if project_id else None
+            if existing is not None:
+                _require_owner_or_admin(user, existing.owner_email)
+                base = existing.to_dict()
+                base.update(raw)
+                raw = base
+            owner = _workspace_owner(
+                raw,
+                user=user,
+                existing_owner=existing.owner_email if existing else "",
+            )
+            if _user_store(request).get_user(owner) is None:
+                raise ValueError("project owner is not a registered user")
+            raw["owner_email"] = owner
+            scope_changed = bool(
+                existing is not None
+                and (
+                    str(raw.get("asset") or "").strip().upper() != existing.asset
+                    or str(
+                        raw.get("quote_currency") or raw.get("quote") or ""
+                    ).strip().upper()
+                    != existing.quote_currency
+                )
+            )
+            raw["status"] = (
+                "pending"
+                if scope_changed and user.role != "admin"
+                else existing.status
+                if existing is not None
+                else "active"
+                if user.role == "admin"
+                else "pending"
+            )
+            project = UserProject.from_dict(raw)
+            if project.status == "active" and user.role == "admin":
+                _user_store(request).admin_grant_asset(
+                    email=project.owner_email,
+                    asset=project.asset,
+            )
+            project = store.upsert_project(project)
+            audit_target = project.id
+            audit_detail = f"saved user project {project.name}"
+            audit_payload = project.to_dict()
+        elif action == "approve_project":
+            _require_admin_user(user)
+            project_id = str(payload.get("project_id") or payload.get("id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _user_store(request).admin_grant_asset(
+                email=project.owner_email,
+                asset=project.asset,
+            )
+            project = store.set_project_status(project.id, "active")
+            audit_target = project.id
+            audit_detail = f"approved user project {project.name}"
+            audit_payload = project.to_dict()
+        elif action == "disable_project":
+            project_id = str(payload.get("project_id") or payload.get("id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            project = store.set_project_status(project.id, "disabled")
+            audit_target = project.id
+            audit_detail = f"disabled user project {project.name}"
+            audit_payload = project.to_dict()
+        elif action == "delete_project":
+            project_id = str(payload.get("project_id") or payload.get("id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            store.delete_project(project.id)
+            audit_target = project.id
+            audit_detail = f"deleted user project {project.name}"
+            audit_payload = {"project_id": project.id}
+        elif action == "upsert_account":
+            raw = dict(
+                payload.get("account")
+                if isinstance(payload.get("account"), dict)
+                else payload
+            )
+            credentials = raw.pop("credentials", None)
+            account_id = str(raw.get("id") or "").strip()
+            existing = store.get_account(account_id) if account_id else None
+            if existing is not None:
+                _require_owner_or_admin(user, existing.owner_email)
+                base = existing.to_dict()
+                base.update(raw)
+                raw = base
+            project_id = str(raw.get("project_id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            owner = _workspace_owner(
+                raw,
+                user=user,
+                existing_owner=existing.owner_email if existing else project.owner_email,
+            )
+            if owner != project.owner_email:
+                raise ValueError("project and exchange account owners must match")
+            raw["owner_email"] = owner
+            raw["connection_status"] = (
+                "unverified"
+                if credentials or existing is None
+                else existing.connection_status
+            )
+            account = UserExchangeAccount.from_dict(raw)
+            exchange_changed = bool(
+                existing is not None and existing.exchange != account.exchange
+            )
+            supplied = credentials if isinstance(credentials, dict) else {}
+            if exchange_changed:
+                required = {"api_key", "secret"}
+                supplied_fields = {
+                    key
+                    for key, value in supplied.items()
+                    if str(value or "").strip()
+                }
+                missing = sorted(required.difference(supplied_fields))
+                if missing:
+                    raise ValueError(
+                        "re-enter API key and secret when changing exchange"
+                    )
+            if account.enabled:
+                if project.status != "active":
+                    raise PermissionError("project approval is required before enabling account")
+                _require_user_assets(user, [project.asset])
+                if not account.withdrawal_disabled_confirmed:
+                    raise ValueError(
+                        "confirm that API withdrawal permission is disabled"
+                    )
+                current_auth = store.credential_status(account.id)
+                has_required = current_auth["configured"] or (
+                    bool(str(supplied.get("api_key") or "").strip())
+                    and bool(str(supplied.get("secret") or "").strip())
+                )
+                if not has_required:
+                    raise ValueError("configure API key and secret before enabling account")
+                if not current_auth["vault_available"]:
+                    raise RuntimeError("credential encryption is not configured")
+            account = store.upsert_account(
+                account,
+                credentials=credentials,
+                replace_credentials=exchange_changed,
+            )
+            audit_target = account.id
+            audit_detail = f"saved encrypted {account.exchange} account"
+            audit_payload = account.to_dict()
+            audit_payload["credentials"] = store.credential_status(account.id)
+        elif action == "delete_account":
+            account_id = str(payload.get("account_id") or payload.get("id") or "").strip()
+            account = store.get_account(account_id)
+            if account is None:
+                raise ValueError(f"exchange account not found: {account_id}")
+            _require_owner_or_admin(user, account.owner_email)
+            store.delete_account(account.id)
+            audit_target = account.id
+            audit_detail = f"deleted encrypted {account.exchange} account"
+            audit_payload = {"account_id": account.id}
+        else:
+            raise ValueError(f"unsupported workspace action: {action}")
+
+        write_web_audit_event(
+            cfg,
+            request,
+            action=f"user_workspace_{action}",
+            target=audit_target,
+            detail=audit_detail,
+            payload=audit_payload,
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "workspace": build_user_workspace_payload(store, user=user),
+            }
+        )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+    except (json.JSONDecodeError, sqlite3.Error, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
 
 
 async def api_strategy_center(request: web.Request) -> web.Response:
@@ -6672,6 +6966,10 @@ def create_app(
     )
     auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
     web_user_store = WebUserStore(default_web_user_store_path(cfg))
+    user_workspace_store = UserWorkspaceStore(
+        default_user_workspace_path(cfg),
+        master_key_env=cfg.web_security.credential_master_key_env,
+    )
     strategy_center_store = StrategyCenterStore(
         default_strategy_center_path(cfg),
         max_recent_signals=cfg.strategy_center.max_recent_signals,
@@ -6680,6 +6978,7 @@ def create_app(
     app["config"] = cfg
     app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
     app["web_user_store"] = web_user_store
+    app["user_workspace_store"] = user_workspace_store
     app["strategy_center_store"] = strategy_center_store
     app["login_rate_limiter"] = LoginRateLimiter()
     app["email_verification_manager"] = EmailVerificationManager(

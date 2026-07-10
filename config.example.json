@@ -214,6 +214,8 @@
     "trust_proxy_headers": true,
     "cookie_secure": true,
     "user_store_path": "data/web_users.json",
+    "user_workspace_path": "data/user_workspace.sqlite3",
+    "credential_master_key_env": "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
     "registration_enabled": false,
     "bootstrap_admin_email_env": "CRYPTO_ARB_WEB_ADMIN_EMAIL",
     "registration_code_env": null,

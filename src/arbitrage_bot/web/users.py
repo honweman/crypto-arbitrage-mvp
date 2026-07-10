@@ -422,6 +422,28 @@ class WebUserStore:
     def list_users(self) -> list[WebUser]:
         return sorted(self._read_users().values(), key=lambda item: item.email)
 
+    def admin_grant_asset(self, *, email: str, asset: str) -> WebUser:
+        normalized_email = normalize_email(email)
+        normalized_asset = str(asset or "").strip().upper()
+        if not normalized_asset:
+            raise ValueError("asset is required")
+        users = self._read_users()
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        assets = list(user.allowed_assets)
+        if normalized_asset not in assets:
+            assets.append(normalized_asset)
+        updated = replace(
+            user,
+            allowed_assets=assets,
+            preferred_asset=user.preferred_asset or normalized_asset,
+            updated_at=time.time(),
+        )
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
+
     def admin_create_user(
         self,
         *,

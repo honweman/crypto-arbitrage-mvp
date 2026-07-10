@@ -421,6 +421,8 @@ class WebSecurityConfig:
     verification_code_ttl_seconds: int = 600
     verification_resend_seconds: int = 60
     verification_max_attempts: int = 5
+    user_workspace_path: str = "data/user_workspace.sqlite3"
+    credential_master_key_env: str | None = "CRYPTO_ARB_CREDENTIAL_MASTER_KEY"
 
 
 @dataclass(frozen=True)
@@ -1263,6 +1265,16 @@ def load_config(path: str | Path) -> BotConfig:
             verification_max_attempts=max(
                 1,
                 int(web_security_raw.get("verification_max_attempts", 5)),
+            ),
+            user_workspace_path=str(
+                web_security_raw.get(
+                    "user_workspace_path",
+                    "data/user_workspace.sqlite3",
+                )
+            ),
+            credential_master_key_env=web_security_raw.get(
+                "credential_master_key_env",
+                "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
             ),
         ),
     )

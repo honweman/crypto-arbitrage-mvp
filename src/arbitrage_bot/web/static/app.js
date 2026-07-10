@@ -28,6 +28,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "holders",
 	      ],
 	      settings: [
+	        "user-workspace-section",
 	        "strategy-settings-cards",
 	        "markets-config",
 	        "carry-config",
@@ -2750,6 +2751,428 @@ function balanceStatusClass(status) {
       renderSignalEvents(center);
     }
 
+    function workspaceProjectLabel(project) {
+      const owner = lastState?.auth?.role === "admin" ? ` · ${project.owner_email}` : "";
+      return `${project.name || project.symbol || project.id} · ${project.symbol || "--"}${owner}`;
+    }
+
+    function workspaceExchange(exchangeId) {
+      return (currentUserWorkspace?.exchange_catalog || []).find(
+        (row) => row.id === exchangeId
+      ) || null;
+    }
+
+    function resetUserProjectForm() {
+      selectedUserProjectId = "";
+      userProjectFormDirty = false;
+      setFieldValue("user-project-id", "");
+      setFieldValue("user-project-name", "");
+      setFieldValue("user-project-asset", "");
+      setFieldValue("user-project-quote", "");
+    }
+
+    function fillUserProjectForm(project) {
+      selectedUserProjectId = project?.id || "";
+      userProjectFormDirty = false;
+      setFieldValue("user-project-id", project?.id || "");
+      setFieldValue("user-project-name", project?.name || "");
+      setFieldValue("user-project-asset", project?.asset || "");
+      setFieldValue("user-project-quote", project?.quote_currency || "");
+      document.getElementById("user-project-name")?.focus();
+    }
+
+    function renderUserProjectForm(workspace) {
+      if (userProjectFormDirty || userProjectFormBusy) return;
+      const selected = (workspace?.projects || []).find(
+        (project) => project.id === selectedUserProjectId
+      );
+      if (selected) {
+        setFieldValue("user-project-id", selected.id);
+        setFieldValue("user-project-name", selected.name);
+        setFieldValue("user-project-asset", selected.asset);
+        setFieldValue("user-project-quote", selected.quote_currency);
+      } else {
+        selectedUserProjectId = "";
+        setFieldValue("user-project-id", "");
+        setFieldValue("user-project-name", "");
+        setFieldValue("user-project-asset", "");
+        setFieldValue("user-project-quote", "");
+      }
+    }
+
+    function renderUserProjects(workspace) {
+      const body = document.getElementById("user-projects");
+      if (!body) return;
+      body.innerHTML = "";
+      const projects = workspace?.projects || [];
+      if (projects.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="5">${escapeHtml(uiText("No projects yet. Create one before adding an exchange account."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      const isAdmin = lastState?.auth?.role === "admin";
+      for (const project of projects) {
+        const tr = document.createElement("tr");
+        const statusClass = project.status === "active" ? "ok" : project.status === "pending" ? "risk-blocked" : "subtle";
+        tr.innerHTML = `
+          <td title="${escapeHtml(project.id || "")}">${escapeHtml(project.name || project.id)}</td>
+          <td>${escapeHtml(project.owner_email || "--")}</td>
+          <td>${escapeHtml(project.symbol || `${project.asset}/${project.quote_currency}`)}</td>
+          <td class="${statusClass}">${escapeHtml(project.status || "--")}</td>
+          <td><div class="workspace-table-actions"></div></td>
+        `;
+        const actions = tr.querySelector(".workspace-table-actions");
+        const editButton = document.createElement("button");
+        editButton.className = "control-button";
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => fillUserProjectForm(project));
+        actions.appendChild(editButton);
+        if (isAdmin && project.status !== "active") {
+          const approveButton = document.createElement("button");
+          approveButton.className = "control-button";
+          approveButton.type = "button";
+          approveButton.textContent = "Approve";
+          approveButton.addEventListener("click", () => approveUserProject(project, approveButton));
+          actions.appendChild(approveButton);
+        }
+        if (project.status === "active") {
+          const disableButton = document.createElement("button");
+          disableButton.className = "ghost-button danger";
+          disableButton.type = "button";
+          disableButton.textContent = "Disable";
+          disableButton.addEventListener("click", () => disableUserProject(project, disableButton));
+          actions.appendChild(disableButton);
+        }
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger-button";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteUserProject(project, deleteButton));
+        actions.appendChild(deleteButton);
+        body.appendChild(tr);
+      }
+    }
+
+    function resetUserExchangeAccountForm() {
+      selectedUserExchangeAccountId = "";
+      userExchangeAccountFormDirty = false;
+      setFieldValue("user-exchange-account-id", "");
+      setFieldValue("user-exchange-label", "");
+      setFieldValue("user-exchange-api-key", "");
+      setFieldValue("user-exchange-secret", "");
+      setFieldValue("user-exchange-passphrase", "");
+      setCheckedValue("user-exchange-enabled", false);
+      setCheckedValue("user-exchange-no-withdraw", false);
+      const projects = currentUserWorkspace?.projects || [];
+      const defaultProject = projects.find((project) => project.status === "active") || projects[0];
+      const defaultExchange = currentUserWorkspace?.exchange_catalog?.[0];
+      setFieldValue("user-exchange-project", defaultProject?.id || "");
+      setFieldValue("user-exchange-id", defaultExchange?.id || "");
+      syncUserExchangeMarketTypes();
+    }
+
+    function fillUserExchangeAccountForm(account) {
+      selectedUserExchangeAccountId = account?.id || "";
+      userExchangeAccountFormDirty = false;
+      setFieldValue("user-exchange-account-id", account?.id || "");
+      setFieldValue("user-exchange-project", account?.project_id || "");
+      setFieldValue("user-exchange-label", account?.label || "");
+      setFieldValue("user-exchange-id", account?.exchange || "");
+      setFieldValue("user-exchange-api-key", "");
+      setFieldValue("user-exchange-secret", "");
+      setFieldValue("user-exchange-passphrase", "");
+      setCheckedValue("user-exchange-enabled", account?.enabled);
+      setCheckedValue(
+        "user-exchange-no-withdraw",
+        account?.withdrawal_disabled_confirmed
+      );
+      syncUserExchangeMarketTypes(account?.market_type || "spot");
+      document.getElementById("user-exchange-label")?.focus();
+    }
+
+    function syncUserExchangeMarketTypes(preferredMarketType = "") {
+      const exchangeId = document.getElementById("user-exchange-id")?.value || "";
+      const exchange = workspaceExchange(exchangeId);
+      const currentMarketType = preferredMarketType
+        || document.getElementById("user-exchange-market-type")?.value
+        || "spot";
+      const rows = (exchange?.market_types || []).map((marketType) => ({
+        value: marketType,
+        label: marketType === "swap" ? "Perpetual Swap" : marketType === "future" ? "Futures" : "Spot",
+      }));
+      const selectedMarketType = rows.some((row) => row.value === currentMarketType)
+        ? currentMarketType
+        : rows[0]?.value || "";
+      setSelectOptions(
+        "user-exchange-market-type",
+        rows,
+        selectedMarketType,
+        "Select market"
+      );
+      const needsPassphrase = (exchange?.required_credentials || []).includes("passphrase");
+      const passphraseField = document.getElementById("user-exchange-passphrase-field");
+      if (passphraseField) passphraseField.hidden = !needsPassphrase;
+      const projectId = document.getElementById("user-exchange-project")?.value || "";
+      const project = (currentUserWorkspace?.projects || []).find(
+        (row) => row.id === projectId
+      );
+      const enabled = document.getElementById("user-exchange-enabled");
+      if (enabled) {
+        enabled.disabled = !project || project.status !== "active";
+        enabled.title = enabled.disabled
+          ? uiText("The project must be approved before this account can be enabled.")
+          : "";
+        if (enabled.disabled) enabled.checked = false;
+      }
+    }
+
+    function renderUserExchangeAccountForm(workspace) {
+      if (userExchangeAccountFormDirty || userExchangeAccountFormBusy) return;
+      const projectRows = workspace?.projects || [];
+      const projects = projectRows.map((project) => ({
+        value: project.id,
+        label: workspaceProjectLabel(project),
+        title: `${project.status} · ${project.owner_email}`,
+      }));
+      const exchanges = (workspace?.exchange_catalog || []).map((exchange) => ({
+        value: exchange.id,
+        label: exchange.label || exchange.id,
+        title: (exchange.market_types || []).join(", "),
+      }));
+      const selected = (workspace?.accounts || []).find(
+        (account) => account.id === selectedUserExchangeAccountId
+      );
+      const projectValue = selected?.project_id
+        || document.getElementById("user-exchange-project")?.value
+        || projects.find((row) => projectRows.find((project) => project.id === row.value)?.status === "active")?.value
+        || projects[0]?.value
+        || "";
+      const exchangeValue = selected?.exchange
+        || document.getElementById("user-exchange-id")?.value
+        || exchanges[0]?.value
+        || "";
+      setSelectOptions("user-exchange-project", projects, projectValue, "Select project");
+      setSelectOptions("user-exchange-id", exchanges, exchangeValue, "Select exchange");
+      if (selected) {
+        setFieldValue("user-exchange-account-id", selected.id);
+        setFieldValue("user-exchange-label", selected.label);
+        setCheckedValue("user-exchange-enabled", selected.enabled);
+        setCheckedValue(
+          "user-exchange-no-withdraw",
+          selected.withdrawal_disabled_confirmed
+        );
+      } else {
+        selectedUserExchangeAccountId = "";
+        setFieldValue("user-exchange-account-id", "");
+      }
+      setFieldValue("user-exchange-api-key", "");
+      setFieldValue("user-exchange-secret", "");
+      setFieldValue("user-exchange-passphrase", "");
+      syncUserExchangeMarketTypes(selected?.market_type || "");
+    }
+
+    function renderUserExchangeAccounts(workspace) {
+      const body = document.getElementById("user-exchange-accounts");
+      if (!body) return;
+      body.innerHTML = "";
+      const accounts = workspace?.accounts || [];
+      const projectMap = new Map(
+        (workspace?.projects || []).map((project) => [project.id, project])
+      );
+      if (accounts.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">${escapeHtml(uiText("No exchange accounts yet."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const account of accounts) {
+        const project = projectMap.get(account.project_id);
+        const credentials = account.credentials || {};
+        const credentialText = credentials.configured ? "Encrypted / configured" : "Missing";
+        const accountStatus = account.enabled
+          ? "Enabled"
+          : project?.status !== "active"
+            ? "Waiting for project"
+            : "Disabled";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || account.id)}<br><span class="subtle">${escapeHtml(account.owner_email || "--")}</span></td>
+          <td>${escapeHtml(project?.name || account.project_id || "--")}<br><span class="subtle">${escapeHtml(project?.symbol || "--")}</span></td>
+          <td>${escapeHtml(workspaceExchange(account.exchange)?.label || account.exchange)}<br><span class="subtle">${escapeHtml(account.market_type || "spot")}</span></td>
+          <td class="${credentials.configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
+          <td class="${account.enabled ? "ok" : "subtle"}">${escapeHtml(accountStatus)}<br><span class="subtle">${escapeHtml(account.connection_status || "unverified")}</span></td>
+          <td><div class="workspace-table-actions"></div></td>
+        `;
+        const actions = tr.querySelector(".workspace-table-actions");
+        const editButton = document.createElement("button");
+        editButton.className = "control-button";
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => fillUserExchangeAccountForm(account));
+        actions.appendChild(editButton);
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger-button";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteUserExchangeAccount(account, deleteButton));
+        actions.appendChild(deleteButton);
+        body.appendChild(tr);
+      }
+    }
+
+    function setUserWorkspace(workspace) {
+      currentUserWorkspace = workspace || null;
+      if (lastState) lastState.user_workspace = workspace;
+      if (pageStateCache.settings) pageStateCache.settings.user_workspace = workspace;
+      renderUserWorkspace(workspace);
+    }
+
+    function renderUserWorkspace(workspace) {
+      currentUserWorkspace = workspace || null;
+      const summary = workspace?.summary || {};
+      const vaultText = workspace?.vault_available ? "encrypted vault ready" : "credential vault unavailable";
+      const statusText = workspace?.status === "user_account_required"
+        ? "registered account required"
+        : workspace?.error || `${summary.project_count || 0} projects · ${summary.pending_project_count || 0} pending · ${summary.configured_account_count || 0}/${summary.account_count || 0} API accounts configured · ${vaultText}`;
+      text("user-workspace-meta", statusText);
+      const formsDisabled = workspace?.status === "user_account_required" || workspace?.status === "error";
+      document.querySelectorAll("#user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button").forEach((control) => {
+        control.disabled = formsDisabled;
+      });
+      renderUserProjectForm(workspace);
+      renderUserProjects(workspace);
+      renderUserExchangeAccountForm(workspace);
+      renderUserExchangeAccounts(workspace);
+      if (!formsDisabled) syncUserExchangeMarketTypes();
+    }
+
+    async function postUserWorkspace(payload) {
+      const res = await fetch("/api/user-workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `workspace update failed (${res.status})`);
+      setUserWorkspace(result.workspace);
+      return result.workspace;
+    }
+
+    async function applyUserProject(event) {
+      event.preventDefault();
+      if (userProjectFormBusy) return;
+      userProjectFormBusy = true;
+      const button = document.getElementById("user-project-save");
+      button.disabled = true;
+      const id = document.getElementById("user-project-id").value.trim();
+      const project = {
+        name: document.getElementById("user-project-name").value.trim(),
+        asset: document.getElementById("user-project-asset").value.trim().toUpperCase(),
+        quote_currency: document.getElementById("user-project-quote").value.trim().toUpperCase(),
+      };
+      if (id) project.id = id;
+      try {
+        await postUserWorkspace({ action: "upsert_project", project });
+        resetUserProjectForm();
+        renderUserWorkspace(currentUserWorkspace);
+      } catch (error) {
+        text("user-workspace-meta", `project update failed: ${error.message || error}`);
+      } finally {
+        userProjectFormBusy = false;
+        button.disabled = false;
+      }
+    }
+
+    async function approveUserProject(project, button) {
+      button.disabled = true;
+      try {
+        await postUserWorkspace({ action: "approve_project", project_id: project.id });
+      } catch (error) {
+        text("user-workspace-meta", `approval failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function disableUserProject(project, button) {
+      if (!dangerConfirm("Disable this project and all of its exchange accounts?")) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({ action: "disable_project", project_id: project.id });
+      } catch (error) {
+        text("user-workspace-meta", `disable failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function deleteUserProject(project, button) {
+      if (!dangerConfirm("Delete this project?", "Delete its exchange accounts first.")) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({ action: "delete_project", project_id: project.id });
+        if (selectedUserProjectId === project.id) resetUserProjectForm();
+      } catch (error) {
+        text("user-workspace-meta", `delete failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function applyUserExchangeAccount(event) {
+      event.preventDefault();
+      if (userExchangeAccountFormBusy) return;
+      userExchangeAccountFormBusy = true;
+      const button = document.getElementById("user-exchange-save");
+      button.disabled = true;
+      const id = document.getElementById("user-exchange-account-id").value.trim();
+      const credentials = {};
+      const apiKey = document.getElementById("user-exchange-api-key").value.trim();
+      const secret = document.getElementById("user-exchange-secret").value.trim();
+      const passphrase = document.getElementById("user-exchange-passphrase").value.trim();
+      if (apiKey) credentials.api_key = apiKey;
+      if (secret) credentials.secret = secret;
+      if (passphrase) credentials.passphrase = passphrase;
+      const account = {
+        project_id: document.getElementById("user-exchange-project").value,
+        label: document.getElementById("user-exchange-label").value.trim(),
+        exchange: document.getElementById("user-exchange-id").value,
+        market_type: document.getElementById("user-exchange-market-type").value,
+        enabled: document.getElementById("user-exchange-enabled").checked,
+        withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
+      };
+      if (id) account.id = id;
+      if (Object.keys(credentials).length) account.credentials = credentials;
+      try {
+        await postUserWorkspace({ action: "upsert_account", account });
+        resetUserExchangeAccountForm();
+        renderUserWorkspace(currentUserWorkspace);
+      } catch (error) {
+        text("user-workspace-meta", `account update failed: ${error.message || error}`);
+      } finally {
+        document.getElementById("user-exchange-api-key").value = "";
+        document.getElementById("user-exchange-secret").value = "";
+        document.getElementById("user-exchange-passphrase").value = "";
+        userExchangeAccountFormBusy = false;
+        button.disabled = false;
+      }
+    }
+
+    async function deleteUserExchangeAccount(account, button) {
+      if (!dangerConfirm("Delete this exchange account and its encrypted API credentials?")) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({ action: "delete_account", account_id: account.id });
+        if (selectedUserExchangeAccountId === account.id) resetUserExchangeAccountForm();
+      } catch (error) {
+        text("user-workspace-meta", `delete failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function formatDue(ts) {
       if (!ts) return "--";
       const seconds = ts - Date.now() / 1000;
@@ -3292,8 +3715,15 @@ function balanceStatusClass(status) {
     let apiAccountFormBusy = false;
     let fundingArbFormDirty = false;
     let fundingArbFormBusy = false;
-    let signalBotFormDirty = false;
-    let signalBotFormBusy = false;
+	    let signalBotFormDirty = false;
+	    let signalBotFormBusy = false;
+	    let userProjectFormDirty = false;
+	    let userProjectFormBusy = false;
+	    let selectedUserProjectId = "";
+	    let userExchangeAccountFormDirty = false;
+	    let userExchangeAccountFormBusy = false;
+	    let selectedUserExchangeAccountId = "";
+	    let currentUserWorkspace = null;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -4758,6 +5188,7 @@ function balanceStatusClass(status) {
       lastVisibleRenderAt[activePage] = now;
       if (activePage === "settings") {
         if (Array.isArray(data.market_limits)) currentMarketLimits = data.market_limits;
+	        renderOpenSection("user-workspace-section", () => renderUserWorkspace(data.user_workspace));
         renderOpenSection("strategy-settings-cards", () => renderStrategySettingCards(data));
         renderOpenSection("markets-config", () => renderMarketsConfig(data));
         renderOpenSection("carry-config", () => renderCashCarryConfig(data));
@@ -4888,8 +5319,23 @@ function balanceStatusClass(status) {
       setProgramRunning(event.target.checked);
     });
     document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
-    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
-    document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
+	    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
+	    document.getElementById("user-project-form").addEventListener("input", () => {
+	      userProjectFormDirty = true;
+	    });
+	    document.getElementById("user-project-form").addEventListener("submit", applyUserProject);
+	    document.getElementById("user-project-new").addEventListener("click", resetUserProjectForm);
+	    document.getElementById("user-exchange-account-form").addEventListener("input", () => {
+	      userExchangeAccountFormDirty = true;
+	    });
+	    document.getElementById("user-exchange-account-form").addEventListener("change", (event) => {
+	      userExchangeAccountFormDirty = true;
+	      if (event.target?.id === "user-exchange-id") syncUserExchangeMarketTypes();
+	      if (event.target?.id === "user-exchange-project") syncUserExchangeMarketTypes();
+	    });
+	    document.getElementById("user-exchange-account-form").addEventListener("submit", applyUserExchangeAccount);
+	    document.getElementById("user-exchange-new").addEventListener("click", resetUserExchangeAccountForm);
+	    document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
     document.getElementById("carry-form").addEventListener("submit", addCashCarryPair);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
     document.getElementById("mm-form").addEventListener("input", (event) => {

@@ -221,6 +221,14 @@ class ConfigTest(unittest.TestCase):
             "CRYPTO_ARB_WEB_ALLOWED_IPS",
         )
         self.assertEqual(cfg.web_security.user_store_path, "data/web_users.json")
+        self.assertEqual(
+            cfg.web_security.user_workspace_path,
+            "data/user_workspace.sqlite3",
+        )
+        self.assertEqual(
+            cfg.web_security.credential_master_key_env,
+            "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
+        )
         self.assertFalse(cfg.web_security.registration_enabled)
         self.assertEqual(
             cfg.web_security.bootstrap_admin_email_env,

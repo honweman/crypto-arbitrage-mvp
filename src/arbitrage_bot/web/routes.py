@@ -29,6 +29,7 @@ def register_routes(app: web.Application) -> None:
         api_signal_webhook,
         api_strategy_center,
         api_strategy_control,
+        api_user_workspace,
         forgot_password_code_post,
         forgot_password_get,
         index,
@@ -64,6 +65,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/execution-algo", api_execution_algo)
     app.router.add_post("/api/backtest", api_backtest)
     app.router.add_post("/api/strategy-center", api_strategy_center)
+    app.router.add_post("/api/user-workspace", api_user_workspace)
     app.router.add_post("/api/signal/{source}", api_signal_webhook)
     app.router.add_post("/api/signal", api_signal_webhook)
     app.router.add_post("/api/auto-buy-sell", api_slow_execution)
