@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
@@ -184,11 +184,15 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260710-workspace1" defer></script>',
+            '<script src="/static/app.js?v=20260710-workspace5" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260710-workspace1" defer></script>',
+            '<script src="/static/i18n.js?v=20260710-workspace5" defer></script>',
+            INDEX_HTML,
+        )
+        self.assertIn(
+            'id="user-workspace-notice" class="subtle" role="status"',
             INDEX_HTML,
         )
 
@@ -284,7 +288,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260710-workspace1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260710-workspace5">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -5872,6 +5876,36 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     project_payload = await project_response.json()
                     project = project_payload["workspace"]["projects"][0]
 
+                    with patch.object(
+                        app["workspace_market_discovery"],
+                        "discover",
+                        new_callable=AsyncMock,
+                    ) as discovery_mock:
+                        discovery_mock.return_value = (
+                            [
+                                {
+                                    "symbol": "ACS/USDC",
+                                    "base": "ACS",
+                                    "quote": "USDC",
+                                    "active": True,
+                                    "type": "spot",
+                                    "cost_min": 1.0,
+                                }
+                            ],
+                            False,
+                        )
+                        discovery_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "discover_markets",
+                                "project_id": project["id"],
+                                "exchange": "coinbase",
+                                "market_type": "spot",
+                                "api_variant": "default",
+                            },
+                        )
+                        discovery_payload = await discovery_response.json()
+
                     account_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -5947,6 +5981,43 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                             "password": "Strong-pass-2!",
                         },
                     )
+                    untested_enable_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_account",
+                            "account": {"id": account["id"], "enabled": True},
+                        },
+                    )
+                    untested_enable_payload = await untested_enable_response.json()
+                    with patch.object(
+                        app["workspace_account_checker"],
+                        "check",
+                        new_callable=AsyncMock,
+                    ) as check_mock:
+                        check_mock.return_value = {
+                            "status": "healthy",
+                            "checked_at": time.time(),
+                            "latency_ms": 12.5,
+                            "exchange": "coinbase",
+                            "market_type": "spot",
+                            "api_variant": "default",
+                            "symbol": "ACS/USDC",
+                            "market": {"symbol": "ACS/USDC", "active": True},
+                            "order_book": {"available": True},
+                            "balances": [
+                                {"currency": "ACS", "total": 10.0},
+                                {"currency": "USDC", "total": 20.0},
+                            ],
+                            "open_order_count": 0,
+                        }
+                        connection_test_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "test_account",
+                                "account_id": account["id"],
+                            },
+                        )
+                        connection_test_payload = await connection_test_response.json()
                     enable_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -5991,9 +6062,12 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(project_response.status, 200, project_payload)
         self.assertEqual(project["status"], "pending")
+        self.assertEqual(discovery_response.status, 200, discovery_payload)
+        self.assertEqual(discovery_payload["markets"][0]["symbol"], "ACS/USDC")
         self.assertEqual(account_response.status, 200, account_payload)
         self.assertTrue(account["credentials"]["configured"])
         self.assertEqual(account["connection_status"], "unverified")
+        self.assertEqual(account["symbol"], "ACS/USDC")
         self.assertNotIn("api_key", account)
         self.assertNotIn("secret", account)
         self.assertEqual(premature_enable_response.status, 403)
@@ -6003,8 +6077,18 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unregistered_owner_response.status, 400, unregistered_owner_payload)
         self.assertIn("not a registered user", unregistered_owner_payload["error"])
         self.assertIn("ACS", persisted_member.allowed_assets)
+        self.assertEqual(untested_enable_response.status, 400, untested_enable_payload)
+        self.assertIn("connection test", untested_enable_payload["error"])
+        self.assertEqual(connection_test_response.status, 200, connection_test_payload)
+        self.assertEqual(
+            connection_test_payload["connection_test"]["status"],
+            "healthy",
+        )
         self.assertEqual(enable_response.status, 200, enable_payload)
         self.assertTrue(enable_payload["workspace"]["accounts"][0]["enabled"])
+        self.assertTrue(
+            enable_payload["workspace"]["accounts"][0]["connection_fresh"]
+        )
         self.assertEqual(exchange_change_response.status, 400, exchange_change_payload)
         self.assertIn("re-enter API key", exchange_change_payload["error"])
         self.assertEqual(scope_change_response.status, 200, scope_change_payload)

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260710-workspace1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260710-workspace5">
 
 </head>
 <body>
@@ -398,6 +398,7 @@
       <div class="section-title">
         <h2>Projects & Exchange Accounts</h2>
         <span id="user-workspace-meta" class="subtle"></span>
+        <span id="user-workspace-notice" class="subtle" role="status" aria-live="polite"></span>
       </div>
       <div class="form-divider">Projects</div>
       <form id="user-project-form" class="control-panel">
@@ -451,6 +452,15 @@
           <label for="user-exchange-market-type">Market</label>
           <select id="user-exchange-market-type" required></select>
         </div>
+        <div class="field" id="user-exchange-variant-field" hidden>
+          <label for="user-exchange-api-variant">API Region</label>
+          <select id="user-exchange-api-variant"></select>
+        </div>
+        <div class="field wide-field">
+          <label for="user-exchange-symbol">Trading Pair</label>
+          <select id="user-exchange-symbol" required></select>
+        </div>
+        <button id="user-exchange-load-markets" class="ghost-button" type="button">Load Pairs</button>
         <div class="field wide-field">
           <label for="user-exchange-api-key">API Key</label>
           <textarea id="user-exchange-api-key" rows="2" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
@@ -471,7 +481,7 @@
           <input id="user-exchange-no-withdraw" type="checkbox">
           I confirm withdrawal permission is disabled for this API key
         </label>
-        <div class="subtle wide-field">Use a trade-only API key. Credentials are encrypted and never shown again.</div>
+        <div class="subtle wide-field">Use a trade-only API key. Save it, test the connection, then enable the account. Credentials are encrypted and never shown again.</div>
         <button id="user-exchange-save" class="control-button" type="submit">Save Account</button>
         <button id="user-exchange-new" class="ghost-button" type="button">New</button>
       </form>
@@ -1934,8 +1944,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260710-workspace1" defer></script>
-  <script src="/static/app.js?v=20260710-workspace1" defer></script>
+  <script src="/static/i18n.js?v=20260710-workspace5" defer></script>
+  <script src="/static/app.js?v=20260710-workspace5" defer></script>
 
 </body>
 </html>

@@ -623,8 +623,20 @@ class BithumbV2Client:
 
 
 class ExchangeManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        credentials_by_key: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         self._clients: dict[str, Any] = {}
+        self._credentials_by_key = {
+            str(key): {
+                str(field): str(value).replace("\\n", "\n")
+                for field, value in credentials.items()
+                if value
+            }
+            for key, credentials in (credentials_by_key or {}).items()
+        }
 
     def _build_client(self, cfg: ExchangeConfig) -> Any:
         ccxt = importlib.import_module("ccxt.async_support")
@@ -645,9 +657,18 @@ class ExchangeManager:
         if cfg.market_type != "spot":
             options["options"].setdefault("defaultType", cfg.market_type)
 
-        api_key = _credential_from_env(cfg.api_key_env)
-        secret = _credential_from_env(cfg.secret_env)
-        password = _credential_from_env(cfg.password_env)
+        direct_credentials = self._credentials_by_key.get(cfg.key, {})
+        api_key = direct_credentials.get("api_key") or _credential_from_env(
+            cfg.api_key_env
+        )
+        secret = direct_credentials.get("secret") or _credential_from_env(
+            cfg.secret_env
+        )
+        password = (
+            direct_credentials.get("password")
+            or direct_credentials.get("passphrase")
+            or _credential_from_env(cfg.password_env)
+        )
         if api_key:
             options["apiKey"] = api_key
         if secret:
@@ -681,6 +702,8 @@ class ExchangeManager:
             *[client.close() for client in self._clients.values()],
             return_exceptions=True,
         )
+        self._clients.clear()
+        self._credentials_by_key.clear()
 
     async def fetch_order_book(
         self,

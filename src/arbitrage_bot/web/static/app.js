@@ -2855,6 +2855,37 @@ function balanceStatusClass(status) {
       }
     }
 
+    function workspaceProject(projectId) {
+      return (currentUserWorkspace?.projects || []).find(
+        (project) => project.id === projectId
+      ) || null;
+    }
+
+    function workspaceSelectedAccount() {
+      const accountId = document.getElementById("user-exchange-account-id")?.value || "";
+      return (currentUserWorkspace?.accounts || []).find(
+        (account) => account.id === accountId
+      ) || null;
+    }
+
+    function workspaceMarketCacheKey({ project, exchange, marketType, apiVariant }) {
+      return [project?.asset || "", exchange || "", marketType || "", apiVariant || ""].join(":");
+    }
+
+    function workspaceConnectionFresh(account) {
+      if (typeof account?.connection_fresh === "boolean") {
+        return account.connection_fresh;
+      }
+      const checkedAt = Number(account?.connection_checked_at || 0);
+      const ageSeconds = Date.now() / 1000 - checkedAt;
+      return Boolean(
+        account?.connection_status === "healthy"
+        && checkedAt > 0
+        && ageSeconds >= 0
+        && ageSeconds <= 86400
+      );
+    }
+
     function resetUserExchangeAccountForm() {
       selectedUserExchangeAccountId = "";
       userExchangeAccountFormDirty = false;
@@ -2870,7 +2901,7 @@ function balanceStatusClass(status) {
       const defaultExchange = currentUserWorkspace?.exchange_catalog?.[0];
       setFieldValue("user-exchange-project", defaultProject?.id || "");
       setFieldValue("user-exchange-id", defaultExchange?.id || "");
-      syncUserExchangeMarketTypes();
+      syncUserExchangeMarketTypes("", "", defaultProject?.symbol || "");
     }
 
     function fillUserExchangeAccountForm(account) {
@@ -2888,43 +2919,113 @@ function balanceStatusClass(status) {
         "user-exchange-no-withdraw",
         account?.withdrawal_disabled_confirmed
       );
-      syncUserExchangeMarketTypes(account?.market_type || "spot");
+      syncUserExchangeMarketTypes(
+        account?.market_type || "spot",
+        account?.api_variant || "",
+        account?.symbol || ""
+      );
       document.getElementById("user-exchange-label")?.focus();
     }
 
-    function syncUserExchangeMarketTypes(preferredMarketType = "") {
+    function syncUserExchangeMarketTypes(
+      preferredMarketType = "",
+      preferredVariant = "",
+      preferredSymbol = ""
+    ) {
       const exchangeId = document.getElementById("user-exchange-id")?.value || "";
       const exchange = workspaceExchange(exchangeId);
       const currentMarketType = preferredMarketType
         || document.getElementById("user-exchange-market-type")?.value
         || "spot";
-      const rows = (exchange?.market_types || []).map((marketType) => ({
+      const marketRows = (exchange?.market_types || []).map((marketType) => ({
         value: marketType,
         label: marketType === "swap" ? "Perpetual Swap" : marketType === "future" ? "Futures" : "Spot",
       }));
-      const selectedMarketType = rows.some((row) => row.value === currentMarketType)
+      const selectedMarketType = marketRows.some((row) => row.value === currentMarketType)
         ? currentMarketType
-        : rows[0]?.value || "";
+        : marketRows[0]?.value || "";
       setSelectOptions(
         "user-exchange-market-type",
-        rows,
+        marketRows,
         selectedMarketType,
         "Select market"
       );
+
+      const variants = (exchange?.variants || []).map((variant) => ({
+        value: variant.id,
+        label: variant.label || variant.id,
+      }));
+      const currentVariant = preferredVariant
+        || document.getElementById("user-exchange-api-variant")?.value
+        || exchange?.default_variant
+        || variants[0]?.value
+        || "default";
+      const selectedVariant = variants.some((row) => row.value === currentVariant)
+        ? currentVariant
+        : exchange?.default_variant || variants[0]?.value || "default";
+      setSelectOptions(
+        "user-exchange-api-variant",
+        variants,
+        selectedVariant,
+        "Select API region"
+      );
+      const variantField = document.getElementById("user-exchange-variant-field");
+      if (variantField) variantField.hidden = variants.length <= 1;
+
+      const projectId = document.getElementById("user-exchange-project")?.value || "";
+      const project = workspaceProject(projectId);
+      const currentSymbol = preferredSymbol
+        || document.getElementById("user-exchange-symbol")?.value
+        || project?.symbol
+        || "";
+      const cacheKey = workspaceMarketCacheKey({
+        project,
+        exchange: exchangeId,
+        marketType: selectedMarketType,
+        apiVariant: selectedVariant,
+      });
+      const discovered = discoveredUserMarkets.get(cacheKey) || [];
+      const symbolRows = discovered.map((market) => ({
+        value: market.symbol,
+        label: market.cost_min
+          ? `${market.symbol} · min ${fmt.format(market.cost_min)} ${market.quote}`
+          : market.symbol,
+        title: `${market.type || selectedMarketType} · ${market.active === false ? "inactive" : "active"}`,
+      }));
+      if (project?.symbol && !symbolRows.some((row) => row.value === project.symbol)) {
+        symbolRows.unshift({ value: project.symbol, label: project.symbol });
+      }
+      setSelectOptions(
+        "user-exchange-symbol",
+        symbolRows,
+        currentSymbol,
+        "Load or select pair"
+      );
+
       const needsPassphrase = (exchange?.required_credentials || []).includes("passphrase");
       const passphraseField = document.getElementById("user-exchange-passphrase-field");
       if (passphraseField) passphraseField.hidden = !needsPassphrase;
-      const projectId = document.getElementById("user-exchange-project")?.value || "";
-      const project = (currentUserWorkspace?.projects || []).find(
-        (row) => row.id === projectId
+
+      const selectedAccount = workspaceSelectedAccount();
+      const sameConnection = Boolean(
+        selectedAccount
+        && selectedAccount.project_id === projectId
+        && selectedAccount.exchange === exchangeId
+        && selectedAccount.market_type === selectedMarketType
+        && selectedAccount.api_variant === selectedVariant
+        && selectedAccount.symbol === currentSymbol
       );
+      const connectionReady = sameConnection && workspaceConnectionFresh(selectedAccount);
+      const projectReady = project?.status === "active";
       const enabled = document.getElementById("user-exchange-enabled");
       if (enabled) {
-        enabled.disabled = !project || project.status !== "active";
-        enabled.title = enabled.disabled
+        enabled.disabled = !projectReady || (!connectionReady && !selectedAccount?.enabled);
+        if (!connectionReady) enabled.checked = false;
+        enabled.title = !projectReady
           ? uiText("The project must be approved before this account can be enabled.")
-          : "";
-        if (enabled.disabled) enabled.checked = false;
+          : !connectionReady
+            ? uiText("Run a successful connection test before enabling this account.")
+            : "";
       }
     }
 
@@ -2970,7 +3071,11 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
-      syncUserExchangeMarketTypes(selected?.market_type || "");
+      syncUserExchangeMarketTypes(
+        selected?.market_type || "",
+        selected?.api_variant || "",
+        selected?.symbol || ""
+      );
     }
 
     function renderUserExchangeAccounts(workspace) {
@@ -2991,18 +3096,34 @@ function balanceStatusClass(status) {
         const project = projectMap.get(account.project_id);
         const credentials = account.credentials || {};
         const credentialText = credentials.configured ? "Encrypted / configured" : "Missing";
+        const connectionFresh = workspaceConnectionFresh(account);
         const accountStatus = account.enabled
           ? "Enabled"
           : project?.status !== "active"
             ? "Waiting for project"
-            : "Disabled";
+            : account.connection_status === "error"
+              ? "Connection error"
+              : connectionFresh
+                ? "Ready to enable"
+                : "Needs connection test";
+        const connectionText = account.connection_checked_at
+          ? `${account.connection_status || "unverified"} · ${formatAge(account.connection_checked_at)}`
+          : account.connection_status || "unverified";
+        const connectionClass = account.connection_status === "healthy"
+          ? "ok"
+          : account.connection_status === "error"
+            ? "missing"
+            : "subtle";
+        const variantText = account.api_variant && !["default", "global"].includes(account.api_variant)
+          ? ` · ${account.api_variant}`
+          : "";
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || account.id)}<br><span class="subtle">${escapeHtml(account.owner_email || "--")}</span></td>
-          <td>${escapeHtml(project?.name || account.project_id || "--")}<br><span class="subtle">${escapeHtml(project?.symbol || "--")}</span></td>
-          <td>${escapeHtml(workspaceExchange(account.exchange)?.label || account.exchange)}<br><span class="subtle">${escapeHtml(account.market_type || "spot")}</span></td>
+          <td>${escapeHtml(project?.name || account.project_id || "--")}<br><span class="subtle">${escapeHtml(account.symbol || project?.symbol || "--")}</span></td>
+          <td>${escapeHtml(workspaceExchange(account.exchange)?.label || account.exchange)}<br><span class="subtle">${escapeHtml(`${account.market_type || "spot"}${variantText}`)}</span></td>
           <td class="${credentials.configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
-          <td class="${account.enabled ? "ok" : "subtle"}">${escapeHtml(accountStatus)}<br><span class="subtle">${escapeHtml(account.connection_status || "unverified")}</span></td>
+          <td class="${connectionClass}" title="${escapeHtml(account.connection_error || "")}">${escapeHtml(accountStatus)}<br><span class="subtle">${escapeHtml(connectionText)}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");
@@ -3012,6 +3133,14 @@ function balanceStatusClass(status) {
         editButton.textContent = "Edit";
         editButton.addEventListener("click", () => fillUserExchangeAccountForm(account));
         actions.appendChild(editButton);
+        const testButton = document.createElement("button");
+        testButton.className = "ghost-button";
+        testButton.type = "button";
+        testButton.textContent = "Test";
+        testButton.disabled = !credentials.configured || !account.symbol;
+        testButton.title = testButton.disabled ? uiText("Save credentials and a trading pair first.") : "";
+        testButton.addEventListener("click", () => testUserExchangeAccount(account, testButton));
+        actions.appendChild(testButton);
         const deleteButton = document.createElement("button");
         deleteButton.className = "danger-button";
         deleteButton.type = "button";
@@ -3029,6 +3158,12 @@ function balanceStatusClass(status) {
       renderUserWorkspace(workspace);
     }
 
+    function setUserWorkspaceNotice(value, durationMs = 12000) {
+      userWorkspaceNoticeText = String(value || "");
+      userWorkspaceNoticeUntil = Date.now() + Math.max(1000, durationMs);
+      text("user-workspace-notice", userWorkspaceNoticeText);
+    }
+
     function renderUserWorkspace(workspace) {
       currentUserWorkspace = workspace || null;
       const summary = workspace?.summary || {};
@@ -3036,7 +3171,12 @@ function balanceStatusClass(status) {
       const statusText = workspace?.status === "user_account_required"
         ? "registered account required"
         : workspace?.error || `${summary.project_count || 0} projects · ${summary.pending_project_count || 0} pending · ${summary.configured_account_count || 0}/${summary.account_count || 0} API accounts configured · ${vaultText}`;
+      if (userWorkspaceNoticeUntil <= Date.now()) {
+        userWorkspaceNoticeText = "";
+        userWorkspaceNoticeUntil = 0;
+      }
       text("user-workspace-meta", statusText);
+      text("user-workspace-notice", userWorkspaceNoticeText);
       const formsDisabled = workspace?.status === "user_account_required" || workspace?.status === "error";
       document.querySelectorAll("#user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button").forEach((control) => {
         control.disabled = formsDisabled;
@@ -3057,7 +3197,72 @@ function balanceStatusClass(status) {
       const result = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(result.error || `workspace update failed (${res.status})`);
       setUserWorkspace(result.workspace);
-      return result.workspace;
+      return result;
+    }
+
+    async function loadUserExchangeMarkets() {
+      if (userMarketDiscoveryBusy) return;
+      const button = document.getElementById("user-exchange-load-markets");
+      const projectId = document.getElementById("user-exchange-project").value;
+      const exchange = document.getElementById("user-exchange-id").value;
+      const marketType = document.getElementById("user-exchange-market-type").value;
+      const apiVariant = document.getElementById("user-exchange-api-variant").value;
+      const project = workspaceProject(projectId);
+      if (!project || !exchange || !marketType) {
+        setUserWorkspaceNotice(uiText("Select a project and exchange first."));
+        return;
+      }
+      userMarketDiscoveryBusy = true;
+      button.disabled = true;
+      try {
+        const result = await postUserWorkspace({
+          action: "discover_markets",
+          project_id: projectId,
+          exchange,
+          market_type: marketType,
+          api_variant: apiVariant,
+        });
+        const cacheKey = workspaceMarketCacheKey({
+          project,
+          exchange,
+          marketType,
+          apiVariant,
+        });
+        discoveredUserMarkets.set(cacheKey, result.markets || []);
+        syncUserExchangeMarketTypes(marketType, apiVariant);
+        setUserWorkspaceNotice(
+          `${(result.markets || []).length} ${uiText("trading pairs loaded")}${result.cached ? ` · ${uiText("cached")}` : ""}`
+        );
+      } catch (error) {
+        setUserWorkspaceNotice(`market discovery failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+        userMarketDiscoveryBusy = false;
+      }
+    }
+
+    async function testUserExchangeAccount(account, button) {
+      button.disabled = true;
+      try {
+        const result = await postUserWorkspace({
+          action: "test_account",
+          account_id: account.id,
+        });
+        const check = result.connection_test || {};
+        if (check.status !== "healthy") {
+          throw new Error(check.error || "connection test failed");
+        }
+        const balances = (check.balances || [])
+          .map((row) => `${row.currency} ${fmt.format(row.total ?? row.free ?? 0)}`)
+          .join(" · ");
+        setUserWorkspaceNotice(
+          `${uiText("Connection healthy")} · ${account.exchange} ${account.symbol} · ${Number(check.latency_ms || 0).toFixed(0)}ms · ${check.open_order_count || 0} ${uiText("open orders")}${balances ? ` · ${balances}` : ""}`
+        );
+      } catch (error) {
+        setUserWorkspaceNotice(`connection test failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
     }
 
     async function applyUserProject(event) {
@@ -3078,7 +3283,7 @@ function balanceStatusClass(status) {
         resetUserProjectForm();
         renderUserWorkspace(currentUserWorkspace);
       } catch (error) {
-        text("user-workspace-meta", `project update failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`project update failed: ${error.message || error}`);
       } finally {
         userProjectFormBusy = false;
         button.disabled = false;
@@ -3090,7 +3295,7 @@ function balanceStatusClass(status) {
       try {
         await postUserWorkspace({ action: "approve_project", project_id: project.id });
       } catch (error) {
-        text("user-workspace-meta", `approval failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`approval failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -3102,7 +3307,7 @@ function balanceStatusClass(status) {
       try {
         await postUserWorkspace({ action: "disable_project", project_id: project.id });
       } catch (error) {
-        text("user-workspace-meta", `disable failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`disable failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -3115,7 +3320,7 @@ function balanceStatusClass(status) {
         await postUserWorkspace({ action: "delete_project", project_id: project.id });
         if (selectedUserProjectId === project.id) resetUserProjectForm();
       } catch (error) {
-        text("user-workspace-meta", `delete failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`delete failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -3140,6 +3345,8 @@ function balanceStatusClass(status) {
         label: document.getElementById("user-exchange-label").value.trim(),
         exchange: document.getElementById("user-exchange-id").value,
         market_type: document.getElementById("user-exchange-market-type").value,
+        api_variant: document.getElementById("user-exchange-api-variant").value,
+        symbol: document.getElementById("user-exchange-symbol").value,
         enabled: document.getElementById("user-exchange-enabled").checked,
         withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
       };
@@ -3150,7 +3357,7 @@ function balanceStatusClass(status) {
         resetUserExchangeAccountForm();
         renderUserWorkspace(currentUserWorkspace);
       } catch (error) {
-        text("user-workspace-meta", `account update failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`account update failed: ${error.message || error}`);
       } finally {
         document.getElementById("user-exchange-api-key").value = "";
         document.getElementById("user-exchange-secret").value = "";
@@ -3167,7 +3374,7 @@ function balanceStatusClass(status) {
         await postUserWorkspace({ action: "delete_account", account_id: account.id });
         if (selectedUserExchangeAccountId === account.id) resetUserExchangeAccountForm();
       } catch (error) {
-        text("user-workspace-meta", `delete failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`delete failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -3724,6 +3931,10 @@ function balanceStatusClass(status) {
 	    let userExchangeAccountFormBusy = false;
 	    let selectedUserExchangeAccountId = "";
 	    let currentUserWorkspace = null;
+	    let userMarketDiscoveryBusy = false;
+	    const discoveredUserMarkets = new Map();
+	    let userWorkspaceNoticeText = "";
+	    let userWorkspaceNoticeUntil = 0;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -5330,11 +5541,20 @@ function balanceStatusClass(status) {
 	    });
 	    document.getElementById("user-exchange-account-form").addEventListener("change", (event) => {
 	      userExchangeAccountFormDirty = true;
-	      if (event.target?.id === "user-exchange-id") syncUserExchangeMarketTypes();
-	      if (event.target?.id === "user-exchange-project") syncUserExchangeMarketTypes();
+	      if (event.target?.id === "user-exchange-project") {
+	        const project = workspaceProject(event.target.value);
+	        syncUserExchangeMarketTypes("", "", project?.symbol || "");
+	      } else if ([
+	        "user-exchange-id",
+	        "user-exchange-market-type",
+	        "user-exchange-api-variant",
+	      ].includes(event.target?.id)) {
+	        syncUserExchangeMarketTypes();
+	      }
 	    });
 	    document.getElementById("user-exchange-account-form").addEventListener("submit", applyUserExchangeAccount);
 	    document.getElementById("user-exchange-new").addEventListener("click", resetUserExchangeAccountForm);
+	    document.getElementById("user-exchange-load-markets").addEventListener("click", loadUserExchangeMarkets);
 	    document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
     document.getElementById("carry-form").addEventListener("submit", addCashCarryPair);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);

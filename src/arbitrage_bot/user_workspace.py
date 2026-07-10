@@ -12,13 +12,20 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 PROJECT_STATUSES = {"pending", "active", "disabled"}
 MARKET_TYPES = {"spot", "swap", "future"}
+CONNECTION_STATUSES = {"unverified", "healthy", "error"}
+CONNECTION_MAX_AGE_SECONDS = 86_400.0
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 ASSET_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{1,19}$")
+SYMBOL_RE = re.compile(
+    r"^[A-Z0-9][A-Z0-9._-]{0,29}/[A-Z0-9][A-Z0-9._-]{0,29}"
+    r"(?::[A-Z0-9][A-Z0-9._-]{0,29})?$"
+)
 CREDENTIAL_FIELDS = {"api_key", "secret", "passphrase", "password"}
 
 EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
@@ -27,30 +34,43 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "label": "Coinbase",
         "market_types": ["spot"],
         "required_credentials": ["api_key", "secret"],
+        "default_variant": "default",
+        "variants": [{"id": "default", "label": "Default"}],
     },
     {
         "id": "bithumb",
         "label": "Bithumb",
         "market_types": ["spot"],
         "required_credentials": ["api_key", "secret"],
+        "default_variant": "v2",
+        "variants": [{"id": "v2", "label": "API v2.0"}],
     },
     {
         "id": "upbit",
         "label": "Upbit",
         "market_types": ["spot"],
         "required_credentials": ["api_key", "secret"],
+        "default_variant": "global",
+        "variants": [
+            {"id": "global", "label": "Global"},
+            {"id": "indonesia", "label": "Indonesia (id.Upbit)"},
+        ],
     },
     {
         "id": "bybit",
         "label": "Bybit",
         "market_types": ["spot", "swap"],
         "required_credentials": ["api_key", "secret"],
+        "default_variant": "default",
+        "variants": [{"id": "default", "label": "Default"}],
     },
     {
         "id": "binance",
         "label": "Binance",
         "market_types": ["spot", "swap"],
         "required_credentials": ["api_key", "secret"],
+        "default_variant": "default",
+        "variants": [{"id": "default", "label": "Default"}],
     },
 )
 EXCHANGES_BY_ID = {row["id"]: row for row in EXCHANGE_CATALOG}
@@ -86,6 +106,13 @@ def _clean_asset(value: Any, *, label: str) -> str:
     result = str(value or "").strip().upper()
     if not ASSET_RE.fullmatch(result):
         raise ValueError(f"{label} must be 2-20 letters, numbers, '.', '_' or '-'")
+    return result
+
+
+def _clean_symbol(value: Any) -> str:
+    result = str(value or "").strip().upper()
+    if result and not SYMBOL_RE.fullmatch(result):
+        raise ValueError("account symbol must use BASE/QUOTE or BASE/QUOTE:SETTLE format")
     return result
 
 
@@ -154,9 +181,13 @@ class UserExchangeAccount:
     label: str
     exchange: str
     market_type: str = "spot"
+    api_variant: str = "default"
+    symbol: str = ""
     enabled: bool = False
     withdrawal_disabled_confirmed: bool = False
     connection_status: str = "unverified"
+    connection_checked_at: float | None = None
+    connection_error: str = ""
     created_at: float = field(default_factory=_now)
     updated_at: float = field(default_factory=_now)
 
@@ -171,6 +202,21 @@ class UserExchangeAccount:
         market_type = str(raw.get("market_type") or "spot").strip().lower()
         if market_type not in MARKET_TYPES or market_type not in exchange_row["market_types"]:
             raise ValueError(f"{exchange} does not support {market_type} accounts")
+        variants = {
+            str(item.get("id") or "")
+            for item in exchange_row.get("variants", [])
+            if isinstance(item, dict)
+        }
+        api_variant = str(
+            raw.get("api_variant") or exchange_row.get("default_variant") or "default"
+        ).strip().lower()
+        if api_variant not in variants:
+            raise ValueError(f"{exchange} does not support API variant {api_variant}")
+        connection_status = str(
+            raw.get("connection_status") or "unverified"
+        ).strip().lower()
+        if connection_status not in CONNECTION_STATUSES:
+            connection_status = "unverified"
         project_id = _clean_id(raw.get("project_id"), prefix="project")
         now = _now()
         return cls(
@@ -180,13 +226,21 @@ class UserExchangeAccount:
             label=_clean_text(raw.get("label") or exchange_row["label"]),
             exchange=exchange,
             market_type=market_type,
+            api_variant=api_variant,
+            symbol=_clean_symbol(raw.get("symbol")),
             enabled=bool(raw.get("enabled", False)),
             withdrawal_disabled_confirmed=bool(
                 raw.get("withdrawal_disabled_confirmed", False)
             ),
-            connection_status=_clean_text(
-                raw.get("connection_status") or "unverified",
-                max_length=32,
+            connection_status=connection_status,
+            connection_checked_at=(
+                float(raw["connection_checked_at"])
+                if raw.get("connection_checked_at") is not None
+                else None
+            ),
+            connection_error=_clean_text(
+                raw.get("connection_error"),
+                max_length=240,
             ),
             created_at=float(raw.get("created_at") or now),
             updated_at=float(raw.get("updated_at") or now),
@@ -200,12 +254,29 @@ class UserExchangeAccount:
             "label": self.label,
             "exchange": self.exchange,
             "market_type": self.market_type,
+            "api_variant": self.api_variant,
+            "symbol": self.symbol,
             "enabled": self.enabled,
             "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
             "connection_status": self.connection_status,
+            "connection_checked_at": self.connection_checked_at,
+            "connection_error": self.connection_error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+def account_connection_is_fresh(
+    account: UserExchangeAccount,
+    *,
+    now: float | None = None,
+) -> bool:
+    if account.connection_status != "healthy":
+        return False
+    if account.connection_checked_at is None:
+        return False
+    age = (now if now is not None else _now()) - account.connection_checked_at
+    return 0.0 <= age <= CONNECTION_MAX_AGE_SECONDS
 
 
 class CredentialCipher:
@@ -264,11 +335,14 @@ class CredentialCipher:
     ) -> dict[str, str]:
         if self._key is None:
             raise RuntimeError("credential encryption is not configured")
-        plaintext = AESGCM(self._key).decrypt(
-            nonce,
-            ciphertext,
-            self._associated_data(account_id, owner_email),
-        )
+        try:
+            plaintext = AESGCM(self._key).decrypt(
+                nonce,
+                ciphertext,
+                self._associated_data(account_id, owner_email),
+            )
+        except InvalidTag as exc:
+            raise ValueError("encrypted credentials could not be decrypted") from exc
         raw = json.loads(plaintext.decode("utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("decrypted credentials are invalid")
@@ -335,12 +409,53 @@ class UserWorkspaceStore:
                 );
                 """
             )
+            self._migrate_legacy_accounts(connection)
             connection.commit()
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
         self._ready = True
+
+    def _migrate_legacy_accounts(self, connection: sqlite3.Connection) -> None:
+        project_rows = connection.execute(
+            "SELECT id, payload FROM user_projects"
+        ).fetchall()
+        projects = {
+            str(row["id"]): UserProject.from_dict(json.loads(row["payload"]))
+            for row in project_rows
+        }
+        now = _now()
+        account_rows = connection.execute(
+            "SELECT id, payload FROM user_exchange_accounts"
+        ).fetchall()
+        for row in account_rows:
+            account = UserExchangeAccount.from_dict(json.loads(row["payload"]))
+            project = projects.get(account.project_id)
+            symbol = account.symbol or (project.symbol if project else "")
+            connection_fresh = account_connection_is_fresh(account, now=now)
+            enabled = account.enabled and connection_fresh
+            if symbol == account.symbol and enabled == account.enabled:
+                continue
+            updated = replace(
+                account,
+                symbol=symbol,
+                enabled=enabled,
+                updated_at=now,
+            )
+            connection.execute(
+                """
+                UPDATE user_exchange_accounts
+                SET exchange = ?, updated_at = ?, payload = ?
+                WHERE id = ?
+                """,
+                (
+                    updated.exchange,
+                    updated.updated_at,
+                    self._dump(updated.to_dict()),
+                    updated.id,
+                ),
+            )
 
     @staticmethod
     def _dump(payload: dict[str, Any]) -> str:
@@ -389,9 +504,16 @@ class UserWorkspaceStore:
                 + " ORDER BY updated_at DESC, id ASC",
                 params,
             ).fetchall()
-        return [
-            UserExchangeAccount.from_dict(json.loads(row["payload"])) for row in rows
-        ]
+            accounts = [
+                UserExchangeAccount.from_dict(json.loads(row["payload"]))
+                for row in rows
+            ]
+            accounts = self._disable_stale_accounts_in_connection(
+                connection,
+                accounts,
+            )
+            connection.commit()
+        return accounts
 
     def get_project(self, project_id: str) -> UserProject | None:
         self._ensure()
@@ -409,7 +531,38 @@ class UserWorkspaceStore:
                 "SELECT payload FROM user_exchange_accounts WHERE id = ?",
                 (account_id,),
             ).fetchone()
-        return UserExchangeAccount.from_dict(json.loads(row["payload"])) if row else None
+            if row is None:
+                return None
+            account = UserExchangeAccount.from_dict(json.loads(row["payload"]))
+            account = self._disable_stale_accounts_in_connection(
+                connection,
+                [account],
+            )[0]
+            connection.commit()
+        return account
+
+    def _disable_stale_accounts_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        accounts: list[UserExchangeAccount],
+    ) -> list[UserExchangeAccount]:
+        now = _now()
+        result = []
+        for account in accounts:
+            if not account.enabled or account_connection_is_fresh(account, now=now):
+                result.append(account)
+                continue
+            updated = replace(account, enabled=False, updated_at=now)
+            connection.execute(
+                """
+                UPDATE user_exchange_accounts
+                SET updated_at = ?, payload = ?
+                WHERE id = ?
+                """,
+                (updated.updated_at, self._dump(updated.to_dict()), updated.id),
+            )
+            result.append(updated)
+        return result
 
     def upsert_project(self, project: UserProject) -> UserProject:
         self._ensure()
@@ -588,6 +741,28 @@ class UserWorkspaceStore:
             connection.commit()
         return updated
 
+    def update_account_connection(
+        self,
+        account_id: str,
+        *,
+        status: str,
+        error: str = "",
+    ) -> UserExchangeAccount:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in CONNECTION_STATUSES:
+            raise ValueError(f"unsupported connection status: {status}")
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError(f"exchange account not found: {account_id}")
+        updated = replace(
+            account,
+            enabled=account.enabled if normalized_status == "healthy" else False,
+            connection_status=normalized_status,
+            connection_checked_at=_now(),
+            connection_error=_clean_text(error, max_length=240),
+        )
+        return self.upsert_account(updated)
+
     def credential_status(self, account_id: str) -> dict[str, Any]:
         self._ensure()
         with self._connect() as connection:
@@ -648,6 +823,7 @@ class UserWorkspaceStore:
         account_rows = []
         for account in accounts:
             row = account.to_dict()
+            row["connection_fresh"] = account_connection_is_fresh(account)
             row["credentials"] = self.credential_status(account.id)
             account_rows.append(row)
         return {

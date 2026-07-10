@@ -156,6 +156,46 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(client.options_payload["apiKey"], "key")
         self.assertEqual(client.options_payload["secret"], "secret")
 
+    def test_direct_credentials_override_environment_without_global_mutation(self) -> None:
+        class FakeCoinbase:
+            def __init__(self, options: dict[str, object]) -> None:
+                self.options_payload = options
+
+        class FakeCcxt:
+            coinbase = FakeCoinbase
+
+        cfg = ExchangeConfig(
+            id="coinbase",
+            label="workspace:account-1",
+            api_key_env="GLOBAL_API_KEY",
+            secret_env="GLOBAL_SECRET",
+        )
+        manager = ExchangeManager(
+            credentials_by_key={
+                cfg.key: {
+                    "api_key": "direct-key",
+                    "secret": "direct-secret",
+                    "passphrase": "direct-passphrase",
+                }
+            }
+        )
+
+        with patch(
+            "arbitrage_bot.exchanges.importlib.import_module",
+            return_value=FakeCcxt,
+        ), patch.dict(
+            os.environ,
+            {"GLOBAL_API_KEY": "global-key", "GLOBAL_SECRET": "global-secret"},
+            clear=True,
+        ):
+            client = manager.client(cfg)
+            global_api_key_after = os.environ["GLOBAL_API_KEY"]
+
+        self.assertEqual(client.options_payload["apiKey"], "direct-key")
+        self.assertEqual(client.options_payload["secret"], "direct-secret")
+        self.assertEqual(client.options_payload["password"], "direct-passphrase")
+        self.assertEqual(global_api_key_after, "global-key")
+
     def test_bithumb_limit_order_features_block_post_only(self) -> None:
         cfg = ExchangeConfig(id="bithumb", label="bithumb-spot")
 

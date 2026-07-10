@@ -156,10 +156,15 @@ from ..trade_log import (
     summarize_trade_entries,
     write_trade_event,
 )
+from ..user_account_check import (
+    WorkspaceAccountCheckService,
+    WorkspaceMarketDiscoveryService,
+)
 from ..user_workspace import (
     UserExchangeAccount,
     UserProject,
     UserWorkspaceStore,
+    account_connection_is_fresh,
 )
 from ..web_config import (
     _backtest_overrides_from_payload,
@@ -4703,6 +4708,16 @@ def _user_workspace_store(request: web.Request) -> UserWorkspaceStore:
     return request.app["user_workspace_store"]
 
 
+def _workspace_market_discovery(
+    request: web.Request,
+) -> WorkspaceMarketDiscoveryService:
+    return request.app["workspace_market_discovery"]
+
+
+def _workspace_account_checker(request: web.Request) -> WorkspaceAccountCheckService:
+    return request.app["workspace_account_checker"]
+
+
 def _strategy_center_store(request: web.Request) -> StrategyCenterStore:
     return request.app["strategy_center_store"]
 
@@ -5942,6 +5957,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         audit_target = ""
         audit_detail = ""
         audit_payload: dict[str, Any] = {}
+        response_extra: dict[str, Any] = {}
 
         if action == "upsert_project":
             raw = dict(
@@ -5988,7 +6004,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 _user_store(request).admin_grant_asset(
                     email=project.owner_email,
                     asset=project.asset,
-            )
+                )
             project = store.upsert_project(project)
             audit_target = project.id
             audit_detail = f"saved user project {project.name}"
@@ -6054,16 +6070,42 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if owner != project.owner_email:
                 raise ValueError("project and exchange account owners must match")
             raw["owner_email"] = owner
+            raw["symbol"] = str(raw.get("symbol") or project.symbol).strip().upper()
             raw["connection_status"] = (
-                "unverified"
-                if credentials or existing is None
-                else existing.connection_status
+                existing.connection_status if existing else "unverified"
             )
+            raw["connection_checked_at"] = (
+                existing.connection_checked_at if existing else None
+            )
+            raw["connection_error"] = existing.connection_error if existing else ""
             account = UserExchangeAccount.from_dict(raw)
+            if _base_asset_from_symbol(account.symbol) != project.asset:
+                raise ValueError(
+                    f"account symbol base must match project asset {project.asset}"
+                )
             exchange_changed = bool(
                 existing is not None and existing.exchange != account.exchange
             )
             supplied = credentials if isinstance(credentials, dict) else {}
+            credentials_changed = any(
+                str(value or "").strip() for value in supplied.values()
+            )
+            connection_changed = bool(
+                existing is None
+                or credentials_changed
+                or existing.exchange != account.exchange
+                or existing.market_type != account.market_type
+                or existing.api_variant != account.api_variant
+                or existing.symbol != account.symbol
+            )
+            if connection_changed:
+                account = replace(
+                    account,
+                    enabled=False,
+                    connection_status="unverified",
+                    connection_checked_at=None,
+                    connection_error="",
+                )
             if exchange_changed:
                 required = {"api_key", "secret"}
                 supplied_fields = {
@@ -6093,6 +6135,10 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     raise ValueError("configure API key and secret before enabling account")
                 if not current_auth["vault_available"]:
                     raise RuntimeError("credential encryption is not configured")
+                if not account_connection_is_fresh(account):
+                    raise ValueError(
+                        "run a successful account connection test before enabling"
+                    )
             account = store.upsert_account(
                 account,
                 credentials=credentials,
@@ -6102,6 +6148,106 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_detail = f"saved encrypted {account.exchange} account"
             audit_payload = account.to_dict()
             audit_payload["credentials"] = store.credential_status(account.id)
+        elif action == "discover_markets":
+            project_id = str(payload.get("project_id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            exchange = str(payload.get("exchange") or "").strip().lower()
+            market_type = str(payload.get("market_type") or "spot").strip().lower()
+            api_variant = str(payload.get("api_variant") or "").strip().lower()
+            probe_raw = {
+                "owner_email": project.owner_email,
+                "project_id": project.id,
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": project.symbol,
+            }
+            if api_variant:
+                probe_raw["api_variant"] = api_variant
+            probe = UserExchangeAccount.from_dict(probe_raw)
+            api_variant = probe.api_variant
+            markets, cached = await _workspace_market_discovery(request).discover(
+                exchange=probe.exchange,
+                market_type=probe.market_type,
+                api_variant=probe.api_variant,
+                asset=project.asset,
+            )
+            audit_target = project.id
+            audit_detail = (
+                f"discovered {len(markets)} {project.asset} markets on {exchange}"
+            )
+            audit_payload = {
+                "project_id": project.id,
+                "exchange": exchange,
+                "market_type": market_type,
+                "api_variant": api_variant,
+                "market_count": len(markets),
+                "cached": cached,
+            }
+            response_extra = {
+                "markets": markets,
+                "cached": cached,
+            }
+        elif action == "test_account":
+            account_id = str(
+                payload.get("account_id") or payload.get("id") or ""
+            ).strip()
+            account = store.get_account(account_id)
+            if account is None:
+                raise ValueError(f"exchange account not found: {account_id}")
+            _require_owner_or_admin(user, account.owner_email)
+            project = store.get_project(account.project_id)
+            if project is None:
+                raise ValueError(f"project not found: {account.project_id}")
+            credential_status = store.credential_status(account.id)
+            if not credential_status["configured"]:
+                raise ValueError("configure API key and secret before testing account")
+            credentials = store.decrypt_credentials(
+                account_id=account.id,
+                owner_email=account.owner_email,
+            )
+            try:
+                check_result = await _workspace_account_checker(request).check(
+                    account=account,
+                    project=project,
+                    credentials=credentials,
+                )
+            finally:
+                credentials.clear()
+            current_account = store.get_account(account.id)
+            current_project = store.get_project(project.id)
+            if (
+                current_account is None
+                or current_project is None
+                or current_account.updated_at != account.updated_at
+                or current_project.updated_at != project.updated_at
+            ):
+                raise RuntimeError(
+                    "account or project changed during the connection test; result discarded"
+                )
+            account = store.update_account_connection(
+                account.id,
+                status=str(check_result.get("status") or "error"),
+                error=str(check_result.get("error") or ""),
+            )
+            audit_target = account.id
+            audit_detail = (
+                f"tested {account.exchange} account: {account.connection_status}"
+            )
+            audit_payload = {
+                "account_id": account.id,
+                "project_id": account.project_id,
+                "exchange": account.exchange,
+                "market_type": account.market_type,
+                "api_variant": account.api_variant,
+                "symbol": account.symbol,
+                "status": account.connection_status,
+                "latency_ms": check_result.get("latency_ms"),
+                "error": account.connection_error,
+            }
+            response_extra = {"connection_test": check_result}
         elif action == "delete_account":
             account_id = str(payload.get("account_id") or payload.get("id") or "").strip()
             account = store.get_account(account_id)
@@ -6123,12 +6269,12 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             detail=audit_detail,
             payload=audit_payload,
         )
-        return web.json_response(
-            {
-                "ok": True,
-                "workspace": build_user_workspace_payload(store, user=user),
-            }
-        )
+        response_payload = {
+            "ok": True,
+            "workspace": build_user_workspace_payload(store, user=user),
+        }
+        response_payload.update(response_extra)
+        return web.json_response(response_payload)
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except RuntimeError as exc:
@@ -6970,6 +7116,8 @@ def create_app(
         default_user_workspace_path(cfg),
         master_key_env=cfg.web_security.credential_master_key_env,
     )
+    workspace_market_discovery = WorkspaceMarketDiscoveryService()
+    workspace_account_checker = WorkspaceAccountCheckService()
     strategy_center_store = StrategyCenterStore(
         default_strategy_center_path(cfg),
         max_recent_signals=cfg.strategy_center.max_recent_signals,
@@ -6979,6 +7127,8 @@ def create_app(
     app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
     app["web_user_store"] = web_user_store
     app["user_workspace_store"] = user_workspace_store
+    app["workspace_market_discovery"] = workspace_market_discovery
+    app["workspace_account_checker"] = workspace_account_checker
     app["strategy_center_store"] = strategy_center_store
     app["login_rate_limiter"] = LoginRateLimiter()
     app["email_verification_manager"] = EmailVerificationManager(

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.user_workspace import (
+    CONNECTION_MAX_AGE_SECONDS,
     CredentialCipher,
     UserExchangeAccount,
     UserProject,
@@ -239,6 +241,130 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertIsNotNone(disabled)
         self.assertFalse(disabled.enabled)
         self.assertEqual(credentials, {"api_key": "key", "secret": "secret"})
+
+    def test_connection_error_disables_account_and_keeps_credentials_encrypted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_WORKSPACE_MASTER_KEY",
+            )
+            project = store.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "asset": "ACS",
+                        "quote_currency": "USDC",
+                        "status": "active",
+                    }
+                )
+            )
+            account = store.upsert_account(
+                UserExchangeAccount.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "exchange": "upbit",
+                        "api_variant": "indonesia",
+                        "symbol": "ACS/USDT",
+                        "enabled": True,
+                        "withdrawal_disabled_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key", "secret": "secret"},
+            )
+
+            failed = store.update_account_connection(
+                account.id,
+                status="error",
+                error="authentication failed",
+            )
+            payload = store.public_payload(
+                owner_email=account.owner_email,
+                is_admin=False,
+            )
+
+        self.assertFalse(failed.enabled)
+        self.assertEqual(failed.connection_status, "error")
+        self.assertIsNotNone(failed.connection_checked_at)
+        self.assertEqual(failed.connection_error, "authentication failed")
+        self.assertTrue(payload["accounts"][0]["credentials"]["configured"])
+        self.assertFalse(payload["accounts"][0]["connection_fresh"])
+        self.assertEqual(payload["accounts"][0]["api_variant"], "indonesia")
+        self.assertEqual(payload["accounts"][0]["symbol"], "ACS/USDT")
+
+    def test_legacy_accounts_gain_project_symbol_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "workspace.sqlite3"
+            store = UserWorkspaceStore(path, master_key_env=None)
+            project = store.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "asset": "ACS",
+                        "quote_currency": "USDC",
+                        "status": "active",
+                    }
+                )
+            )
+            account = store.upsert_account(
+                UserExchangeAccount.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "exchange": "coinbase",
+                        "enabled": True,
+                    }
+                )
+            )
+
+            restarted_store = UserWorkspaceStore(path, master_key_env=None)
+            migrated = restarted_store.get_account(account.id)
+
+        self.assertIsNotNone(migrated)
+        self.assertEqual(migrated.symbol, "ACS/USDC")
+        self.assertFalse(migrated.enabled)
+
+    def test_stale_healthy_connection_is_disabled_on_read_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "workspace.sqlite3"
+            store = UserWorkspaceStore(path, master_key_env=None)
+            project = store.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "asset": "ACS",
+                        "quote_currency": "USDC",
+                        "status": "active",
+                    }
+                )
+            )
+            account = store.upsert_account(
+                UserExchangeAccount.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "exchange": "coinbase",
+                        "symbol": project.symbol,
+                        "enabled": True,
+                        "connection_status": "healthy",
+                        "connection_checked_at": (
+                            time.time() - CONNECTION_MAX_AGE_SECONDS - 1
+                        ),
+                    }
+                )
+            )
+
+            expired = store.get_account(account.id)
+            restarted_store = UserWorkspaceStore(path, master_key_env=None)
+            persisted = restarted_store.get_account(account.id)
+
+        self.assertIsNotNone(expired)
+        self.assertEqual(expired.connection_status, "healthy")
+        self.assertFalse(expired.enabled)
+        self.assertFalse(persisted.enabled)
 
     def test_cipher_rejects_invalid_key_length(self) -> None:
         short_key = base64.urlsafe_b64encode(b"short").decode("ascii")
