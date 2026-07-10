@@ -215,8 +215,12 @@
     "cookie_secure": true,
     "user_store_path": "data/web_users.json",
     "registration_enabled": false,
-    "registration_code_env": "CRYPTO_ARB_WEB_REGISTRATION_CODE",
-    "totp_issuer": "Crypto Trading Dashboard"
+    "bootstrap_admin_email_env": "CRYPTO_ARB_WEB_ADMIN_EMAIL",
+    "registration_code_env": null,
+    "totp_issuer": "Crypto Trading Dashboard",
+    "verification_code_ttl_seconds": 600,
+    "verification_resend_seconds": 60,
+    "verification_max_attempts": 5
   },
   "spot_exchanges": [
     {

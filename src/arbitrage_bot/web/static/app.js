@@ -839,8 +839,9 @@ function balanceStatusClass(status) {
       const select = document.getElementById("profile-asset");
       if (!emailEl || !select) return;
       const mode = auth?.mode || "legacy";
-      emailEl.textContent = mode === "user" ? (auth.email || "User") : "Legacy";
-      emailEl.title = emailEl.textContent;
+      emailEl.textContent = mode === "user" ? (auth.username || auth.email || "User") : "Legacy";
+      if (mode === "user" && auth.email) emailEl.title = auth.email;
+      else emailEl.title = emailEl.textContent;
       const available = auth?.available_assets || [];
       const allowed = auth?.allowed_assets?.length ? auth.allowed_assets : available;
       const assets = [...new Set((allowed || []).filter(Boolean))].sort();

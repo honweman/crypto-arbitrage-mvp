@@ -19,6 +19,7 @@ PASSWORD_HASH_ITERATIONS = 260_000
 TOTP_INTERVAL_SECONDS = 30
 TOTP_DIGITS = 6
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
 
 
 def normalize_email(value: str) -> str:
@@ -26,6 +27,23 @@ def normalize_email(value: str) -> str:
     if not EMAIL_RE.match(email):
         raise ValueError("email is invalid")
     return email
+
+
+def normalize_username(value: str) -> str:
+    username = str(value or "").strip().lower()
+    if not USERNAME_RE.fullmatch(username):
+        raise ValueError(
+            "username must be 3-32 characters using letters, numbers, '.', '_' or '-'"
+        )
+    return username
+
+
+def default_username_for_email(email: str) -> str:
+    local_part = normalize_email(email).split("@", 1)[0].lower()
+    username = re.sub(r"[^a-z0-9_.-]+", "-", local_part).strip("._-")
+    if len(username) < 3:
+        username = f"user-{username or 'account'}"
+    return normalize_username(username[:32])
 
 
 def normalize_assets(values: Any) -> list[str]:
@@ -44,9 +62,21 @@ def normalize_assets(values: Any) -> list[str]:
     return assets
 
 
-def hash_password(password: str) -> str:
-    if len(password) < 8:
+def validate_password(password: str) -> str:
+    value = str(password or "")
+    if len(value) < 8:
         raise ValueError("password must be at least 8 characters")
+    if not any(char.isalpha() for char in value):
+        raise ValueError("password must include at least one letter")
+    if not any(char.isdigit() for char in value):
+        raise ValueError("password must include at least one number")
+    if not any(not char.isalnum() and not char.isspace() for char in value):
+        raise ValueError("password must include at least one special character")
+    return value
+
+
+def hash_password(password: str) -> str:
+    password = validate_password(password)
     salt = os.urandom(16)
     digest = hashlib.pbkdf2_hmac(
         "sha256",
@@ -144,25 +174,32 @@ def totp_provisioning_uri(
 @dataclass(frozen=True)
 class WebUser:
     email: str
+    username: str
     password_hash: str
     totp_secret: str
-    totp_enabled: bool = True
+    totp_enabled: bool = False
     allowed_assets: list[str] = field(default_factory=list)
     preferred_asset: str = ""
     role: str = "user"
+    auth_version: int = 1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "WebUser":
+        email = normalize_email(str(raw.get("email", "")))
         return cls(
-            email=normalize_email(str(raw.get("email", ""))),
+            email=email,
+            username=normalize_username(
+                str(raw.get("username") or default_username_for_email(email))
+            ),
             password_hash=str(raw.get("password_hash", "")),
             totp_secret=str(raw.get("totp_secret", "")),
-            totp_enabled=bool(raw.get("totp_enabled", True)),
+            totp_enabled=bool(raw.get("totp_enabled", False)),
             allowed_assets=normalize_assets(raw.get("allowed_assets", [])),
             preferred_asset=str(raw.get("preferred_asset", "")).strip().upper(),
             role=str(raw.get("role", "user") or "user"),
+            auth_version=max(1, int(raw.get("auth_version") or 1)),
             created_at=float(raw.get("created_at") or time.time()),
             updated_at=float(raw.get("updated_at") or time.time()),
         )
@@ -170,12 +207,14 @@ class WebUser:
     def to_dict(self) -> dict[str, Any]:
         return {
             "email": self.email,
+            "username": self.username,
             "password_hash": self.password_hash,
             "totp_secret": self.totp_secret,
             "totp_enabled": self.totp_enabled,
             "allowed_assets": self.allowed_assets,
             "preferred_asset": self.preferred_asset,
             "role": self.role,
+            "auth_version": self.auth_version,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -183,6 +222,7 @@ class WebUser:
     def public_dict(self, *, available_assets: list[str] | None = None) -> dict[str, Any]:
         return {
             "email": self.email,
+            "username": self.username,
             "role": self.role,
             "totp_enabled": self.totp_enabled,
             "allowed_assets": self.allowed_assets,
@@ -208,10 +248,20 @@ class WebUserStore:
         if isinstance(rows, dict):
             rows = list(rows.values())
         users: dict[str, WebUser] = {}
+        usernames: set[str] = set()
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
             user = WebUser.from_dict(row)
+            if user.username in usernames:
+                base = user.username[:27]
+                suffix = 2
+                candidate = f"{base}-{suffix}"
+                while candidate in usernames:
+                    suffix += 1
+                    candidate = f"{base}-{suffix}"
+                user = replace(user, username=candidate)
+            usernames.add(user.username)
             users[user.email] = user
         return users
 
@@ -239,10 +289,36 @@ class WebUserStore:
     def get_user(self, email: str) -> WebUser | None:
         return self._read_users().get(normalize_email(email))
 
+    def get_user_by_username(self, username: str) -> WebUser | None:
+        normalized = normalize_username(username)
+        return next(
+            (
+                user
+                for user in self._read_users().values()
+                if hmac.compare_digest(user.username, normalized)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _require_unique_username(
+        users: dict[str, WebUser],
+        username: str,
+        *,
+        exclude_email: str = "",
+    ) -> None:
+        for user in users.values():
+            if user.email != exclude_email and hmac.compare_digest(
+                user.username,
+                username,
+            ):
+                raise ValueError("username is already registered")
+
     def create_user(
         self,
         *,
         email: str,
+        username: str = "",
         password: str,
         allowed_assets: list[str] | str | None = None,
         preferred_asset: str = "",
@@ -251,12 +327,17 @@ class WebUserStore:
         users = self._read_users()
         if normalized_email in users:
             raise ValueError("email is already registered")
+        normalized_username = normalize_username(
+            username or default_username_for_email(normalized_email)
+        )
+        self._require_unique_username(users, normalized_username)
         assets = normalize_assets(allowed_assets or [])
         preferred = str(preferred_asset or "").strip().upper()
         if preferred and assets and preferred not in assets:
             raise ValueError("preferred asset must be in allowed assets")
         user = WebUser(
             email=normalized_email,
+            username=normalized_username,
             password_hash=hash_password(password),
             totp_secret=generate_totp_secret(),
             allowed_assets=assets,
@@ -267,15 +348,46 @@ class WebUserStore:
         self._write_users(users)
         return user
 
-    def authenticate(self, *, email: str, password: str, totp: str) -> WebUser | None:
-        user = self.get_user(email)
+    def authenticate(
+        self,
+        *,
+        username: str = "",
+        password: str,
+        email: str = "",
+        totp: str = "",
+    ) -> WebUser | None:
+        # Email and TOTP remain accepted by the Python API for legacy callers,
+        # while the dashboard now authenticates with username and password.
+        _ = totp
+        try:
+            user = (
+                self.get_user_by_username(username)
+                if username
+                else self.get_user(email)
+            )
+        except ValueError:
+            return None
         if user is None:
             return None
         if not verify_password(password, user.password_hash):
             return None
-        if user.totp_enabled and not verify_totp(user.totp_secret, totp):
-            return None
         return user
+
+    def reset_password(self, *, email: str, new_password: str) -> WebUser:
+        normalized_email = normalize_email(email)
+        users = self._read_users()
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        updated = replace(
+            user,
+            password_hash=hash_password(new_password),
+            auth_version=user.auth_version + 1,
+            updated_at=time.time(),
+        )
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
 
     def update_profile(
         self,
@@ -292,12 +404,14 @@ class WebUserStore:
             raise ValueError("preferred asset is not allowed for this user")
         updated = WebUser(
             email=user.email,
+            username=user.username,
             password_hash=user.password_hash,
             totp_secret=user.totp_secret,
             totp_enabled=user.totp_enabled,
             allowed_assets=user.allowed_assets,
             preferred_asset=preferred,
             role=user.role,
+            auth_version=user.auth_version,
             created_at=user.created_at,
             updated_at=time.time(),
         )
@@ -312,6 +426,7 @@ class WebUserStore:
         self,
         *,
         email: str,
+        username: str = "",
         password: str,
         role: str = "user",
         allowed_assets: list[str] | str | None = None,
@@ -324,12 +439,17 @@ class WebUserStore:
         users = self._read_users()
         if normalized_email in users:
             raise ValueError("email is already registered")
+        normalized_username = normalize_username(
+            username or default_username_for_email(normalized_email)
+        )
+        self._require_unique_username(users, normalized_username)
         assets = normalize_assets(allowed_assets or [])
         preferred = str(preferred_asset or "").strip().upper()
         if preferred and assets and preferred not in assets:
             raise ValueError("preferred asset must be in allowed assets")
         user = WebUser(
             email=normalized_email,
+            username=normalized_username,
             password_hash=hash_password(password),
             totp_secret=generate_totp_secret(),
             allowed_assets=assets,
@@ -349,6 +469,7 @@ class WebUserStore:
         self,
         *,
         email: str,
+        username: str | None = None,
         role: str | None = None,
         allowed_assets: list[str] | str | None = None,
         allowed_assets_provided: bool = False,
@@ -370,6 +491,15 @@ class WebUserStore:
         if new_role != "admin":
             self._require_not_last_admin(users, normalized_email)
 
+        new_username = user.username
+        if username is not None:
+            new_username = normalize_username(username)
+            self._require_unique_username(
+                users,
+                new_username,
+                exclude_email=normalized_email,
+            )
+
         new_assets = (
             normalize_assets(allowed_assets or [])
             if allowed_assets_provided
@@ -387,9 +517,15 @@ class WebUserStore:
         new_password_hash = user.password_hash
         if new_password:
             new_password_hash = hash_password(new_password)
+        new_auth_version = (
+            user.auth_version + 1
+            if new_password_hash != user.password_hash
+            else user.auth_version
+        )
 
         if (
             new_role == user.role
+            and new_username == user.username
             and new_assets == user.allowed_assets
             and new_preferred == user.preferred_asset
             and new_password_hash == user.password_hash
@@ -399,9 +535,11 @@ class WebUserStore:
         updated = replace(
             user,
             role=new_role,
+            username=new_username,
             allowed_assets=new_assets,
             preferred_asset=new_preferred,
             password_hash=new_password_hash,
+            auth_version=new_auth_version,
             updated_at=time.time(),
         )
         users[updated.email] = updated
@@ -416,4 +554,3 @@ class WebUserStore:
         self._require_not_last_admin(users, normalized_email)
         del users[normalized_email]
         self._write_users(users)
-

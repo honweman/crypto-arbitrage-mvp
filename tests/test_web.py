@@ -68,7 +68,6 @@ from arbitrage_bot.web import (
     _spot_markets_from_payload,
     _daily_report_due,
     _global_scan_health_warnings,
-    _registration_code_required,
     _require_admin_user,
     _require_user_assets,
     _client_ip,
@@ -2331,28 +2330,22 @@ class WebMonitorTest(unittest.TestCase):
 
         self.assertEqual(default_strategy_center_path(cfg), "data/strategy_center.sqlite3")
 
-    def test_registration_code_is_required_when_env_name_is_configured(self) -> None:
-        self.assertTrue(_registration_code_required(make_config()))
-        self.assertFalse(
-            _registration_code_required(
-                make_config(
-                    web_security=WebSecurityConfig(registration_code_env=None)
-                )
-            )
-        )
-
     def test_user_role_and_asset_permission_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WebUserStore(Path(tmp) / "users.json")
             admin = store.create_user(
                 email="admin@example.com",
-                password="strong-password",
+                password="Strong-pass-1!",
                 allowed_assets=["ACS"],
             )
             user = store.create_user(
                 email="user@example.com",
-                password="strong-password",
+                password="Strong-pass-1!",
                 allowed_assets=["ACS"],
+            )
+            unassigned_user = store.create_user(
+                email="unassigned@example.com",
+                password="Strong-pass-1!",
             )
 
         self.assertEqual(admin.role, "admin")
@@ -2364,6 +2357,8 @@ class WebMonitorTest(unittest.TestCase):
             _require_admin_user(user)
         with self.assertRaisesRegex(PermissionError, "BTC"):
             _require_user_assets(user, ["BTC"])
+        with self.assertRaisesRegex(PermissionError, "ACS"):
+            _require_user_assets(unassigned_user, ["ACS"])
 
     def test_state_payload_filters_to_user_asset_scope(self) -> None:
         cfg = make_config(
@@ -2392,7 +2387,7 @@ class WebMonitorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             user = WebUserStore(Path(tmp) / "users.json").create_user(
                 email="trader@example.com",
-                password="strong-password",
+                password="Strong-pass-1!",
                 allowed_assets=["ACS", "BTC"],
                 preferred_asset="ACS",
             )
@@ -5412,10 +5407,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            store.create_user(email="admin@example.com", password="strong-password-1")
+            store.create_user(email="admin@example.com", password="Strong-pass-1!")
             member = store.create_user(
                 email="member@example.com",
-                password="strong-password-2",
+                password="Strong-pass-2!",
                 allowed_assets=["ACS"],
             )
             cfg = make_config(
@@ -5435,7 +5430,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     "/login",
                     data={
                         "email": member.email,
-                        "password": "strong-password-2",
+                        "password": "Strong-pass-2!",
                         "totp": totp_code(member.totp_secret),
                     },
                 )
@@ -5447,7 +5442,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         {
                             "action": "create_user",
                             "email": "new@example.com",
-                            "password": "another-strong-pw",
+                            "password": "Strong-pass-3!",
                         },
                     ),
                     (
@@ -5474,7 +5469,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            admin = store.create_user(email="admin@example.com", password="Strong-pass-1!")
             cfg = make_config(
                 web_security=WebSecurityConfig(
                     password_env=None,
@@ -5492,7 +5487,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     "/login",
                     data={
                         "email": admin.email,
-                        "password": "strong-password-1",
+                        "password": "Strong-pass-1!",
                         "totp": totp_code(admin.totp_secret),
                     },
                 )
@@ -5501,7 +5496,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     json={
                         "action": "create_user",
                         "email": admin.email,
-                        "password": "another-strong-pw",
+                        "password": "Strong-pass-3!",
                     },
                 )
                 duplicate_payload = await duplicate_response.json()
@@ -5526,10 +5521,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            admin = store.create_user(email="admin@example.com", password="Strong-pass-1!")
             member = store.create_user(
                 email="member@example.com",
-                password="strong-password-2",
+                password="Strong-pass-2!",
                 allowed_assets=["ACS"],
             )
             cfg = make_config(
@@ -5549,7 +5544,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     "/login",
                     data={
                         "email": admin.email,
-                        "password": "strong-password-1",
+                        "password": "Strong-pass-1!",
                         "totp": totp_code(admin.totp_secret),
                     },
                 )
@@ -5566,7 +5561,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     "/login",
                     data={
                         "email": member.email,
-                        "password": "strong-password-2",
+                        "password": "Strong-pass-2!",
                         "totp": totp_code(member.totp_secret),
                     },
                 )
@@ -5592,7 +5587,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            admin = store.create_user(email="admin@example.com", password="strong-password-1")
+            admin = store.create_user(email="admin@example.com", password="Strong-pass-1!")
             cfg = make_config(
                 web_security=WebSecurityConfig(
                     password_env=None,
@@ -5610,7 +5605,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     "/login",
                     data={
                         "email": admin.email,
-                        "password": "strong-password-1",
+                        "password": "Strong-pass-1!",
                         "totp": totp_code(admin.totp_secret),
                     },
                 )
@@ -5620,7 +5615,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     json={
                         "action": "create_user",
                         "email": "trader@example.com",
-                        "password": "another-strong-pw",
+                        "password": "Strong-pass-3!",
                         "allowed_assets": ["ACS", "BTC"],
                         "preferred_asset": "ACS",
                     },
@@ -5699,6 +5694,120 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "trader@example.com",
             [row["email"] for row in list_payload["users"]],
         )
+
+    async def test_email_registration_login_and_password_reset_flow(self) -> None:
+        class CapturingEmailSender:
+            def __init__(self) -> None:
+                self.codes: dict[tuple[str, str], str] = {}
+
+            def configured(self) -> bool:
+                return True
+
+            async def send_code(
+                self,
+                *,
+                email: str,
+                code: str,
+                purpose: str,
+            ) -> None:
+                self.codes[(email, purpose)] = code
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                    registration_enabled=True,
+                    bootstrap_admin_email_env="TEST_BOOTSTRAP_ADMIN_EMAIL",
+                    registration_code_env=None,
+                    verification_resend_seconds=10,
+                ),
+            )
+            env_patch = patch.dict(
+                os.environ,
+                {"TEST_BOOTSTRAP_ADMIN_EMAIL": "trader@example.com"},
+            )
+            env_patch.start()
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            sender = CapturingEmailSender()
+            app["verification_email_sender"] = sender
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                denied_code_response = await client.post(
+                    "/register/code",
+                    data={
+                        "email": "attacker@example.com",
+                        "username": "attacker01",
+                    },
+                )
+                code_response = await client.post(
+                    "/register/code",
+                    data={
+                        "email": "trader@example.com",
+                        "username": "trader01",
+                    },
+                )
+                registration_code = sender.codes[("trader@example.com", "register")]
+                register_response = await client.post(
+                    "/register",
+                    data={
+                        "email": "trader@example.com",
+                        "username": "trader01",
+                        "verification_code": registration_code,
+                        "password": "Strong-pass-1!",
+                        "password_confirm": "Strong-pass-1!",
+                    },
+                )
+                login_response = await client.post(
+                    "/login",
+                    data={
+                        "username": "trader01",
+                        "password": "Strong-pass-1!",
+                    },
+                )
+                logged_in_state = await (await client.get("/api/state")).json()
+
+                reset_code_response = await client.post(
+                    "/forgot-password/code",
+                    data={"email": "trader@example.com"},
+                )
+                reset_code = sender.codes[("trader@example.com", "password_reset")]
+                reset_response = await client.post(
+                    "/reset-password",
+                    data={
+                        "email": "trader@example.com",
+                        "verification_code": reset_code,
+                        "password": "Strong-pass-2!",
+                        "password_confirm": "Strong-pass-2!",
+                    },
+                )
+                expired_session_response = await client.get("/api/state")
+                new_login_response = await client.post(
+                    "/login",
+                    data={
+                        "username": "trader01",
+                        "password": "Strong-pass-2!",
+                    },
+                )
+            finally:
+                await client.close()
+                env_patch.stop()
+
+        self.assertEqual(denied_code_response.status, 403)
+        self.assertEqual(code_response.status, 200)
+        self.assertEqual(register_response.status, 200)
+        self.assertEqual(login_response.status, 200)
+        self.assertEqual(logged_in_state["auth"]["username"], "trader01")
+        self.assertEqual(reset_code_response.status, 200)
+        self.assertEqual(reset_response.status, 200)
+        self.assertEqual(expired_session_response.status, 401)
+        self.assertEqual(new_login_response.status, 200)
 
 if __name__ == "__main__":
     unittest.main()

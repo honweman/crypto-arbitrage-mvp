@@ -53,7 +53,7 @@ def _user_can_access_asset(user: WebUser | None, asset: str) -> bool:
     normalized = str(asset or "").strip().upper()
     if not normalized:
         return True
-    return not user.allowed_assets or normalized in set(user.allowed_assets)
+    return normalized in set(user.allowed_assets)
 
 
 def _require_admin_user(user: WebUser | None) -> None:
@@ -122,11 +122,14 @@ def _filter_state_payload_for_user(
 
     allowed_assets = set(user.allowed_assets)
     asset_scope = _user_asset_scope(user)
+    unassigned_user = user.role != "admin" and not allowed_assets
 
     def in_scope(asset: str) -> bool:
         normalized = str(asset or "").strip().upper()
         if not normalized:
             return True
+        if unassigned_user:
+            return False
         if allowed_assets and normalized not in allowed_assets:
             return False
         return not asset_scope or normalized in asset_scope
@@ -141,8 +144,8 @@ def _filter_state_payload_for_user(
             if symbol and symbol_in_scope(str(symbol))
         ]
 
-    currency_scope: set[str] | None = None
-    if allowed_assets or asset_scope:
+    currency_scope: set[str] | None = set() if unassigned_user else None
+    if not unassigned_user and (allowed_assets or asset_scope):
         currency_scope = set(asset_scope or allowed_assets)
         for market in cfg.spot_markets:
             if in_scope(market.asset):

@@ -29,18 +29,26 @@ def register_routes(app: web.Application) -> None:
         api_signal_webhook,
         api_strategy_center,
         api_strategy_control,
+        forgot_password_code_post,
+        forgot_password_get,
         index,
         login_get,
         login_post,
         logout,
         register_get,
+        register_code_post,
         register_post,
+        reset_password_post,
     )
 
     app.router.add_get("/login", login_get)
     app.router.add_post("/login", login_post)
     app.router.add_get("/register", register_get)
+    app.router.add_post("/register/code", register_code_post)
     app.router.add_post("/register", register_post)
+    app.router.add_get("/forgot-password", forgot_password_get)
+    app.router.add_post("/forgot-password/code", forgot_password_code_post)
+    app.router.add_post("/reset-password", reset_password_post)
     app.router.add_get("/logout", logout)
     app.router.add_get("/", index)
     app.router.add_static("/static/", STATIC_DIR, name="static", append_version=True)

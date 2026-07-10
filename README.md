@@ -600,11 +600,19 @@ The web monitor can be protected with a password and an IP allowlist without sto
   "cookie_secret_env": "CRYPTO_ARB_WEB_COOKIE_SECRET",
   "allowed_ips_env": "CRYPTO_ARB_WEB_ALLOWED_IPS",
   "trust_proxy_headers": true,
-  "cookie_secure": true
+  "cookie_secure": true,
+  "user_store_path": "data/web_users.json",
+  "registration_enabled": true,
+  "bootstrap_admin_email_env": "CRYPTO_ARB_WEB_ADMIN_EMAIL",
+  "verification_code_ttl_seconds": 600,
+  "verification_resend_seconds": 60,
+  "verification_max_attempts": 5
 }
 ```
 
 Set `CRYPTO_ARB_WEB_PASSWORD` and `CRYPTO_ARB_WEB_ALLOWED_IPS` in the server environment file. `CRYPTO_ARB_WEB_ALLOWED_IPS` accepts comma-separated IPs or CIDR ranges. When nginx terminates HTTPS, bind the Python app to `127.0.0.1` and pass `X-Real-IP` / `X-Forwarded-Proto` headers:
+
+When `registration_enabled` is true, users register with an email verification code and choose a unique username. Passwords must be at least eight characters and contain a letter, a number, and a special character. Subsequent logins use username and password. Password reset codes are sent to the registered email. Set `CRYPTO_ARB_WEB_ADMIN_EMAIL` before opening registration: only that address may create the first administrator account. Later accounts start without asset permissions until an administrator assigns them. Existing email users are given a compatible username based on the part before `@`.
 
 ```nginx
 location / {
@@ -639,6 +647,8 @@ Alerts support generic webhook, Telegram, and SMTP email:
   "daily_report_time": "23:59"
 }
 ```
+
+Email registration and password recovery reuse `email_from_env`, `smtp_host_env`, `smtp_port_env`, `smtp_username_env`, `smtp_password_env`, and `smtp_tls`. They do not require alert delivery to be enabled and do not use the fixed `email_to_env` recipient.
 
 Auto-stop pauses the program after repeated degraded/error cycles, or immediately when the daily P/L breaches `risk.max_daily_loss_quote`. Daily reports are sent through the configured alert channels once per local day.
 

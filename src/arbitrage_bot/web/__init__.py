@@ -6,7 +6,6 @@ import base64
 import contextlib
 import hashlib
 import hmac
-import html
 import ipaddress
 import json
 import os
@@ -20,6 +19,11 @@ from typing import Any
 
 from aiohttp import web
 
+from .auth_views import (
+    forgot_password_html as _forgot_password_html,
+    login_html as _login_html,
+    register_html as _register_html,
+)
 from .render_payloads import (
     STATE_VIEW_IDS,
     state_payload_for_view,
@@ -28,8 +32,14 @@ from .render_payloads import (
 from .users import (
     WebUser,
     WebUserStore,
-    normalize_assets,
-    totp_provisioning_uri,
+    normalize_email,
+    normalize_username,
+    validate_password,
+)
+from .verification import (
+    EmailVerificationManager,
+    VerificationEmailSender,
+    VerificationRateLimited,
 )
 from .user_scope import (
     _assets_from_cash_and_carry_pairs,
@@ -210,6 +220,12 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": (
+        "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    ),
 }
 
 # Brute-force protection for the login endpoint.
@@ -269,146 +285,6 @@ class LoginRateLimiter:
     def register_success(self, key: str) -> None:
         self._failures.pop(key, None)
         self._locked_until.pop(key, None)
-
-
-LOGIN_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Crypto Trading Login</title>
-  <style>
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background: #f5f6f2;
-      color: #17211b;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    form {
-      width: min(360px, calc(100% - 32px));
-      display: grid;
-      gap: 12px;
-      padding: 22px;
-      border: 1px solid #d8ded8;
-      border-radius: 8px;
-      background: #ffffff;
-    }
-    h1 { margin: 0 0 4px; font-size: 20px; }
-    p { margin: 0; color: #66736b; font-size: 13px; line-height: 1.45; }
-    label { color: #66736b; font-size: 12px; font-weight: 700; text-transform: uppercase; }
-    input {
-      width: 100%;
-      min-height: 40px;
-      padding: 8px 10px;
-      border: 1px solid #d8ded8;
-      border-radius: 6px;
-      font: inherit;
-      box-sizing: border-box;
-    }
-    button {
-      min-height: 40px;
-      border: 1px solid #101828;
-      border-radius: 6px;
-      background: #101828;
-      color: #ffffff;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    a { color: #1d4ed8; font-size: 13px; text-decoration: none; }
-    .optional { display: __EMAIL_DISPLAY__; }
-    .register { display: __REGISTER_DISPLAY__; }
-    .error { min-height: 18px; color: #b33b2e; font-size: 13px; }
-  </style>
-</head>
-<body>
-  <form method="post" action="/login">
-    <h1>Crypto Trading</h1>
-    <p>__LOGIN_HINT__</p>
-    <div class="optional">
-      <label for="email">Email</label>
-      <input id="email" name="email" type="email" autocomplete="username" autofocus>
-    </div>
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" __PASSWORD_AUTOFOCUS__>
-    <div class="optional">
-      <label for="totp">Google Authenticator Code</label>
-      <input id="totp" name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*">
-    </div>
-    <button type="submit">Sign In</button>
-    <a class="register" href="/register">Register with email and 2FA</a>
-    <div class="error">__ERROR__</div>
-  </form>
-</body>
-</html>
-"""
-
-
-REGISTER_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Register Crypto Trading User</title>
-  <style>
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background: #f5f6f2;
-      color: #17211b;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    form, .panel {
-      width: min(440px, calc(100% - 32px));
-      display: grid;
-      gap: 12px;
-      padding: 22px;
-      border: 1px solid #d8ded8;
-      border-radius: 8px;
-      background: #ffffff;
-    }
-    h1 { margin: 0 0 4px; font-size: 20px; }
-    p { margin: 0; color: #66736b; font-size: 13px; line-height: 1.45; }
-    label { color: #66736b; font-size: 12px; font-weight: 700; text-transform: uppercase; }
-    input {
-      width: 100%;
-      min-height: 40px;
-      padding: 8px 10px;
-      border: 1px solid #d8ded8;
-      border-radius: 6px;
-      font: inherit;
-      box-sizing: border-box;
-    }
-    button {
-      min-height: 40px;
-      border: 1px solid #101828;
-      border-radius: 6px;
-      background: #101828;
-      color: #ffffff;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    code {
-      display: block;
-      padding: 10px;
-      border-radius: 6px;
-      background: #f1f5f9;
-      overflow-wrap: anywhere;
-    }
-    a { color: #1d4ed8; font-size: 13px; text-decoration: none; }
-    .code-field { display: __CODE_DISPLAY__; }
-    .error { min-height: 18px; color: #b33b2e; font-size: 13px; }
-  </style>
-</head>
-<body>
-  __BODY__
-</body>
-</html>
-"""
 
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -4736,20 +4612,38 @@ def _cookie_secret(cfg: BotConfig) -> str:
     )
 
 
-def _registration_code(cfg: BotConfig) -> str | None:
-    return _env_optional(cfg.web_security.registration_code_env)
-
-
-def _registration_code_required(cfg: BotConfig) -> bool:
-    return bool(cfg.web_security.registration_code_env)
-
-
 def _user_store(request: web.Request) -> WebUserStore:
     return request.app["web_user_store"]
 
 
+def _require_allowed_registration_email(
+    cfg: BotConfig,
+    store: WebUserStore,
+    email: str,
+) -> None:
+    if store.has_users():
+        return
+    admin_email = _env_optional(cfg.web_security.bootstrap_admin_email_env)
+    if not admin_email:
+        raise RuntimeError("initial administrator email is not configured")
+    try:
+        expected = normalize_email(admin_email)
+    except ValueError:
+        raise RuntimeError("initial administrator email is invalid") from None
+    if not hmac.compare_digest(email, expected):
+        raise PermissionError("registration is not available for this email")
+
+
 def _login_rate_limiter(request: web.Request) -> LoginRateLimiter:
     return request.app["login_rate_limiter"]
+
+
+def _verification_manager(request: web.Request) -> EmailVerificationManager:
+    return request.app["email_verification_manager"]
+
+
+def _verification_email_sender(request: web.Request) -> VerificationEmailSender:
+    return request.app["verification_email_sender"]
 
 
 def _strategy_center_store(request: web.Request) -> StrategyCenterStore:
@@ -4843,38 +4737,67 @@ def _ip_allowed(ip_value: str, allowed_specs: list[str]) -> bool:
     return False
 
 
-def _sign_session(cfg: BotConfig, timestamp: int, email: str = "") -> str:
+def _sign_session(
+    cfg: BotConfig,
+    timestamp: int,
+    email: str = "",
+    auth_version: int = 0,
+) -> str:
     secret = _cookie_secret(cfg).encode("utf-8")
-    payload = f"{timestamp}:{email}".encode("utf-8")
+    payload = (
+        f"{timestamp}:{auth_version}:{email}"
+        if auth_version
+        else f"{timestamp}:{email}"
+    ).encode("utf-8")
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
-def _make_session_token(cfg: BotConfig, email: str = "") -> str:
+def _make_session_token(
+    cfg: BotConfig,
+    email: str = "",
+    auth_version: int = 0,
+) -> str:
     timestamp = int(time.time())
     if email:
-        raw = f"v2:{timestamp}:{email}:{_sign_session(cfg, timestamp, email)}"
+        version = max(1, int(auth_version or 1))
+        signature = _sign_session(cfg, timestamp, email, version)
+        raw = f"v3:{timestamp}:{version}:{email}:{signature}"
     else:
         raw = f"{timestamp}:{_sign_session(cfg, timestamp)}"
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def _session_identity(cfg: BotConfig, token: str | None) -> tuple[bool, str]:
+def _session_details(cfg: BotConfig, token: str | None) -> tuple[bool, str, int]:
     if not token:
-        return False, ""
+        return False, "", 0
     try:
         raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        if raw.startswith("v2:"):
+        if raw.startswith("v3:"):
+            _, timestamp_text, version_text, email, signature = raw.split(":", 4)
+            auth_version = int(version_text)
+        elif raw.startswith("v2:"):
             _, timestamp_text, email, signature = raw.split(":", 3)
+            auth_version = 0
         else:
             timestamp_text, signature = raw.split(":", 1)
             email = ""
+            auth_version = 0
         timestamp = int(timestamp_text)
     except (ValueError, TypeError):
-        return False, ""
-    if time.time() - timestamp > SESSION_MAX_AGE_SECONDS:
-        return False, ""
-    valid = hmac.compare_digest(signature, _sign_session(cfg, timestamp, email))
-    return valid, email if valid else ""
+        return False, "", 0
+    age = time.time() - timestamp
+    if age > SESSION_MAX_AGE_SECONDS or age < -60:
+        return False, "", 0
+    valid = hmac.compare_digest(
+        signature,
+        _sign_session(cfg, timestamp, email, auth_version),
+    )
+    return valid, email if valid else "", auth_version if valid else 0
+
+
+def _session_identity(cfg: BotConfig, token: str | None) -> tuple[bool, str]:
+    valid, email, _ = _session_details(cfg, token)
+    return valid, email
 
 
 def _session_valid(cfg: BotConfig, token: str | None) -> bool:
@@ -4886,77 +4809,6 @@ def _add_security_headers(response: web.StreamResponse) -> web.StreamResponse:
     for key, value in SECURITY_HEADERS.items():
         response.headers.setdefault(key, value)
     return response
-
-
-def _login_html(
-    *,
-    error: str = "",
-    email_login: bool = False,
-    registration_enabled: bool = False,
-) -> str:
-    hint = (
-        "Use your registered email, password, and Google Authenticator code."
-        if email_login
-        else "Use the temporary dashboard password. Email login starts after users are registered."
-    )
-    return (
-        LOGIN_HTML.replace("__ERROR__", html.escape(error))
-        .replace("__LOGIN_HINT__", html.escape(hint))
-        .replace("__EMAIL_DISPLAY__", "block" if email_login else "none")
-        .replace("__REGISTER_DISPLAY__", "block" if registration_enabled else "none")
-        .replace("__PASSWORD_AUTOFOCUS__", "" if email_login else "autofocus")
-    )
-
-
-def _register_html(
-    *,
-    cfg: BotConfig,
-    error: str = "",
-    user: WebUser | None = None,
-) -> str:
-    code_required = _registration_code_required(cfg)
-    if user is not None:
-        uri = totp_provisioning_uri(
-            email=user.email,
-            secret=user.totp_secret,
-            issuer=cfg.web_security.totp_issuer,
-        )
-        body = f"""
-  <div class="panel">
-    <h1>2FA Setup</h1>
-    <p>User <strong>{html.escape(user.email)}</strong> is registered.</p>
-    <p>Add this setup key to Google Authenticator, then sign in with the 6-digit code.</p>
-    <label>Setup Key</label>
-    <code>{html.escape(user.totp_secret)}</code>
-    <label>Authenticator URI</label>
-    <code>{html.escape(uri)}</code>
-    <a href="/login">Continue to login</a>
-  </div>
-"""
-    else:
-        body = f"""
-  <form method="post" action="/register">
-    <h1>Register User</h1>
-    <p>Create an email user and Google Authenticator setup key. Use comma-separated assets such as ACS,BTC.</p>
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="username" autofocus>
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="new-password">
-    <label for="assets">Allowed Assets</label>
-    <input id="assets" name="assets" type="text" placeholder="ACS,BTC">
-    <div class="code-field">
-      <label for="registration_code">Registration Code</label>
-      <input id="registration_code" name="registration_code" type="password">
-    </div>
-    <button type="submit">Register</button>
-    <a href="/login">Back to login</a>
-    <div class="error">{html.escape(error)}</div>
-  </form>
-"""
-    return (
-        REGISTER_HTML.replace("__BODY__", body)
-        .replace("__CODE_DISPLAY__", "block" if code_required else "none")
-    )
 
 
 def _email_login_enabled(request: web.Request) -> bool:
@@ -5005,8 +4857,7 @@ async def login_post(request: web.Request) -> web.Response:
     form = await request.post()
     email_login = _email_login_enabled(request)
     supplied_password = str(form.get("password", ""))
-    email = str(form.get("email", ""))
-    totp = str(form.get("totp", ""))
+    username = str(form.get("username") or form.get("email") or "")
 
     limiter = _login_rate_limiter(request)
     throttle_key = _client_ip(request, cfg) or "unknown"
@@ -5019,19 +4870,22 @@ async def login_post(request: web.Request) -> web.Response:
         )
 
     if email_login:
-        try:
-            user = _user_store(request).authenticate(
-                email=email,
+        user = (
+            _user_store(request).authenticate(
+                email=username,
                 password=supplied_password,
-                totp=totp,
             )
-        except ValueError:
-            user = None
+            if "@" in username
+            else _user_store(request).authenticate(
+                username=username,
+                password=supplied_password,
+            )
+        )
         if user is None:
             limiter.register_failure(throttle_key)
             return web.Response(
                 text=_login_html(
-                    error="Invalid email, password, or authenticator code",
+                    error="登录名或密码错误 / Invalid username or password",
                     email_login=True,
                     registration_enabled=cfg.web_security.registration_enabled,
                 ),
@@ -5042,7 +4896,7 @@ async def login_post(request: web.Request) -> web.Response:
         response = web.HTTPFound("/")
         response.set_cookie(
             SESSION_COOKIE,
-            _make_session_token(cfg, user.email),
+            _make_session_token(cfg, user.email, user.auth_version),
             max_age=SESSION_MAX_AGE_SECONDS,
             httponly=True,
             secure=cfg.web_security.cookie_secure and _request_is_https(request, cfg),
@@ -5082,7 +4936,83 @@ async def register_get(request: web.Request) -> web.Response:
     if not cfg.web_security.registration_enabled:
         return web.Response(text="Registration is disabled", status=404)
     return web.Response(
-        text=_register_html(cfg=cfg),
+        text=_register_html(),
+        content_type="text/html",
+    )
+
+
+async def register_code_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    if not cfg.web_security.registration_enabled:
+        return web.Response(text="Registration is disabled", status=404)
+    form = await request.post()
+    email = str(form.get("email") or "")
+    username = str(form.get("username") or "")
+    try:
+        normalized_email = normalize_email(email)
+        normalized_username = normalize_username(username)
+        store = _user_store(request)
+        _require_allowed_registration_email(cfg, store, normalized_email)
+        if store.get_user(normalized_email) is not None:
+            raise ValueError("email is already registered")
+        if store.get_user_by_username(normalized_username) is not None:
+            raise ValueError("username is already registered")
+        sender = _verification_email_sender(request)
+        if not sender.configured():
+            raise RuntimeError("email verification service is not configured")
+        code = _verification_manager(request).issue(
+            email=normalized_email,
+            purpose="register",
+            client_key=_client_ip(request, cfg) or "unknown",
+        )
+        try:
+            await sender.send_code(
+                email=normalized_email,
+                code=code,
+                purpose="register",
+            )
+        except Exception:
+            _verification_manager(request).discard(
+                email=normalized_email,
+                purpose="register",
+            )
+            raise RuntimeError("verification email could not be sent") from None
+    except VerificationRateLimited as exc:
+        response = web.Response(
+            text=_register_html(
+                email=email,
+                username=username,
+                error=str(exc),
+            ),
+            content_type="text/html",
+            status=429,
+        )
+        response.headers["Retry-After"] = str(int(exc.retry_after + 0.999))
+        return response
+    except RuntimeError as exc:
+        return web.Response(
+            text=_register_html(email=email, username=username, error=str(exc)),
+            content_type="text/html",
+            status=503,
+        )
+    except PermissionError as exc:
+        return web.Response(
+            text=_register_html(email=email, username=username, error=str(exc)),
+            content_type="text/html",
+            status=403,
+        )
+    except ValueError as exc:
+        return web.Response(
+            text=_register_html(email=email, username=username, error=str(exc)),
+            content_type="text/html",
+            status=400,
+        )
+    return web.Response(
+        text=_register_html(
+            email=normalized_email,
+            username=normalized_username,
+            notice="验证码已发送，请在有效期内完成注册。",
+        ),
         content_type="text/html",
     )
 
@@ -5092,35 +5022,60 @@ async def register_post(request: web.Request) -> web.Response:
     if not cfg.web_security.registration_enabled:
         return web.Response(text="Registration is disabled", status=404)
     form = await request.post()
-    expected_code = _registration_code(cfg)
-    if _registration_code_required(cfg) and expected_code is None:
+    email = str(form.get("email") or "")
+    username = str(form.get("username") or "")
+    password = str(form.get("password") or "")
+    password_confirm = str(form.get("password_confirm") or "")
+    try:
+        normalized_email = normalize_email(email)
+        normalized_username = normalize_username(username)
+        if password != password_confirm:
+            raise ValueError("passwords do not match")
+        validate_password(password)
+        store = _user_store(request)
+        _require_allowed_registration_email(cfg, store, normalized_email)
+        if store.get_user(normalized_email) is not None:
+            raise ValueError("email is already registered")
+        if store.get_user_by_username(normalized_username) is not None:
+            raise ValueError("username is already registered")
+        if not _verification_manager(request).verify(
+            email=normalized_email,
+            purpose="register",
+            code=str(form.get("verification_code") or ""),
+        ):
+            raise ValueError("verification code is invalid or expired")
+        user = _user_store(request).create_user(
+            email=normalized_email,
+            username=normalized_username,
+            password=password,
+        )
+    except PermissionError as exc:
         return web.Response(
             text=_register_html(
-                cfg=cfg,
-                error="Registration code environment variable is not set",
+                email=email,
+                username=username,
+                error=str(exc),
+            ),
+            content_type="text/html",
+            status=403,
+        )
+    except RuntimeError as exc:
+        return web.Response(
+            text=_register_html(
+                email=email,
+                username=username,
+                error=str(exc),
             ),
             content_type="text/html",
             status=503,
         )
-    supplied_code = str(form.get("registration_code", ""))
-    if expected_code is not None and not hmac.compare_digest(
-        supplied_code,
-        expected_code,
-    ):
-        return web.Response(
-            text=_register_html(cfg=cfg, error="Invalid registration code"),
-            content_type="text/html",
-            status=403,
-        )
-    try:
-        user = _user_store(request).create_user(
-            email=str(form.get("email", "")),
-            password=str(form.get("password", "")),
-            allowed_assets=normalize_assets(str(form.get("assets", ""))),
-        )
     except ValueError as exc:
         return web.Response(
-            text=_register_html(cfg=cfg, error=str(exc)),
+            text=_register_html(
+                email=email,
+                username=username,
+                error=str(exc),
+            ),
             content_type="text/html",
             status=400,
         )
@@ -5129,14 +5084,124 @@ async def register_post(request: web.Request) -> web.Response:
         action="user_register",
         target=user.email,
         detail="registered web user",
-        payload={"email": user.email, "allowed_assets": user.allowed_assets},
+        payload={"email": user.email, "username": user.username},
         actor_ip=_client_ip(request, cfg),
         path=request.path,
         method=request.method,
         user_agent=str(request.headers.get("User-Agent", ""))[:160],
     )
     return web.Response(
-        text=_register_html(cfg=cfg, user=user),
+        text=_register_html(user=user),
+        content_type="text/html",
+    )
+
+
+async def forgot_password_get(_: web.Request) -> web.Response:
+    return web.Response(
+        text=_forgot_password_html(),
+        content_type="text/html",
+    )
+
+
+async def forgot_password_code_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    form = await request.post()
+    email = str(form.get("email") or "")
+    try:
+        normalized_email = normalize_email(email)
+        sender = _verification_email_sender(request)
+        if not sender.configured():
+            raise RuntimeError("email verification service is not configured")
+        user = _user_store(request).get_user(normalized_email)
+        code = _verification_manager(request).issue(
+            email=normalized_email,
+            purpose="password_reset",
+            client_key=_client_ip(request, cfg) or "unknown",
+        )
+        if user is not None:
+            try:
+                await sender.send_code(
+                    email=normalized_email,
+                    code=code,
+                    purpose="password_reset",
+                )
+            except Exception:
+                _verification_manager(request).discard(
+                    email=normalized_email,
+                    purpose="password_reset",
+                )
+                raise RuntimeError("verification email could not be sent") from None
+    except VerificationRateLimited as exc:
+        response = web.Response(
+            text=_forgot_password_html(email=email, error=str(exc)),
+            content_type="text/html",
+            status=429,
+        )
+        response.headers["Retry-After"] = str(int(exc.retry_after + 0.999))
+        return response
+    except RuntimeError as exc:
+        return web.Response(
+            text=_forgot_password_html(email=email, error=str(exc)),
+            content_type="text/html",
+            status=503,
+        )
+    except ValueError as exc:
+        return web.Response(
+            text=_forgot_password_html(email=email, error=str(exc)),
+            content_type="text/html",
+            status=400,
+        )
+    return web.Response(
+        text=_forgot_password_html(
+            email=normalized_email,
+            notice="如果该邮箱已注册，验证码已经发送。",
+        ),
+        content_type="text/html",
+    )
+
+
+async def reset_password_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    form = await request.post()
+    email = str(form.get("email") or "")
+    password = str(form.get("password") or "")
+    password_confirm = str(form.get("password_confirm") or "")
+    try:
+        normalized_email = normalize_email(email)
+        if password != password_confirm:
+            raise ValueError("passwords do not match")
+        validate_password(password)
+        if _user_store(request).get_user(normalized_email) is None:
+            raise ValueError("verification code is invalid or expired")
+        if not _verification_manager(request).verify(
+            email=normalized_email,
+            purpose="password_reset",
+            code=str(form.get("verification_code") or ""),
+        ):
+            raise ValueError("verification code is invalid or expired")
+        user = _user_store(request).reset_password(
+            email=normalized_email,
+            new_password=password,
+        )
+    except ValueError as exc:
+        return web.Response(
+            text=_forgot_password_html(email=email, error=str(exc)),
+            content_type="text/html",
+            status=400,
+        )
+    write_system_web_audit_event(
+        cfg,
+        action="user_password_reset",
+        target=user.email,
+        detail="reset password by verified email",
+        payload={"email": user.email, "username": user.username},
+        actor_ip=_client_ip(request, cfg),
+        path=request.path,
+        method=request.method,
+        user_agent=str(request.headers.get("User-Agent", ""))[:160],
+    )
+    return web.Response(
+        text=_forgot_password_html(reset_complete=True),
         content_type="text/html",
     )
 
@@ -5174,7 +5239,15 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
         ):
             return _add_security_headers(web.Response(text="Forbidden", status=403))
 
-        if request.path in {"/login", "/logout", "/register"}:
+        if request.path in {
+            "/login",
+            "/logout",
+            "/register",
+            "/register/code",
+            "/forgot-password",
+            "/forgot-password/code",
+            "/reset-password",
+        }:
             return await call_handler()
         if request.path == "/api/signal" or request.path.startswith("/api/signal/"):
             return await call_handler()
@@ -5190,7 +5263,7 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
             "/metrics",
         } and _is_local_ip(remote):
             return await call_handler()
-        session_valid, session_email = _session_identity(
+        session_valid, session_email, session_auth_version = _session_details(
             cfg,
             request.cookies.get(SESSION_COOKIE),
         )
@@ -5204,8 +5277,11 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
             raise redirect
         if session_email:
             try:
-                if _user_store(request).get_user(session_email) is None:
+                session_user = _user_store(request).get_user(session_email)
+                if session_user is None:
                     raise ValueError("unknown user")
+                if session_user.auth_version != session_auth_version:
+                    raise ValueError("expired user session")
             except ValueError:
                 if request.path.startswith("/api/"):
                     return _add_security_headers(
@@ -5300,6 +5376,7 @@ async def api_profile(request: web.Request) -> web.Response:
 def _public_admin_user_dict(user: WebUser) -> dict[str, Any]:
     return {
         "email": user.email,
+        "username": user.username,
         "role": user.role,
         "totp_enabled": user.totp_enabled,
         "allowed_assets": user.allowed_assets,
@@ -5323,12 +5400,14 @@ async def api_admin_users(request: web.Request) -> web.Response:
             raise ValueError("payload must be an object")
         action = str(payload.get("action") or "").strip().lower()
         email = str(payload.get("email") or "").strip()
+        username = str(payload.get("username") or "").strip()
 
         if action == "list":
             pass
         elif action == "create_user":
             created = store.admin_create_user(
                 email=email,
+                username=username,
                 password=str(payload.get("password") or ""),
                 role=str(payload.get("role") or "user"),
                 allowed_assets=payload.get("allowed_assets"),
@@ -5342,11 +5421,13 @@ async def api_admin_users(request: web.Request) -> web.Response:
             if not email:
                 raise ValueError("email is required")
             role_provided = "role" in payload
+            username_provided = "username" in payload
             allowed_assets_provided = "allowed_assets" in payload
             preferred_asset_provided = "preferred_asset" in payload
             new_password = str(payload.get("new_password") or "")
             updated = store.admin_update_user(
                 email=email,
+                username=username if username_provided else None,
                 role=str(payload.get("role") or "") if role_provided else None,
                 allowed_assets=payload.get("allowed_assets"),
                 allowed_assets_provided=allowed_assets_provided,
@@ -5362,6 +5443,7 @@ async def api_admin_users(request: web.Request) -> web.Response:
                 name
                 for name, touched in (
                     ("role", role_provided),
+                    ("username", username_provided),
                     ("assets", allowed_assets_provided or preferred_asset_provided),
                     ("password", bool(new_password)),
                 )
@@ -6600,6 +6682,12 @@ def create_app(
     app["web_user_store"] = web_user_store
     app["strategy_center_store"] = strategy_center_store
     app["login_rate_limiter"] = LoginRateLimiter()
+    app["email_verification_manager"] = EmailVerificationManager(
+        ttl_seconds=cfg.web_security.verification_code_ttl_seconds,
+        resend_seconds=cfg.web_security.verification_resend_seconds,
+        max_attempts=cfg.web_security.verification_max_attempts,
+    )
+    app["verification_email_sender"] = VerificationEmailSender(cfg.alerts)
 
     async def monitor_context(app_: web.Application) -> Any:
         monitor_task = asyncio.create_task(

@@ -223,9 +223,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.web_security.user_store_path, "data/web_users.json")
         self.assertFalse(cfg.web_security.registration_enabled)
         self.assertEqual(
-            cfg.web_security.registration_code_env,
-            "CRYPTO_ARB_WEB_REGISTRATION_CODE",
+            cfg.web_security.bootstrap_admin_email_env,
+            "CRYPTO_ARB_WEB_ADMIN_EMAIL",
         )
+        self.assertIsNone(cfg.web_security.registration_code_env)
+        self.assertEqual(cfg.web_security.verification_code_ttl_seconds, 600)
+        self.assertEqual(cfg.web_security.verification_resend_seconds, 60)
+        self.assertEqual(cfg.web_security.verification_max_attempts, 5)
         self.assertEqual(cfg.web_security.totp_issuer, "DayDayUp Trade")
         self.assertTrue(
             any(
