@@ -293,6 +293,50 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return `${currency} ${formatBalanceAmount(value || 0)}`;
     }
 
+    function marketLimitKey(exchange, symbol) {
+      return `${String(exchange || "").trim()}::${String(symbol || "").trim()}`;
+    }
+
+    function marketLimitFor(exchange, symbol) {
+      const key = marketLimitKey(exchange, symbol);
+      return (currentMarketLimits || []).find((row) => marketLimitKey(row.exchange, row.symbol) === key) || null;
+    }
+
+    function marketLimitValue(row, field) {
+      const value = row?.limits?.[field];
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    function marketPrecisionValue(row, field) {
+      const value = row?.precision?.[field];
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    function formatLimitValue(value, currency = "") {
+      if (value == null) return "--";
+      const prefix = currency ? `${currency} ` : "";
+      return `${prefix}${formatBalanceAmount(value)}`;
+    }
+
+    function marketLimitSummary(row, symbol) {
+      if (!row) return uiText("Exchange minimum unavailable");
+      if (row.status && row.status !== "ok") {
+        return row.error || `${uiText("Exchange minimum unavailable")} (${row.status})`;
+      }
+      const quote = quoteCurrency(symbol || row.symbol);
+      const base = baseCurrency(symbol || row.symbol);
+      const costMin = marketLimitValue(row, "cost_min");
+      const amountMin = marketLimitValue(row, "amount_min");
+      const priceTick = marketPrecisionValue(row, "price");
+      const parts = [];
+      parts.push(`${uiText("Min notional")}: ${formatLimitValue(costMin, quote)}`);
+      if (amountMin != null) parts.push(`${uiText("Min base")}: ${formatLimitValue(amountMin, base)}`);
+      if (priceTick != null) parts.push(`${uiText("Price tick")}: ${fmt.format(priceTick)}`);
+      return parts.join(" · ");
+    }
+
     function renderMarkets(markets) {
       const body = document.getElementById("markets");
       body.innerHTML = "";
@@ -855,6 +899,7 @@ function balanceStatusClass(status) {
     let marketsConfigBusy = false;
     let carryConfigBusy = false;
     let currentSpotMarkets = [];
+    let currentMarketLimits = [];
     let currentCashCarryPairs = [];
 
     async function cancelOrder(order, button) {
@@ -1337,6 +1382,7 @@ function balanceStatusClass(status) {
       if (marketsConfigBusy) return;
       const config = data.config || {};
       const exchanges = config.spot_exchanges || [];
+      if (Array.isArray(data.market_limits)) currentMarketLimits = data.market_limits;
       currentSpotMarkets = (config.spot_markets || []).map(normalizeMarketRow);
       renderMarketExchangeSelect(exchanges);
       text(
@@ -1348,18 +1394,26 @@ function balanceStatusClass(status) {
       body.innerHTML = "";
       if (currentSpotMarkets.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="5">No markets configured.</td>`;
+        tr.innerHTML = `<td colspan="8">No markets configured.</td>`;
         body.appendChild(tr);
         return;
       }
 
       currentSpotMarkets.forEach((market, index) => {
+        const limit = marketLimitFor(market.exchange, market.symbol);
+        const costMin = marketLimitValue(limit, "cost_min");
+        const amountMin = marketLimitValue(limit, "amount_min");
+        const priceTick = marketPrecisionValue(limit, "price");
+        const title = marketLimitSummary(limit, market.symbol);
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${escapeHtml(market.asset)}</td>
           <td>${escapeHtml(market.exchange)}</td>
           <td>${escapeHtml(market.symbol)}</td>
           <td>${escapeHtml(market.quote_currency)}</td>
+          <td class="num" title="${escapeHtml(title)}">${escapeHtml(formatLimitValue(costMin, market.quote_currency))}</td>
+          <td class="num" title="${escapeHtml(title)}">${escapeHtml(formatLimitValue(amountMin, baseCurrency(market.symbol)))}</td>
+          <td class="num" title="${escapeHtml(title)}">${priceTick == null ? "--" : fmt.format(priceTick)}</td>
           <td class="market-action"></td>
         `;
         const action = tr.querySelector(".market-action");
@@ -3436,6 +3490,7 @@ function balanceStatusClass(status) {
             marketType: market.market_type || account.market_type || "spot",
             symbol: market.symbol || "",
             quoteCurrency: market.quote_currency || quoteCurrency(market.symbol),
+            marketLimit: marketLimitFor(market.exchange || account.key, market.symbol || ""),
           }))
           .filter((market) => market.symbol);
       }
@@ -3449,6 +3504,7 @@ function balanceStatusClass(status) {
         marketType: account?.market_type || "spot",
         symbol,
         quoteCurrency: quoteCurrency(symbol),
+        marketLimit: marketLimitFor(account?.key || "", symbol),
       }));
     }
 
@@ -3628,6 +3684,7 @@ function balanceStatusClass(status) {
           const option = document.createElement("option");
           option.value = symbol;
           option.textContent = symbol;
+          option.title = marketLimitSummary(marketLimitFor(account?.key || "", symbol), symbol);
           symbolSelect.appendChild(option);
         }
         if (preferredSymbol && symbols.includes(preferredSymbol)) {
@@ -3642,20 +3699,26 @@ function balanceStatusClass(status) {
         fillExchanges(accountSelect.value);
         fillSymbols("");
         onDirty();
+        updateSlowMarketLimitHint();
       });
       projectSelect.addEventListener("change", () => {
         fillExchanges(accountSelect.value);
         if (exchangeSelect.value) accountSelect.value = exchangeSelect.value;
         fillSymbols("");
         onDirty();
+        updateSlowMarketLimitHint();
       });
       exchangeSelect.addEventListener("change", () => {
         if (exchangeSelect.value) accountSelect.value = exchangeSelect.value;
         fillProjects(projectSelect.value);
         fillSymbols("");
         onDirty();
+        updateSlowMarketLimitHint();
       });
-      symbolSelect.addEventListener("change", onDirty);
+      symbolSelect.addEventListener("change", () => {
+        onDirty();
+        updateSlowMarketLimitHint();
+      });
       fillProjects(selectedProjectForSymbol(list, selectedSymbol));
       fillExchanges(selectedExchange || accountSelect.value);
       fillSymbols(selectedSymbol || "");
@@ -4020,11 +4083,53 @@ function balanceStatusClass(status) {
     function updateSlowLabels() {
       updateSlowUnitLabels();
       updateSlowGateLabels();
+      updateSlowMarketLimitHint();
+    }
+
+    function slowPlanReferencePrice() {
+      const plan = lastState?.slow_execution?.plan;
+      if (!plan) return null;
+      const exchange = selectedSlowAccount();
+      const symbol = selectedSlowSymbol();
+      if (exchange && plan.exchange && exchange !== plan.exchange) return null;
+      if (symbol && plan.symbol && symbol !== plan.symbol) return null;
+      const value = Number(plan.trigger_price || plan.order?.price || plan.mid_price);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    }
+
+    function updateSlowMarketLimitHint() {
+      const box = document.getElementById("slow-market-limits");
+      if (!box) return;
+      const exchange = selectedSlowAccount();
+      const symbol = selectedSlowSymbol();
+      if (!exchange || !symbol) {
+        box.textContent = uiText("Select an account and pair to view exchange minimums.");
+        box.className = "field wide-field market-limit-hint";
+        return;
+      }
+      const limit = marketLimitFor(exchange, symbol);
+      const costMin = marketLimitValue(limit, "cost_min");
+      const referencePrice = slowPlanReferencePrice();
+      const base = baseCurrency(symbol);
+      const quote = quoteCurrency(symbol);
+      const configuredMin = numericValue("slow-slice-min");
+      const suggestedBase = costMin != null && referencePrice ? costMin / referencePrice : null;
+      const belowExchangeMin = costMin != null && referencePrice && configuredMin > 0 && configuredMin * referencePrice < costMin;
+      const summary = marketLimitSummary(limit, symbol);
+      const configuredText = configuredMin > 0 && referencePrice
+        ? `${uiText("Configured min/order")}: ${formatLimitValue(configuredMin, base)} ≈ ${formatLimitValue(configuredMin * referencePrice, quote)}`
+        : `${uiText("Configured min/order")}: --`;
+      const suggestedText = suggestedBase != null
+        ? `${uiText("Suggested minimum base")}: ${formatLimitValue(suggestedBase, base)}`
+        : `${uiText("Suggested minimum base")}: --`;
+      box.textContent = `${summary} · ${configuredText} · ${suggestedText}`;
+      box.className = `field wide-field market-limit-hint ${belowExchangeMin ? "limit-warning" : ""}`;
     }
 
     function renderSlowExecutionConfig(config, accounts) {
       if (!config || slowFormDirty || slowFormBusy) {
         updateCoreFormStates();
+        updateSlowMarketLimitHint();
         return;
       }
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
@@ -4044,6 +4149,7 @@ function balanceStatusClass(status) {
       setNumericField("slow-ttl", config.order_ttl_seconds || 0);
       setNumericField("slow-start-price", config.start_price || 0);
       setNumericField("slow-stop-price", config.stop_price || 0);
+      updateSlowMarketLimitHint();
       updateCoreFormStates();
     }
 
@@ -4650,6 +4756,7 @@ function balanceStatusClass(status) {
       }
       lastVisibleRenderAt[activePage] = now;
       if (activePage === "settings") {
+        if (Array.isArray(data.market_limits)) currentMarketLimits = data.market_limits;
         renderOpenSection("strategy-settings-cards", () => renderStrategySettingCards(data));
         renderOpenSection("markets-config", () => renderMarketsConfig(data));
         renderOpenSection("carry-config", () => renderCashCarryConfig(data));

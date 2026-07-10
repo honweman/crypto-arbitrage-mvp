@@ -41,7 +41,12 @@ from .user_scope import (
     _require_user_assets,
 )
 
-from ..account_check import _auth_env_status, _balance_currencies, _summarize_balance
+from ..account_check import (
+    _auth_env_status,
+    _balance_currencies,
+    _market_summary,
+    _summarize_balance,
+)
 from ..alerts import AlertService
 from ..auto_buy_sell_task import (
     AutoBuySellTaskService,
@@ -1736,12 +1741,19 @@ async def _fetch_exchange_balance_payload(
             "skipped_reason": None,
             "currencies": [],
         },
+        "markets": [],
     }
 
     if not symbols:
         account["status"] = "idle"
         account["balance"]["skipped_reason"] = "no configured symbols"
         return account
+
+    account["markets"] = await _fetch_exchange_market_limit_payload(
+        manager,
+        exchange,
+        symbols,
+    )
     if not auth["configured"]:
         account["status"] = "warning"
         account["warnings"].append("API env vars are not configured")
@@ -1787,6 +1799,31 @@ async def _fetch_exchange_balance_payload(
         "open_order_reserves": reserve_payload,
     }
     return account
+
+
+async def _fetch_exchange_market_limit_payload(
+    manager: ExchangeManager,
+    exchange: ExchangeConfig,
+    symbols: list[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        row: dict[str, Any] = {
+            "exchange": exchange.key,
+            "symbol": symbol,
+            "status": "unknown",
+            "market": {"found": False},
+            "error": None,
+        }
+        try:
+            market = await manager.fetch_market_info(exchange, symbol=symbol)
+            row["market"] = _market_summary(market)
+            row["status"] = "ok" if row["market"].get("found") else "missing"
+        except Exception as exc:  # noqa: BLE001
+            row["status"] = "error"
+            row["error"] = f"{exc.__class__.__name__}: {exc}"
+        rows.append(row)
+    return rows
 
 
 async def _fetch_derivative_exchange_risk_payload(

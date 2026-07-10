@@ -358,6 +358,34 @@ def _compact_account_balances_payload(
     )
 
 
+def _compact_market_limits_payload(account_balances: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for account in account_balances.get("accounts", []) or []:
+        if not isinstance(account, dict):
+            continue
+        exchange = str(account.get("exchange") or "")
+        label = str(account.get("label") or exchange)
+        market_type = str(account.get("market_type") or "")
+        for item in account.get("markets", []) or []:
+            if not isinstance(item, dict):
+                continue
+            market = item.get("market") if isinstance(item.get("market"), dict) else {}
+            rows.append(
+                {
+                    "exchange": str(item.get("exchange") or exchange),
+                    "label": label,
+                    "market_type": market_type,
+                    "symbol": str(item.get("symbol") or market.get("symbol") or ""),
+                    "status": str(item.get("status") or "unknown"),
+                    "limits": market.get("limits") if isinstance(market, dict) else {},
+                    "precision": market.get("precision") if isinstance(market, dict) else {},
+                    "active": market.get("active") if isinstance(market, dict) else None,
+                    "error": item.get("error"),
+                }
+            )
+    return rows
+
+
 def _compact_derivatives_payload(
     derivatives: dict[str, Any],
     *,
@@ -715,6 +743,11 @@ def state_payload_for_view(
         result["trading_console"] = payload.get("trading_console", {})
     elif is_records:
         result["trading_console"] = payload.get("trading_console", {})
+
+    if is_settings and _section_open(section_ids, "markets-config", "slow-orders"):
+        result["market_limits"] = _compact_market_limits_payload(
+            payload.get("account_balances", {}),
+        )
 
     return result
 

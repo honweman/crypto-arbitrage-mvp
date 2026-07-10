@@ -4059,6 +4059,26 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     "total": {"ACS": 1000.0, "USDT": 21.0},
                 }
 
+            async def fetch_market_info(
+                self,
+                _: ExchangeConfig,
+                *,
+                symbol: str,
+            ) -> dict[str, object]:
+                assert symbol == "ACS/USDT"
+                return {
+                    "id": "ACSUSDT",
+                    "symbol": "ACS/USDT",
+                    "active": True,
+                    "type": "spot",
+                    "spot": True,
+                    "precision": {"amount": 1.0, "price": 0.000001},
+                    "limits": {
+                        "amount": {"min": 10.0, "max": 1_000_000.0},
+                        "cost": {"min": 5.0, "max": 100_000.0},
+                    },
+                }
+
         cfg = make_config(
             spot_markets=[
                 SpotMarketConfig(
@@ -4094,6 +4114,11 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(totals["ACS"]["total"], 1000.0)
         self.assertEqual(totals["USDT"]["free"], 20.0)
         self.assertEqual(payload["accounts"][0]["status"], "ok")
+        self.assertEqual(payload["accounts"][0]["markets"][0]["status"], "ok")
+        self.assertEqual(
+            payload["accounts"][0]["markets"][0]["market"]["limits"]["cost_min"],
+            5.0,
+        )
 
     async def test_fetch_account_balances_adjusts_for_open_order_reserves(self) -> None:
         class FakeBalanceManager:
@@ -4805,6 +4830,44 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view_task["config"]["exchange"], "coinbase-spot")
         self.assertEqual(view_task["config"]["price_mode"], "taker")
         self.assertIn("total_quote", view_task["config"])
+
+    async def test_settings_view_includes_compact_market_limits(self) -> None:
+        payload = {
+            "status": "running",
+            "config": {"spot_markets": []},
+            "account_balances": {
+                "accounts": [
+                    {
+                        "exchange": "bithumb-spot",
+                        "label": "bithumb-spot",
+                        "market_type": "spot",
+                        "balance": {"currencies": [{"currency": "KRW", "total": 1}]},
+                        "markets": [
+                            {
+                                "exchange": "bithumb-spot",
+                                "symbol": "ACS/KRW",
+                                "status": "ok",
+                                "market": {
+                                    "symbol": "ACS/KRW",
+                                    "limits": {
+                                        "amount_min": 1.0,
+                                        "cost_min": 5000.0,
+                                    },
+                                    "precision": {"price": 0.0001},
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "totals": [{"currency": "KRW", "total": 1}],
+            },
+        }
+
+        settings = state_payload_for_view(payload, "settings", sections="slow-orders")
+
+        self.assertNotIn("account_balances", settings)
+        self.assertEqual(settings["market_limits"][0]["exchange"], "bithumb-spot")
+        self.assertEqual(settings["market_limits"][0]["limits"]["cost_min"], 5000.0)
 
     async def test_program_state_persists_in_runtime_store(self) -> None:
         cfg = make_config()
