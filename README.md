@@ -622,7 +622,18 @@ New user projects remain pending until an administrator approves the asset. Save
 
 Users can create isolated paper strategy instances for Market Maker, Auto Buy/Sell, Spot Grid, DCA, and cross-exchange Spot Arbitrage. Each instance is bound to one project and only that owner's verified exchange accounts, with its own order budget, total budget, daily-loss, open-order, slippage, and order-book-age limits. A strategy can be resumed only when its project is active, its account count and symbols match, credentials remain available in the encrypted vault, withdrawal permission is confirmed disabled, and every account has a fresh successful connection test. Credential or market changes, failed/stale connection checks, and project scope changes automatically pause affected instances.
 
-Per-user strategy instances are intentionally paper-only: they do not submit or cancel exchange orders, and their payloads reject `live_enabled`. This release stores and validates each configuration but does not yet run a per-user paper simulation loop. Existing global MM, Auto Buy/Sell, and arbitrage runners remain separately configured. A future per-user live executor must add fill ownership, per-user P/L, atomic risk reservation, reconciliation, and explicit staged approval before these instances may control real accounts.
+Per-user strategy instances are intentionally paper-only: they do not submit or cancel exchange orders, never decrypt the account API credentials, and their payloads reject `live_enabled`. A background scheduler reads public order books, shares one fetch across strategies and accounts watching the same public market, and runs each enabled instance at its configured refresh/scan interval. The global program switch pauses this scheduler too. Existing global MM, Auto Buy/Sell, and arbitrage runners remain separately configured.
+
+Paper state, virtual fills, and the strategy timeline are stored separately in `data/user_paper_trading.sqlite3`. Writes use one SQLite transaction with optimistic version checks, so a stale cycle cannot overwrite a reset, strategy edit, or newer cycle. State survives service restarts; each user sees only their own strategy records, while administrators retain operational visibility. The UI shows status/reason, progress, virtual open orders, cumulative and daily P/L, recent activity, and the exact retained state/fill/event counts before reset. History is compacted per strategy to the newest 5,000 fills and 500 events.
+
+The simulator currently models execution as follows:
+
+- Auto Buy/Sell and DCA use visible public order-book depth, configurable paper fees, and a max-slippage check. Auto Buy/Sell evaluates its start and stop price before every fill.
+- Market Maker and Spot Grid only fill virtual orders created in an earlier cycle when the current top of book crosses their limit. The remaining virtual book is rebuilt at each configured refresh.
+- Spot Arbitrage converts quote currencies with the latest monitor quote rates and commits both simulated legs together; if either leg lacks depth, balance, or acceptable slippage, neither leg is recorded.
+- Daily-loss stops, pauses, configuration blocks, and market-data failures clear virtual open orders while retaining balances, fills, and P/L history.
+
+Paper balances are synthetic and are derived from each strategy's `max_total_quote`; they are not the user's real exchange balances. P/L is marked from current mid prices and the latest configured quote-currency conversion. The model does not reproduce maker queue priority, fills that occur between REST snapshots, exchange minimum-notional/precision rejection, network/order latency, transfer costs, or one-leg failure after a real submission. Treat the results as a safety and behavior check, not a live-return forecast. A future per-user live executor must add private balance reservation, fill ownership, exchange reconciliation, idempotent client order IDs, partial-fill hedging, and explicit staged approval before these instances may control real accounts.
 
 Generate the credential encryption key once on the server and store it in the protected service environment file:
 
@@ -723,8 +734,8 @@ Before trading, update `fee_bps` to match your account tier and confirm all thre
 
 ## Next steps before live trading
 
-1. Add paper trading with order lifecycle simulation.
-2. Add transfer and withdrawal availability checks.
+1. Calibrate paper fills against captured live order-book and account fill data, including maker queue and latency assumptions.
+2. Enforce exchange minimum-notional, amount precision, and price-tick rules inside every paper strategy.
 3. Store full quote and decision history in a database for post-trade analysis.
 4. Add exchange statement reconciliation for audited daily realized P/L.
 5. Add order-fill lifecycle alerts for stale, partially filled, or repeatedly rejected orders.

@@ -142,6 +142,29 @@ class UserStrategyTest(unittest.TestCase):
             strategy_parameter_blockers(too_many_orders),
         )
 
+        underfunded_grid = UserStrategy.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "project_id": "project-acs",
+                "strategy_type": "spot_grid",
+                "parameters": {
+                    "lower_price": 0.1,
+                    "upper_price": 0.2,
+                    "grid_count": 2,
+                    "quote_per_grid": 5.0,
+                },
+                "risk": {
+                    "max_order_quote": 5.0,
+                    "max_total_quote": 10.0,
+                    "max_open_orders": 3,
+                },
+            }
+        )
+        self.assertIn(
+            "strategy budget exceeds max total quote",
+            strategy_parameter_blockers(underfunded_grid),
+        )
+
     def test_store_builds_ready_paper_strategy_and_disables_it_on_account_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             "os.environ",
@@ -235,10 +258,24 @@ class UserStrategyTest(unittest.TestCase):
 
             one_readiness = store.strategy_readiness(one_account)
             two_readiness = store.strategy_readiness(two_accounts)
+            mismatched_single = store.strategy_readiness(
+                UserStrategy.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "strategy_type": "market_maker",
+                        "account_ids": [bybit.id],
+                    }
+                )
+            )
 
         self.assertFalse(one_readiness["ready"])
         self.assertTrue(any("at least 2" in row for row in one_readiness["blockers"]))
         self.assertTrue(two_readiness["ready"])
+        self.assertFalse(mismatched_single["ready"])
+        self.assertTrue(
+            any("quote currency mismatch" in row for row in mismatched_single["blockers"])
+        )
 
     def test_referenced_account_cannot_be_deleted_and_project_disable_pauses_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

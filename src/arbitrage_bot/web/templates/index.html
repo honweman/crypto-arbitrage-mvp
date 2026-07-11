@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260711-user-strategy2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260711-user-paper4">
 
 </head>
 <body>
@@ -613,6 +613,10 @@
             <option value="geometric">Geometric</option>
           </select>
         </div>
+        <div class="field" data-user-strategy-types="spot_grid">
+          <label for="user-strategy-grid-refresh">Refresh Seconds</label>
+          <input id="user-strategy-grid-refresh" type="number" min="1" step="any">
+        </div>
 
         <div class="field" data-user-strategy-types="spot_spread">
           <label for="user-strategy-profit-bps">Min Profit Bps</label>
@@ -652,7 +656,11 @@
           <label for="user-strategy-risk-book-age">Max Book Age Sec</label>
           <input id="user-strategy-risk-book-age" type="number" min="0" step="any">
         </div>
-        <div class="subtle wide-field">Paper mode only. This strategy cannot place or cancel live orders.</div>
+        <div class="field">
+          <label for="user-strategy-risk-fee">Paper Fee Bps</label>
+          <input id="user-strategy-risk-fee" type="number" min="0" max="1000" step="any">
+        </div>
+        <div class="subtle wide-field">Paper simulation only. No live orders or cancels.</div>
         <button id="user-strategy-save" class="control-button" type="submit">Save Strategy</button>
         <button id="user-strategy-cancel" class="ghost-button" type="button">Close</button>
       </form>
@@ -665,13 +673,32 @@
               <th>Accounts</th>
               <th>Budget</th>
               <th>Status</th>
-              <th>Mode</th>
+              <th>Paper P/L</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody id="user-strategies"></tbody>
         </table>
       </div>
+      <details id="user-paper-activity" class="paper-activity">
+        <summary>
+          <span>Paper Activity</span>
+          <span id="user-paper-summary" class="subtle"></span>
+        </summary>
+        <div class="table-wrap">
+          <table class="mobile-card-table paper-activity-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Strategy</th>
+                <th>Event</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="user-paper-events"></tbody>
+          </table>
+        </div>
+      </details>
     </section>
 
     <section id="strategy-settings-section" data-page="settings" class="compact-section">
@@ -2116,8 +2143,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260711-user-strategy2" defer></script>
-  <script src="/static/app.js?v=20260711-user-strategy2" defer></script>
+  <script src="/static/i18n.js?v=20260711-user-paper4" defer></script>
+  <script src="/static/app.js?v=20260711-user-paper4" defer></script>
 
 </body>
 </html>

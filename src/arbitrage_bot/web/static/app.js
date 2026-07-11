@@ -3488,6 +3488,7 @@ function balanceStatusClass(status) {
         setFieldValue("user-strategy-grid-count", values.grid_count);
         setFieldValue("user-strategy-grid-quote", values.quote_per_grid);
         setFieldValue("user-strategy-grid-spacing", values.spacing);
+        setFieldValue("user-strategy-grid-refresh", values.refresh_seconds);
       } else if (strategyType === "spot_spread") {
         setFieldValue("user-strategy-profit-bps", values.min_profit_bps);
         setFieldValue("user-strategy-cycle-quote", values.max_cycle_quote);
@@ -3504,6 +3505,7 @@ function balanceStatusClass(status) {
       setFieldValue("user-strategy-risk-orders", values.max_open_orders);
       setFieldValue("user-strategy-risk-slippage", values.max_slippage_bps);
       setFieldValue("user-strategy-risk-book-age", values.max_order_book_age_seconds);
+      setFieldValue("user-strategy-risk-fee", values.paper_fee_bps);
     }
 
     function syncUserStrategyTypeFields({ applyDefaults = false } = {}) {
@@ -3588,6 +3590,7 @@ function balanceStatusClass(status) {
           grid_count: numericValue("user-strategy-grid-count"),
           quote_per_grid: numericValue("user-strategy-grid-quote"),
           spacing: document.getElementById("user-strategy-grid-spacing").value,
+          refresh_seconds: numericValue("user-strategy-grid-refresh"),
         };
       }
       return {
@@ -3605,6 +3608,7 @@ function balanceStatusClass(status) {
         max_open_orders: numericValue("user-strategy-risk-orders"),
         max_slippage_bps: numericValue("user-strategy-risk-slippage"),
         max_order_book_age_seconds: numericValue("user-strategy-risk-book-age"),
+        paper_fee_bps: numericValue("user-strategy-risk-fee"),
       };
     }
 
@@ -3625,6 +3629,53 @@ function balanceStatusClass(status) {
       return strategy;
     }
 
+    function formatPaperPnl(value, currency) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "--";
+      return `${money.format(number)} ${currency || ""}`.trim();
+    }
+
+    function paperRuntimeStatusClass(status) {
+      const value = String(status || "");
+      if (["running", "orders_active", "complete"].includes(value)) return "ok";
+      if (value.startsWith("blocked") || value === "error") return "risk-blocked";
+      return "subtle";
+    }
+
+    function renderUserPaperEvents(workspace) {
+      const details = document.getElementById("user-paper-activity");
+      const body = document.getElementById("user-paper-events");
+      if (!details || !body) return;
+      const strategies = workspace?.strategies || [];
+      details.hidden = strategies.length === 0;
+      body.innerHTML = "";
+      const paper = workspace?.paper || {};
+      const summary = paper.summary || {};
+      text(
+        "user-paper-summary",
+        `${summary.fill_count || 0} ${uiText("fills")} · ${summary.open_order_count || 0} ${uiText("open")}`
+      );
+      const strategyMap = new Map(strategies.map((strategy) => [strategy.id, strategy]));
+      const events = paper.events || [];
+      if (events.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="4">${escapeHtml(uiText("No paper activity yet."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const event of events) {
+        const strategy = strategyMap.get(event.strategy_id);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${formatTimestamp(Number(event.created_at || 0) * 1000)}</td>
+          <td>${escapeHtml(strategy?.name || event.strategy_id || "--")}</td>
+          <td class="${paperRuntimeStatusClass(event.status)}">${escapeHtml(uiText(event.event_type || event.status || "--"))}</td>
+          <td title="${escapeHtml(event.reason || "")}">${escapeHtml(event.reason || "--")}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function renderUserStrategies(workspace) {
       const body = document.getElementById("user-strategies");
       if (!body) return;
@@ -3633,8 +3684,9 @@ function balanceStatusClass(status) {
       const summary = workspace?.summary || {};
       text(
         "user-strategy-meta",
-        `${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("paper ready")}`
+        `${summary.paper_running_count || 0} ${uiText("running")} · ${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("ready")}`
       );
+      renderUserPaperEvents(workspace);
       if (strategies.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="7">${escapeHtml(uiText("No user strategies yet."))}</td>`;
@@ -3648,22 +3700,43 @@ function balanceStatusClass(status) {
         const project = projectMap.get(strategy.project_id);
         const readiness = strategy.readiness || {};
         const blockers = readiness.blockers || [];
+        const runtime = strategy.paper_runtime || {};
+        const runtimeTerminal = Boolean(runtime.terminal);
+        const runtimeStatus = !strategy.enabled
+          ? "paused"
+          : runtimeTerminal && runtime.status
+            ? runtime.status
+            : strategy.status === "blocked"
+            ? "blocked"
+            : runtime.status || "not_started";
+        const runtimeReason = runtimeTerminal
+          ? runtime.reason || blockers[0] || ""
+          : blockers[0] || runtime.reason || "";
+        const runtimeTitle = Array.from(
+          new Set([runtimeReason, ...blockers].filter(Boolean))
+        ).join("; ");
+        const currency = runtime.common_quote_currency
+          || workspace?.paper?.summary?.common_quote_currency
+          || project?.quote_currency
+          || "";
         const accounts = (strategy.accounts || [])
           .map((account) => `${account.exchange} ${account.symbol}`)
           .join(" · ");
-        const statusClass = strategy.status === "paper_ready"
-          ? "ok"
-          : strategy.status === "blocked"
-            ? "risk-blocked"
-            : "subtle";
+        const statusClass = paperRuntimeStatusClass(runtimeStatus);
+        const progress = Number(runtime.progress_pct);
+        const progressText = Number.isFinite(progress)
+          ? `<br><span class="subtle">${escapeHtml(`${progress.toFixed(1)}%`)}</span>`
+          : "";
+        const activityText = `${Number(runtime.fill_count || 0)} ${uiText("fills")} · ${Number(runtime.open_order_count || 0)} ${uiText("open")}`;
+        const runtimeDetail = [runtimeReason, activityText].filter(Boolean).join(" · ");
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || strategy.id)}<br><span class="subtle">${escapeHtml(uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type))}</span></td>
           <td>${escapeHtml(project?.name || strategy.project_id || "--")}</td>
           <td>${escapeHtml(accounts || "--")}</td>
-          <td class="num">${formatSymbolQuantity(strategy.risk?.max_total_quote || 0, project?.symbol || "", "quote")}</td>
-          <td class="${statusClass}" title="${escapeHtml(blockers.join("; "))}">${escapeHtml(uiText(strategy.status || "paused"))}${blockers.length ? `<br><span class="subtle">${escapeHtml(blockers[0])}</span>` : ""}</td>
-          <td>${escapeHtml(uiText("Paper only"))}</td>
+          <td class="num">${formatSymbolQuantity(strategy.risk?.max_total_quote || 0, project?.symbol || "", "quote")}${progressText}</td>
+          <td class="${statusClass}" title="${escapeHtml(runtimeTitle)}">${escapeHtml(uiText(runtimeStatus))}<br><span class="subtle">${escapeHtml(runtimeDetail)}</span></td>
+          <td class="num ${pnlClass(runtime.total_pnl_common)}">${formatPaperPnl(runtime.total_pnl_common || 0, currency)}<br><span class="subtle">${escapeHtml(uiText("Today"))}: ${formatPaperPnl(runtime.daily_pnl_common || 0, currency)}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");
@@ -3679,6 +3752,15 @@ function balanceStatusClass(status) {
         toggleButton.textContent = uiText(strategy.enabled ? "Pause" : "Resume");
         toggleButton.addEventListener("click", () => toggleUserStrategy(strategy, toggleButton));
         actions.appendChild(toggleButton);
+        const paperCounts = strategy.paper_counts || {};
+        if (Number(paperCounts.state_count || 0) + Number(paperCounts.fill_count || 0) > 0) {
+          const resetButton = document.createElement("button");
+          resetButton.className = "ghost-button";
+          resetButton.type = "button";
+          resetButton.textContent = uiText("Reset Paper");
+          resetButton.addEventListener("click", () => resetUserStrategyPaper(strategy, resetButton));
+          actions.appendChild(resetButton);
+        }
         const deleteButton = document.createElement("button");
         deleteButton.className = "danger-button";
         deleteButton.type = "button";
@@ -3724,6 +3806,24 @@ function balanceStatusClass(status) {
         );
       } catch (error) {
         setUserWorkspaceNotice(`strategy control failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function resetUserStrategyPaper(strategy, button) {
+      const counts = strategy.paper_counts || {};
+      const detail = `${Number(counts.state_count || 0)} ${uiText("state")} · ${Number(counts.fill_count || 0)} ${uiText("fills")} · ${Number(counts.event_count || 0)} ${uiText("events")}`;
+      if (!dangerConfirm("Reset this paper simulation?", detail)) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "reset_strategy_paper",
+          strategy_id: strategy.id,
+        });
+        setUserWorkspaceNotice(uiText("Paper simulation reset."));
+      } catch (error) {
+        setUserWorkspaceNotice(`paper reset failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }

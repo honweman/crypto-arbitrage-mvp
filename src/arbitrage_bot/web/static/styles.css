@@ -35,8 +35,7 @@ header {
   gap: 16px;
   padding: 14px 24px;
   border-bottom: 1px solid var(--line);
-  background: rgb(255 255 255 / 94%);
-  backdrop-filter: blur(10px);
+  background: var(--surface);
 }
 
 h1 {
@@ -706,6 +705,46 @@ h2 {
   display: none !important;
 }
 
+.paper-activity {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.paper-activity summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.paper-activity summary::-webkit-details-marker {
+  display: none;
+}
+
+.paper-activity summary::before {
+  content: "+";
+  width: 14px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.paper-activity[open] summary::before {
+  content: "-";
+}
+
+.paper-activity summary > span:first-child {
+  margin-right: auto;
+}
+
+#user-workspace-section .paper-activity-table {
+  min-width: 680px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1352,6 +1391,27 @@ tbody tr:last-child td {
     grid-column: 1 / -1;
   }
   .compact-section > .section-title { padding: 9px 10px; }
+  #user-workspace-section > .section-title {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 4px 8px;
+  }
+  #user-workspace-section > .section-title h2 {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  #user-workspace-section > .section-title::after {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  #user-workspace-meta,
+  #user-workspace-notice {
+    grid-column: 1 / -1;
+  }
+  #user-workspace-notice:empty {
+    display: none;
+  }
   .compact-section.section-open > :not(.section-title) { margin: 8px 10px 10px; }
   .control-panel { grid-template-columns: 1fr; }
   .account-selector { grid-template-columns: 1fr; }
@@ -1386,6 +1446,9 @@ tbody tr:last-child td {
     border-spacing: 0 8px;
   }
   #user-workspace-section table {
+    min-width: 0;
+  }
+  #user-workspace-section .paper-activity-table {
     min-width: 0;
   }
   .mobile-card-table thead {

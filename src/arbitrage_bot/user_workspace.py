@@ -1082,6 +1082,13 @@ class UserWorkspaceStore:
                 blockers.append(f"account symbol is missing: {account.label}")
             elif project is not None and account.symbol.split("/", 1)[0] != project.asset:
                 blockers.append(f"account symbol asset mismatch: {account.label}")
+            elif (
+                project is not None
+                and strategy.strategy_type != "spot_spread"
+                and account.symbol.split("/", 1)[1].split(":", 1)[0]
+                != project.quote_currency
+            ):
+                blockers.append(f"account quote currency mismatch: {account.label}")
             if not account.enabled:
                 blockers.append(f"account is disabled: {account.label}")
             if not account.withdrawal_disabled_confirmed:

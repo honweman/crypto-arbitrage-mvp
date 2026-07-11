@@ -160,6 +160,11 @@ from ..user_account_check import (
     WorkspaceAccountCheckService,
     WorkspaceMarketDiscoveryService,
 )
+from ..user_paper_engine import (
+    UserPaperTradingService,
+    user_paper_trading_task_loop,
+)
+from ..user_paper_store import UserPaperTradingStore
 from ..user_strategies import UserStrategy
 from ..user_workspace import (
     UserExchangeAccount,
@@ -2619,6 +2624,14 @@ def default_user_workspace_path(cfg: BotConfig) -> str:
     )
 
 
+def default_user_paper_trading_path(cfg: BotConfig) -> str:
+    return str(
+        Path(default_user_workspace_path(cfg)).with_name(
+            "user_paper_trading.sqlite3"
+        )
+    )
+
+
 def default_strategy_center_path(cfg: BotConfig) -> str:
     return cfg.strategy_center.path or str(
         Path(cfg.trade_log.path).with_name("strategy_center.sqlite3")
@@ -2629,7 +2642,28 @@ def build_user_workspace_payload(
     store: UserWorkspaceStore,
     *,
     user: WebUser | None,
+    paper_store: UserPaperTradingStore | None = None,
 ) -> dict[str, Any]:
+    empty_paper = {
+        "status": "user_account_required" if user is None else "unavailable",
+        "mode": "paper",
+        "live_submit_allowed": False,
+        "states": [],
+        "events": [],
+        "recent_fills": [],
+        "counts": {},
+        "summary": {
+            "state_count": 0,
+            "running_count": 0,
+            "complete_count": 0,
+            "blocked_count": 0,
+            "fill_count": 0,
+            "open_order_count": 0,
+            "total_pnl_common": 0.0,
+            "daily_pnl_common": 0.0,
+            "common_quote_currency": "",
+        },
+    }
     if user is None:
         return {
             "status": "user_account_required",
@@ -2638,6 +2672,7 @@ def build_user_workspace_payload(
             "strategies": [],
             "exchange_catalog": [],
             "strategy_catalog": [],
+            "paper": empty_paper,
             "vault_available": store.cipher.available,
             "summary": {
                 "project_count": 0,
@@ -2651,10 +2686,54 @@ def build_user_workspace_payload(
             },
         }
     try:
-        return store.public_payload(
+        payload = store.public_payload(
             owner_email=user.email,
             is_admin=user.role == "admin",
         )
+        if paper_store is None:
+            paper = empty_paper
+        else:
+            try:
+                paper = paper_store.public_payload(
+                    owner_email=user.email,
+                    is_admin=user.role == "admin",
+                )
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                paper = {**empty_paper, "status": "error", "error": str(exc)}
+        states = {
+            str(row.get("strategy_id") or ""): row
+            for row in paper.get("states", [])
+            if isinstance(row, dict)
+        }
+        counts = paper.get("counts") if isinstance(paper.get("counts"), dict) else {}
+        for strategy in payload["strategies"]:
+            strategy_id = str(strategy.get("id") or "")
+            strategy["paper_runtime"] = states.get(
+                strategy_id,
+                {
+                    "strategy_id": strategy_id,
+                    "mode": "paper",
+                    "live_submit_allowed": False,
+                    "status": "not_started",
+                    "reason": "paper simulation has not started",
+                    "fill_count": 0,
+                    "open_order_count": 0,
+                    "total_pnl_common": 0.0,
+                    "daily_pnl_common": 0.0,
+                },
+            )
+            strategy["paper_counts"] = counts.get(
+                strategy_id,
+                {"state_count": 0, "fill_count": 0, "event_count": 0},
+            )
+        payload["paper"] = paper
+        payload["summary"]["paper_running_count"] = int(
+            paper.get("summary", {}).get("running_count") or 0
+        )
+        payload["summary"]["paper_fill_count"] = int(
+            paper.get("summary", {}).get("fill_count") or 0
+        )
+        return payload
     except (OSError, sqlite3.Error, ValueError) as exc:
         return {
             "status": "error",
@@ -2664,6 +2743,7 @@ def build_user_workspace_payload(
             "strategies": [],
             "exchange_catalog": [],
             "strategy_catalog": [],
+            "paper": {**empty_paper, "status": "error"},
             "vault_available": store.cipher.available,
             "summary": {
                 "project_count": 0,
@@ -4721,6 +4801,10 @@ def _user_workspace_store(request: web.Request) -> UserWorkspaceStore:
     return request.app["user_workspace_store"]
 
 
+def _user_paper_store(request: web.Request) -> UserPaperTradingStore:
+    return request.app["user_paper_store"]
+
+
 def _workspace_market_discovery(
     request: web.Request,
 ) -> WorkspaceMarketDiscoveryService:
@@ -5406,6 +5490,7 @@ async def api_state(request: web.Request) -> web.Response:
         payload["user_workspace"] = build_user_workspace_payload(
             _user_workspace_store(request),
             user=requesting_user,
+            paper_store=_user_paper_store(request),
         )
     if (
         requesting_user is not None
@@ -6342,9 +6427,27 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raise ValueError(f"strategy not found: {strategy_id}")
             _require_owner_or_admin(user, strategy.owner_email)
             store.delete_strategy(strategy.id)
+            _user_paper_store(request).delete_strategy(strategy.id)
             audit_target = strategy.id
             audit_detail = f"deleted paper strategy {strategy.name}"
             audit_payload = {"strategy_id": strategy.id, "mode": "paper"}
+        elif action == "reset_strategy_paper":
+            strategy_id = str(
+                payload.get("strategy_id") or payload.get("id") or ""
+            ).strip()
+            strategy = store.get_strategy(strategy_id)
+            if strategy is None:
+                raise ValueError(f"strategy not found: {strategy_id}")
+            _require_owner_or_admin(user, strategy.owner_email)
+            reset_counts = _user_paper_store(request).reset_strategy(strategy)
+            audit_target = strategy.id
+            audit_detail = f"reset paper simulation {strategy.name}"
+            audit_payload = {
+                "strategy_id": strategy.id,
+                "mode": "paper",
+                "deleted": reset_counts,
+            }
+            response_extra = {"paper_reset": reset_counts}
         elif action == "delete_account":
             account_id = str(payload.get("account_id") or payload.get("id") or "").strip()
             account = store.get_account(account_id)
@@ -6368,7 +6471,11 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         )
         response_payload = {
             "ok": True,
-            "workspace": build_user_workspace_payload(store, user=user),
+            "workspace": build_user_workspace_payload(
+                store,
+                user=user,
+                paper_store=_user_paper_store(request),
+            ),
         }
         response_payload.update(response_extra)
         return web.json_response(response_payload)
@@ -7213,6 +7320,14 @@ def create_app(
         default_user_workspace_path(cfg),
         master_key_env=cfg.web_security.credential_master_key_env,
     )
+    user_paper_store = UserPaperTradingStore(default_user_paper_trading_path(cfg))
+    user_paper_service = UserPaperTradingService(
+        user_workspace_store,
+        user_paper_store,
+        quote_rates=cfg.quote_rates,
+        common_quote_currency=cfg.common_quote_currency,
+        order_book_depth=cfg.order_book_depth,
+    )
     workspace_market_discovery = WorkspaceMarketDiscoveryService()
     workspace_account_checker = WorkspaceAccountCheckService()
     strategy_center_store = StrategyCenterStore(
@@ -7224,6 +7339,8 @@ def create_app(
     app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
     app["web_user_store"] = web_user_store
     app["user_workspace_store"] = user_workspace_store
+    app["user_paper_store"] = user_paper_store
+    app["user_paper_service"] = user_paper_service
     app["workspace_market_discovery"] = workspace_market_discovery
     app["workspace_account_checker"] = workspace_account_checker
     app["strategy_center_store"] = strategy_center_store
@@ -7250,10 +7367,18 @@ def create_app(
         auto_task = asyncio.create_task(
             auto_buy_sell_task_loop(cfg, state, auto_buy_sell_tasks)
         )
+        user_paper_task = asyncio.create_task(
+            user_paper_trading_task_loop(
+                user_paper_service,
+                running_check=state.is_running,
+                quote_rates_provider=state.quote_rates,
+            )
+        )
         app_["monitor_task"] = monitor_task
         app_["market_maker_task"] = mm_task
         app_["spot_grid_task"] = grid_task
         app_["auto_buy_sell_task"] = auto_task
+        app_["user_paper_task"] = user_paper_task
         try:
             yield
         finally:
@@ -7261,6 +7386,7 @@ def create_app(
             mm_task.cancel()
             grid_task.cancel()
             auto_task.cancel()
+            user_paper_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await monitor_task
             with contextlib.suppress(asyncio.CancelledError):
@@ -7269,6 +7395,9 @@ def create_app(
                 await grid_task
             with contextlib.suppress(asyncio.CancelledError):
                 await auto_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await user_paper_task
+            await user_paper_service.close()
 
     app.cleanup_ctx.append(monitor_context)
 

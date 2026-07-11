@@ -45,6 +45,7 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
             "grid_count": 10,
             "quote_per_grid": 1.0,
             "spacing": "arithmetic",
+            "refresh_seconds": 10.0,
         },
     },
     "dca": {
@@ -79,6 +80,7 @@ DEFAULT_USER_STRATEGY_RISK: dict[str, Any] = {
     "max_open_orders": 50,
     "max_slippage_bps": 50.0,
     "max_order_book_age_seconds": 10.0,
+    "paper_fee_bps": 60.0,
 }
 
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
@@ -280,6 +282,12 @@ def _clean_parameters(strategy_type: str, value: Any) -> dict[str, Any]:
                 minimum=0.00000001,
             ),
             "spacing": spacing,
+            "refresh_seconds": _finite_float(
+                merged["refresh_seconds"],
+                label="refresh_seconds",
+                minimum=1.0,
+                maximum=3600.0,
+            ),
         }
     if strategy_type == "dca":
         side = str(merged["side"] or "").strip().lower()
@@ -367,6 +375,11 @@ def _clean_risk(value: Any) -> dict[str, Any]:
             merged["max_order_book_age_seconds"],
             label="max_order_book_age_seconds",
             maximum=3600.0,
+        ),
+        "paper_fee_bps": _finite_float(
+            merged["paper_fee_bps"],
+            label="paper_fee_bps",
+            maximum=1_000.0,
         ),
     }
     if result["max_total_quote"] < result["max_order_quote"]:
@@ -485,8 +498,8 @@ def strategy_parameter_blockers(strategy: UserStrategy) -> list[str]:
                     blockers.append("sell stop price must be below start price")
     elif strategy.strategy_type == "spot_grid":
         order_quote = parameters["quote_per_grid"]
-        total_quote = parameters["grid_count"] * order_quote
-        planned_orders = parameters["grid_count"]
+        total_quote = (parameters["grid_count"] + 1) * order_quote
+        planned_orders = parameters["grid_count"] + 1
         if parameters["lower_price"] <= 0 or parameters["upper_price"] <= 0:
             blockers.append("grid lower and upper prices are required")
         elif parameters["upper_price"] <= parameters["lower_price"]:

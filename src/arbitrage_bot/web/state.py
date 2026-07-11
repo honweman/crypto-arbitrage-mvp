@@ -527,6 +527,17 @@ class MonitorState:
         async with self._lock:
             return json.loads(json.dumps(self._payload.get("portfolio", {})))
 
+    async def quote_rates(self) -> dict[str, float]:
+        async with self._lock:
+            raw = self._payload.get("quote_rates", self._base_cfg.quote_rates)
+            if not isinstance(raw, dict):
+                raw = self._base_cfg.quote_rates
+            return {
+                str(currency).upper(): float(rate)
+                for currency, rate in raw.items()
+                if isinstance(rate, (int, float)) and float(rate) > 0
+            }
+
     async def is_running(self) -> bool:
         async with self._lock:
             return self._program_running
