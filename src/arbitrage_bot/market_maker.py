@@ -15,6 +15,7 @@ from .exchanges import (
     limit_order_features,
 )
 from .market_making import MarketMakerPlan, build_symmetric_market_maker_plan
+from .models import OrderBookSnapshot
 from .order_validation import summarize_order_validations
 from .risk import (
     RiskMarketContext,
