@@ -824,17 +824,43 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         plan = build_symmetric_market_maker_plan(book, cfg.market_maker)
+        prepared_orders = [
+            {
+                "exchange": "bybit-spot",
+                "symbol": "ACS/USDT",
+                "side": order.side,
+                "status": "ok",
+                "requested_amount": order.amount,
+                "requested_price": order.price,
+                "amount": order.amount,
+                "price": order.price + (0.00000005 if order.side == "sell" else -0.00000005),
+                "cost": order.amount
+                * (order.price + (0.00000005 if order.side == "sell" else -0.00000005)),
+                "limits": {},
+                "precision": {},
+                "errors": [],
+                "warnings": [],
+            }
+            for order in plan.orders
+        ]
         existing_orders = [
             {
                 "id": f"old-mm-{index}",
                 "side": order.side,
-                "price": order.price,
-                "amount": order.amount,
+                "price": prepared["price"],
+                "amount": prepared["amount"],
+                "remaining": prepared["amount"],
             }
-            for index, order in enumerate(plan.orders, start=1)
+            for index, (order, prepared) in enumerate(
+                zip(plan.orders, prepared_orders),
+                start=1,
+            )
         ]
 
         class FakeManager:
+            def __init__(self) -> None:
+                self.prepare_count = 0
+
             async def fetch_order_book(
                 self,
                 *_: object,
@@ -848,12 +874,18 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
             async def cancel_order(self, *_: object, **__: object) -> None:
                 raise AssertionError("matching restart orders should not be canceled")
 
-            async def prepare_limit_order(self, *_: object, **__: object) -> None:
-                raise AssertionError("matching restart orders should not be validated")
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                **__: object,
+            ) -> list[dict[str, object]]:
+                self.prepare_count += 1
+                return prepared_orders
 
+        manager = FakeManager()
         payload = await run_cycle(
             cfg,
-            FakeManager(),  # type: ignore[arg-type]
+            manager,  # type: ignore[arg-type]
             live=True,
             replace_existing=False,
             replace_order_ids=[str(order["id"]) for order in existing_orders],
@@ -864,6 +896,127 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["adopted_existing_open_orders"])
         self.assertAlmostEqual(payload["reprice_bps"], 0.0)
         self.assertEqual(payload["execution"]["placed_count"], 0)
+        self.assertEqual(manager.prepare_count, 1)
+
+    async def test_live_cycle_rebuilds_partially_filled_orders_after_restart(
+        self,
+    ) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014, amount=100_000)],
+            asks=[BookLevel(price=0.00016, amount=100_000)],
+        )
+        cfg = self._cfg(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+                levels=1,
+                quote_per_level=1.0,
+                depth_shape="flat",
+                reprice_threshold_bps=2.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        plan = build_symmetric_market_maker_plan(book, cfg.market_maker)
+        prepared_orders = [
+            {
+                "exchange": "bybit-spot",
+                "symbol": "ACS/USDT",
+                "side": order.side,
+                "status": "ok",
+                "requested_amount": order.amount,
+                "requested_price": order.price,
+                "amount": order.amount,
+                "price": order.price,
+                "cost": order.quote_notional,
+                "limits": {},
+                "precision": {},
+                "errors": [],
+                "warnings": [],
+            }
+            for order in plan.orders
+        ]
+        existing_orders = [
+            {
+                "id": f"old-mm-{index}",
+                "side": order.side,
+                "price": order.price,
+                "amount": order.amount,
+                "remaining": order.amount * (0.5 if index == 1 else 1.0),
+            }
+            for index, order in enumerate(plan.orders, start=1)
+        ]
+
+        class FakeManager:
+            def __init__(self) -> None:
+                self.open_orders = list(existing_orders)
+                self.placed = 0
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return book
+
+            async def fetch_open_orders(
+                self,
+                *_: object,
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return list(self.open_orders)
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return prepared_orders
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, str]:
+                self.open_orders = [
+                    order
+                    for order in self.open_orders
+                    if order.get("id") != order_id
+                ]
+                return {"id": order_id, "status": "canceled"}
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, str]:
+                self.placed += 1
+                return {"id": f"new-mm-{self.placed}"}
+
+        manager = FakeManager()
+        payload = await run_cycle(
+            cfg,
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=[str(order["id"]) for order in existing_orders],
+            existing_open_orders=existing_orders,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertFalse(payload.get("adopted_existing_open_orders", False))
+        self.assertIsNone(payload["reprice_bps"])
+        self.assertEqual(payload["execution"]["canceled_count"], 2)
+        self.assertEqual(payload["execution"]["placed_count"], 2)
 
     async def test_live_cycle_reuses_batch_prepared_orders_for_placement(
         self,

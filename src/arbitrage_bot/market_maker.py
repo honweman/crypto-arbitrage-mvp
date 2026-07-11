@@ -128,6 +128,8 @@ def _scaled_market_context(
 def _plan_reprice_bps(
     previous_plan: dict[str, Any] | None,
     current_plan: MarketMakerPlan,
+    *,
+    current_orders: list[dict[str, Any]] | None = None,
 ) -> float | None:
     if not previous_plan:
         return None
@@ -138,7 +140,10 @@ def _plan_reprice_bps(
     previous_orders = previous_plan.get("orders")
     if not isinstance(previous_orders, list):
         return None
-    if len(previous_orders) != len(current_plan.orders):
+    comparison_orders = current_orders or [
+        order.to_dict() for order in current_plan.orders
+    ]
+    if len(previous_orders) != len(comparison_orders):
         return None
 
     previous_by_key = {
@@ -147,20 +152,24 @@ def _plan_reprice_bps(
         if isinstance(item, dict)
     }
     max_change_bps = 0.0
-    for order in current_plan.orders:
-        previous_order = previous_by_key.get((order.side, order.level))
+    for order in comparison_orders:
+        previous_order = previous_by_key.get((order.get("side"), order.get("level")))
         if not isinstance(previous_order, dict):
             return None
         previous_price = previous_order.get("price")
         previous_quote = previous_order.get("quote_notional")
+        current_price = _number_or_none(order.get("price"))
+        current_quote = _number_or_none(order.get("quote_notional"))
         if not isinstance(previous_price, (int, float)):
             return None
         if not isinstance(previous_quote, (int, float)):
             return None
-        if abs(float(previous_quote) - order.quote_notional) > 1e-12:
+        if current_price is None or current_quote is None:
+            return None
+        if abs(float(previous_quote) - current_quote) > 1e-12:
             return None
         price_change_bps = (
-            abs(order.price - float(previous_price))
+            abs(current_price - float(previous_price))
             / current_plan.mid_price
             * 10_000
         )
@@ -177,16 +186,44 @@ def _number_or_none(value: Any) -> float | None:
         return None
 
 
+def _comparison_orders(
+    current_plan: MarketMakerPlan,
+    prepared_orders: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not prepared_orders or len(prepared_orders) != len(current_plan.orders):
+        return [order.to_dict() for order in current_plan.orders]
+    rows = []
+    for order, prepared in zip(current_plan.orders, prepared_orders):
+        price = _number_or_none(prepared.get("price"))
+        amount = _number_or_none(prepared.get("amount"))
+        cost = _number_or_none(prepared.get("cost"))
+        rows.append(
+            {
+                "side": order.side,
+                "level": order.level,
+                "price": order.price if price is None else price,
+                "amount": order.amount if amount is None else amount,
+                "quote_notional": order.quote_notional if cost is None else cost,
+            }
+        )
+    return rows
+
+
 def _previous_plan_from_open_orders(
     current_plan: MarketMakerPlan,
     open_orders: list[dict[str, Any]] | None,
+    *,
+    current_orders: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    if not open_orders or len(open_orders) != len(current_plan.orders):
+    comparison_orders = current_orders or [
+        order.to_dict() for order in current_plan.orders
+    ]
+    if not open_orders or len(open_orders) != len(comparison_orders):
         return None
     current_by_side = {
         side: sorted(
-            [order for order in current_plan.orders if order.side == side],
-            key=lambda order: order.level,
+            [order for order in comparison_orders if order.get("side") == side],
+            key=lambda order: int(order.get("level") or 0),
         )
         for side in ("buy", "sell")
     }
@@ -196,9 +233,14 @@ def _previous_plan_from_open_orders(
             return None
         side = str(raw.get("side") or "").lower()
         price = _number_or_none(raw.get("price"))
+        amount = _number_or_none(raw.get("remaining"))
+        if amount is None:
+            amount = _number_or_none(raw.get("amount"))
         if side not in open_by_side or price is None or price <= 0:
             return None
-        open_by_side[side].append({"side": side, "price": price})
+        open_by_side[side].append(
+            {"side": side, "price": price, "amount": amount}
+        )
 
     previous_orders: list[dict[str, Any]] = []
     for side in ("buy", "sell"):
@@ -211,12 +253,18 @@ def _previous_plan_from_open_orders(
         if len(expected) != len(observed):
             return None
         for expected_order, observed_order in zip(expected, observed):
+            expected_amount = _number_or_none(expected_order.get("amount"))
+            observed_amount = _number_or_none(observed_order.get("amount"))
+            if expected_amount is not None and observed_amount is not None:
+                tolerance = max(abs(expected_amount), 1.0) * 1e-10
+                if abs(expected_amount - observed_amount) > tolerance:
+                    return None
             previous_orders.append(
                 {
                     "side": side,
-                    "level": expected_order.level,
+                    "level": expected_order.get("level"),
                     "price": observed_order["price"],
-                    "quote_notional": expected_order.quote_notional,
+                    "quote_notional": expected_order.get("quote_notional"),
                 }
             )
 
@@ -814,15 +862,31 @@ async def run_cycle(
         if not payload["risk"]["approved"]:
             payload["status"] = "blocked_by_risk"
             return payload
+        validation: dict[str, Any] | None = None
+        comparison_orders: list[dict[str, Any]] | None = None
+        if previous_plan is None and replace_order_ids and existing_open_orders:
+            validation = await validate_plan_orders(cfg, manager, plan)
+            payload["order_validation"] = validation
+            if validation["status"] != "ok":
+                return _block_for_validation(payload, validation)
+            comparison_orders = _comparison_orders(
+                plan,
+                validation.get("orders"),
+            )
         previous_plan_for_reprice = previous_plan
         adopted_existing_open_orders = False
         if previous_plan_for_reprice is None and replace_order_ids:
             previous_plan_for_reprice = _previous_plan_from_open_orders(
                 plan,
                 existing_open_orders,
+                current_orders=comparison_orders,
             )
             adopted_existing_open_orders = previous_plan_for_reprice is not None
-        reprice_bps = _plan_reprice_bps(previous_plan_for_reprice, plan)
+        reprice_bps = _plan_reprice_bps(
+            previous_plan_for_reprice,
+            plan,
+            current_orders=comparison_orders,
+        )
         payload["reprice_bps"] = reprice_bps
         if adopted_existing_open_orders:
             payload["adopted_existing_open_orders"] = True
@@ -857,8 +921,9 @@ async def run_cycle(
                 ),
             }
             return payload
-        validation = await validate_plan_orders(cfg, manager, plan)
-        payload["order_validation"] = validation
+        if validation is None:
+            validation = await validate_plan_orders(cfg, manager, plan)
+            payload["order_validation"] = validation
         if validation["status"] != "ok":
             return _block_for_validation(payload, validation)
         execution = await place_plan(
