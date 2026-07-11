@@ -874,6 +874,7 @@ function balanceStatusClass(status) {
     function renderAuthProfile(auth) {
       const emailEl = document.getElementById("user-email");
       const select = document.getElementById("profile-asset");
+      const securityLink = document.getElementById("security-link");
       if (!emailEl || !select) return;
       const mode = auth?.mode || "legacy";
       emailEl.textContent = mode === "user" ? (auth.username || auth.email || "User") : "Legacy";
@@ -895,6 +896,12 @@ function balanceStatusClass(status) {
       }
       select.value = auth?.preferred_asset || "";
       select.disabled = mode !== "user" || assets.length === 0;
+      if (securityLink) {
+        securityLink.hidden = mode !== "user";
+        securityLink.title = auth?.totp_enabled
+          ? "Authenticator enabled"
+          : "Authenticator not enabled";
+      }
     }
 
     async function updateProfileAsset(event) {

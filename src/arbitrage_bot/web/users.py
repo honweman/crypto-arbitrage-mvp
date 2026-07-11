@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+from ..user_workspace import CredentialCipher
 
 
 PASSWORD_HASH_ITERATIONS = 260_000
@@ -150,10 +153,13 @@ def verify_totp(
     if not supplied.isdigit():
         return False
     now = time.time() if for_time is None else for_time
-    for step in range(-window, window + 1):
-        candidate_time = now + step * TOTP_INTERVAL_SECONDS
-        if hmac.compare_digest(supplied, totp_code(secret, for_time=candidate_time)):
-            return True
+    try:
+        for step in range(-window, window + 1):
+            candidate_time = now + step * TOTP_INTERVAL_SECONDS
+            if hmac.compare_digest(supplied, totp_code(secret, for_time=candidate_time)):
+                return True
+    except (binascii.Error, TypeError, ValueError):
+        return False
     return False
 
 
@@ -232,8 +238,58 @@ class WebUser:
 
 
 class WebUserStore:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        master_key_env: str | None = None,
+    ) -> None:
         self.path = Path(path)
+        self.master_key_env = master_key_env
+        self.cipher = CredentialCipher(
+            os.environ.get(master_key_env) if master_key_env else None
+        )
+
+    @staticmethod
+    def _decode_encrypted_field(value: Any) -> bytes:
+        encoded = str(value or "")
+        padding = "=" * ((4 - len(encoded) % 4) % 4)
+        return base64.urlsafe_b64decode((encoded + padding).encode("ascii"))
+
+    def _user_from_stored_dict(self, raw: dict[str, Any]) -> WebUser:
+        values = dict(raw)
+        ciphertext = values.get("totp_secret_ciphertext")
+        nonce = values.get("totp_secret_nonce")
+        if ciphertext or nonce:
+            try:
+                credentials = self.cipher.decrypt(
+                    account_id="web-user-totp",
+                    owner_email=normalize_email(str(values.get("email") or "")),
+                    nonce=self._decode_encrypted_field(nonce),
+                    ciphertext=self._decode_encrypted_field(ciphertext),
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                raise ValueError("web user TOTP secret could not be decrypted") from exc
+            values["totp_secret"] = credentials.get("secret", "")
+        return WebUser.from_dict(values)
+
+    def _user_to_stored_dict(self, user: WebUser) -> dict[str, Any]:
+        values = user.to_dict()
+        if not self.cipher.available or not user.totp_secret:
+            return values
+        nonce, ciphertext = self.cipher.encrypt(
+            account_id="web-user-totp",
+            owner_email=user.email,
+            credentials={"secret": user.totp_secret},
+        )
+        values.pop("totp_secret", None)
+        values["totp_secret_nonce"] = base64.urlsafe_b64encode(nonce).decode(
+            "ascii"
+        )
+        values["totp_secret_ciphertext"] = base64.urlsafe_b64encode(
+            ciphertext
+        ).decode("ascii")
+        return values
 
     def _read_users(self) -> dict[str, WebUser]:
         try:
@@ -252,7 +308,7 @@ class WebUserStore:
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
-            user = WebUser.from_dict(row)
+            user = self._user_from_stored_dict(row)
             if user.username in usernames:
                 base = user.username[:27]
                 suffix = 2
@@ -269,7 +325,10 @@ class WebUserStore:
         payload = {
             "version": 1,
             "updated_at": time.time(),
-            "users": [user.to_dict() for user in sorted(users.values(), key=lambda item: item.email)],
+            "users": [
+                self._user_to_stored_dict(user)
+                for user in sorted(users.values(), key=lambda item: item.email)
+            ],
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
@@ -277,11 +336,34 @@ class WebUserStore:
             json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
         os.replace(tmp_path, self.path)
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+
+    def migrate_totp_secrets(self) -> bool:
+        if not self.cipher.available or not self.path.exists():
+            return False
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"could not read web user store: {exc}") from exc
+        rows = raw.get("users", []) if isinstance(raw, dict) else []
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        has_plaintext_secret = any(
+            isinstance(row, dict) and bool(row.get("totp_secret"))
+            for row in rows or []
+        )
+        if not has_plaintext_secret:
+            return False
+        self._write_users(self._read_users())
+        return True
 
     def has_users(self) -> bool:
         return bool(self._read_users())
@@ -356,9 +438,6 @@ class WebUserStore:
         email: str = "",
         totp: str = "",
     ) -> WebUser | None:
-        # Email and TOTP remain accepted by the Python API for legacy callers,
-        # while the dashboard now authenticates with username and password.
-        _ = totp
         try:
             user = (
                 self.get_user_by_username(username)
@@ -371,7 +450,58 @@ class WebUserStore:
             return None
         if not verify_password(password, user.password_hash):
             return None
+        if user.totp_enabled and not verify_totp(user.totp_secret, totp):
+            return None
         return user
+
+    def ensure_totp_secret(self, *, email: str) -> WebUser:
+        normalized_email = normalize_email(email)
+        users = self._read_users()
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        if user.totp_secret:
+            return user
+        updated = replace(
+            user,
+            totp_secret=generate_totp_secret(),
+            updated_at=time.time(),
+        )
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
+
+    def set_totp_enabled(
+        self,
+        *,
+        email: str,
+        password: str,
+        code: str,
+        enabled: bool,
+    ) -> WebUser:
+        normalized_email = normalize_email(email)
+        users = self._read_users()
+        user = users.get(normalized_email)
+        if user is None:
+            raise ValueError("user is not registered")
+        if not verify_password(password, user.password_hash):
+            raise ValueError("current password is incorrect")
+        if enabled == user.totp_enabled:
+            state = "enabled" if enabled else "disabled"
+            raise ValueError(f"authenticator is already {state}")
+        secret = user.totp_secret or generate_totp_secret()
+        if not verify_totp(secret, code):
+            raise ValueError("authenticator code is invalid")
+        updated = replace(
+            user,
+            totp_secret=secret if enabled else generate_totp_secret(),
+            totp_enabled=enabled,
+            auth_version=user.auth_version + 1,
+            updated_at=time.time(),
+        )
+        users[updated.email] = updated
+        self._write_users(users)
+        return updated
 
     def reset_password(self, *, email: str, new_password: str) -> WebUser:
         normalized_email = normalize_email(email)
@@ -382,6 +512,8 @@ class WebUserStore:
         updated = replace(
             user,
             password_hash=hash_password(new_password),
+            totp_secret=generate_totp_secret(),
+            totp_enabled=False,
             auth_version=user.auth_version + 1,
             updated_at=time.time(),
         )
@@ -544,6 +676,16 @@ class WebUserStore:
             if new_password_hash != user.password_hash
             else user.auth_version
         )
+        new_totp_secret = (
+            generate_totp_secret()
+            if new_password_hash != user.password_hash
+            else user.totp_secret
+        )
+        new_totp_enabled = (
+            False
+            if new_password_hash != user.password_hash
+            else user.totp_enabled
+        )
 
         if (
             new_role == user.role
@@ -561,6 +703,8 @@ class WebUserStore:
             allowed_assets=new_assets,
             preferred_asset=new_preferred,
             password_hash=new_password_hash,
+            totp_secret=new_totp_secret,
+            totp_enabled=new_totp_enabled,
             auth_version=new_auth_version,
             updated_at=time.time(),
         )

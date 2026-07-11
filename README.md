@@ -626,6 +626,7 @@ The web monitor can be protected with a password and an IP allowlist without sto
   "credential_master_key_env": "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
   "registration_enabled": true,
   "bootstrap_admin_email_env": "CRYPTO_ARB_WEB_ADMIN_EMAIL",
+  "totp_issuer": "Crypto Trading Dashboard",
   "verification_code_ttl_seconds": 600,
   "verification_resend_seconds": 60,
   "verification_max_attempts": 5
@@ -635,6 +636,8 @@ The web monitor can be protected with a password and an IP allowlist without sto
 Set `CRYPTO_ARB_WEB_PASSWORD` and `CRYPTO_ARB_WEB_ALLOWED_IPS` in the server environment file. `CRYPTO_ARB_WEB_ALLOWED_IPS` accepts comma-separated IPs or CIDR ranges. When nginx terminates HTTPS, bind the Python app to `127.0.0.1` and pass `X-Real-IP` / `X-Forwarded-Proto` headers:
 
 When `registration_enabled` is true, users register with an email verification code and choose a unique username. Passwords must be at least eight characters and contain a letter, a number, and a special character. Subsequent logins use username and password. Password reset codes are sent to the registered email. Set `CRYPTO_ARB_WEB_ADMIN_EMAIL` before opening registration: only that address may create the first administrator account. Later accounts start without asset permissions until an administrator assigns them. Existing email users are given a compatible username based on the part before `@`.
+
+Registered users can open `Security` from the dashboard header to bind Google Authenticator or another standard TOTP application. Enabling or disabling TOTP requires both the current password and a valid six-digit code, rotates the session version, and signs out every existing session. Once enabled, every username/password login also requires the current TOTP code. A verified email password reset disables TOTP and rotates its secret so a lost authenticator device cannot permanently lock the account; the user must bind it again after recovery. Setup pages containing the TOTP secret are returned with `Cache-Control: no-store`. When `credential_master_key_env` is configured, TOTP secrets are encrypted at rest with AES-GCM using the same master key as per-user exchange credentials; existing plaintext TOTP fields are migrated atomically at service startup.
 
 Each registered user gets an isolated project workspace. A user creates a project for an asset and quote currency, then adds exchange accounts with trade-only API credentials. The account form selects the exchange, market type, API region, and actual trading pair; `Load Pairs` uses public exchange metadata and shows the reported minimum order value when available. Upbit supports both Global and Indonesia (`id.Upbit`) API regions, and Bithumb user accounts use API v2.0.
 

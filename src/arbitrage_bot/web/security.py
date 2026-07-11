@@ -26,12 +26,14 @@ from .auth_views import (
     forgot_password_html as _forgot_password_html,
     login_html as _login_html,
     register_html as _register_html,
+    security_html as _security_html,
 )
 from .users import (
     WebUser,
     WebUserStore,
     normalize_email,
     normalize_username,
+    totp_provisioning_uri,
     validate_password,
 )
 from .verification import (
@@ -595,6 +597,7 @@ async def login_post(request: web.Request) -> web.Response:
     email_login = _email_login_enabled(request)
     supplied_password = str(form.get("password", ""))
     username = str(form.get("username") or form.get("email") or "")
+    supplied_totp = str(form.get("totp") or "")
 
     limiter = _login_rate_limiter(request)
     throttle_key = _client_ip(request, cfg) or "unknown"
@@ -611,18 +614,23 @@ async def login_post(request: web.Request) -> web.Response:
             _user_store(request).authenticate(
                 email=username,
                 password=supplied_password,
+                totp=supplied_totp,
             )
             if "@" in username
             else _user_store(request).authenticate(
                 username=username,
                 password=supplied_password,
+                totp=supplied_totp,
             )
         )
         if user is None:
             limiter.register_failure(throttle_key)
             return web.Response(
                 text=_login_html(
-                    error="登录名或密码错误 / Invalid username or password",
+                    error=(
+                        "登录凭据或动态码错误 / "
+                        "Invalid username, password, or authenticator code"
+                    ),
                     email_login=True,
                     registration_enabled=cfg.web_security.registration_enabled,
                 ),
@@ -666,6 +674,98 @@ async def login_post(request: web.Request) -> web.Response:
         samesite="Strict",
     )
     raise response
+
+
+def _security_page_response(
+    request: web.Request,
+    user: WebUser,
+    *,
+    error: str = "",
+    notice: str = "",
+    signed_out: bool = False,
+    status: int = 200,
+) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    provisioning_uri = (
+        totp_provisioning_uri(
+            email=user.email,
+            secret=user.totp_secret,
+            issuer=cfg.web_security.totp_issuer,
+        )
+        if not user.totp_enabled and user.totp_secret
+        else ""
+    )
+    response = web.Response(
+        text=_security_html(
+            user=user,
+            issuer=cfg.web_security.totp_issuer,
+            provisioning_uri=provisioning_uri,
+            error=error,
+            notice=notice,
+            signed_out=signed_out,
+        ),
+        content_type="text/html",
+        status=status,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    if signed_out:
+        response.del_cookie(SESSION_COOKIE)
+    return response
+
+
+async def security_get(request: web.Request) -> web.Response:
+    user = _request_user(request)
+    if user is None:
+        raise web.HTTPNotFound(text="User account security is unavailable")
+    user = _user_store(request).ensure_totp_secret(email=user.email)
+    return _security_page_response(request, user)
+
+
+async def security_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    user = _request_user(request)
+    if user is None:
+        raise web.HTTPNotFound(text="User account security is unavailable")
+    form = await request.post()
+    action = str(form.get("action") or "").strip().lower()
+    try:
+        if action not in {"enable", "disable"}:
+            raise ValueError("action must be enable or disable")
+        updated = _user_store(request).set_totp_enabled(
+            email=user.email,
+            password=str(form.get("password") or ""),
+            code=str(form.get("totp") or ""),
+            enabled=action == "enable",
+        )
+    except ValueError as exc:
+        current = _user_store(request).ensure_totp_secret(email=user.email)
+        return _security_page_response(
+            request,
+            current,
+            error=str(exc),
+            status=400,
+        )
+
+    write_web_audit_event(
+        cfg,
+        request,
+        action=f"totp_{action}",
+        target=updated.email,
+        detail=f"{action}d authenticator two-factor authentication",
+        payload={"totp_enabled": updated.totp_enabled},
+    )
+    notice = (
+        "Authenticator 二次验证已启用 / Authenticator 2FA is enabled"
+        if updated.totp_enabled
+        else "Authenticator 二次验证已关闭 / Authenticator 2FA is disabled"
+    )
+    return _security_page_response(
+        request,
+        updated,
+        notice=notice,
+        signed_out=True,
+    )
 
 
 async def register_get(request: web.Request) -> web.Response:

@@ -60,6 +60,8 @@ AUTH_CSS = """
   .error { color: #b42318; }
   .notice { color: #17633a; }
   .rule { color: #66736b; font-size: 12px; }
+  .setup { display: grid; gap: 8px; padding: 12px 0; border-block: 1px solid #e5e9e6; }
+  code { overflow-wrap: anywhere; color: #17211b; font-size: 14px; }
 """
 
 
@@ -99,6 +101,9 @@ def login_html(
   <input id="username" name="username" type="text" autocomplete="username" autofocus required>
   <label for="password">密码 / Password</label>
   <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <label for="totp">Authenticator 动态码 / Authenticator code</label>
+  <input id="totp" name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{{6}}" maxlength="6">
+  <div class="rule">仅在账户已启用二次验证时需要填写。</div>
   <button type="submit">登录 / Sign In</button>
   <div class="links">
     {register_link}
@@ -176,7 +181,7 @@ def forgot_password_html(
         body = """
 <div class="panel">
   <h1>密码已更新 / Password updated</h1>
-  <p>请使用登录名和新密码重新登录。</p>
+  <p>请使用登录名和新密码重新登录。原 Authenticator 绑定已重置，可登录后重新绑定。</p>
   <a href="/login">返回登录 / Continue to login</a>
 </div>
 """
@@ -202,3 +207,73 @@ def forgot_password_html(
 </form>
 """
     return _auth_document(title="Reset Crypto Trading Password", body=body)
+
+
+def security_html(
+    *,
+    user: WebUser,
+    issuer: str,
+    provisioning_uri: str = "",
+    error: str = "",
+    notice: str = "",
+    signed_out: bool = False,
+) -> str:
+    error_html = f'<div class="error">{html.escape(error)}</div>'
+    notice_html = f'<div class="notice">{html.escape(notice)}</div>'
+    if signed_out:
+        body = f"""
+<div class="panel">
+  <h1>安全设置已更新 / Security updated</h1>
+  {notice_html}
+  <p>所有旧会话已经失效，请重新登录。</p>
+  <a href="/login">重新登录 / Sign in again</a>
+</div>
+"""
+    elif user.totp_enabled:
+        body = f"""
+<form method="post" action="/security">
+  <h1>登录安全 / Login security</h1>
+  <p>Google Authenticator 二次验证已启用。</p>
+  <input type="hidden" name="action" value="disable">
+  <input type="text" name="username" value="{html.escape(user.username)}" autocomplete="username" hidden readonly>
+  <label for="password">当前密码 / Current password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <label for="totp">Authenticator 动态码 / Authenticator code</label>
+  <input id="totp" name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{{6}}" maxlength="6" required>
+  <button type="submit">关闭二次验证 / Disable 2FA</button>
+  <div class="rule">关闭后会注销所有现有会话并生成新的绑定密钥。</div>
+  <div class="links"><a href="/">返回控制台 / Back to dashboard</a></div>
+  {notice_html}
+  {error_html}
+</form>
+"""
+    else:
+        secret = html.escape(user.totp_secret)
+        uri = html.escape(provisioning_uri, quote=True)
+        body = f"""
+<form method="post" action="/security">
+  <h1>启用二次验证 / Enable 2FA</h1>
+  <p>在 Google Authenticator 中添加基于时间的密钥，然后输入生成的 6 位动态码。</p>
+  <div class="setup">
+    <label>账户 / Account</label>
+    <code>{html.escape(user.username)}</code>
+    <label>发行方 / Issuer</label>
+    <code>{html.escape(issuer)}</code>
+    <label>设置密钥 / Setup key</label>
+    <code>{secret}</code>
+    <a href="{uri}">在 Authenticator 中打开 / Open in authenticator</a>
+  </div>
+  <input type="hidden" name="action" value="enable">
+  <input type="text" name="username" value="{html.escape(user.username)}" autocomplete="username" hidden readonly>
+  <label for="password">当前密码 / Current password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <label for="totp">6 位动态码 / 6-digit code</label>
+  <input id="totp" name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{{6}}" maxlength="6" required>
+  <button type="submit">验证并启用 / Verify and enable</button>
+  <div class="rule">绑定成功会注销现有会话。遗失手机时，可通过邮箱找回密码并重置二次验证。</div>
+  <div class="links"><a href="/">暂不启用 / Back to dashboard</a></div>
+  {notice_html}
+  {error_html}
+</form>
+"""
+    return _auth_document(title="Crypto Trading Login Security", body=body)

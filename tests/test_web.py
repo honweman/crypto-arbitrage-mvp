@@ -186,11 +186,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260711-i18n1" defer></script>',
+            '<script src="/static/app.js?v=20260712-security1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260711-i18n1" defer></script>',
+            '<script src="/static/i18n.js?v=20260712-security1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -225,12 +225,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260711-i18n1"></script>',
+            '<script src="/static/theme.js?v=20260712-security1"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index('/static/theme.js?v=20260711-i18n1'),
-            INDEX_HTML.index('/static/styles.css?v=20260711-i18n1'),
+            INDEX_HTML.index('/static/theme.js?v=20260712-security1'),
+            INDEX_HTML.index('/static/styles.css?v=20260712-security1'),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn('root.dataset.theme = theme', theme_js)
@@ -335,7 +335,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260711-i18n1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260712-security1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -5935,6 +5935,121 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expired_session_response.status, 401)
         self.assertEqual(new_login_response.status, 200)
 
+    async def test_user_totp_setup_login_and_disable_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store_path = data_dir / "web_users.json"
+            trade_log_path = data_dir / "trade_events.jsonl"
+            store = WebUserStore(store_path)
+            user = store.create_user(
+                email="secure@example.com",
+                username="secure-user",
+                password="Strong-pass-1!",
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                    totp_issuer="Test Trading",
+                ),
+                trade_log=TradeLogConfig(path=str(trade_log_path)),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                unauthorized = await client.get("/security", allow_redirects=False)
+                login = await client.post(
+                    "/login",
+                    data={
+                        "username": user.username,
+                        "password": "Strong-pass-1!",
+                    },
+                    allow_redirects=False,
+                )
+                setup = await client.get("/security")
+                setup_html = await setup.text()
+                invalid = await client.post(
+                    "/security",
+                    data={
+                        "action": "enable",
+                        "password": "Strong-pass-1!",
+                        "totp": "123",
+                    },
+                )
+                enabled = await client.post(
+                    "/security",
+                    data={
+                        "action": "enable",
+                        "password": "Strong-pass-1!",
+                        "totp": totp_code(user.totp_secret),
+                    },
+                )
+                expired_session = await client.get("/api/state")
+                no_code_login = await client.post(
+                    "/login",
+                    data={
+                        "username": user.username,
+                        "password": "Strong-pass-1!",
+                    },
+                    allow_redirects=False,
+                )
+                enabled_user = store.get_user(user.email)
+                totp_login = await client.post(
+                    "/login",
+                    data={
+                        "username": user.username,
+                        "password": "Strong-pass-1!",
+                        "totp": totp_code(enabled_user.totp_secret),
+                    },
+                    allow_redirects=False,
+                )
+                enabled_page = await client.get("/security")
+                enabled_html = await enabled_page.text()
+                disabled = await client.post(
+                    "/security",
+                    data={
+                        "action": "disable",
+                        "password": "Strong-pass-1!",
+                        "totp": totp_code(enabled_user.totp_secret),
+                    },
+                )
+                password_only_login = await client.post(
+                    "/login",
+                    data={
+                        "username": user.username,
+                        "password": "Strong-pass-1!",
+                    },
+                    allow_redirects=False,
+                )
+                audit_text = (data_dir / "web_audit_events.jsonl").read_text(
+                    encoding="utf-8"
+                )
+            finally:
+                await client.close()
+
+        self.assertEqual(unauthorized.status, 302)
+        self.assertEqual(login.status, 302)
+        self.assertEqual(setup.status, 200)
+        self.assertIn(user.totp_secret, setup_html)
+        self.assertIn("Test Trading", setup_html)
+        self.assertEqual(setup.headers["Cache-Control"], "no-store")
+        self.assertEqual(invalid.status, 400)
+        self.assertEqual(enabled.status, 200)
+        self.assertEqual(expired_session.status, 401)
+        self.assertEqual(no_code_login.status, 401)
+        self.assertEqual(totp_login.status, 302)
+        self.assertEqual(enabled_page.status, 200)
+        self.assertIn("二次验证已启用", enabled_html)
+        self.assertEqual(disabled.status, 200)
+        self.assertEqual(password_only_login.status, 302)
+        self.assertIn('"action": "totp_enable"', audit_text)
+        self.assertIn('"action": "totp_disable"', audit_text)
+        self.assertNotIn(user.totp_secret, audit_text)
+
     async def test_user_backtest_api_login_run_and_delete_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -6421,7 +6536,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await client.close()
 
-            persisted_member = user_store.get_user(member.email)
+            persisted_member = app["web_user_store"].get_user(member.email)
             database_bytes = workspace_path.read_bytes()
             paper_database_bytes = workspace_path.with_name(
                 "user_paper_trading.sqlite3"

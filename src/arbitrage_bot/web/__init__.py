@@ -104,6 +104,8 @@ from .security import (
     register_get,
     register_post,
     reset_password_post,
+    security_get,
+    security_post,
     write_system_web_audit_event,
     write_web_audit_event,
 )
@@ -6653,7 +6655,11 @@ def create_app(
         runtime_store_path=default_runtime_store_path(cfg),
     )
     auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
-    web_user_store = WebUserStore(default_web_user_store_path(cfg))
+    web_user_store = WebUserStore(
+        default_web_user_store_path(cfg),
+        master_key_env=cfg.web_security.credential_master_key_env,
+    )
+    web_user_store.migrate_totp_secrets()
     user_workspace_store = UserWorkspaceStore(
         default_user_workspace_path(cfg),
         master_key_env=cfg.web_security.credential_master_key_env,

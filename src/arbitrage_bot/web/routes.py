@@ -44,6 +44,8 @@ def register_routes(app: web.Application) -> None:
         register_code_post,
         register_post,
         reset_password_post,
+        security_get,
+        security_post,
     )
 
     app.router.add_get("/login", login_get)
@@ -55,6 +57,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/forgot-password/code", forgot_password_code_post)
     app.router.add_post("/reset-password", reset_password_post)
     app.router.add_get("/logout", logout)
+    app.router.add_get("/security", security_get)
+    app.router.add_post("/security", security_post)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_static("/static/", STATIC_DIR, name="static", append_version=True)

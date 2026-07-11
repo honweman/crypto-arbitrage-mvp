@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import os
 import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from arbitrage_bot.web.users import (
     WebUserStore,
@@ -55,6 +58,104 @@ class WebUserStoreTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_password(password)
 
+    def test_totp_enable_login_enforcement_and_disable_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            user = store.create_user(
+                email="secure@example.com",
+                username="secure-user",
+                password="Strong-pass-1!",
+            )
+
+            with self.assertRaisesRegex(ValueError, "current password"):
+                store.set_totp_enabled(
+                    email=user.email,
+                    password="wrong-password",
+                    code=totp_code(user.totp_secret),
+                    enabled=True,
+                )
+            with self.assertRaisesRegex(ValueError, "code is invalid"):
+                store.set_totp_enabled(
+                    email=user.email,
+                    password="Strong-pass-1!",
+                    code="123",
+                    enabled=True,
+                )
+
+            enabled = store.set_totp_enabled(
+                email=user.email,
+                password="Strong-pass-1!",
+                code=totp_code(user.totp_secret),
+                enabled=True,
+            )
+            self.assertTrue(enabled.totp_enabled)
+            self.assertEqual(enabled.auth_version, user.auth_version + 1)
+            self.assertIsNone(
+                store.authenticate(
+                    username=user.username,
+                    password="Strong-pass-1!",
+                )
+            )
+            self.assertIsNone(
+                store.authenticate(
+                    username=user.username,
+                    password="Strong-pass-1!",
+                    totp="00000000",
+                )
+            )
+            self.assertIsNotNone(
+                store.authenticate(
+                    username=user.username,
+                    password="Strong-pass-1!",
+                    totp=totp_code(enabled.totp_secret),
+                )
+            )
+
+            disabled = store.set_totp_enabled(
+                email=user.email,
+                password="Strong-pass-1!",
+                code=totp_code(enabled.totp_secret),
+                enabled=False,
+            )
+            password_auth = store.authenticate(
+                username=user.username,
+                password="Strong-pass-1!",
+            )
+
+        self.assertFalse(disabled.totp_enabled)
+        self.assertNotEqual(disabled.totp_secret, enabled.totp_secret)
+        self.assertEqual(disabled.auth_version, enabled.auth_version + 1)
+        self.assertIsNotNone(password_auth)
+
+    def test_totp_secret_migrates_to_encrypted_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "users.json"
+            user = WebUserStore(path).create_user(
+                email="secure@example.com",
+                password="Strong-pass-1!",
+            )
+            self.assertIn(user.totp_secret, path.read_text(encoding="utf-8"))
+            encoded_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
+            with patch.dict(os.environ, {"TEST_TOTP_MASTER_KEY": encoded_key}):
+                encrypted_store = WebUserStore(
+                    path,
+                    master_key_env="TEST_TOTP_MASTER_KEY",
+                )
+                migrated = encrypted_store.migrate_totp_secrets()
+                stored = path.read_text(encoding="utf-8")
+                loaded = encrypted_store.get_user(user.email)
+                store_mode = path.stat().st_mode & 0o777
+
+            raw_user = json.loads(stored)["users"][0]
+
+        self.assertTrue(migrated)
+        self.assertNotIn(user.totp_secret, stored)
+        self.assertNotIn("totp_secret", raw_user)
+        self.assertIn("totp_secret_nonce", raw_user)
+        self.assertIn("totp_secret_ciphertext", raw_user)
+        self.assertEqual(loaded.totp_secret, user.totp_secret)
+        self.assertEqual(store_mode, 0o600)
+
     def test_username_is_unique_and_legacy_users_get_compatible_username(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "users.json"
@@ -90,7 +191,6 @@ class WebUserStoreTest(unittest.TestCase):
                 email=user.email,
                 new_password="Strong-pass-2!",
             )
-
             self.assertEqual(updated.auth_version, user.auth_version + 1)
             self.assertIsNone(
                 store.authenticate(username=user.username, password="Strong-pass-1!")
@@ -98,6 +198,34 @@ class WebUserStoreTest(unittest.TestCase):
             self.assertIsNotNone(
                 store.authenticate(username=user.username, password="Strong-pass-2!")
             )
+
+    def test_password_reset_disables_and_rotates_totp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            user = store.create_user(
+                email="member@example.com",
+                password="Strong-pass-1!",
+            )
+            enabled = store.set_totp_enabled(
+                email=user.email,
+                password="Strong-pass-1!",
+                code=totp_code(user.totp_secret),
+                enabled=True,
+            )
+
+            updated = store.reset_password(
+                email=user.email,
+                new_password="Strong-pass-2!",
+            )
+            reset_auth = store.authenticate(
+                username=user.username,
+                password="Strong-pass-2!",
+            )
+
+        self.assertFalse(updated.totp_enabled)
+        self.assertNotEqual(updated.totp_secret, enabled.totp_secret)
+        self.assertEqual(updated.auth_version, enabled.auth_version + 1)
+        self.assertIsNotNone(reset_auth)
 
     def test_profile_preferred_asset_must_be_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,7 +380,16 @@ class WebUserStoreTest(unittest.TestCase):
             store = WebUserStore(Path(tmp) / "users.json")
             member = store.create_user(email="member@example.com", password="Strong-pass-1!")
 
-            store.admin_update_user(email=member.email, new_password="Strong-pass-2!")
+            enabled = store.set_totp_enabled(
+                email=member.email,
+                password="Strong-pass-1!",
+                code=totp_code(member.totp_secret),
+                enabled=True,
+            )
+            updated = store.admin_update_user(
+                email=member.email,
+                new_password="Strong-pass-2!",
+            )
 
             self.assertIsNone(
                 store.authenticate(
@@ -265,9 +402,10 @@ class WebUserStoreTest(unittest.TestCase):
                 store.authenticate(
                     email=member.email,
                     password="Strong-pass-2!",
-                    totp=totp_code(member.totp_secret),
                 )
             )
+            self.assertFalse(updated.totp_enabled)
+            self.assertNotEqual(updated.totp_secret, enabled.totp_secret)
 
     def test_admin_delete_user_protects_the_last_remaining_admin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
