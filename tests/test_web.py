@@ -184,11 +184,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260711-user-paper4" defer></script>',
+            '<script src="/static/app.js?v=20260711-perf2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260711-user-paper4" defer></script>',
+            '<script src="/static/i18n.js?v=20260711-perf2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -304,7 +304,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260711-user-paper4">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260711-perf2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -6249,6 +6249,104 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b"test-secret-value", database_bytes)
         self.assertNotIn(b"test-api-key-value", paper_database_bytes)
         self.assertNotIn(b"test-secret-value", paper_database_bytes)
+
+class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_api_state_is_gzip_compressed_for_gzip_clients(self) -> None:
+        cfg = make_config()
+        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/api/state")
+            payload = await response.json()
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
+            self.assertIn("status", payload)
+        finally:
+            await client.close()
+
+    async def test_static_assets_get_immutable_cache_control_and_gzip(self) -> None:
+        cfg = make_config()
+        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/static/app.js")
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                response.headers.get("Cache-Control"),
+                "public, max-age=31536000, immutable",
+            )
+            self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
+        finally:
+            await client.close()
+
+    async def test_favicon_is_served_even_without_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env="TEST_WEB_PASSWORD",
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(data_dir / "web_users.json"),
+                ),
+            )
+            with patch.dict(os.environ, {"TEST_WEB_PASSWORD": "123456"}, clear=False):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    ico = await client.get("/favicon.ico", allow_redirects=False)
+                    svg = await client.get(
+                        "/static/favicon.svg", allow_redirects=False
+                    )
+                    page = await client.get("/", allow_redirects=False)
+
+                    self.assertEqual(ico.status, 200)
+                    self.assertEqual(ico.headers.get("Content-Type"), "image/svg+xml")
+                    self.assertEqual(svg.status, 200)
+                    # The dashboard itself still requires a session.
+                    self.assertEqual(page.status, 302)
+                finally:
+                    await client.close()
+
+    async def test_state_stream_pushes_snapshots_matching_state_payload(self) -> None:
+        cfg = make_config()
+        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            state_response = await client.get("/api/state?view=status")
+            state_payload = await state_response.json()
+
+            stream_response = await client.get(
+                "/api/state/stream?view=status&interval=1"
+            )
+            self.assertEqual(stream_response.status, 200)
+            self.assertEqual(
+                stream_response.headers.get("Content-Type"),
+                "text/event-stream",
+            )
+            event = await asyncio.wait_for(
+                stream_response.content.readuntil(b"\n\n"),
+                timeout=10,
+            )
+            stream_response.close()
+
+            self.assertTrue(event.startswith(b"data: "))
+            streamed_payload = json.loads(event[len(b"data: "):].decode("utf-8"))
+            self.assertEqual(
+                sorted(streamed_payload.keys()),
+                sorted(state_payload.keys()),
+            )
+            self.assertIn("status", streamed_payload)
+        finally:
+            await client.close()
+
 
 if __name__ == "__main__":
     unittest.main()

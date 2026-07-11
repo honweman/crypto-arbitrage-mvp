@@ -26,10 +26,12 @@ def register_routes(app: web.Application) -> None:
         api_slow_execution,
         api_spot_grid,
         api_state,
+        api_state_stream,
         api_signal_webhook,
         api_strategy_center,
         api_strategy_control,
         api_user_workspace,
+        favicon,
         forgot_password_code_post,
         forgot_password_get,
         index,
@@ -52,8 +54,10 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/reset-password", reset_password_post)
     app.router.add_get("/logout", logout)
     app.router.add_get("/", index)
+    app.router.add_get("/favicon.ico", favicon)
     app.router.add_static("/static/", STATIC_DIR, name="static", append_version=True)
     app.router.add_get("/api/state", api_state)
+    app.router.add_get("/api/state/stream", api_state_stream)
     app.router.add_post("/api/profile", api_profile)
     app.router.add_post("/api/control", api_control)
     app.router.add_post("/api/markets", api_markets)

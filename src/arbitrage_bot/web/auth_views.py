@@ -70,6 +70,7 @@ def _auth_document(*, title: str, body: str) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <style>{AUTH_CSS}</style>
 </head>
 <body><main>{body}</main></body>
