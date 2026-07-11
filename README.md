@@ -560,6 +560,17 @@ CRYPTO_ARB_DEPLOY_HOST=root@example.com scripts/deploy_cloud.sh
 
 The helper excludes `.venv`, `data`, `logs`, `config.json`, `config.acs.json`, `.DS_Store`, and Mac `._*` metadata files, then creates a timestamped backup under the remote `data/` directory before restarting the service.
 
+The same helper can run from GitHub Actions: the manual `deploy` workflow
+(Actions tab → deploy → Run workflow, confirmation input `deploy`) checks out
+`main`, runs the test suite, and then executes `scripts/deploy_cloud.sh` over
+SSH. Configure repository secrets `DEPLOY_SSH_KEY` and `DEPLOY_HOST`
+(optionally `DEPLOY_DIR`, `DEPLOY_SERVICE`, and `DEPLOY_KNOWN_HOSTS` with
+`ssh-keyscan` output to pin the host key). Use a dedicated deploy key pair
+authorized on the server rather than a personal key, and pin
+`DEPLOY_KNOWN_HOSTS` in production so the first connection cannot be
+intercepted. The workflow is deliberately manual-only — merging to `main`
+never deploys by itself.
+
 The config `label` is the account identity used by the rest of the bot. Multiple accounts on the same exchange should be configured as separate exchange entries with the same `id` and different labels:
 
 ```json
