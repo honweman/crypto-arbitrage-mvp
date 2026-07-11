@@ -117,6 +117,8 @@ from arbitrage_bot.web_config import (
     strategy_universe_to_dict,
 )
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
+from arbitrage_bot.user_strategies import UserStrategy
+from arbitrage_bot.user_workspace import UserExchangeAccount, UserProject
 
 
 HTML = f"{INDEX_HTML}\n{APP_JS}"
@@ -184,11 +186,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260711-workspace3" defer></script>',
+            '<script src="/static/app.js?v=20260711-backtest2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260711-workspace3" defer></script>',
+            '<script src="/static/i18n.js?v=20260711-backtest2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -197,6 +199,13 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertIn('id="user-setup-readiness"', INDEX_HTML)
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
+        self.assertIn('id="backtest-section"', INDEX_HTML)
+        self.assertIn('id="backtest-run"', INDEX_HTML)
+        self.assertIn("Uses public historical candles", INDEX_HTML)
+        self.assertNotIn(
+            'data-ui-feature="backtest" data-ui-hidden-default="true"',
+            INDEX_HTML,
+        )
 
     def test_page_supports_korean_language_option(self) -> None:
         i18n_js = Path("src/arbitrage_bot/web/static/i18n.js").read_text(
@@ -307,7 +316,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260711-workspace3">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260711-backtest2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -570,7 +579,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('data-ui-feature="spot_grid" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="dca" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="execution_algo" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="backtest" data-ui-hidden-default="true"', HTML)
+        self.assertIn('id="backtest-section"', HTML)
+        self.assertNotIn(
+            'data-ui-feature="backtest" data-ui-hidden-default="true"',
+            HTML,
+        )
         self.assertIn('data-ui-feature="orders_detail" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="strategy_timeline" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="audit_trail" data-ui-hidden-default="true"', HTML)
@@ -757,8 +770,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="exec-algo"', HTML)
         self.assertIn('id="exec-total-quote"', HTML)
         self.assertIn('id="exec-schedule"', HTML)
-        self.assertIn("Backtest / Paper", HTML)
-        self.assertIn("/api/backtest", HTML)
+        self.assertIn("Historical Backtest", HTML)
+        self.assertIn("/api/user-backtests", APP_JS)
         self.assertIn('id="backtest-form"', HTML)
         self.assertIn('id="backtest-strategy"', HTML)
         self.assertIn('id="backtest-return"', HTML)
@@ -5832,6 +5845,156 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reset_response.status, 200)
         self.assertEqual(expired_session_response.status, 401)
         self.assertEqual(new_login_response.status, 200)
+
+    async def test_user_backtest_api_login_run_and_delete_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            user = user_store.create_user(
+                email="researcher@example.com",
+                username="researcher01",
+                password="Strong-pass-1!",
+                allowed_assets=["ACS"],
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(data_dir / "user_workspace.sqlite3"),
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=str(data_dir / "trade_events.jsonl"),
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            workspace = app["user_workspace_store"]
+            project = workspace.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "id": "project-backtest",
+                        "owner_email": user.email,
+                        "name": "ACS Backtest",
+                        "asset": "ACS",
+                        "quote_currency": "USDC",
+                        "status": "active",
+                    }
+                )
+            )
+            account = workspace.upsert_account(
+                UserExchangeAccount.from_dict(
+                    {
+                        "id": "account-backtest",
+                        "owner_email": user.email,
+                        "project_id": project.id,
+                        "label": "Coinbase Public",
+                        "exchange": "coinbase",
+                        "market_type": "spot",
+                        "symbol": "ACS/USDC",
+                    }
+                )
+            )
+            strategy = workspace.upsert_strategy(
+                UserStrategy.from_dict(
+                    {
+                        "id": "strategy-backtest",
+                        "owner_email": user.email,
+                        "project_id": project.id,
+                        "name": "ACS DCA Research",
+                        "strategy_type": "dca",
+                        "account_ids": [account.id],
+                        "parameters": {
+                            "side": "buy",
+                            "total_quote": 20.0,
+                            "quote_per_order": 5.0,
+                            "interval_seconds": 3600.0,
+                            "trigger_price": 1.0,
+                            "take_profit_pct": 0.0,
+                        },
+                    }
+                )
+            )
+
+            async def fake_history(_account, *, timeframe, limit):
+                self.assertEqual(timeframe, "1h")
+                start = 1_700_000_000_000
+                return [
+                    {
+                        "timestamp_ms": start + index * 3_600_000,
+                        "open": 1.0,
+                        "high": 1.02,
+                        "low": 0.95,
+                        "close": 1.0 - (index % 4) * 0.01,
+                        "volume": 100.0,
+                    }
+                    for index in range(limit)
+                ]
+
+            app["user_backtest_service"].fetcher = fake_history
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                unauthorized = await client.get("/api/user-backtests")
+                login = await client.post(
+                    "/login",
+                    data={
+                        "username": user.username,
+                        "password": "Strong-pass-1!",
+                    },
+                )
+                initial = await client.get("/api/user-backtests")
+                create = await client.post(
+                    "/api/user-backtests",
+                    json={
+                        "action": "create",
+                        "project_id": project.id,
+                        "strategy_id": strategy.id,
+                        "account_id": account.id,
+                        "timeframe": "1h",
+                        "history_bars": 30,
+                        "initial_cash": 100.0,
+                        "initial_base": 0.0,
+                        "fee_bps": 20.0,
+                        "slippage_bps": 5.0,
+                        "latency_bars": 0,
+                    },
+                )
+                create_payload = await create.json()
+                run_id = create_payload["run"]["id"]
+                completed_payload = None
+                for _ in range(100):
+                    response = await client.get(
+                        f"/api/user-backtests?run_id={run_id}"
+                    )
+                    completed_payload = await response.json()
+                    if completed_payload["selected"]["status"] == "complete":
+                        break
+                    await asyncio.sleep(0.01)
+                delete = await client.post(
+                    "/api/user-backtests",
+                    json={"action": "delete", "run_id": run_id},
+                )
+                delete_payload = await delete.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(unauthorized.status, 401)
+        self.assertEqual(login.status, 200)
+        self.assertEqual(initial.status, 200)
+        self.assertEqual(create.status, 200, create_payload)
+        assert completed_payload is not None
+        self.assertEqual(completed_payload["selected"]["status"], "complete")
+        self.assertEqual(
+            completed_payload["selected"]["result"]["data_source"],
+            "exchange_ohlcv",
+        )
+        self.assertFalse(completed_payload["selected"]["live_submit_allowed"])
+        self.assertEqual(delete.status, 200, delete_payload)
+        self.assertEqual(delete_payload["backtests"]["runs"], [])
 
     async def test_user_workspace_project_approval_and_encrypted_account_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

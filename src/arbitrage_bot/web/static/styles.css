@@ -669,8 +669,15 @@ h2 {
 
 .compact-section.section-open > .control-panel,
 .compact-section.section-open > .readiness-grid,
-.compact-section.section-open > .mm-safety-grid {
+.compact-section.section-open > .mm-safety-grid,
+.compact-section.section-open > .mini-grid,
+.compact-section.section-open > .backtest-progress,
+.compact-section.section-open > .backtest-warnings {
   display: grid;
+}
+
+.compact-section.section-open > .backtest-safety-note {
+  display: flex;
 }
 
 .compact-section.section-open > .feed {
@@ -1343,6 +1350,142 @@ tbody tr:last-child td {
   line-height: 1.2;
 }
 
+.backtest-safety-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid var(--info-line);
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backtest-safety-note strong {
+  flex: 0 0 auto;
+  color: var(--blue);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.backtest-progress {
+  display: grid;
+  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backtest-progress-bar {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.backtest-progress-bar > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 180ms ease;
+}
+
+.backtest-chart-wrap {
+  min-height: 220px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.backtest-chart-legend {
+  display: flex;
+  justify-content: flex-end;
+  gap: 16px;
+  min-height: 22px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.backtest-chart-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  margin: 0 5px 3px 0;
+  background: var(--green);
+}
+
+.backtest-chart-legend span:last-child::before {
+  background: var(--blue);
+}
+
+#backtest-chart {
+  display: block;
+  width: 100%;
+  height: 180px;
+}
+
+.backtest-warnings {
+  display: grid;
+  gap: 4px;
+  color: var(--warn-text);
+  font-size: 11px;
+}
+
+.backtest-warnings:empty {
+  display: none !important;
+}
+
+.backtest-runs-table {
+  min-width: 900px;
+}
+
+.backtest-run-selected td {
+  background: var(--info-bg);
+}
+
+.backtest-details {
+  border-top: 1px solid var(--line);
+}
+
+.backtest-details summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.backtest-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.backtest-details summary::before {
+  content: "+";
+  width: 14px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.backtest-details[open] summary::before {
+  content: "-";
+}
+
+.backtest-details summary span:last-child {
+  margin-left: auto;
+}
+
 .account-option {
   display: inline-flex;
   align-items: center;
@@ -1571,6 +1714,17 @@ tbody tr:last-child td {
   .control-panel { grid-template-columns: 1fr; }
   .account-selector { grid-template-columns: 1fr; }
   .mini-grid { grid-template-columns: 1fr; }
+  #backtest-section .mini-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .backtest-safety-note {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .backtest-progress { grid-template-columns: 1fr; }
+  .backtest-chart-wrap { min-height: 190px; }
+  #backtest-chart { height: 150px; }
   .strategy-settings-grid { grid-template-columns: 1fr; }
   .instance-status-row { grid-template-columns: 1fr; }
   .instance-status-pill { justify-self: start; }
@@ -1645,5 +1799,12 @@ tbody tr:last-child td {
   }
   .mobile-card-table .num {
     text-align: left;
+  }
+  #backtest-section .mobile-card-table td.workspace-table-actions {
+    grid-template-columns: minmax(88px, 38%) repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+  #backtest-section .workspace-table-actions button {
+    width: 100%;
   }
 }

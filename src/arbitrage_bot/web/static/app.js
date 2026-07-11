@@ -55,7 +55,6 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const HIDDEN_UI_FEATURES = new Set([
 	      "api_accounts",
 	      "audit_trail",
-	      "backtest",
 	      "cash_and_carry",
 	      "contract_strategies",
 	      "dca",
@@ -110,6 +109,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 		    function setActivePage(page, options = {}) {
 		      const activePage = PAGE_IDS.has(page) ? page : "status";
 		      currentPage = activePage;
+		      if (activePage !== "settings") scheduleUserBacktestPoll(false);
 	      clearRefreshTimer();
 	      applyFeatureVisibility();
 		      document.querySelectorAll("[data-page]").forEach((el) => {
@@ -2184,33 +2184,312 @@ function balanceStatusClass(status) {
       }
     }
 
-    function renderBacktest(backtest) {
-      const result = backtest?.result;
-      text("backtest-return", result ? `${Number(result.return_pct || 0).toFixed(2)}%` : "--");
-      text("backtest-drawdown", result ? `${Number(result.max_drawdown_pct || 0).toFixed(2)}%` : "--");
-      text("backtest-fees", result ? money.format(result.fee_quote || 0) : "--");
-      text("backtest-fill-rate", result ? `${(Number(result.fill_rate || 0) * 100).toFixed(1)}%` : "--");
-      const body = document.getElementById("backtest-points");
-      body.innerHTML = "";
-      const points = result?.points || [];
-      if (!result || points.length === 0) {
-        const tr = document.createElement("tr");
-        const status = backtest?.error || backtest?.status || "disabled";
-        tr.innerHTML = `<td colspan="6">${escapeHtml(status)}</td>`;
-        body.appendChild(tr);
+    const USER_BACKTEST_ACTIVE_STATUSES = new Set(["queued", "fetching", "running"]);
+    const USER_BACKTEST_STRATEGIES = new Set(["spot_grid", "dca"]);
+
+    function backtestStatusClass(status) {
+      if (status === "complete") return "risk-ok";
+      if (status === "error" || status === "interrupted") return "risk-blocked";
+      return USER_BACKTEST_ACTIVE_STATUSES.has(status) ? "ok" : "risk-off";
+    }
+
+    function backtestPercent(value, digits = 2) {
+      const number = Number(value);
+      return Number.isFinite(number) ? `${number.toFixed(digits)}%` : "--";
+    }
+
+    function backtestEpoch(value) {
+      const seconds = Number(value);
+      return Number.isFinite(seconds) ? formatTimestamp(seconds * 1000) : "--";
+    }
+
+    function replaceBacktestOptions(select, rows, preferred, placeholder) {
+      select.innerHTML = "";
+      if (!rows.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = uiText(placeholder);
+        select.appendChild(option);
+        select.disabled = true;
+        return "";
+      }
+      select.disabled = false;
+      for (const row of rows) {
+        const option = document.createElement("option");
+        option.value = row.value;
+        option.textContent = row.label;
+        select.appendChild(option);
+      }
+      const selected = rows.some((row) => row.value === preferred)
+        ? preferred
+        : rows[0].value;
+      select.value = selected;
+      return selected;
+    }
+
+    function syncBacktestAccountOptions(preferredAccount = "", applyFeeDefault = false) {
+      const workspace = currentUserWorkspace || {};
+      const projectId = document.getElementById("backtest-project").value;
+      const strategyId = document.getElementById("backtest-strategy").value;
+      const strategy = (workspace.strategies || []).find((row) => row.id === strategyId);
+      const assigned = new Set(strategy?.account_ids || []);
+      const accounts = (workspace.accounts || [])
+        .filter((account) => (
+          account.project_id === projectId
+          && account.market_type === "spot"
+          && Boolean(account.symbol)
+          && assigned.has(account.id)
+        ))
+        .map((account) => ({
+          value: account.id,
+          label: `${account.label || account.exchange} · ${account.exchange} · ${account.symbol}`,
+        }));
+      const accountId = replaceBacktestOptions(
+        document.getElementById("backtest-account"),
+        accounts,
+        preferredAccount,
+        "No assigned spot account",
+      );
+      if (applyFeeDefault && strategy?.risk?.paper_fee_bps != null) {
+        setNumericField("backtest-fee", strategy.risk.paper_fee_bps);
+      }
+      const account = (workspace.accounts || []).find((row) => row.id === accountId);
+      const symbol = account?.symbol || "BASE/QUOTE";
+      text("backtest-cash-label", `${uiText("Initial Cash")} (${quoteCurrency(symbol)})`);
+      text("backtest-base-label", `${uiText("Initial Base")} (${baseCurrency(symbol)})`);
+      document.getElementById("backtest-run").disabled = !accountId || backtestFormBusy;
+    }
+
+    function syncBacktestStrategyOptions(preferredStrategy = "", preferredAccount = "") {
+      const workspace = currentUserWorkspace || {};
+      const projectId = document.getElementById("backtest-project").value;
+      const strategies = (workspace.strategies || [])
+        .filter((strategy) => (
+          strategy.project_id === projectId
+          && USER_BACKTEST_STRATEGIES.has(strategy.strategy_type)
+        ))
+        .map((strategy) => ({
+          value: strategy.id,
+          label: `${strategy.name || strategy.id} · ${uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type)}`,
+        }));
+      replaceBacktestOptions(
+        document.getElementById("backtest-strategy"),
+        strategies,
+        preferredStrategy,
+        "No Spot Grid or DCA strategy",
+      );
+      syncBacktestAccountOptions(preferredAccount, false);
+    }
+
+    function renderBacktestSelectors(workspace) {
+      currentUserWorkspace = workspace || currentUserWorkspace;
+      const projectSelect = document.getElementById("backtest-project");
+      if (!projectSelect) return;
+      const previousProject = projectSelect.value;
+      const previousStrategy = document.getElementById("backtest-strategy").value;
+      const previousAccount = document.getElementById("backtest-account").value;
+      const projects = (currentUserWorkspace?.projects || [])
+        .filter((project) => project.status === "active")
+        .map((project) => ({
+          value: project.id,
+          label: `${project.name || project.id} · ${project.symbol || "--"}`,
+        }));
+      replaceBacktestOptions(
+        projectSelect,
+        projects,
+        previousProject,
+        "No active projects",
+      );
+      syncBacktestStrategyOptions(previousStrategy, previousAccount);
+    }
+
+    function drawBacktestChart(points) {
+      const canvas = document.getElementById("backtest-chart");
+      if (!canvas) return;
+      const cssWidth = Math.max(280, Math.floor(canvas.clientWidth || 800));
+      const cssHeight = Math.max(140, Math.floor(canvas.clientHeight || 180));
+      const ratio = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.floor(cssWidth * ratio);
+      canvas.height = Math.floor(cssHeight * ratio);
+      const context = canvas.getContext("2d");
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, cssWidth, cssHeight);
+      const styles = getComputedStyle(document.documentElement);
+      const lineColor = styles.getPropertyValue("--line").trim();
+      const textColor = styles.getPropertyValue("--muted").trim();
+      context.strokeStyle = lineColor;
+      context.lineWidth = 1;
+      for (let index = 1; index < 4; index += 1) {
+        const y = Math.round((cssHeight - 24) * index / 4) + 8;
+        context.beginPath();
+        context.moveTo(8, y);
+        context.lineTo(cssWidth - 8, y);
+        context.stroke();
+      }
+      if (!points || points.length < 2) {
+        context.fillStyle = textColor;
+        context.font = "12px system-ui";
+        context.textAlign = "center";
+        context.fillText(uiText("No completed backtest selected."), cssWidth / 2, cssHeight / 2);
         return;
       }
-      for (const point of points.slice(-80)) {
+      const plot = (key, color) => {
+        const values = points.map((point) => Number(point[key])).filter(Number.isFinite);
+        const minimum = Math.min(...values);
+        const maximum = Math.max(...values);
+        const span = Math.max(Math.abs(maximum - minimum), Math.abs(maximum) * 1e-9, 1e-12);
+        context.beginPath();
+        context.strokeStyle = color;
+        context.lineWidth = 1.7;
+        points.forEach((point, index) => {
+          const x = 8 + index / (points.length - 1) * (cssWidth - 16);
+          const y = 8 + (maximum - Number(point[key])) / span * (cssHeight - 24);
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      };
+      plot("equity", styles.getPropertyValue("--green").trim());
+      plot("price", styles.getPropertyValue("--blue").trim());
+    }
+
+    function renderBacktestPoints(run) {
+      const result = run?.result;
+      const points = result?.points || [];
+      const body = document.getElementById("backtest-points");
+      body.innerHTML = "";
+      text("backtest-point-count", points.length ? `${Math.min(60, points.length)} / ${points.length}` : "");
+      if (!points.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">${escapeHtml(run?.error || uiText("No completed backtest selected."))}</td>`;
+        body.appendChild(tr);
+        drawBacktestChart([]);
+        return;
+      }
+      for (const point of points.slice(-60)) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td class="num">${point.step}</td>
+          <td>${formatTimestamp(point.timestamp_ms)}</td>
           <td class="num">${fmt.format(point.price)}</td>
           <td class="num">${money.format(point.equity)}</td>
-          <td class="num">${Number(point.drawdown_pct || 0).toFixed(2)}%</td>
+          <td class="num">${backtestPercent(point.drawdown_pct)}</td>
           <td class="num">${compact.format(point.base)}</td>
           <td class="num">${money.format(point.cash)}</td>
         `;
         body.appendChild(tr);
+      }
+      drawBacktestChart(points);
+    }
+
+    function renderBacktestRuns(payload) {
+      const body = document.getElementById("backtest-runs");
+      body.innerHTML = "";
+      const runs = payload?.runs || [];
+      if (!runs.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">${escapeHtml(uiText("No historical backtests yet."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const run of runs) {
+        const metrics = run.metrics || {};
+        const request = run.request || {};
+        const tr = document.createElement("tr");
+        if (run.id === selectedBacktestRunId) tr.className = "backtest-run-selected";
+        tr.innerHTML = `
+          <td title="${escapeHtml(run.id || "")}">${escapeHtml(shortId(run.id))}<br><span class="subtle">${escapeHtml(backtestEpoch(run.created_at))}</span></td>
+          <td>${escapeHtml(run.strategy?.name || "--")}</td>
+          <td>${escapeHtml(run.account?.exchange || "--")}<br><span class="subtle">${escapeHtml(run.account?.symbol || "--")}</span></td>
+          <td>${escapeHtml(request.timeframe || "--")} · ${Number(request.history_bars || 0)} ${escapeHtml(uiText("bars"))}</td>
+          <td class="num ${pnlClass(Number(metrics.return_pct || 0))}">${backtestPercent(metrics.return_pct)}</td>
+          <td class="num">${backtestPercent(metrics.max_drawdown_pct)}</td>
+          <td class="${backtestStatusClass(run.status)}">${escapeHtml(uiText(run.status || "--"))}</td>
+          <td class="workspace-table-actions"></td>
+        `;
+        const action = tr.querySelector(".workspace-table-actions");
+        const viewButton = document.createElement("button");
+        viewButton.type = "button";
+        viewButton.className = "ghost-button";
+        viewButton.textContent = uiText("View");
+        viewButton.addEventListener("click", () => loadUserBacktests({ runId: run.id, force: true }));
+        action.appendChild(viewButton);
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "danger-button";
+        deleteButton.textContent = uiText("Delete");
+        deleteButton.disabled = USER_BACKTEST_ACTIVE_STATUSES.has(run.status);
+        deleteButton.addEventListener("click", () => deleteUserBacktest(run.id, deleteButton));
+        action.appendChild(deleteButton);
+        body.appendChild(tr);
+      }
+    }
+
+    function scheduleUserBacktestPoll(active) {
+      if (userBacktestPollTimer) clearTimeout(userBacktestPollTimer);
+      userBacktestPollTimer = null;
+      if (!active || currentPage !== "settings" || !isSectionOpenFor("backtest-points")) return;
+      userBacktestPollTimer = setTimeout(() => {
+        loadUserBacktests({ runId: selectedBacktestRunId, force: true });
+      }, 2000);
+    }
+
+    function renderUserBacktests(payload) {
+      currentUserBacktests = payload || null;
+      const selected = payload?.selected || null;
+      if (selected?.id) selectedBacktestRunId = selected.id;
+      const result = selected?.result || null;
+      text("backtest-meta", `${Number(payload?.active_count || 0)} ${uiText("running backtests")} · ${(payload?.runs || []).length} ${uiText("saved runs")}`);
+      text("backtest-return", result ? backtestPercent(result.return_pct) : "--");
+      text("backtest-benchmark", result ? backtestPercent(result.benchmark_return_pct) : "--");
+      text("backtest-excess", result ? backtestPercent(result.excess_return_pct) : "--");
+      text("backtest-drawdown", result ? backtestPercent(result.max_drawdown_pct) : "--");
+      text("backtest-sharpe", result?.sharpe_ratio == null ? "--" : Number(result.sharpe_ratio).toFixed(2));
+      text("backtest-fees", result ? money.format(result.fee_quote || 0) : "--");
+      text("backtest-turnover", result ? backtestPercent(result.turnover_pct, 1) : "--");
+      text("backtest-trades", result ? String(result.trade_count || 0) : "--");
+      const progress = Math.max(0, Math.min(100, Number(selected?.progress_pct || 0)));
+      document.getElementById("backtest-progress-fill").style.width = `${progress}%`;
+      const market = selected?.account
+        ? `${selected.account.exchange || "--"} ${selected.account.symbol || "--"}`
+        : "";
+      const marketData = result?.market_data || {};
+      const barSummary = Number(marketData.received_bars || 0) > 0
+        ? ` · ${Number(marketData.received_bars)} ${uiText("bars")}`
+        : "";
+      const gapSummary = Number(marketData.gap_filled_bars || 0) > 0
+        ? ` · ${Number(marketData.gap_filled_bars)} ${uiText("no-trade bars filled")}`
+        : "";
+      const progressText = selected
+        ? `${uiText(selected.status || "--")} · ${market}${barSummary}${gapSummary}${selected.error ? ` · ${selected.error}` : ""}`
+        : uiText("No backtest selected.");
+      text("backtest-progress-text", progressText);
+      const warnings = document.getElementById("backtest-warnings");
+      warnings.innerHTML = (result?.warnings || [])
+        .map((warning) => `<span>${escapeHtml(warning)}</span>`)
+        .join("");
+      renderBacktestRuns(payload);
+      renderBacktestPoints(selected);
+      applyMobileTableLabels(document.getElementById("backtest-section"));
+      scheduleUserBacktestPoll(Number(payload?.active_count || 0) > 0);
+    }
+
+    async function loadUserBacktests({ runId = "", force = false } = {}) {
+      if (userBacktestLoadBusy) return;
+      if (!force && Date.now() - userBacktestLastLoadedAt < 3000) return;
+      if (currentPage !== "settings" || !isSectionOpenFor("backtest-points")) return;
+      userBacktestLoadBusy = true;
+      try {
+        const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+        const response = await fetch(`/api/user-backtests${query}`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "backtest load failed");
+        userBacktestLastLoadedAt = Date.now();
+        renderUserBacktests(payload);
+      } catch (error) {
+        text("backtest-meta", `${uiText("Load failed")}: ${error.message || error}`);
+        scheduleUserBacktestPoll(false);
+      } finally {
+        userBacktestLoadBusy = false;
       }
     }
 
@@ -4610,6 +4889,11 @@ function balanceStatusClass(status) {
     let execFormBusy = false;
     let backtestFormDirty = false;
     let backtestFormBusy = false;
+    let currentUserBacktests = null;
+    let selectedBacktestRunId = "";
+    let userBacktestLoadBusy = false;
+    let userBacktestLastLoadedAt = 0;
+    let userBacktestPollTimer = null;
     let strategyCenterFormDirty = false;
     let strategyCenterFormBusy = false;
     let apiAccountFormDirty = false;
@@ -5757,65 +6041,70 @@ function balanceStatusClass(status) {
       }
     }
 
-    function renderBacktestConfig(config, accounts) {
-      if (!config || backtestFormDirty || backtestFormBusy) return;
-      document.getElementById("backtest-enabled").checked = Boolean(config.enabled);
-      renderStrategyAccounts("backtest-accounts", "backtest-account", accounts, config.exchange || "", config.symbol || "", () => {
-        backtestFormDirty = true;
-      });
-      document.getElementById("backtest-strategy").value = config.strategy || "spot_grid";
-      setNumericField("backtest-cash", config.initial_cash || 0);
-      setNumericField("backtest-base", config.initial_base || 0);
-      setNumericField("backtest-fee", config.fee_bps || 0);
-      setNumericField("backtest-slippage", config.slippage_bps || 0);
-      setNumericField("backtest-price-start", config.price_start || 0);
-      setNumericField("backtest-price-end", config.price_end || 0);
-      setNumericField("backtest-steps", config.step_count || 2);
-      setNumericField("backtest-volatility", config.volatility_bps || 0);
-      setNumericField("backtest-trend", config.trend_bps || 0);
-      setNumericField("backtest-max-points", config.max_recent_points || 80);
-    }
-
     function backtestPayloadFromForm() {
       return {
-        enabled: document.getElementById("backtest-enabled").checked,
-        exchange: selectedStrategyAccount("backtest-account"),
-        symbol: selectedStrategySymbol("backtest-account"),
-        strategy: document.getElementById("backtest-strategy").value,
+        action: "create",
+        project_id: document.getElementById("backtest-project").value,
+        strategy_id: document.getElementById("backtest-strategy").value,
+        account_id: document.getElementById("backtest-account").value,
+        timeframe: document.getElementById("backtest-timeframe").value,
+        history_bars: numericValue("backtest-history-bars"),
         initial_cash: numericValue("backtest-cash"),
         initial_base: numericValue("backtest-base"),
         fee_bps: numericValue("backtest-fee"),
         slippage_bps: numericValue("backtest-slippage"),
-        price_start: numericValue("backtest-price-start"),
-        price_end: numericValue("backtest-price-end"),
-        step_count: numericValue("backtest-steps"),
-        volatility_bps: numericValue("backtest-volatility"),
-        trend_bps: numericValue("backtest-trend"),
-        max_recent_points: numericValue("backtest-max-points"),
+        latency_bars: numericValue("backtest-latency-bars"),
       };
     }
 
-    async function applyBacktestConfig(event) {
+    async function applyUserBacktest(event) {
       event.preventDefault();
       if (backtestFormBusy) return;
       backtestFormBusy = true;
-      const button = document.getElementById("backtest-apply");
+      const button = document.getElementById("backtest-run");
       button.disabled = true;
+      button.textContent = uiText("Starting");
       try {
-        const res = await fetch("/api/backtest", {
+        const payload = backtestPayloadFromForm();
+        if (!payload.project_id || !payload.strategy_id || !payload.account_id) {
+          throw new Error(uiText("Select a project, strategy, and assigned account."));
+        }
+        const res = await fetch("/api/user-backtests", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(backtestPayloadFromForm()),
+          body: JSON.stringify(payload),
         });
         const result = await res.json();
-        if (!res.ok) throw new Error(result.error || "backtest update failed");
+        if (!res.ok) throw new Error(result.error || "backtest start failed");
         backtestFormDirty = false;
-        await refresh();
+        selectedBacktestRunId = result.run?.id || "";
+        userBacktestLastLoadedAt = Date.now();
+        renderUserBacktests(result.backtests);
       } catch (error) {
-        text("backtest-meta", `update failed: ${error.message || error}`);
+        text("backtest-meta", `${uiText("Start failed")}: ${error.message || error}`);
       } finally {
-        button.disabled = false;
         backtestFormBusy = false;
+        button.textContent = uiText("Run Backtest");
+        syncBacktestAccountOptions(document.getElementById("backtest-account").value, false);
+      }
+    }
+
+    async function deleteUserBacktest(runId, button) {
+      if (!dangerConfirm("Delete this backtest result?")) return;
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/user-backtests", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete", run_id: runId }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "backtest delete failed");
+        if (selectedBacktestRunId === runId) selectedBacktestRunId = "";
+        renderUserBacktests(payload.backtests);
+      } catch (error) {
+        text("backtest-meta", `${uiText("Delete failed")}: ${error.message || error}`);
+        button.disabled = false;
       }
     }
 
@@ -6070,14 +6359,6 @@ function balanceStatusClass(status) {
           : `${data.execution_algo?.status || "disabled"}${execReason ? ` · ${execReason}` : ""}`
       );
 
-      const backtestResult = data.backtest?.result;
-      text(
-        "backtest-meta",
-        backtestResult
-          ? `${displayStrategy(backtestResult.strategy)} · return ${Number(backtestResult.return_pct || 0).toFixed(2)}% · max DD ${Number(backtestResult.max_drawdown_pct || 0).toFixed(2)}% · trades ${backtestResult.trade_count || 0}`
-          : `${data.backtest?.status || "disabled"}${data.backtest?.error ? ` · ${data.backtest.error}` : ""}`
-      );
-
       renderPortfolio(data.portfolio);
       renderStrategySummaries(data);
     }
@@ -6129,8 +6410,10 @@ function balanceStatusClass(status) {
           renderExecutionAlgo(data.execution_algo);
         });
         renderOpenSection("backtest-points", () => {
-          renderBacktestConfig(data.backtest?.config, data.backtest?.accounts);
-          renderBacktest(data.backtest);
+          renderBacktestSelectors(data.user_workspace);
+          if (currentUserBacktests) renderUserBacktests(currentUserBacktests);
+          else renderUserBacktests({ active_count: 0, runs: [], selected: null });
+          loadUserBacktests();
         });
         finishVisiblePageRender();
         return;
@@ -6385,6 +6668,8 @@ function balanceStatusClass(status) {
     window.addEventListener("crypto-arb-language-change", () => {
       updateSlowLabels();
       renderUserStrategies(currentUserWorkspace);
+      renderBacktestSelectors(currentUserWorkspace);
+      if (currentUserBacktests) renderUserBacktests(currentUserBacktests);
       const userStrategyForm = document.getElementById("user-strategy-form");
       if (userStrategyForm && !userStrategyForm.hidden) {
         const strategyType = document.getElementById("user-strategy-type").value;
@@ -6422,7 +6707,16 @@ function balanceStatusClass(status) {
     document.getElementById("backtest-form").addEventListener("change", () => {
       backtestFormDirty = true;
     });
-    document.getElementById("backtest-form").addEventListener("submit", applyBacktestConfig);
+    document.getElementById("backtest-project").addEventListener("change", () => {
+      syncBacktestStrategyOptions("", "");
+    });
+    document.getElementById("backtest-strategy").addEventListener("change", () => {
+      syncBacktestAccountOptions("", true);
+    });
+    document.getElementById("backtest-account").addEventListener("change", () => {
+      syncBacktestAccountOptions(document.getElementById("backtest-account").value, false);
+    });
+    document.getElementById("backtest-form").addEventListener("submit", applyUserBacktest);
     document.getElementById("strategy-center-form").addEventListener("input", () => {
       strategyCenterFormDirty = true;
     });

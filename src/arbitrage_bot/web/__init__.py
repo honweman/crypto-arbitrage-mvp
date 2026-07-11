@@ -212,6 +212,7 @@ from ..trade_log import (
     summarize_trade_entries,
     write_trade_event,
 )
+from ..user_backtesting import UserBacktestService, UserBacktestStore
 from ..user_account_check import (
     WorkspaceAccountCheckService,
     WorkspaceMarketDiscoveryService,
@@ -2608,6 +2609,12 @@ def default_user_paper_trading_path(cfg: BotConfig) -> str:
         Path(default_user_workspace_path(cfg)).with_name(
             "user_paper_trading.sqlite3"
         )
+    )
+
+
+def default_user_backtest_path(cfg: BotConfig) -> str:
+    return str(
+        Path(default_user_workspace_path(cfg)).with_name("user_backtests.sqlite3")
     )
 
 
@@ -5219,6 +5226,10 @@ def _require_workspace_user(user: WebUser | None) -> WebUser:
     return user
 
 
+def _user_backtest_service(request: web.Request) -> UserBacktestService:
+    return request.app["user_backtest_service"]
+
+
 def _workspace_owner(
     raw: dict[str, Any],
     *,
@@ -5679,6 +5690,116 @@ async def api_user_workspace(request: web.Request) -> web.Response:
     except RuntimeError as exc:
         return web.json_response({"error": str(exc)}, status=503)
     except (json.JSONDecodeError, sqlite3.Error, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def api_user_backtests_get(request: web.Request) -> web.Response:
+    try:
+        user = _require_workspace_user(_request_user(request))
+        run_id = str(request.query.get("run_id") or "").strip()
+        payload = _user_backtest_service(request).public_payload(
+            owner_email=user.email,
+            is_admin=user.role == "admin",
+            run_id=run_id,
+        )
+        return web.json_response(payload)
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (sqlite3.Error, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def api_user_backtests_post(request: web.Request) -> web.Response:
+    cfg: BotConfig = request.app["config"]
+    service = _user_backtest_service(request)
+    try:
+        user = _require_workspace_user(_request_user(request))
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        action = str(payload.get("action") or "create").strip().lower()
+
+        if action == "create":
+            project_id = str(payload.get("project_id") or "").strip()
+            project = _user_workspace_store(request).get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            _require_user_assets(user, [project.asset])
+            run = await service.create_run(
+                owner_email=project.owner_email,
+                project_id=project.id,
+                strategy_id=str(payload.get("strategy_id") or "").strip(),
+                account_id=str(payload.get("account_id") or "").strip(),
+                timeframe=str(payload.get("timeframe") or "1h").strip(),
+                history_bars=payload.get("history_bars", 200),
+                initial_cash=payload.get("initial_cash", 1000.0),
+                initial_base=payload.get("initial_base", 0.0),
+                fee_bps=payload.get("fee_bps"),
+                slippage_bps=payload.get("slippage_bps", 5.0),
+                latency_bars=payload.get("latency_bars", 0),
+            )
+            write_web_audit_event(
+                cfg,
+                request,
+                action="user_backtest_create",
+                target=run["id"],
+                detail="queued public historical backtest",
+                payload={
+                    "run_id": run["id"],
+                    "owner_email": project.owner_email,
+                    "project_id": project.id,
+                    "strategy_id": run["strategy_id"],
+                    "account_id": run["account_id"],
+                    "timeframe": run["request"]["timeframe"],
+                    "history_bars": run["request"]["history_bars"],
+                },
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "run": run,
+                    "backtests": service.public_payload(
+                        owner_email=user.email,
+                        is_admin=user.role == "admin",
+                        run_id=run["id"],
+                    ),
+                }
+            )
+
+        if action == "delete":
+            run_id = str(payload.get("run_id") or "").strip()
+            if not run_id:
+                raise ValueError("run_id is required")
+            service.delete_run(
+                run_id,
+                owner_email=user.email,
+                is_admin=user.role == "admin",
+            )
+            write_web_audit_event(
+                cfg,
+                request,
+                action="user_backtest_delete",
+                target=run_id,
+                detail="deleted historical backtest result",
+                payload={"run_id": run_id},
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "backtests": service.public_payload(
+                        owner_email=user.email,
+                        is_admin=user.role == "admin",
+                    ),
+                }
+            )
+
+        raise ValueError(f"unsupported backtest action: {action}")
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+    except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
 
@@ -6535,6 +6656,11 @@ def create_app(
         common_quote_currency=cfg.common_quote_currency,
         order_book_depth=cfg.order_book_depth,
     )
+    user_backtest_store = UserBacktestStore(default_user_backtest_path(cfg))
+    user_backtest_service = UserBacktestService(
+        user_workspace_store,
+        user_backtest_store,
+    )
     workspace_market_discovery = WorkspaceMarketDiscoveryService()
     workspace_account_checker = WorkspaceAccountCheckService()
     strategy_center_store = StrategyCenterStore(
@@ -6548,6 +6674,8 @@ def create_app(
     app["user_workspace_store"] = user_workspace_store
     app["user_paper_store"] = user_paper_store
     app["user_paper_service"] = user_paper_service
+    app["user_backtest_store"] = user_backtest_store
+    app["user_backtest_service"] = user_backtest_service
     app["workspace_market_discovery"] = workspace_market_discovery
     app["workspace_account_checker"] = workspace_account_checker
     app["strategy_center_store"] = strategy_center_store
@@ -6604,6 +6732,7 @@ def create_app(
                 await auto_task
             with contextlib.suppress(asyncio.CancelledError):
                 await user_paper_task
+            await user_backtest_service.close()
             await user_paper_service.close()
 
     app.cleanup_ctx.append(monitor_context)

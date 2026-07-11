@@ -304,6 +304,42 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_ohlcv_uses_public_ccxt_capability(self) -> None:
+        class FakeClient:
+            has = {"fetchOHLCV": True}
+
+            def __init__(self) -> None:
+                self.load_count = 0
+                self.args = None
+
+            async def load_markets(self) -> dict[str, object]:
+                self.load_count += 1
+                return {}
+
+            async def fetch_ohlcv(self, *args: object) -> list[list[float]]:
+                self.args = args
+                return [[1_700_000_000_000, 1.0, 1.1, 0.9, 1.05, 10.0]]
+
+        cfg = ExchangeConfig(id="coinbase", label="coinbase-public")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        rows = await manager.fetch_ohlcv(
+            cfg,
+            symbol="ACS/USDC",
+            timeframe="1h",
+            since_ms=1_699_000_000_000,
+            limit=200,
+        )
+
+        self.assertEqual(client.load_count, 1)
+        self.assertEqual(
+            client.args,
+            ("ACS/USDC", "1h", 1_699_000_000_000, 200),
+        )
+        self.assertEqual(rows[0][4], 1.05)
+
     async def test_bithumb_v2_fetch_closed_orders_paginates_requested_limit(
         self,
     ) -> None:

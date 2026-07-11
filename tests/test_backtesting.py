@@ -154,6 +154,78 @@ class BacktestingTest(unittest.TestCase):
         )
         self.assertTrue(any("latency" in warning for warning in result.warnings))
 
+    def test_historical_series_reports_market_and_risk_metrics(self) -> None:
+        timestamps = [1_700_000_000_000 + index * 3_600_000 for index in range(8)]
+        prices = [1.0, 0.98, 0.95, 0.99, 1.02, 1.04, 1.01, 1.06]
+
+        result = run_paper_backtest(
+            BacktestConfig(
+                enabled=True,
+                strategy="dca",
+                symbol="ACS/USDT",
+                initial_cash=100.0,
+                fee_bps=10.0,
+                max_recent_points=20,
+            ),
+            dca=DcaConfig(
+                enabled=True,
+                symbol="ACS/USDT",
+                side="buy",
+                trigger_price=1.0,
+                interval_seconds=7_200.0,
+                quote_per_order=10.0,
+                max_orders=3,
+            ),
+            price_series=prices,
+            timestamps_ms=timestamps,
+            timeframe_seconds=3_600.0,
+            data_source="exchange_ohlcv",
+        )
+
+        self.assertEqual(result.data_source, "exchange_ohlcv")
+        self.assertEqual(result.bar_count, len(prices))
+        self.assertEqual(result.start_timestamp_ms, timestamps[0])
+        self.assertEqual(result.end_timestamp_ms, timestamps[-1])
+        self.assertAlmostEqual(result.benchmark_return_pct, 6.0)
+        self.assertIsNotNone(result.annualized_volatility_pct)
+        self.assertIsNotNone(result.sharpe_ratio)
+        self.assertGreater(result.turnover_pct, 0.0)
+        self.assertTrue(all(point.timestamp_ms for point in result.points))
+        self.assertTrue(any("OHLCV" in warning for warning in result.warnings))
+
+    def test_historical_dca_respects_interval_seconds(self) -> None:
+        timestamps = [1_700_000_000_000 + index * 60_000 for index in range(6)]
+        result = run_paper_backtest(
+            BacktestConfig(
+                enabled=True,
+                strategy="dca",
+                symbol="ACS/USDT",
+                initial_cash=100.0,
+            ),
+            dca=DcaConfig(
+                enabled=True,
+                symbol="ACS/USDT",
+                side="buy",
+                quote_per_order=5.0,
+                max_orders=10,
+                interval_seconds=120.0,
+            ),
+            price_series=[1.0] * 6,
+            timestamps_ms=timestamps,
+            timeframe_seconds=60.0,
+        )
+
+        self.assertEqual(result.trade_count, 3)
+
+    def test_historical_series_rejects_misaligned_timestamps(self) -> None:
+        with self.assertRaisesRegex(ValueError, "timestamps must match"):
+            run_paper_backtest(
+                BacktestConfig(enabled=True, strategy="dca"),
+                dca=DcaConfig(enabled=True),
+                price_series=[1.0, 1.1],
+                timestamps_ms=[1_700_000_000_000],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

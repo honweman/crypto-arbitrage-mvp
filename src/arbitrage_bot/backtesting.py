@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import statistics
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .config import BacktestConfig, DcaConfig, ExecutionAlgoConfig, SpotGridConfig
@@ -42,6 +43,7 @@ class EquityPoint:
     base: float
     equity: float
     drawdown_pct: float
+    timestamp_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +53,7 @@ class EquityPoint:
             "base": self.base,
             "equity": self.equity,
             "drawdown_pct": self.drawdown_pct,
+            "timestamp_ms": self.timestamp_ms,
         }
 
 
@@ -71,6 +74,17 @@ class BacktestResult:
     filled_base: float
     fill_rate: float
     trade_count: int
+    data_source: str = "synthetic"
+    bar_count: int = 0
+    start_timestamp_ms: int | None = None
+    end_timestamp_ms: int | None = None
+    benchmark_return_pct: float = 0.0
+    excess_return_pct: float = 0.0
+    annualized_volatility_pct: float | None = None
+    sharpe_ratio: float | None = None
+    sortino_ratio: float | None = None
+    positive_period_rate: float | None = None
+    turnover_pct: float = 0.0
     points: list[EquityPoint] = field(default_factory=list)
     trades: list[PaperTrade] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -92,6 +106,17 @@ class BacktestResult:
             "filled_base": self.filled_base,
             "fill_rate": self.fill_rate,
             "trade_count": self.trade_count,
+            "data_source": self.data_source,
+            "bar_count": self.bar_count,
+            "start_timestamp_ms": self.start_timestamp_ms,
+            "end_timestamp_ms": self.end_timestamp_ms,
+            "benchmark_return_pct": self.benchmark_return_pct,
+            "excess_return_pct": self.excess_return_pct,
+            "annualized_volatility_pct": self.annualized_volatility_pct,
+            "sharpe_ratio": self.sharpe_ratio,
+            "sortino_ratio": self.sortino_ratio,
+            "positive_period_rate": self.positive_period_rate,
+            "turnover_pct": self.turnover_pct,
             "points": [point.to_dict() for point in self.points],
             "trades": [trade.to_dict() for trade in self.trades],
             "warnings": self.warnings,
@@ -119,6 +144,71 @@ def synthetic_price_series(
         price = max(1e-12, trend_price * (1 + wave))
         prices.append(price)
     return prices
+
+
+def _validated_price_series(values: list[float]) -> list[float]:
+    prices = []
+    for value in values:
+        try:
+            price = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("backtest price series contains a non-number") from exc
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("backtest price series must contain finite positive prices")
+        prices.append(price)
+    if len(prices) < 2:
+        raise ValueError("backtest price series must contain at least two prices")
+    return prices
+
+
+def _performance_metrics(
+    points: list[EquityPoint],
+    prices: list[float],
+    *,
+    timeframe_seconds: float | None,
+    filled_quote: float,
+    initial_equity: float,
+    strategy_return_pct: float,
+) -> dict[str, float | None]:
+    benchmark_return_pct = (prices[-1] / prices[0] - 1) * 100
+    returns = [
+        current.equity / previous.equity - 1
+        for previous, current in zip(points, points[1:])
+        if previous.equity > 0
+    ]
+    positive_period_rate = (
+        sum(1 for value in returns if value > 0) / len(returns)
+        if returns
+        else None
+    )
+    volatility_pct: float | None = None
+    sharpe_ratio: float | None = None
+    sortino_ratio: float | None = None
+    if timeframe_seconds and timeframe_seconds > 0 and len(returns) >= 2:
+        periods_per_year = 365.0 * 24.0 * 3600.0 / timeframe_seconds
+        mean_return = statistics.fmean(returns)
+        stdev = statistics.stdev(returns)
+        if stdev > 0:
+            volatility_pct = stdev * math.sqrt(periods_per_year) * 100
+            sharpe_ratio = mean_return / stdev * math.sqrt(periods_per_year)
+        downside_deviation = math.sqrt(
+            statistics.fmean(min(0.0, value) ** 2 for value in returns)
+        )
+        if downside_deviation > 0:
+            sortino_ratio = (
+                mean_return / downside_deviation * math.sqrt(periods_per_year)
+            )
+    return {
+        "benchmark_return_pct": benchmark_return_pct,
+        "excess_return_pct": strategy_return_pct - benchmark_return_pct,
+        "annualized_volatility_pct": volatility_pct,
+        "sharpe_ratio": sharpe_ratio,
+        "sortino_ratio": sortino_ratio,
+        "positive_period_rate": positive_period_rate,
+        "turnover_pct": (
+            filled_quote / initial_equity * 100 if initial_equity > 0 else 0.0
+        ),
+    }
 
 
 def _mark_equity(cash: float, base: float, price: float) -> float:
@@ -451,6 +541,7 @@ def _run_dca(
     prices: list[float],
     cfg: BacktestConfig,
     strategy_cfg: DcaConfig,
+    timestamps_ms: list[int] | None = None,
 ) -> tuple[list[EquityPoint], list[PaperTrade], float, float]:
     cash = cfg.initial_cash
     base = cfg.initial_base
@@ -460,14 +551,21 @@ def _run_dca(
     side = strategy_cfg.side if strategy_cfg.side in {"buy", "sell"} else "buy"
     max_orders = max(1, strategy_cfg.max_orders)
     order_count = 0
+    next_due_ms: float | None = None
     for step, price in enumerate(prices):
+        timestamp_ms = timestamps_ms[step] if timestamps_ms is not None else None
+        interval_due = (
+            timestamp_ms is None
+            or next_due_ms is None
+            or timestamp_ms >= next_due_ms
+        )
         trigger = strategy_cfg.trigger_price
         triggered = trigger <= 0 or (
             side == "buy" and price <= trigger
         ) or (
             side == "sell" and price >= trigger
         )
-        if triggered and order_count < max_orders:
+        if triggered and interval_due and order_count < max_orders:
             quote_notional = strategy_cfg.quote_per_order * (
                 strategy_cfg.size_multiplier ** order_count
             )
@@ -496,6 +594,11 @@ def _run_dca(
             if trade is not None:
                 trades.append(trade)
                 order_count += 1
+                if timestamp_ms is not None:
+                    next_due_ms = timestamp_ms + max(
+                        1.0,
+                        strategy_cfg.interval_seconds,
+                    ) * 1000
         peak = _append_point(
             points,
             step=step,
@@ -569,6 +672,10 @@ def run_paper_backtest(
     dca: DcaConfig | None = None,
     execution_algo: ExecutionAlgoConfig | None = None,
     current_mid: float | None = None,
+    price_series: list[float] | None = None,
+    timestamps_ms: list[int] | None = None,
+    timeframe_seconds: float | None = None,
+    data_source: str | None = None,
 ) -> BacktestResult:
     strategy = str(cfg.strategy or "spot_grid").lower()
     if strategy not in {"spot_grid", "dca", "execution_algo"}:
@@ -578,7 +685,29 @@ def run_paper_backtest(
     if cfg.fee_bps < 0 or cfg.slippage_bps < 0:
         raise ValueError("backtest fee_bps and slippage_bps must be non-negative")
 
-    prices = synthetic_price_series(cfg, current_mid=current_mid)
+    prices = (
+        _validated_price_series(price_series)
+        if price_series is not None
+        else synthetic_price_series(cfg, current_mid=current_mid)
+    )
+    normalized_timestamps: list[int] | None = None
+    if timestamps_ms is not None:
+        if len(timestamps_ms) != len(prices):
+            raise ValueError("backtest timestamps must match the price series")
+        normalized_timestamps = [int(value) for value in timestamps_ms]
+        if any(
+            current <= previous
+            for previous, current in zip(
+                normalized_timestamps,
+                normalized_timestamps[1:],
+            )
+        ):
+            raise ValueError("backtest timestamps must be strictly increasing")
+    source = str(
+        data_source
+        or ("exchange_ohlcv" if price_series is not None else cfg.data_source)
+        or "synthetic"
+    ).strip().lower()
     symbol = cfg.symbol
     if strategy == "spot_grid":
         strategy_cfg = spot_grid or SpotGridConfig(symbol=symbol)
@@ -587,7 +716,12 @@ def run_paper_backtest(
     elif strategy == "dca":
         strategy_cfg = dca or DcaConfig(symbol=symbol)
         symbol = symbol or strategy_cfg.symbol
-        points, trades, cash, base = _run_dca(prices, cfg, strategy_cfg)
+        points, trades, cash, base = _run_dca(
+            prices,
+            cfg,
+            strategy_cfg,
+            normalized_timestamps,
+        )
     else:
         strategy_cfg = execution_algo or ExecutionAlgoConfig(symbol=symbol)
         symbol = symbol or strategy_cfg.symbol
@@ -596,6 +730,7 @@ def run_paper_backtest(
     initial_equity = _mark_equity(cfg.initial_cash, cfg.initial_base, prices[0])
     final_equity = _mark_equity(cash, base, prices[-1])
     total_return = final_equity - initial_equity
+    return_pct = 0.0 if initial_equity <= 0 else total_return / initial_equity * 100
     filled_quote = sum(trade.quote_notional for trade in trades)
     target_quote = (
         cfg.initial_cash
@@ -612,10 +747,27 @@ def run_paper_backtest(
     elif strategy == "execution_algo" and execution_algo is not None:
         target_quote = execution_algo.total_quote or execution_algo.total_base * prices[0]
     target_quote = max(target_quote, filled_quote, 1e-12)
+    if normalized_timestamps is not None:
+        points = [
+            replace(point, timestamp_ms=normalized_timestamps[point.step])
+            for point in points
+        ]
+    metrics = _performance_metrics(
+        points,
+        prices,
+        timeframe_seconds=timeframe_seconds,
+        filled_quote=filled_quote,
+        initial_equity=initial_equity,
+        strategy_return_pct=return_pct,
+    )
     max_recent = max(1, cfg.max_recent_points)
-    warnings = [
-        "synthetic price path; use exchange history before live deployment"
-    ]
+    warnings = (
+        ["synthetic price path; use exchange history before live deployment"]
+        if source == "synthetic"
+        else [
+            "historical OHLCV close-price path; intrabar order sequence and queue priority are not modeled"
+        ]
+    )
     if _depth_trade_enabled(cfg):
         warnings.append("synthetic order book depth simulation is enabled")
     if cfg.latency_steps > 0:
@@ -628,7 +780,7 @@ def run_paper_backtest(
         initial_equity=initial_equity,
         final_equity=final_equity,
         total_return_quote=total_return,
-        return_pct=0.0 if initial_equity <= 0 else total_return / initial_equity * 100,
+        return_pct=return_pct,
         max_drawdown_pct=max((point.drawdown_pct for point in points), default=0.0),
         fee_quote=sum(trade.fee_quote for trade in trades),
         slippage_quote=sum(trade.slippage_quote for trade in trades),
@@ -636,6 +788,21 @@ def run_paper_backtest(
         filled_base=sum(trade.amount for trade in trades),
         fill_rate=min(1.0, filled_quote / target_quote),
         trade_count=len(trades),
+        data_source=source,
+        bar_count=len(prices),
+        start_timestamp_ms=(
+            normalized_timestamps[0] if normalized_timestamps is not None else None
+        ),
+        end_timestamp_ms=(
+            normalized_timestamps[-1] if normalized_timestamps is not None else None
+        ),
+        benchmark_return_pct=float(metrics["benchmark_return_pct"] or 0.0),
+        excess_return_pct=float(metrics["excess_return_pct"] or 0.0),
+        annualized_volatility_pct=metrics["annualized_volatility_pct"],
+        sharpe_ratio=metrics["sharpe_ratio"],
+        sortino_ratio=metrics["sortino_ratio"],
+        positive_period_rate=metrics["positive_period_rate"],
+        turnover_pct=float(metrics["turnover_pct"] or 0.0),
         points=points[-max_recent:],
         trades=trades[-max_recent:],
         warnings=warnings,

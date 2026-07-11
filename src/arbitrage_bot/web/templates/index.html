@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20260711-workspace3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260711-backtest2">
 
 </head>
 <body>
@@ -1823,93 +1823,120 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="backtest" data-ui-hidden-default="true">
+    <section id="backtest-section" data-page="settings" class="compact-section" data-ui-feature="backtest">
       <div class="section-title">
-        <h2>Backtest / Paper</h2>
+        <h2>Historical Backtest</h2>
         <span id="backtest-meta" class="subtle"></span>
       </div>
+      <div class="backtest-safety-note">
+        <strong>Research only</strong>
+        <span>Uses public historical candles. API credentials are not read and live orders are never submitted.</span>
+      </div>
       <form id="backtest-form" class="control-panel">
-        <label class="check-field">
-          <input id="backtest-enabled" type="checkbox">
-          Enabled
-        </label>
-        <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
-          <div id="backtest-accounts" class="account-options"></div>
+        <div class="field">
+          <label for="backtest-project">Project</label>
+          <select id="backtest-project"></select>
         </div>
         <div class="field">
           <label for="backtest-strategy">Strategy</label>
-          <select id="backtest-strategy">
-            <option value="spot_grid">Spot Grid</option>
-            <option value="dca">DCA Bot</option>
-            <option value="execution_algo">TWAP/VWAP/POV</option>
+          <select id="backtest-strategy"></select>
+        </div>
+        <div class="field">
+          <label for="backtest-account">Exchange Account</label>
+          <select id="backtest-account"></select>
+        </div>
+        <div class="field">
+          <label for="backtest-timeframe">Candle Timeframe</label>
+          <select id="backtest-timeframe">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="1h" selected>1h</option>
+            <option value="4h">4h</option>
+            <option value="1d">1d</option>
           </select>
         </div>
-        <div class="form-divider">Portfolio</div>
         <div class="field">
-          <label for="backtest-cash">Initial Cash</label>
-          <input id="backtest-cash" type="number" min="0" step="any">
+          <label for="backtest-history-bars">History Bars</label>
+          <input id="backtest-history-bars" type="number" min="20" max="500" step="1" value="200">
+        </div>
+        <div class="form-divider">Simulation Assumptions</div>
+        <div class="field">
+          <label for="backtest-cash"><span id="backtest-cash-label">Initial Cash</span></label>
+          <input id="backtest-cash" type="number" min="0" step="any" value="1000">
         </div>
         <div class="field">
-          <label for="backtest-base">Initial Base</label>
-          <input id="backtest-base" type="number" min="0" step="any">
+          <label for="backtest-base"><span id="backtest-base-label">Initial Base</span></label>
+          <input id="backtest-base" type="number" min="0" step="any" value="0">
         </div>
         <div class="field">
           <label for="backtest-fee">Fee bps</label>
-          <input id="backtest-fee" type="number" min="0" step="any">
+          <input id="backtest-fee" type="number" min="0" max="1000" step="any" value="60">
         </div>
         <div class="field">
           <label for="backtest-slippage">Slippage bps</label>
-          <input id="backtest-slippage" type="number" min="0" step="any">
-        </div>
-        <div class="form-divider">Synthetic Path</div>
-        <div class="field">
-          <label for="backtest-price-start">Start Price</label>
-          <input id="backtest-price-start" type="number" min="0" step="any">
+          <input id="backtest-slippage" type="number" min="0" max="10000" step="any" value="5">
         </div>
         <div class="field">
-          <label for="backtest-price-end">End Price</label>
-          <input id="backtest-price-end" type="number" min="0" step="any">
+          <label for="backtest-latency-bars">Latency Bars</label>
+          <input id="backtest-latency-bars" type="number" min="0" max="20" step="1" value="0">
         </div>
-        <div class="field">
-          <label for="backtest-steps">Steps</label>
-          <input id="backtest-steps" type="number" min="2" step="1">
-        </div>
-        <div class="field">
-          <label for="backtest-volatility">Volatility bps</label>
-          <input id="backtest-volatility" type="number" min="0" step="any">
-        </div>
-        <div class="field">
-          <label for="backtest-trend">Trend bps</label>
-          <input id="backtest-trend" type="number" step="any">
-        </div>
-        <div class="field">
-          <label for="backtest-max-points">Max Points</label>
-          <input id="backtest-max-points" type="number" min="1" step="1">
-        </div>
-        <button id="backtest-apply" class="control-button" type="submit">Apply</button>
+        <button id="backtest-run" class="control-button" type="submit">Run Backtest</button>
       </form>
+      <div id="backtest-progress" class="backtest-progress" aria-live="polite">
+        <span class="backtest-progress-bar"><span id="backtest-progress-fill"></span></span>
+        <span id="backtest-progress-text">No backtest selected.</span>
+      </div>
       <div class="mini-grid">
         <div class="mini-card"><span>Return</span><strong id="backtest-return">--</strong></div>
+        <div class="mini-card"><span>Buy & Hold</span><strong id="backtest-benchmark">--</strong></div>
+        <div class="mini-card"><span>Excess Return</span><strong id="backtest-excess">--</strong></div>
         <div class="mini-card"><span>Max DD</span><strong id="backtest-drawdown">--</strong></div>
+        <div class="mini-card"><span>Sharpe</span><strong id="backtest-sharpe">--</strong></div>
         <div class="mini-card"><span>Fees</span><strong id="backtest-fees">--</strong></div>
-        <div class="mini-card"><span>Fill Rate</span><strong id="backtest-fill-rate">--</strong></div>
+        <div class="mini-card"><span>Turnover</span><strong id="backtest-turnover">--</strong></div>
+        <div class="mini-card"><span>Trades</span><strong id="backtest-trades">--</strong></div>
       </div>
-      <div class="table-wrap">
-        <table class="mobile-card-table">
+      <div class="backtest-chart-wrap">
+        <div class="backtest-chart-legend"><span>Equity</span><span>Market Price</span></div>
+        <canvas id="backtest-chart" height="180" aria-label="Backtest equity and market price chart"></canvas>
+      </div>
+      <div id="backtest-warnings" class="backtest-warnings"></div>
+      <div class="table-wrap stacked-table">
+        <table class="mobile-card-table backtest-runs-table">
           <thead>
             <tr>
-              <th class="num">Step</th>
-              <th class="num">Price</th>
-              <th class="num">Equity</th>
-              <th class="num">Drawdown</th>
-              <th class="num">Base</th>
-              <th class="num">Cash</th>
+              <th>Run</th>
+              <th>Strategy</th>
+              <th>Market</th>
+              <th>Window</th>
+              <th class="num">Return</th>
+              <th class="num">Max DD</th>
+              <th>Status</th>
+              <th>Action</th>
             </tr>
           </thead>
-          <tbody id="backtest-points"></tbody>
+          <tbody id="backtest-runs"></tbody>
         </table>
       </div>
+      <details class="backtest-details">
+        <summary><span>Recent Equity Points</span><span id="backtest-point-count" class="subtle"></span></summary>
+        <div class="table-wrap stacked-table">
+          <table class="mobile-card-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th class="num">Price</th>
+                <th class="num">Equity</th>
+                <th class="num">Drawdown</th>
+                <th class="num">Base</th>
+                <th class="num">Cash</th>
+              </tr>
+            </thead>
+            <tbody id="backtest-points"></tbody>
+          </table>
+        </div>
+      </details>
     </section>
 
     <section id="mm-section" data-page="settings" class="compact-section">
@@ -2147,8 +2174,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260711-workspace3" defer></script>
-  <script src="/static/app.js?v=20260711-workspace3" defer></script>
+  <script src="/static/i18n.js?v=20260711-backtest2" defer></script>
+  <script src="/static/app.js?v=20260711-backtest2" defer></script>
 
 </body>
 </html>

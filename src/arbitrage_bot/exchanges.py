@@ -1159,6 +1159,24 @@ class ExchangeManager:
         market = market_getter(symbol)
         return market if isinstance(market, dict) else None
 
+    async def fetch_ohlcv(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        timeframe: str,
+        since_ms: int | None = None,
+        limit: int | None = None,
+    ) -> list[list[Any]]:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        fetcher = getattr(client, "fetch_ohlcv", None)
+        if capabilities.get("fetchOHLCV") is False or fetcher is None:
+            raise NotImplementedError(f"{cfg.key} does not support public OHLCV data")
+        await client.load_markets()
+        rows = await fetcher(symbol, timeframe, since_ms, limit)
+        return [list(row) for row in rows or [] if isinstance(row, (list, tuple))]
+
     async def cancel_order(
         self,
         cfg: ExchangeConfig,
