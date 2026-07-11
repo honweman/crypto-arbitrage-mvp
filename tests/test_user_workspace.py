@@ -14,12 +14,131 @@ from arbitrage_bot.user_workspace import (
     UserProject,
     UserWorkspaceStore,
 )
+from arbitrage_bot.user_strategies import UserStrategy
 
 
 MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_project_readiness_guides_each_onboarding_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_WORKSPACE_MASTER_KEY",
+            )
+            project = store.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "name": "ACS Trading",
+                        "asset": "ACS",
+                        "quote_currency": "USDC",
+                        "status": "active",
+                    }
+                )
+            )
+            project_row = store.public_payload(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )["projects"][0]
+            self.assertEqual(
+                project_row["readiness"]["next_action"]["code"],
+                "add_exchange_account",
+            )
+
+            account = store.upsert_account(
+                UserExchangeAccount.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "label": "Coinbase Main",
+                        "exchange": "coinbase",
+                        "symbol": project.symbol,
+                        "withdrawal_disabled_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key", "secret": "secret"},
+            )
+            payload = store.public_payload(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )
+            account_row = payload["accounts"][0]
+            self.assertEqual(
+                account_row["readiness"]["next_action"]["code"],
+                "test_connection",
+            )
+            self.assertEqual(account_row["readiness"]["completed_steps"], 5)
+
+            account = store.update_account_connection(account.id, status="healthy")
+            payload = store.public_payload(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )
+            account_row = payload["accounts"][0]
+            self.assertEqual(
+                account_row["readiness"]["next_action"]["code"],
+                "enable_account",
+            )
+            self.assertGreater(
+                account_row["readiness"]["connection_remaining_seconds"],
+                86_000,
+            )
+
+            account = store.upsert_account(
+                UserExchangeAccount.from_dict({**account.to_dict(), "enabled": True})
+            )
+            payload = store.public_payload(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )
+            self.assertTrue(payload["accounts"][0]["readiness"]["ready"])
+            self.assertEqual(
+                payload["projects"][0]["readiness"]["next_action"]["code"],
+                "create_strategy",
+            )
+
+            strategy = store.upsert_strategy(
+                UserStrategy.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "name": "ACS Coinbase MM",
+                        "strategy_type": "market_maker",
+                        "account_ids": [account.id],
+                    }
+                )
+            )
+            payload = store.public_payload(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )
+            self.assertTrue(payload["strategies"][0]["readiness"]["ready"])
+            self.assertEqual(
+                payload["projects"][0]["readiness"]["next_action"]["code"],
+                "enable_strategy",
+            )
+
+            store.upsert_strategy(
+                UserStrategy.from_dict({**strategy.to_dict(), "enabled": True})
+            )
+            original_connect = store._connect
+            with patch.object(store, "_connect", side_effect=original_connect) as connect:
+                payload = store.public_payload(
+                    owner_email=project.owner_email,
+                    is_admin=False,
+                )
+            self.assertLessEqual(connect.call_count, 4)
+
+        self.assertTrue(payload["projects"][0]["readiness"]["ready"])
+        self.assertEqual(payload["summary"]["ready_project_count"], 1)
+        self.assertEqual(payload["summary"]["ready_account_count"], 1)
+        self.assertEqual(payload["summary"]["setup_progress_pct"], 100.0)
+
     def test_account_boolean_fields_are_strict(self) -> None:
         base = {
             "owner_email": "trader@example.com",

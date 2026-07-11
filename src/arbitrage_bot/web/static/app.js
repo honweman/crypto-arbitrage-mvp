@@ -218,6 +218,13 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return age < 60 ? `${age.toFixed(0)}s ago` : `${(age / 60).toFixed(1)}m ago`;
     }
 
+    function formatDurationSeconds(value) {
+      const seconds = Math.max(0, Number(value || 0));
+      if (seconds < 60) return `${Math.ceil(seconds)}s`;
+      if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
+      return `${(seconds / 3600).toFixed(seconds < 36000 ? 1 : 0)}h`;
+    }
+
     function baseCurrency(symbol) {
       return String(symbol || "").split("/")[0] || "BASE";
     }
@@ -2764,6 +2771,188 @@ function balanceStatusClass(status) {
       ) || null;
     }
 
+    function focusWorkspaceControl(id) {
+      const control = document.getElementById(id);
+      if (!control) return;
+      control.scrollIntoView({ behavior: "smooth", block: "center" });
+      window.setTimeout(() => control.focus(), 250);
+    }
+
+    function continueUserProjectSetup(project) {
+      const action = project?.readiness?.next_action || {};
+      const actionCode = action.code || "";
+      if (["wait_for_project_approval", "contact_administrator"].includes(actionCode)) {
+        fillUserProjectForm(project);
+        focusWorkspaceControl("user-project-name");
+        return;
+      }
+
+      const account = (currentUserWorkspace?.accounts || []).find(
+        (row) => row.id === action.account_id
+      );
+      if (account) {
+        fillUserExchangeAccountForm(account);
+        const focusByAction = {
+          confirm_withdrawal_disabled: "user-exchange-no-withdraw",
+          save_credentials: "user-exchange-api-key",
+          select_symbol: "user-exchange-load-markets",
+          fix_connection: "user-exchange-api-key",
+          test_connection: "user-exchange-test",
+          enable_account: "user-exchange-enabled",
+        };
+        focusWorkspaceControl(focusByAction[actionCode] || "user-exchange-label");
+        return;
+      }
+
+      if (actionCode === "add_exchange_account") {
+        resetUserExchangeAccountForm();
+        setFieldValue("user-exchange-project", project.id);
+        syncUserExchangeMarketTypes("", "", project.symbol || "");
+        focusWorkspaceControl("user-exchange-label");
+        return;
+      }
+
+      const strategy = (currentUserWorkspace?.strategies || []).find(
+        (row) => row.id === action.strategy_id
+      );
+      if (strategy) {
+        openUserStrategyForm(strategy);
+        focusWorkspaceControl(
+          actionCode === "enable_strategy"
+            ? "user-strategy-enabled"
+            : "user-strategy-name"
+        );
+        return;
+      }
+      if (actionCode === "create_strategy") {
+        openUserStrategyForm(null, project.id);
+        focusWorkspaceControl("user-strategy-name");
+        return;
+      }
+
+      fillUserProjectForm(project);
+      focusWorkspaceControl("user-project-name");
+    }
+
+    function renderUserSetupReadiness(workspace) {
+      const container = document.getElementById("user-setup-readiness");
+      if (!container) return;
+      const signature = JSON.stringify({
+        status: workspace?.status || "",
+        error: workspace?.error || "",
+        projects: (workspace?.projects || []).map((project) => ({
+          id: project.id,
+          name: project.name,
+          symbol: project.symbol,
+          status: project.status,
+          readiness: project.readiness,
+        })),
+      });
+      if (signature === userSetupReadinessSignature) return;
+      userSetupReadinessSignature = signature;
+      container.replaceChildren();
+      if (["user_account_required", "error"].includes(workspace?.status)) {
+        const row = document.createElement("div");
+        row.className = "workspace-readiness-row workspace-readiness-empty";
+        const detail = document.createElement("div");
+        const title = document.createElement("strong");
+        title.textContent = uiText(
+          workspace?.status === "error"
+            ? "Project setup is temporarily unavailable"
+            : "A registered user account is required"
+        );
+        const note = document.createElement("span");
+        note.className = "subtle";
+        note.textContent = workspace?.error || uiText("Log in with your username to manage projects and exchange accounts.");
+        detail.append(title, note);
+        row.appendChild(detail);
+        container.appendChild(row);
+        return;
+      }
+      const projects = workspace?.projects || [];
+      if (projects.length === 0) {
+        const row = document.createElement("div");
+        row.className = "workspace-readiness-row workspace-readiness-empty";
+        const detail = document.createElement("div");
+        const title = document.createElement("strong");
+        title.textContent = uiText("Create your first trading project");
+        const note = document.createElement("span");
+        note.className = "subtle";
+        note.textContent = uiText("Choose an asset and quote currency to begin.");
+        detail.append(title, note);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "control-button";
+        button.textContent = uiText("Create Project");
+        button.addEventListener("click", () => {
+          resetUserProjectForm();
+          focusWorkspaceControl("user-project-name");
+        });
+        row.append(detail, button);
+        container.appendChild(row);
+        return;
+      }
+
+      for (const project of projects) {
+        const readiness = project.readiness || {};
+        const completed = Number(readiness.completed_steps || 0);
+        const total = Number(readiness.total_steps || 0);
+        const progress = Math.max(0, Math.min(100, Number(readiness.progress_pct || 0)));
+        const nextAction = readiness.next_action || {};
+        const row = document.createElement("div");
+        row.className = `workspace-readiness-row ${readiness.ready ? "workspace-ready" : "workspace-attention"}`;
+
+        const identity = document.createElement("div");
+        identity.className = "workspace-readiness-identity";
+        const name = document.createElement("strong");
+        name.textContent = project.name || project.symbol || project.id;
+        const pair = document.createElement("span");
+        pair.className = "subtle";
+        pair.textContent = `${project.symbol || "--"} · ${uiText(project.status || "--")}`;
+        identity.append(name, pair);
+
+        const progressBlock = document.createElement("div");
+        progressBlock.className = "workspace-readiness-progress-block";
+        const progressLabel = document.createElement("span");
+        progressLabel.textContent = `${completed}/${total} ${uiText("setup steps")}`;
+        const progressTrack = document.createElement("div");
+        progressTrack.className = "workspace-readiness-progress";
+        progressTrack.setAttribute("role", "progressbar");
+        progressTrack.setAttribute("aria-valuemin", "0");
+        progressTrack.setAttribute("aria-valuemax", "100");
+        progressTrack.setAttribute("aria-valuenow", String(progress));
+        const progressValue = document.createElement("span");
+        progressValue.style.width = `${progress}%`;
+        progressTrack.appendChild(progressValue);
+        progressBlock.append(progressLabel, progressTrack);
+
+        const next = document.createElement("div");
+        next.className = "workspace-readiness-next";
+        const nextLabel = document.createElement("span");
+        nextLabel.className = "subtle";
+        nextLabel.textContent = uiText("Next step");
+        const nextValue = document.createElement("strong");
+        nextValue.textContent = uiText(nextAction.label || "Review project setup");
+        next.append(nextLabel, nextValue);
+        next.title = (readiness.steps || [])
+          .filter((step) => !step.complete)
+          .map((step) => uiText(step.label || step.id))
+          .join(" · ");
+
+        const actionControl = document.createElement(readiness.ready ? "span" : "button");
+        actionControl.className = readiness.ready
+          ? "workspace-ready-label"
+          : "ghost-button workspace-continue-button";
+        actionControl.textContent = uiText(readiness.ready ? "Ready" : "Continue Setup");
+        if (!readiness.ready) {
+          actionControl.type = "button";
+          actionControl.addEventListener("click", () => continueUserProjectSetup(project));
+        }
+        row.append(identity, progressBlock, next, actionControl);
+        container.appendChild(row);
+      }
+    }
+
     function resetUserProjectForm() {
       selectedUserProjectId = "";
       userProjectFormDirty = false;
@@ -2816,12 +3005,15 @@ function balanceStatusClass(status) {
       const isAdmin = lastState?.auth?.role === "admin";
       for (const project of projects) {
         const tr = document.createElement("tr");
+        tr.dataset.workspaceProjectId = project.id || "";
         const statusClass = project.status === "active" ? "ok" : project.status === "pending" ? "risk-blocked" : "subtle";
+        const setup = project.readiness || {};
+        const setupText = `${setup.completed_steps || 0}/${setup.total_steps || 0} ${uiText("setup steps")}`;
         tr.innerHTML = `
           <td title="${escapeHtml(project.id || "")}">${escapeHtml(project.name || project.id)}</td>
           <td>${escapeHtml(project.owner_email || "--")}</td>
           <td>${escapeHtml(project.symbol || `${project.asset}/${project.quote_currency}`)}</td>
-          <td class="${statusClass}">${escapeHtml(project.status || "--")}</td>
+          <td class="${statusClass}">${escapeHtml(uiText(project.status || "--"))}<br><span class="subtle">${escapeHtml(setupText)}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");
@@ -3029,6 +3221,14 @@ function balanceStatusClass(status) {
             ? uiText("Run a successful connection test before enabling this account.")
             : "";
       }
+      const testButton = document.getElementById("user-exchange-test");
+      if (testButton) {
+        const credentialsConfigured = Boolean(selectedAccount?.credentials?.configured);
+        testButton.disabled = !sameConnection || !credentialsConfigured || !currentSymbol;
+        testButton.title = testButton.disabled
+          ? uiText("Save the account and credentials before testing the connection.")
+          : uiText("This test reads account data and never places or cancels orders.");
+      }
     }
 
     function renderUserExchangeAccountForm(workspace) {
@@ -3097,6 +3297,7 @@ function balanceStatusClass(status) {
       for (const account of accounts) {
         const project = projectMap.get(account.project_id);
         const credentials = account.credentials || {};
+        const readiness = account.readiness || {};
         const credentialText = credentials.configured ? "Encrypted / configured" : "Missing";
         const connectionFresh = workspaceConnectionFresh(account);
         const accountStatus = account.enabled
@@ -3111,6 +3312,11 @@ function balanceStatusClass(status) {
         const connectionText = account.connection_checked_at
           ? `${account.connection_status || "unverified"} · ${formatAge(account.connection_checked_at)}`
           : account.connection_status || "unverified";
+        const connectionRemaining = readiness.connection_remaining_seconds;
+        const readinessText = `${readiness.completed_steps || 0}/${readiness.total_steps || 0} ${uiText("setup steps")}`;
+        const expiryText = connectionRemaining == null
+          ? ""
+          : ` · ${uiText("test valid for")} ${formatDurationSeconds(connectionRemaining)}`;
         const connectionClass = account.connection_status === "healthy"
           ? "ok"
           : account.connection_status === "error"
@@ -3120,12 +3326,13 @@ function balanceStatusClass(status) {
           ? ` · ${account.api_variant}`
           : "";
         const tr = document.createElement("tr");
+        tr.dataset.workspaceAccountId = account.id || "";
         tr.innerHTML = `
           <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || account.id)}<br><span class="subtle">${escapeHtml(account.owner_email || "--")}</span></td>
           <td>${escapeHtml(project?.name || account.project_id || "--")}<br><span class="subtle">${escapeHtml(account.symbol || project?.symbol || "--")}</span></td>
           <td>${escapeHtml(workspaceExchange(account.exchange)?.label || account.exchange)}<br><span class="subtle">${escapeHtml(`${account.market_type || "spot"}${variantText}`)}</span></td>
           <td class="${credentials.configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
-          <td class="${connectionClass}" title="${escapeHtml(account.connection_error || "")}">${escapeHtml(accountStatus)}<br><span class="subtle">${escapeHtml(connectionText)}</span></td>
+          <td class="${connectionClass}" title="${escapeHtml((readiness.blockers || []).join(" · ") || account.connection_error || "")}">${escapeHtml(uiText(accountStatus))}<br><span class="subtle">${escapeHtml(connectionText + expiryText)}</span><br><span class="subtle">${escapeHtml(readinessText)}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");
@@ -3136,7 +3343,7 @@ function balanceStatusClass(status) {
         editButton.addEventListener("click", () => fillUserExchangeAccountForm(account));
         actions.appendChild(editButton);
         const testButton = document.createElement("button");
-        testButton.className = "ghost-button";
+        testButton.className = "ghost-button workspace-account-test";
         testButton.type = "button";
         testButton.textContent = "Test";
         testButton.disabled = !credentials.configured || !account.symbol;
@@ -3169,10 +3376,17 @@ function balanceStatusClass(status) {
     function renderUserWorkspace(workspace) {
       currentUserWorkspace = workspace || null;
       const summary = workspace?.summary || {};
-      const vaultText = workspace?.vault_available ? "encrypted vault ready" : "credential vault unavailable";
+      const summaryParts = [
+        `${summary.ready_project_count || 0}/${summary.project_count || 0} ${uiText("projects ready")}`,
+        `${summary.ready_account_count || 0}/${summary.account_count || 0} ${uiText("accounts ready")}`,
+        `${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("paper ready")}`,
+      ];
+      if (!workspace?.vault_available) {
+        summaryParts.push(uiText("credential vault unavailable"));
+      }
       const statusText = workspace?.status === "user_account_required"
-        ? "registered account required"
-        : workspace?.error || `${summary.project_count || 0} projects · ${summary.pending_project_count || 0} pending · ${summary.configured_account_count || 0}/${summary.account_count || 0} API accounts configured · ${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("paper ready")} · ${vaultText}`;
+        ? uiText("registered account required")
+        : workspace?.error || summaryParts.join(" · ");
       if (userWorkspaceNoticeUntil <= Date.now()) {
         userWorkspaceNoticeText = "";
         userWorkspaceNoticeUntil = 0;
@@ -3183,6 +3397,7 @@ function balanceStatusClass(status) {
       document.querySelectorAll("#user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button, #user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
         control.disabled = formsDisabled;
       });
+      renderUserSetupReadiness(workspace);
       renderUserProjectForm(workspace);
       renderUserProjects(workspace);
       renderUserExchangeAccountForm(workspace);
@@ -3266,6 +3481,15 @@ function balanceStatusClass(status) {
       } finally {
         button.disabled = false;
       }
+    }
+
+    async function testSelectedUserExchangeAccount(event) {
+      const account = workspaceSelectedAccount();
+      if (!account) {
+        setUserWorkspaceNotice(uiText("Save an exchange account before testing it."));
+        return;
+      }
+      await testUserExchangeAccount(account, event.currentTarget);
     }
 
     async function applyUserProject(event) {
@@ -3525,13 +3749,15 @@ function balanceStatusClass(status) {
       renderUserStrategyAccountOptions(selectedUserStrategyAccountIds());
     }
 
-    function openUserStrategyForm(strategy = null) {
+    function openUserStrategyForm(strategy = null, preferredProjectId = "") {
       selectedUserStrategyId = strategy?.id || "";
       userStrategyFormDirty = false;
       const form = document.getElementById("user-strategy-form");
       form.hidden = false;
       setFieldValue("user-strategy-id", strategy?.id || "");
-      const projectId = workspaceStrategyProjectOptions(strategy?.project_id || "");
+      const projectId = workspaceStrategyProjectOptions(
+        strategy?.project_id || preferredProjectId
+      );
       const strategyType = workspaceStrategyTypeOptions(strategy?.strategy_type || "");
       const definition = workspaceStrategyDefinition(strategyType);
       const project = workspaceProject(projectId);
@@ -4402,6 +4628,7 @@ function balanceStatusClass(status) {
     let userStrategyFormBusy = false;
     let selectedUserStrategyId = "";
     let currentUserWorkspace = null;
+    let userSetupReadinessSignature = "";
     let userMarketDiscoveryBusy = false;
     const discoveredUserMarkets = new Map();
     let userWorkspaceNoticeText = "";
@@ -6102,6 +6329,7 @@ function balanceStatusClass(status) {
 	    document.getElementById("user-exchange-account-form").addEventListener("submit", applyUserExchangeAccount);
 	    document.getElementById("user-exchange-new").addEventListener("click", resetUserExchangeAccountForm);
 	    document.getElementById("user-exchange-load-markets").addEventListener("click", loadUserExchangeMarkets);
+	    document.getElementById("user-exchange-test").addEventListener("click", testSelectedUserExchangeAccount);
     document.getElementById("user-strategy-new").addEventListener("click", () => openUserStrategyForm());
     document.getElementById("user-strategy-cancel").addEventListener("click", closeUserStrategyForm);
     document.getElementById("user-strategy-form").addEventListener("input", () => {

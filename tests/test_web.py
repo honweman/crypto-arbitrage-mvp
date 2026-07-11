@@ -184,17 +184,19 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260711-perf2" defer></script>',
+            '<script src="/static/app.js?v=20260711-workspace3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260711-perf2" defer></script>',
+            '<script src="/static/i18n.js?v=20260711-workspace3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
             'id="user-workspace-notice" class="subtle" role="status"',
             INDEX_HTML,
         )
+        self.assertIn('id="user-setup-readiness"', INDEX_HTML)
+        self.assertIn('id="user-exchange-test"', INDEX_HTML)
 
     def test_page_supports_korean_language_option(self) -> None:
         i18n_js = Path("src/arbitrage_bot/web/static/i18n.js").read_text(
@@ -204,6 +206,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('"ko"', i18n_js)
         self.assertIn('"Language": "언어"', i18n_js)
         self.assertIn('"Account / Project / Exchange / Pair"', i18n_js)
+        self.assertIn('"Continue Setup": "설정 계속"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
 
     def test_page_includes_paper_only_user_strategy_controls(self) -> None:
@@ -304,7 +307,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260711-perf2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260711-workspace3">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)

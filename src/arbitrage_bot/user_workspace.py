@@ -1041,10 +1041,175 @@ class UserWorkspaceStore:
             connection.commit()
         return updated
 
-    def strategy_readiness(self, strategy: UserStrategy) -> dict[str, Any]:
+    def _account_readiness(
+        self,
+        account: UserExchangeAccount,
+        *,
+        project: UserProject | None,
+        credential_status: dict[str, Any],
+        now: float,
+    ) -> dict[str, Any]:
+        project_active = project is not None and project.status == "active"
+        vault_available = bool(credential_status.get("vault_available"))
+        credentials_configured = bool(credential_status.get("configured"))
+        withdrawal_disabled = account.withdrawal_disabled_confirmed
+        symbol_selected = bool(account.symbol)
+        connection_fresh = account_connection_is_fresh(account, now=now)
+        account_enabled = account.enabled
+        steps = [
+            {
+                "id": "project_approved",
+                "label": "Project approved",
+                "complete": project_active,
+            },
+            {
+                "id": "credential_vault_ready",
+                "label": "Credential vault available",
+                "complete": vault_available,
+            },
+            {
+                "id": "withdrawal_disabled",
+                "label": "Withdrawal permission disabled",
+                "complete": withdrawal_disabled,
+            },
+            {
+                "id": "credentials_saved",
+                "label": "API credentials saved",
+                "complete": credentials_configured,
+            },
+            {
+                "id": "symbol_selected",
+                "label": "Trading pair selected",
+                "complete": symbol_selected,
+            },
+            {
+                "id": "connection_test_fresh",
+                "label": "Connection test passed",
+                "complete": connection_fresh,
+            },
+            {
+                "id": "account_enabled",
+                "label": "Account enabled",
+                "complete": account_enabled,
+            },
+        ]
+        blockers: list[str] = []
+        if project is None:
+            blockers.append("project is unavailable")
+        elif not project_active:
+            blockers.append("project is not active")
+        if not vault_available:
+            blockers.append("credential vault is unavailable")
+        if not withdrawal_disabled:
+            blockers.append("withdrawal-disabled confirmation is missing")
+        if not credentials_configured:
+            blockers.append("account credentials are missing")
+        if not symbol_selected:
+            blockers.append("account symbol is missing")
+        if not connection_fresh:
+            if account.connection_status == "error":
+                detail = account.connection_error or "connection test failed"
+                blockers.append(f"account connection error: {detail}")
+            else:
+                blockers.append("account connection test is missing or stale")
+        if not account_enabled:
+            blockers.append("account is disabled")
+
+        if project is None or not project_active:
+            next_action = {
+                "code": "wait_for_project_approval",
+                "label": "Wait for administrator approval",
+            }
+        elif not vault_available:
+            next_action = {
+                "code": "contact_administrator",
+                "label": "Contact administrator about the credential vault",
+            }
+        elif not withdrawal_disabled:
+            next_action = {
+                "code": "confirm_withdrawal_disabled",
+                "label": "Confirm withdrawal permission is disabled",
+            }
+        elif not credentials_configured:
+            next_action = {
+                "code": "save_credentials",
+                "label": "Save trade-only API credentials",
+            }
+        elif not symbol_selected:
+            next_action = {
+                "code": "select_symbol",
+                "label": "Select a trading pair",
+            }
+        elif not connection_fresh:
+            next_action = {
+                "code": (
+                    "fix_connection"
+                    if account.connection_status == "error"
+                    else "test_connection"
+                ),
+                "label": (
+                    "Fix the connection error and test again"
+                    if account.connection_status == "error"
+                    else "Run the read-only connection test"
+                ),
+            }
+        elif not account_enabled:
+            next_action = {
+                "code": "enable_account",
+                "label": "Enable the exchange account",
+            }
+        else:
+            next_action = {
+                "code": "complete",
+                "label": "Exchange account is ready",
+            }
+
+        completed_steps = sum(1 for step in steps if step["complete"])
+        expires_at = (
+            account.connection_checked_at + CONNECTION_MAX_AGE_SECONDS
+            if account.connection_checked_at is not None
+            and account.connection_status == "healthy"
+            else None
+        )
+        return {
+            "ready": not blockers,
+            "status": "ready" if not blockers else str(next_action["code"]),
+            "steps": steps,
+            "completed_steps": completed_steps,
+            "total_steps": len(steps),
+            "progress_pct": round(completed_steps * 100.0 / len(steps), 1),
+            "blockers": blockers,
+            "next_action": next_action,
+            "connection_expires_at": expires_at,
+            "connection_remaining_seconds": (
+                max(0.0, expires_at - now) if expires_at is not None else None
+            ),
+        }
+
+    def account_readiness(
+        self,
+        account: UserExchangeAccount,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._account_readiness(
+            account,
+            project=self.get_project(account.project_id),
+            credential_status=self.credential_status(account.id),
+            now=now if now is not None else _now(),
+        )
+
+    def _strategy_readiness(
+        self,
+        strategy: UserStrategy,
+        *,
+        project: UserProject | None,
+        accounts_by_id: dict[str, UserExchangeAccount],
+        credential_statuses: dict[str, dict[str, Any]],
+        now: float,
+    ) -> dict[str, Any]:
         blockers = list(strategy_parameter_blockers(strategy))
         warnings = ["paper mode only; live order submission is disabled"]
-        project = self.get_project(strategy.project_id)
         definition = USER_STRATEGY_DEFINITIONS[strategy.strategy_type]
         if project is None:
             blockers.append("project is unavailable")
@@ -1067,7 +1232,7 @@ class UserWorkspaceStore:
 
         accounts: list[UserExchangeAccount] = []
         for account_id in strategy.account_ids:
-            account = self.get_account(account_id)
+            account = accounts_by_id.get(account_id)
             if account is None:
                 blockers.append(f"account is unavailable: {account_id}")
                 continue
@@ -1095,12 +1260,12 @@ class UserWorkspaceStore:
                 blockers.append(
                     f"withdrawal-disabled confirmation is missing: {account.label}"
                 )
-            if not account_connection_is_fresh(account):
+            if not account_connection_is_fresh(account, now=now):
                 blockers.append(f"account connection test is stale: {account.label}")
-            credential_status = self.credential_status(account.id)
-            if not credential_status["configured"]:
+            credential_status = credential_statuses.get(account.id, {})
+            if not credential_status.get("configured"):
                 blockers.append(f"account credentials are missing: {account.label}")
-            if not credential_status["vault_available"]:
+            if not credential_status.get("vault_available"):
                 blockers.append(f"credential vault is unavailable: {account.label}")
 
         if strategy.strategy_type == "spot_spread":
@@ -1117,33 +1282,233 @@ class UserWorkspaceStore:
             "warnings": warnings,
         }
 
+    def strategy_readiness(self, strategy: UserStrategy) -> dict[str, Any]:
+        accounts = {
+            account_id: account
+            for account_id in strategy.account_ids
+            for account in [self.get_account(account_id)]
+            if account is not None
+        }
+        return self._strategy_readiness(
+            strategy,
+            project=self.get_project(strategy.project_id),
+            accounts_by_id=accounts,
+            credential_statuses=self.credential_statuses(strategy.account_ids),
+            now=_now(),
+        )
+
+    def _project_readiness(
+        self,
+        project: UserProject,
+        *,
+        accounts: list[UserExchangeAccount],
+        strategies: list[UserStrategy],
+        account_readiness: dict[str, dict[str, Any]],
+        strategy_readiness: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        ready_accounts = [
+            account
+            for account in accounts
+            if account_readiness.get(account.id, {}).get("ready")
+        ]
+        ready_strategies = [
+            strategy
+            for strategy in strategies
+            if strategy_readiness.get(strategy.id, {}).get("ready")
+        ]
+        running_strategies = [
+            strategy for strategy in ready_strategies if strategy.enabled
+        ]
+        steps = [
+            {"id": "project_created", "label": "Project created", "complete": True},
+            {
+                "id": "project_approved",
+                "label": "Project approved",
+                "complete": project.status == "active",
+            },
+            {
+                "id": "exchange_account_added",
+                "label": "Exchange account added",
+                "complete": bool(accounts),
+            },
+            {
+                "id": "exchange_account_ready",
+                "label": "Exchange account ready",
+                "complete": bool(ready_accounts),
+            },
+            {
+                "id": "strategy_created",
+                "label": "Paper strategy created",
+                "complete": bool(strategies),
+            },
+            {
+                "id": "strategy_ready",
+                "label": "Paper strategy checks passed",
+                "complete": bool(ready_strategies),
+            },
+            {
+                "id": "strategy_running",
+                "label": "Paper strategy running",
+                "complete": bool(running_strategies),
+            },
+        ]
+
+        if project.status != "active":
+            next_action = {
+                "code": "wait_for_project_approval",
+                "label": (
+                    "Wait for administrator approval"
+                    if project.status == "pending"
+                    else "Ask an administrator to reactivate the project"
+                ),
+            }
+        elif not accounts:
+            next_action = {
+                "code": "add_exchange_account",
+                "label": "Add an exchange API account",
+            }
+        elif not ready_accounts:
+            account = accounts[0]
+            account_action = dict(
+                account_readiness.get(account.id, {}).get("next_action") or {}
+            )
+            next_action = {
+                "code": str(account_action.get("code") or "configure_account"),
+                "label": str(account_action.get("label") or "Configure the exchange account"),
+                "account_id": account.id,
+            }
+        elif not strategies:
+            next_action = {
+                "code": "create_strategy",
+                "label": "Create a paper strategy",
+            }
+        elif not ready_strategies:
+            next_action = {
+                "code": "fix_strategy",
+                "label": "Resolve the strategy blockers",
+                "strategy_id": strategies[0].id,
+            }
+        elif not running_strategies:
+            next_action = {
+                "code": "enable_strategy",
+                "label": "Enable the paper strategy",
+                "strategy_id": ready_strategies[0].id,
+            }
+        else:
+            next_action = {
+                "code": "complete",
+                "label": "Paper strategy is running",
+                "strategy_id": running_strategies[0].id,
+            }
+
+        completed_steps = sum(1 for step in steps if step["complete"])
+        return {
+            "ready": bool(running_strategies),
+            "mode": "paper",
+            "live_submit_allowed": False,
+            "status": "ready" if running_strategies else str(next_action["code"]),
+            "steps": steps,
+            "completed_steps": completed_steps,
+            "total_steps": len(steps),
+            "progress_pct": round(completed_steps * 100.0 / len(steps), 1),
+            "next_action": next_action,
+            "account_count": len(accounts),
+            "ready_account_count": len(ready_accounts),
+            "strategy_count": len(strategies),
+            "ready_strategy_count": len(ready_strategies),
+            "running_strategy_count": len(running_strategies),
+        }
+
+    def project_readiness(self, project: UserProject) -> dict[str, Any]:
+        accounts = [
+            account
+            for account in self.list_accounts(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )
+            if account.project_id == project.id
+        ]
+        strategies = [
+            strategy
+            for strategy in self.list_strategies(
+                owner_email=project.owner_email,
+                is_admin=False,
+            )
+            if strategy.project_id == project.id
+        ]
+        now = _now()
+        credentials = self.credential_statuses([account.id for account in accounts])
+        account_map = {account.id: account for account in accounts}
+        account_readiness = {
+            account.id: self._account_readiness(
+                account,
+                project=project,
+                credential_status=credentials[account.id],
+                now=now,
+            )
+            for account in accounts
+        }
+        strategy_readiness = {
+            strategy.id: self._strategy_readiness(
+                strategy,
+                project=project,
+                accounts_by_id=account_map,
+                credential_statuses=credentials,
+                now=now,
+            )
+            for strategy in strategies
+        }
+        return self._project_readiness(
+            project,
+            accounts=accounts,
+            strategies=strategies,
+            account_readiness=account_readiness,
+            strategy_readiness=strategy_readiness,
+        )
+
     def delete_strategy(self, strategy_id: str) -> None:
         self._ensure()
         with self._connect() as connection:
             connection.execute("DELETE FROM user_strategies WHERE id = ?", (strategy_id,))
             connection.commit()
 
-    def credential_status(self, account_id: str) -> dict[str, Any]:
+    def credential_statuses(
+        self,
+        account_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, dict[str, Any]]:
         self._ensure()
-        with self._connect() as connection:
-            row = self._credential_row(connection, account_id)
-        if row is None:
-            return {
-                "configured": False,
-                "storage": "encrypted",
-                "fields": [],
-                "updated_at": None,
-                "vault_available": self.cipher.available,
-            }
-        fields_payload = json.loads(row["fields"])
-        fields = list(fields_payload.get("fields") or [])
-        return {
-            "configured": "api_key" in fields and "secret" in fields,
+        unique_ids = list(dict.fromkeys(str(item) for item in account_ids if item))
+        default_status = {
+            "configured": False,
             "storage": "encrypted",
-            "fields": fields,
-            "updated_at": float(row["updated_at"]),
+            "fields": [],
+            "updated_at": None,
             "vault_available": self.cipher.available,
         }
+        result = {account_id: dict(default_status) for account_id in unique_ids}
+        if not unique_ids:
+            return result
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT account_id, fields, updated_at "
+                f"FROM user_api_credentials WHERE account_id IN ({placeholders})",
+                tuple(unique_ids),
+            ).fetchall()
+        for row in rows:
+            fields_payload = json.loads(row["fields"])
+            fields = list(fields_payload.get("fields") or [])
+            result[str(row["account_id"])] = {
+                "configured": "api_key" in fields and "secret" in fields,
+                "storage": "encrypted",
+                "fields": fields,
+                "updated_at": float(row["updated_at"]),
+                "vault_available": self.cipher.available,
+            }
+        return result
+
+    def credential_status(self, account_id: str) -> dict[str, Any]:
+        return self.credential_statuses([account_id])[account_id]
 
     def decrypt_credentials(
         self,
@@ -1189,18 +1554,58 @@ class UserWorkspaceStore:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
         accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)
         strategies = self.list_strategies(owner_email=owner_email, is_admin=is_admin)
-        project_rows = [project.to_dict() for project in projects]
+        now = _now()
+        project_map = {project.id: project for project in projects}
+        account_map = {account.id: account for account in accounts}
+        credentials = self.credential_statuses([account.id for account in accounts])
+        account_readiness = {
+            account.id: self._account_readiness(
+                account,
+                project=project_map.get(account.project_id),
+                credential_status=credentials[account.id],
+                now=now,
+            )
+            for account in accounts
+        }
+        strategy_readiness = {
+            strategy.id: self._strategy_readiness(
+                strategy,
+                project=project_map.get(strategy.project_id),
+                accounts_by_id=account_map,
+                credential_statuses=credentials,
+                now=now,
+            )
+            for strategy in strategies
+        }
+        accounts_by_project: dict[str, list[UserExchangeAccount]] = {}
+        for account in accounts:
+            accounts_by_project.setdefault(account.project_id, []).append(account)
+        strategies_by_project: dict[str, list[UserStrategy]] = {}
+        for strategy in strategies:
+            strategies_by_project.setdefault(strategy.project_id, []).append(strategy)
+
+        project_rows = []
+        for project in projects:
+            row = project.to_dict()
+            row["readiness"] = self._project_readiness(
+                project,
+                accounts=accounts_by_project.get(project.id, []),
+                strategies=strategies_by_project.get(project.id, []),
+                account_readiness=account_readiness,
+                strategy_readiness=strategy_readiness,
+            )
+            project_rows.append(row)
         account_rows = []
         for account in accounts:
             row = account.to_dict()
-            row["connection_fresh"] = account_connection_is_fresh(account)
-            row["credentials"] = self.credential_status(account.id)
+            row["connection_fresh"] = account_connection_is_fresh(account, now=now)
+            row["credentials"] = credentials[account.id]
+            row["readiness"] = account_readiness[account.id]
             account_rows.append(row)
-        account_map = {account.id: account for account in accounts}
         strategy_rows = []
         for strategy in strategies:
             row = strategy.to_dict()
-            readiness = self.strategy_readiness(strategy)
+            readiness = strategy_readiness[strategy.id]
             row["readiness"] = readiness
             row["effective_enabled"] = strategy.enabled and readiness["ready"]
             row["status"] = (
@@ -1222,6 +1627,16 @@ class UserWorkspaceStore:
                 if account is not None
             ]
             strategy_rows.append(row)
+        completed_setup_steps = sum(
+            int(row["readiness"]["completed_steps"]) for row in project_rows
+        )
+        total_setup_steps = sum(
+            int(row["readiness"]["total_steps"]) for row in project_rows
+        )
+        next_project = next(
+            (row for row in project_rows if not row["readiness"]["ready"]),
+            project_rows[0] if project_rows else None,
+        )
         return {
             "status": "ok",
             "projects": project_rows,
@@ -1235,9 +1650,34 @@ class UserWorkspaceStore:
                 "pending_project_count": sum(
                     1 for row in project_rows if row["status"] == "pending"
                 ),
+                "ready_project_count": sum(
+                    1 for row in project_rows if row["readiness"]["ready"]
+                ),
+                "attention_project_count": sum(
+                    1 for row in project_rows if not row["readiness"]["ready"]
+                ),
+                "setup_completed_steps": completed_setup_steps,
+                "setup_total_steps": total_setup_steps,
+                "setup_progress_pct": (
+                    round(completed_setup_steps * 100.0 / total_setup_steps, 1)
+                    if total_setup_steps
+                    else 0.0
+                ),
+                "next_project_id": next_project["id"] if next_project else "",
+                "next_action": (
+                    dict(next_project["readiness"]["next_action"])
+                    if next_project
+                    else {
+                        "code": "create_project",
+                        "label": "Create your first trading project",
+                    }
+                ),
                 "account_count": len(account_rows),
                 "configured_account_count": sum(
                     1 for row in account_rows if row["credentials"]["configured"]
+                ),
+                "ready_account_count": sum(
+                    1 for row in account_rows if row["readiness"]["ready"]
                 ),
                 "strategy_count": len(strategy_rows),
                 "enabled_strategy_count": sum(

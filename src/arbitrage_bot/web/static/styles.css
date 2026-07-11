@@ -699,6 +699,89 @@ h2 {
   min-width: 760px;
 }
 
+.compact-section.section-open > .workspace-readiness {
+  display: grid;
+  margin-top: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.workspace-readiness-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(150px, 0.8fr) minmax(220px, 1.3fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.workspace-readiness-row:last-child {
+  border-bottom: 0;
+}
+
+.workspace-readiness-identity,
+.workspace-readiness-progress-block,
+.workspace-readiness-next,
+.workspace-readiness-empty > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.workspace-readiness-identity strong,
+.workspace-readiness-next strong,
+.workspace-readiness-empty strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.workspace-readiness-progress-block > span,
+.workspace-readiness-next > span,
+.workspace-readiness-identity > span,
+.workspace-readiness-empty span {
+  font-size: 11px;
+}
+
+.workspace-readiness-progress {
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.workspace-readiness-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--amber);
+  transition: width 180ms ease;
+}
+
+.workspace-ready .workspace-readiness-progress > span {
+  background: var(--green);
+}
+
+.workspace-ready-label {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.workspace-continue-button {
+  min-width: 104px;
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.workspace-readiness-empty {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .workspace-safety-confirm {
   border-color: var(--warn-line);
   background: var(--warn-bg);
@@ -1456,6 +1539,33 @@ tbody tr:last-child td {
   }
   #user-workspace-notice:empty {
     display: none;
+  }
+  .workspace-readiness-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 10px;
+    padding: 10px;
+  }
+  .workspace-readiness-identity {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .workspace-readiness-progress-block {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .workspace-readiness-next {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+  .workspace-continue-button,
+  .workspace-ready-label {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+  }
+  .workspace-readiness-empty > div {
+    grid-column: 1;
+    grid-row: 1;
   }
   .compact-section.section-open > :not(.section-title) { margin: 8px 10px 10px; }
   .control-panel { grid-template-columns: 1fr; }
