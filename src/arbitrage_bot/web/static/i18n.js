@@ -662,7 +662,56 @@
     "maker": "挂单",
     "buy": "买入",
     "sell": "卖出",
+    "enabled": "已启用",
+    "degraded": "降级",
+    "Running": "运行中",
+    "Attention": "需关注",
+    "Checking": "检查中",
+    "Stopped": "已停止",
+    "Error": "错误",
+    "Paused": "已暂停",
+    "no_opportunity": "暂无机会",
+    "scan": "扫描",
+    "research": "研究",
+    "trigger": "触发",
+    "NO": "否",
+    "YES": "是",
+    "Live blocked": "实盘阻断",
+    "live off": "实盘关闭",
+    "live on": "实盘开启",
+    "Funding Bot": "资金费率机器人",
+    "Basis Bot": "基差机器人",
+    "Futures Grid": "合约网格",
+    "Hedge Rebalancer": "对冲再平衡",
+    "Backtest/Paper": "回测/模拟",
+    "strategy center": "策略中心",
+    "funding pairs": "资金费率对",
+    "basis pairs": "基差对",
+    "market_maker.live_enabled is false":
+      "做市实盘开关未启用 (market_maker.live_enabled=false)",
   };
+
+  // Pattern rules for dynamic strings the exact-match dictionary cannot
+  // cover (counts, ages, prefixed labels). Applied after exact lookup.
+  const ZH_PATTERNS = [
+    [/^open (\d+)$/, "挂单 $1"],
+    [/^fills (\d+)$/, "成交 $1"],
+    [/^issues (\d+)$/, "异常 $1"],
+    [/^placed (\d+)$/, "已下单 $1"],
+    [/^canceled (\d+)$/, "已撤单 $1"],
+    [/^open cap (\d+)$/, "挂单上限 $1"],
+    [/^buy (\d+)$/, "买单 $1"],
+    [/^sell (\d+)$/, "卖单 $1"],
+    [/^(\d+) warning\(s\)$/, "$1 个警告"],
+    [/^(\d+(?:\.\d+)?)s ago$/, "$1 秒前"],
+    [/^(\d+(?:\.\d+)?)m ago$/, "$1 分钟前"],
+    [/^(\d+(?:\.\d+)?)h ago$/, "$1 小时前"],
+    [/^max (\$[\d.,]+)$/, "上限 $1"],
+    [/^Market maker: Missing (.+)$/, "做市：缺少 $1"],
+    [/^Missing (.+)$/, "缺少 $1"],
+    [/^Cancel (.+)$/i, "撤单 $1"],
+    [/^(\d+)\/(\d+) active$/, "$1/$2 运行中"],
+  ];
 
   const KO = {
     "Crypto Trading Dashboard": "암호화폐 트레이딩 대시보드",
@@ -1323,9 +1372,57 @@
     "maker": "메이커",
     "buy": "매수",
     "sell": "매도",
+    "enabled": "활성화됨",
+    "degraded": "성능 저하",
+    "Running": "실행 중",
+    "Attention": "주의",
+    "Checking": "확인 중",
+    "Stopped": "중지됨",
+    "Error": "오류",
+    "Paused": "일시정지됨",
+    "no_opportunity": "기회 없음",
+    "scan": "스캔",
+    "research": "리서치",
+    "trigger": "트리거",
+    "NO": "아니오",
+    "YES": "예",
+    "Live blocked": "실거래 차단",
+    "live off": "실거래 꺼짐",
+    "live on": "실거래 켜짐",
+    "Funding Bot": "펀딩 봇",
+    "Basis Bot": "베이시스 봇",
+    "Futures Grid": "선물 그리드",
+    "Hedge Rebalancer": "헤지 리밸런서",
+    "Backtest/Paper": "백테스트/모의",
+    "strategy center": "전략 센터",
+    "funding pairs": "펀딩 페어",
+    "basis pairs": "베이시스 페어",
+    "market_maker.live_enabled is false":
+      "마켓 메이커 실거래 스위치 꺼짐 (market_maker.live_enabled=false)",
   };
 
+  const KO_PATTERNS = [
+    [/^open (\d+)$/, "미체결 $1"],
+    [/^fills (\d+)$/, "체결 $1"],
+    [/^issues (\d+)$/, "이슈 $1"],
+    [/^placed (\d+)$/, "주문 $1"],
+    [/^canceled (\d+)$/, "취소 $1"],
+    [/^open cap (\d+)$/, "미체결 한도 $1"],
+    [/^buy (\d+)$/, "매수 $1"],
+    [/^sell (\d+)$/, "매도 $1"],
+    [/^(\d+) warning\(s\)$/, "경고 $1건"],
+    [/^(\d+(?:\.\d+)?)s ago$/, "$1초 전"],
+    [/^(\d+(?:\.\d+)?)m ago$/, "$1분 전"],
+    [/^(\d+(?:\.\d+)?)h ago$/, "$1시간 전"],
+    [/^max (\$[\d.,]+)$/, "최대 $1"],
+    [/^Market maker: Missing (.+)$/, "마켓 메이커: $1 누락"],
+    [/^Missing (.+)$/, "$1 누락"],
+    [/^Cancel (.+)$/i, "$1 취소"],
+    [/^(\d+)\/(\d+) active$/, "$1/$2 실행 중"],
+  ];
+
   const DICTS = { en: {}, zh: ZH, ko: KO };
+  const PATTERN_DICTS = { zh: ZH_PATTERNS, ko: KO_PATTERNS };
 
   function initialLanguage() {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -1340,7 +1437,27 @@
   function translate(source, lang = currentLanguage) {
     const text = String(source ?? "");
     if (lang === "en") return text;
-    return DICTS[lang]?.[text] || text;
+    const dict = DICTS[lang];
+    if (!dict) return text;
+    const exact = dict[text];
+    if (exact) return exact;
+    // Dynamic status lines are composed of " · "-joined segments (e.g.
+    // "dry_run · open 3 · 5s ago"). Split BEFORE trying pattern rules so
+    // an open-ended pattern like "Missing (.+)" cannot swallow the
+    // separator and later segments. Segments contain no separator, so
+    // this cannot recurse deeper than one level.
+    if (text.includes(" · ")) {
+      const joined = text
+        .split(" · ")
+        .map((part) => translate(part, lang))
+        .join(" · ");
+      if (joined !== text) return joined;
+      return text;
+    }
+    for (const [pattern, replacement] of PATTERN_DICTS[lang] || []) {
+      if (pattern.test(text)) return text.replace(pattern, replacement);
+    }
+    return text;
   }
 
   function setTextNodeValue(node, translated, original) {
