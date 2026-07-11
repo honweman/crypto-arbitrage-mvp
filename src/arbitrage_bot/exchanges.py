@@ -25,6 +25,8 @@ from .orderbook import normalize_levels
 
 LOGGER = logging.getLogger(__name__)
 
+BITHUMB_KRW_MIN_ORDER_COST = 5_000.0
+
 
 REST_PROXY_ENV_OPTIONS = (
     ("http_proxy_env", "httpProxy"),
@@ -235,6 +237,28 @@ def _market_from_loaded_markets(
         if market_getter is not None:
             market = market_getter(symbol)
     return market if isinstance(market, dict) else None
+
+
+def _market_with_exchange_limit_overrides(
+    cfg: ExchangeConfig,
+    *,
+    symbol: str,
+    market: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if market is None or cfg.id != "bithumb" or _symbol_quote_currency(symbol) != "KRW":
+        return market
+
+    adjusted = dict(market)
+    limits = dict(adjusted.get("limits") or {})
+    cost = dict(limits.get("cost") or {})
+    try:
+        reported_minimum = float(cost.get("min") or 0.0)
+    except (TypeError, ValueError):
+        reported_minimum = 0.0
+    cost["min"] = max(reported_minimum, BITHUMB_KRW_MIN_ORDER_COST)
+    limits["cost"] = cost
+    adjusted["limits"] = limits
+    return adjusted
 
 
 class BithumbV2Error(RuntimeError):
@@ -970,7 +994,11 @@ class ExchangeManager:
     ) -> dict[str, Any]:
         client = self.client(cfg)
         markets = await client.load_markets()
-        market = _market_from_loaded_markets(client, markets, symbol)
+        market = _market_with_exchange_limit_overrides(
+            cfg,
+            symbol=symbol,
+            market=_market_from_loaded_markets(client, markets, symbol),
+        )
         order_amount = float(client.amount_to_precision(symbol, amount))
         exchange_price = _limit_price_to_exchange_tick(
             cfg,
@@ -999,7 +1027,11 @@ class ExchangeManager:
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
         markets = await client.load_markets()
-        market = _market_from_loaded_markets(client, markets, symbol)
+        market = _market_with_exchange_limit_overrides(
+            cfg,
+            symbol=symbol,
+            market=_market_from_loaded_markets(client, markets, symbol),
+        )
         rows = []
         for order in orders:
             amount = float(order["amount"])
@@ -1149,15 +1181,12 @@ class ExchangeManager:
     ) -> dict[str, Any] | None:
         client = self.client(cfg)
         markets = await client.load_markets()
-        if isinstance(markets, dict) and symbol in markets:
-            market = markets[symbol]
-            return market if isinstance(market, dict) else None
-
-        market_getter = getattr(client, "market", None)
-        if market_getter is None:
-            return None
-        market = market_getter(symbol)
-        return market if isinstance(market, dict) else None
+        market = _market_from_loaded_markets(client, markets, symbol)
+        return _market_with_exchange_limit_overrides(
+            cfg,
+            symbol=symbol,
+            market=market,
+        )
 
     async def fetch_ohlcv(
         self,

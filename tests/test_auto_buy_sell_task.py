@@ -35,6 +35,7 @@ class FakeTaskManager:
         self.closed_orders: list[dict[str, object]] = []
         self.closed_order_limits: list[int] = []
         self.trades: list[dict[str, object]] = []
+        self.cancel_keeps_open = False
 
     async def fetch_order_book(
         self,
@@ -119,9 +120,10 @@ class FakeTaskManager:
         **__: object,
     ) -> dict[str, object]:
         self.canceled += 1
-        self.open_order_ids = [
-            item for item in self.open_order_ids if item != order_id
-        ]
+        if not self.cancel_keeps_open:
+            self.open_order_ids = [
+                item for item in self.open_order_ids if item != order_id
+            ]
         return {"id": order_id, "status": "canceled"}
 
 
@@ -134,12 +136,14 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             paused = await service.set_paused(task["id"], True)
             resumed = await service.set_paused(task["id"], False)
             loaded = AutoBuySellTaskStore(Path(tmp) / "tasks.json").load()
+            store_mode = (Path(tmp) / "tasks.json").stat().st_mode & 0o777
 
         self.assertEqual(paused["status"], "paused")
         self.assertEqual(resumed["status"], "running")
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0].id, task["id"])
         self.assertEqual(loaded[0].status, "running")
+        self.assertEqual(store_mode, 0o600)
 
     async def test_create_task_rejects_duplicate_active_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,6 +171,31 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stopped["open_order_count"], 0)
         self.assertEqual(stopped["canceled_count"], 1)
         self.assertEqual(manager.canceled, 1)
+
+    async def test_stop_task_retries_until_cancellation_is_confirmed(self) -> None:
+        manager = FakeTaskManager()
+        manager.cancel_keeps_open = True
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            task = await service.create_task(self._slow_cfg(order_ttl_seconds=30.0))
+            await service.run_due_tasks(cfg, manager)
+
+            pending = await service.stop_task(task["id"], cfg, manager)
+            with self.assertRaisesRegex(ValueError, "cancellation is pending"):
+                await service.set_paused(task["id"], True)
+            manager.cancel_keeps_open = False
+            service._tasks[0].next_run_at = 0.0
+            retried = await service.run_due_tasks(cfg, manager)
+            stopped = retried["tasks"][0]
+
+        self.assertEqual(pending["status"], "stop_cancel_pending")
+        self.assertEqual(pending["open_order_ids"], ["order-1"])
+        self.assertEqual(stopped["status"], "stopped")
+        self.assertEqual(stopped["open_order_ids"], [])
+        self.assertTrue(stopped["last_execution"]["cancel_confirmed"])
+        self.assertEqual(manager.canceled, 2)
+        self.assertEqual(manager.created, 1)
 
     async def test_clear_terminal_tasks_keeps_active_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,6 +376,35 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_task["open_order_count"], 0)
         self.assertEqual(second_task["last_execution"]["reason"], "stop_price_reached")
         self.assertEqual(manager.canceled, 1)
+        self.assertEqual(manager.created, 1)
+
+    async def test_stop_price_retries_until_cancellation_is_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            slow_cfg = self._slow_cfg(
+                stop_price=0.00017,
+                order_ttl_seconds=30.0,
+            )
+            await service.create_task(slow_cfg)
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp, slow_execution=slow_cfg)
+            await service.run_due_tasks(cfg, manager)
+
+            manager.ask_price = 0.00018
+            manager.cancel_keeps_open = True
+            service._tasks[0].next_run_at = 0.0
+            pending = await service.run_due_tasks(cfg, manager)
+
+            manager.cancel_keeps_open = False
+            service._tasks[0].next_run_at = 0.0
+            retried = await service.run_due_tasks(cfg, manager)
+            stopped = retried["tasks"][0]
+
+        self.assertEqual(pending["tasks"][0]["status"], "stop_cancel_pending")
+        self.assertEqual(stopped["status"], "stopped_by_price")
+        self.assertEqual(stopped["open_order_ids"], [])
+        self.assertEqual(stopped["last_execution"]["reason"], "stop_price_reached")
+        self.assertEqual(manager.canceled, 2)
         self.assertEqual(manager.created, 1)
 
     async def test_filled_order_respects_next_interval_before_replacing(self) -> None:

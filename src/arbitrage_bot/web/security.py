@@ -53,6 +53,7 @@ from ..user_workspace import UserWorkspaceStore
 SESSION_COOKIE = "crypto_arb_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
 SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=31536000",
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",

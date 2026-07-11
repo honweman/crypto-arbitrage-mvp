@@ -21,6 +21,7 @@ RUNNING_TASK_STATUSES = {
     "waiting_for_start_price",
     "waiting_for_fill",
     "waiting_for_interval",
+    "stop_cancel_pending",
     "blocked_by_risk",
     "error",
 }
@@ -135,6 +136,33 @@ def _trade_cost(raw: dict[str, Any]) -> float:
 
 def _order_id(raw: dict[str, Any]) -> str:
     return str(raw.get("id") or raw.get("order") or "")
+
+
+async def _cancel_and_confirm_order_ids(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    order_ids: list[str],
+) -> dict[str, Any]:
+    requested_ids = list(dict.fromkeys(str(order_id) for order_id in order_ids if order_id))
+    payload = await cancel_order_ids(cfg, manager, requested_ids)
+    confirmation_errors: list[dict[str, str]] = []
+    remaining_ids = list(requested_ids)
+    try:
+        exchange = _find_exchange(cfg, cfg.slow_execution.exchange)
+        open_orders = await manager.fetch_open_orders(
+            exchange,
+            symbol=cfg.slow_execution.symbol,
+        )
+        open_ids = {_order_id(order) for order in open_orders if _order_id(order)}
+        remaining_ids = [order_id for order_id in requested_ids if order_id in open_ids]
+    except Exception as exc:  # noqa: BLE001
+        confirmation_errors.append({"error": f"{exc.__class__.__name__}: {exc}"})
+
+    payload["remaining_open_order_ids"] = remaining_ids
+    payload["confirmed_absent_count"] = len(requested_ids) - len(remaining_ids)
+    payload["confirmation_errors"] = confirmation_errors
+    payload["cancel_confirmed"] = not remaining_ids and not confirmation_errors
+    return payload
 
 
 def _trade_order_id(raw: dict[str, Any]) -> str:
@@ -314,7 +342,9 @@ class AutoBuySellTaskStore:
             json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2),
             encoding="utf-8",
         )
+        os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, self.path)
+        os.chmod(self.path, 0o600)
 
 
 class AutoBuySellTaskService:
@@ -345,6 +375,10 @@ class AutoBuySellTaskService:
     async def set_paused(self, task_id: str, paused: bool) -> dict[str, Any]:
         async with self._lock:
             task = self._get_task_unlocked(task_id)
+            if task.status == "stop_cancel_pending":
+                raise ValueError(
+                    "cannot pause or resume while order cancellation is pending"
+                )
             if paused:
                 task.status = "paused"
                 task.paused_at = time.time()
@@ -375,12 +409,19 @@ class AutoBuySellTaskService:
 
         cancel_payload: dict[str, Any] | None = None
         if cancel_open_orders and open_order_ids:
-            cancel_payload = await cancel_order_ids(
+            cancel_payload = await _cancel_and_confirm_order_ids(
                 replace(cfg, slow_execution=task_cfg),
                 manager,
                 open_order_ids,
             )
             cancel_payload["task_id"] = task_id
+            cancel_payload["status"] = (
+                "stop_cancel_pending"
+                if cancel_payload.get("remaining_open_order_ids")
+                else "stopped"
+            )
+            cancel_payload["reason"] = "manual_stop"
+            cancel_payload["target_status"] = "stopped"
             write_trade_event(cfg.trade_log, cancel_payload)
             write_strategy_timeline_from_payload(
                 cfg.strategy_timeline,
@@ -392,26 +433,48 @@ class AutoBuySellTaskService:
             task = self._get_task_unlocked(task_id)
             now = time.time()
             if cancel_payload is not None:
-                failed_ids = {
-                    str(row.get("order_id"))
-                    for row in cancel_payload.get("errors", [])
-                    if row.get("order_id")
-                }
-                task.open_order_ids = [
-                    order_id for order_id in task.open_order_ids if order_id in failed_ids
+                remaining_ids = list(cancel_payload.get("remaining_open_order_ids", []))
+                newly_tracked_ids = [
+                    order_id
+                    for order_id in task.open_order_ids
+                    if order_id not in open_order_ids
                 ]
-                task.canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+                task.open_order_ids = list(
+                    dict.fromkeys([*remaining_ids, *newly_tracked_ids])
+                )
+                task.canceled_count += min(
+                    int(cancel_payload.get("canceled_count", 0) or 0),
+                    int(cancel_payload.get("confirmed_absent_count", 0) or 0),
+                )
                 task.last_execution = {
                     "canceled_count": cancel_payload.get("canceled_count", 0),
                     "cancel_requested_order_ids": open_order_ids,
                     "remaining_open_order_ids": list(task.open_order_ids),
                     "errors": cancel_payload.get("errors", []),
+                    "confirmation_errors": cancel_payload.get(
+                        "confirmation_errors", []
+                    ),
+                    "cancel_confirmed": not task.open_order_ids
+                    and bool(cancel_payload.get("cancel_confirmed")),
+                    "reason": "manual_stop",
+                    "target_status": "stopped",
                 }
-            task.status = "stopped"
-            task.last_status = "stopped"
-            task.finished_at = now
+            if task.open_order_ids and cancel_open_orders:
+                task.status = "stop_cancel_pending"
+                task.last_status = "stop_cancel_pending"
+                task.last_error = (
+                    "stop requested; waiting for confirmed cancellation of "
+                    f"{len(task.open_order_ids)} open order(s)"
+                )
+                task.finished_at = None
+                task.next_run_at = now + max(1.0, min(5.0, task_cfg.interval_seconds))
+            else:
+                task.status = "stopped"
+                task.last_status = "stopped"
+                task.last_error = None
+                task.finished_at = now
+                task.next_run_at = 0.0
             task.updated_at = now
-            task.next_run_at = 0.0
             self.store.save(self._tasks)
             return task.to_dict()
 
@@ -543,6 +606,9 @@ class AutoBuySellTaskService:
         task.last_cycle_at = now
         task.updated_at = now
         try:
+            if task.status == "stop_cancel_pending":
+                await self._retry_pending_stop(task, runtime_cfg, manager)
+                return
             await self._refresh_task_activity(task, runtime_cfg, manager)
             if _task_is_complete(task, task_cfg):
                 task.status = "complete"
@@ -611,10 +677,89 @@ class AutoBuySellTaskService:
             )
             task.next_run_at = self._next_check_time(task)
         except Exception as exc:  # noqa: BLE001
-            task.status = "error"
-            task.last_status = "error"
-            task.last_error = f"{exc.__class__.__name__}: {exc}"
+            if task.status == "stop_cancel_pending":
+                task.last_status = "stop_cancel_pending"
+                task.last_error = (
+                    "stop cancellation retry failed: "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+            else:
+                task.status = "error"
+                task.last_status = "error"
+                task.last_error = f"{exc.__class__.__name__}: {exc}"
             task.next_run_at = time.time() + max(1.0, task_cfg.interval_seconds)
+
+    async def _retry_pending_stop(
+        self,
+        task: AutoBuySellTask,
+        cfg: BotConfig,
+        manager: ExchangeManager,
+    ) -> None:
+        previous_execution = task.last_execution or {}
+        target_status = str(previous_execution.get("target_status") or "stopped")
+        if target_status not in {"stopped", "stopped_by_price"}:
+            target_status = "stopped"
+        reason = str(previous_execution.get("reason") or "manual_stop")
+        requested_ids = list(task.open_order_ids)
+        if requested_ids:
+            payload = await _cancel_and_confirm_order_ids(cfg, manager, requested_ids)
+        else:
+            payload = {
+                "type": "slow_execution_cancel",
+                "order_ids": [],
+                "canceled_count": 0,
+                "errors": [],
+                "remaining_open_order_ids": [],
+                "confirmed_absent_count": 0,
+                "confirmation_errors": [],
+                "cancel_confirmed": True,
+            }
+        remaining_ids = list(payload.get("remaining_open_order_ids", []))
+        task.open_order_ids = remaining_ids
+        task.canceled_count += min(
+            int(payload.get("canceled_count", 0) or 0),
+            int(payload.get("confirmed_absent_count", 0) or 0),
+        )
+        task.last_execution = {
+            "canceled_count": payload.get("canceled_count", 0),
+            "cancel_requested_order_ids": requested_ids,
+            "remaining_open_order_ids": remaining_ids,
+            "errors": payload.get("errors", []),
+            "confirmation_errors": payload.get("confirmation_errors", []),
+            "cancel_confirmed": bool(payload.get("cancel_confirmed")),
+            "reason": reason,
+            "target_status": target_status,
+        }
+        now = time.time()
+        task.updated_at = now
+        if remaining_ids:
+            task.status = "stop_cancel_pending"
+            task.last_status = "stop_cancel_pending"
+            task.last_error = (
+                "stop requested; waiting for confirmed cancellation of "
+                f"{len(remaining_ids)} open order(s)"
+            )
+            task.finished_at = None
+            task.next_run_at = now + max(
+                1.0,
+                min(5.0, task.exec_cfg.interval_seconds),
+            )
+        else:
+            task.status = target_status
+            task.last_status = target_status
+            task.last_error = None
+            task.finished_at = now
+            task.next_run_at = 0.0
+        payload["task_id"] = task.id
+        payload["status"] = task.status
+        payload["reason"] = reason
+        payload["target_status"] = target_status
+        write_trade_event(cfg.trade_log, payload)
+        write_strategy_timeline_from_payload(
+            cfg.strategy_timeline,
+            payload,
+            source="auto_buy_sell_task",
+        )
 
     async def _stop_task_if_price_limit_reached(
         self,
@@ -648,27 +793,32 @@ class AutoBuySellTaskService:
             task.next_run_at = 0.0
             return True
 
-        cancel_payload = await cancel_order_ids(cfg, manager, open_order_ids)
+        cancel_payload = await _cancel_and_confirm_order_ids(
+            cfg,
+            manager,
+            open_order_ids,
+        )
         cancel_payload["task_id"] = task.id
-        cancel_payload["status"] = "stopped_by_price"
         cancel_payload["reason"] = "stop_price_reached"
-        failed_ids = {
-            str(row.get("order_id"))
-            for row in cancel_payload.get("errors", [])
-            if row.get("order_id")
-        }
-        task.open_order_ids = [
-            order_id for order_id in task.open_order_ids if order_id in failed_ids
-        ]
-        task.canceled_count += int(cancel_payload.get("canceled_count", 0) or 0)
+        task.open_order_ids = list(cancel_payload.get("remaining_open_order_ids", []))
+        task.canceled_count += min(
+            int(cancel_payload.get("canceled_count", 0) or 0),
+            int(cancel_payload.get("confirmed_absent_count", 0) or 0),
+        )
         task.last_execution = {
             "canceled_count": cancel_payload.get("canceled_count", 0),
             "cancel_requested_order_ids": open_order_ids,
             "remaining_open_order_ids": list(task.open_order_ids),
             "errors": cancel_payload.get("errors", []),
+            "confirmation_errors": cancel_payload.get("confirmation_errors", []),
+            "cancel_confirmed": bool(cancel_payload.get("cancel_confirmed")),
             "reason": "stop_price_reached",
+            "target_status": "stopped_by_price",
         }
         task.updated_at = time.time()
+        cancel_payload["status"] = (
+            "stop_cancel_pending" if task.open_order_ids else "stopped_by_price"
+        )
         write_trade_event(cfg.trade_log, cancel_payload)
         write_strategy_timeline_from_payload(
             cfg.strategy_timeline,
@@ -676,12 +826,13 @@ class AutoBuySellTaskService:
             source="auto_buy_sell_task",
         )
         if task.open_order_ids:
-            task.status = "error"
-            task.last_status = "stop_price_cancel_failed"
+            task.status = "stop_cancel_pending"
+            task.last_status = "stop_cancel_pending"
             task.last_error = (
-                "stop price reached; cancel failed for "
+                "stop price reached; waiting for confirmed cancellation of "
                 f"{len(task.open_order_ids)} open order(s)"
             )
+            task.finished_at = None
             task.next_run_at = time.time() + max(
                 1.0,
                 min(5.0, task_cfg.interval_seconds),

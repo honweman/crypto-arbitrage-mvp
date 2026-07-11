@@ -227,7 +227,7 @@ The web background MM loop also has an optional order book cache. If the active 
 
 Exchange support is intentionally conservative. Binance, Bybit, Coinbase, and Upbit support post-only limit orders through ccxt. Bithumb does not expose post-only support through ccxt, so Bithumb MM with `post_only: true` is blocked before order placement; only set `post_only: false` and `risk.require_post_only: false` for Bithumb if you explicitly accept taker-fill risk. Bithumb also does not support client order ids through ccxt, so its MM orders can only be tracked in memory until the process restarts.
 
-Always run the account preflight before live MM. Public ccxt metadata can expose exchange minimums, but they can change. In a recent ACS public check, Bybit `ACS/USDT` required about 5 USDT minimum order cost, while Bithumb `ACS/KRW` reported a 500 KRW minimum cost. If you raise `quote_per_level`, also raise `risk.max_cycle_quote` enough for `levels * 2 * quote_per_level` after common-currency conversion.
+Always run the account preflight before live MM. Public ccxt metadata can expose exchange minimums, but they can change. Bybit `ACS/USDT` currently requires about 5 USDT minimum order cost. Bithumb public metadata may report 500 KRW for `ACS/KRW`, while its private v2 API enforces 5,000 KRW; the adapter therefore uses the stricter 5,000 KRW floor before submitting an order. If you raise `quote_per_level`, also raise `risk.max_cycle_quote` enough for `levels * 2 * quote_per_level` after common-currency conversion.
 
 The account preflight also checks transfer metadata when the exchange adapter
 supports it. For each configured symbol currency it reports currency active

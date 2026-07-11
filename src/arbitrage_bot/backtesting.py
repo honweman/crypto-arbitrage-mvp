@@ -491,7 +491,6 @@ def _run_grid(
     step_size = (upper - lower) / grid_count
     levels = [lower + step_size * index for index in range(grid_count + 1)]
     last_price = prices[0]
-    total_target = strategy_cfg.quote_per_grid * len(levels)
     for step, price in enumerate(prices):
         for level in levels:
             side = ""

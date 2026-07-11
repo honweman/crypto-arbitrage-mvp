@@ -1239,6 +1239,36 @@ class WebMonitorTest(unittest.TestCase):
             20,
         )
 
+    def test_readiness_payload_treats_risk_disabled_strategy_as_disabled(self) -> None:
+        cfg = make_config(risk=RiskConfig(allow_live_trading=True))
+        payload = build_readiness_payload(
+            cfg,
+            account_balances={"status": "ok", "accounts": []},
+            order_activity={
+                "status": "ok",
+                "accounts": [],
+                "reconciliation": {"status": "ok", "issue_count": 0},
+            },
+            trading_console={
+                "strategies": [
+                    {
+                        "id": "funding_bot",
+                        "label": "Funding Bot",
+                        "configured": True,
+                        "mode": "paper",
+                        "live": False,
+                        "paused": False,
+                        "strategy_allowed": False,
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["strategies"][0]["status"], "disabled")
+        self.assertEqual(payload["summary"]["blocked_strategies"], 0)
+        self.assertEqual(payload["next_actions"], [])
+
     def test_readiness_payload_reports_execution_protection_blockers(self) -> None:
         cfg = make_config(risk=RiskConfig(allow_live_trading=True))
 
@@ -2624,6 +2654,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(
             response.headers["Referrer-Policy"],
             SECURITY_HEADERS["Referrer-Policy"],
+        )
+        self.assertEqual(
+            response.headers["Strict-Transport-Security"],
+            SECURITY_HEADERS["Strict-Transport-Security"],
         )
 
     def test_daily_report_due_and_message(self) -> None:

@@ -1128,7 +1128,11 @@ def build_readiness_payload(
             execution_algo=execution_algo,
             backtest=backtest,
         )
-        if (
+        if strategy.get("configured") and not strategy.get(
+            "strategy_allowed", True
+        ):
+            status = "disabled"
+        elif (
             strategy.get("mode") in {"paper", "research"}
             and strategy.get("configured")
             and not reasons

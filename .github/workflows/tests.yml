@@ -24,5 +24,7 @@ jobs:
           python -m json.tool config.acs.example.json >/dev/null
       - name: Compile
         run: python -m compileall -q src tests
+      - name: Lint
+        run: python -m ruff check src tests scripts
       - name: Test
         run: python -m pytest -q

@@ -464,6 +464,54 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["price"], 0.0001434)
         self.assertEqual(rows[1]["price"], 0.0001435)
 
+    async def test_bithumb_krw_uses_private_api_minimum_order_cost(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.market = {
+                    "limits": {
+                        "amount": {"min": 1.0, "max": None},
+                        "price": {"min": 0.0001, "max": None},
+                        "cost": {"min": 500.0, "max": None},
+                    },
+                    "precision": {"amount": 1.0, "price": 0.0001},
+                }
+
+            async def load_markets(self) -> dict[str, object]:
+                return {"ACS/KRW": self.market}
+
+            def amount_to_precision(self, _: str, amount: float) -> str:
+                return f"{amount:.0f}"
+
+            def price_to_precision(self, _: str, price: float) -> str:
+                return f"{price:.4f}"
+
+        cfg = ExchangeConfig(id="bithumb", label="bithumb-spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        rejected = await manager.prepare_limit_order(
+            cfg,
+            symbol="ACS/KRW",
+            side="buy",
+            amount=30_000.0,
+            price=0.16,
+        )
+        accepted = await manager.prepare_limit_order(
+            cfg,
+            symbol="ACS/KRW",
+            side="buy",
+            amount=32_000.0,
+            price=0.16,
+        )
+        market = await manager.fetch_market_info(cfg, symbol="ACS/KRW")
+
+        self.assertEqual(rejected["status"], "error")
+        self.assertIn("minimum 5000", rejected["errors"][0])
+        self.assertEqual(accepted["status"], "ok")
+        self.assertEqual(market["limits"]["cost"]["min"], 5_000.0)
+        self.assertEqual(client.market["limits"]["cost"]["min"], 500.0)
+
     async def test_create_prepared_limit_orders_uses_batch_client(self) -> None:
         class FakeClient:
             has = {"createOrders": True}
