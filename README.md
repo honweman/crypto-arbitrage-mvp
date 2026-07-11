@@ -132,6 +132,15 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.web \
 
 Then open `http://127.0.0.1:8080`. The page shows scan health, latency, converted bid/ask prices, quote rates, and any live opportunities. The program switch next to the status pill pauses or resumes scanning without stopping the web server.
 
+The dashboard receives live updates over a Server-Sent Events stream at
+`/api/state/stream` (same payload and auth as `/api/state`, with `view`,
+`sections`, and `interval` query parameters); browsers without EventSource
+support, or any stream error, fall back to plain `/api/state` polling
+automatically. JSON and static responses are gzip-compressed, and static
+assets are served with immutable cache headers — bump the `?v=` version
+string in `index.html` whenever `app.js`, `i18n.js`, or `styles.css`
+change. The UI follows the operating system light/dark preference.
+
 The web service also exposes Prometheus-compatible metrics at `/metrics` and
 `/api/metrics`. A local scrape from the server itself is allowed without a
 dashboard session; external requests still go through the same web authentication

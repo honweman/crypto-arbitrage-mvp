@@ -131,6 +131,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        renderCommonState(lastState);
 	      }
 	      if (options.refresh !== false) refresh({ force: true });
+	      ensureStateStream();
 	    }
 
     function setupCompactSections() {
@@ -192,6 +193,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         });
       }
       refresh({ force: true });
+      ensureStateStream();
     }
 
     function openSettingsSection(sectionId) {
@@ -5961,6 +5963,7 @@ function balanceStatusClass(status) {
         if (requestedPage === currentPage) {
           renderVisiblePage(data, requestedPage, { force: Boolean(options.force) });
         }
+        ensureStateStream();
       } catch (error) {
         refreshFailureCount += 1;
         const message = error?.name === "AbortError"
@@ -5969,6 +5972,9 @@ function balanceStatusClass(status) {
         if (!refreshHadSuccess) {
           setHeaderStatus("degraded", "Retrying");
           text("warnings", `Connecting to server: ${message}`);
+        } else if (refreshFailureCount < 2) {
+          // A single missed poll on a healthy session is usually a transient
+          // blip; retry silently instead of flashing the header pill.
         } else if (refreshFailureCount < 3) {
           setHeaderStatus("degraded", "Reconnecting");
           text("warnings", `Connection retry ${refreshFailureCount}/3: ${message}`);
@@ -5985,6 +5991,78 @@ function balanceStatusClass(status) {
           scheduleNextRefresh();
         }
       }
+    }
+
+    // ---- Server-Sent Events state stream (with polling fallback) ----
+    // The stream pushes the same payload as /api/state on a fixed interval.
+    // Polling stays armed as a watchdog: every stream message pushes the next
+    // poll out to 3x the page interval, so if the stream stalls or errors the
+    // regular polling cadence resumes automatically.
+    let stateStream = null;
+    let stateStreamKey = "";
+    let stateStreamDisabledUntil = 0;
+    const STATE_STREAM_RETRY_COOLDOWN_MS = 60000;
+
+    function stateStreamActive() {
+      return stateStream !== null && stateStream.readyState !== 2;
+    }
+
+    function closeStateStream() {
+      if (stateStream) {
+        stateStream.close();
+        stateStream = null;
+        stateStreamKey = "";
+      }
+    }
+
+    function ensureStateStream() {
+      if (!window.EventSource) return;
+      if (Date.now() < stateStreamDisabledUntil) return;
+      if (document.hidden) {
+        closeStateStream();
+        return;
+      }
+      const requestedPage = PAGE_IDS.has(currentPage) ? currentPage : "status";
+      const params = new URLSearchParams({ view: requestedPage });
+      const sectionIds = openSectionIdsForPage(requestedPage);
+      if (sectionIds.length > 0) params.set("sections", sectionIds.join(","));
+      const baseIntervalMs = PAGE_REFRESH_INTERVAL_MS[requestedPage] || REFRESH_INTERVAL_MS;
+      params.set("interval", String(baseIntervalMs / 1000));
+      const key = params.toString();
+      if (stateStreamActive() && stateStreamKey === key) return;
+      closeStateStream();
+      const source = new EventSource(`/api/state/stream?${key}`);
+      stateStream = source;
+      stateStreamKey = key;
+      source.onmessage = (event) => {
+        if (source !== stateStream) return;
+        let data = null;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (!data || typeof data !== "object" || Array.isArray(data)) return;
+        refreshHadSuccess = true;
+        refreshFailureCount = 0;
+        lastState = data;
+        pageStateCache[requestedPage] = data;
+        renderCommonState(data);
+        if (requestedPage === currentPage) {
+          renderVisiblePage(data, requestedPage, { force: false });
+        }
+        scheduleNextRefresh(baseIntervalMs * 3);
+      };
+      source.onerror = () => {
+        if (source !== stateStream) return;
+        if (source.readyState === 2) {
+          // Hard failure (auth, proxy, unsupported): stop trying for a
+          // while and let polling carry the updates.
+          closeStateStream();
+          stateStreamDisabledUntil = Date.now() + STATE_STREAM_RETRY_COOLDOWN_MS;
+        }
+        scheduleNextRefresh();
+      };
     }
 
     applyFeatureVisibility();
@@ -6147,6 +6225,7 @@ function balanceStatusClass(status) {
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         clearRefreshTimer();
+        closeStateStream();
       } else {
         refresh({ force: true });
       }

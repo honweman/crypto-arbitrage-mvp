@@ -4,6 +4,7 @@
   --surface: #ffffff;
   --surface-2: #f1f5f9;
   --surface-3: #fafbfc;
+  --surface-subtle: #fbfcfb;
   --text: #111827;
   --muted: #64748b;
   --line: #d7dde5;
@@ -13,6 +14,48 @@
   --blue: #1d4ed8;
   --focus: #111827;
   --shadow: 0 1px 2px rgb(15 23 42 / 5%);
+  --shadow-2: 0 1px 3px rgb(23 33 27 / 18%);
+  --ok-bg: #e7f3ed;
+  --ok-line: #b8dccb;
+  --warn-bg: #fff4df;
+  --warn-line: #edd2a7;
+  --warn-text: #705816;
+  --danger-bg: #fbe9e6;
+  --danger-line: #e6bbb4;
+  --danger-text: #9d2b2b;
+  --info-bg: #e8f0fa;
+  --info-line: #bfd2ea;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0f1520;
+    --surface: #171f2e;
+    --surface-2: #1e2839;
+    --surface-3: #141c2a;
+    --surface-subtle: #141c2a;
+    --text: #e5eaf2;
+    --muted: #8b98ab;
+    --line: #2a3549;
+    --green: #34d399;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --blue: #60a5fa;
+    --focus: #e5eaf2;
+    --shadow: 0 1px 2px rgb(0 0 0 / 35%);
+    --shadow-2: 0 1px 3px rgb(0 0 0 / 50%);
+    --ok-bg: rgb(52 211 153 / 13%);
+    --ok-line: rgb(52 211 153 / 35%);
+    --warn-bg: rgb(251 191 36 / 13%);
+    --warn-line: rgb(251 191 36 / 35%);
+    --warn-text: #fbd38d;
+    --danger-bg: rgb(248 113 113 / 13%);
+    --danger-line: rgb(248 113 113 / 35%);
+    --danger-text: #fda4a4;
+    --info-bg: rgb(96 165 250 / 13%);
+    --info-line: rgb(96 165 250 / 35%);
+  }
 }
 
 * { box-sizing: border-box; }
@@ -271,10 +314,10 @@ main {
   text-transform: uppercase;
 }
 
-.pill.running { color: var(--green); background: #e7f3ed; border-color: #b8dccb; }
-.pill.degraded { color: var(--amber); background: #fff4df; border-color: #edd2a7; }
-.pill.error { color: var(--red); background: #fbe9e6; border-color: #e6bbb4; }
-.pill.starting { color: var(--blue); background: #e8f0fa; border-color: #bfd2ea; }
+.pill.running { color: var(--green); background: var(--ok-bg); border-color: var(--ok-line); }
+.pill.degraded { color: var(--amber); background: var(--warn-bg); border-color: var(--warn-line); }
+.pill.error { color: var(--red); background: var(--danger-bg); border-color: var(--danger-line); }
+.pill.starting { color: var(--blue); background: var(--info-bg); border-color: var(--info-line); }
 .pill.paused { color: var(--muted); background: var(--surface-2); border-color: var(--line); }
 
 .header-actions {
@@ -399,13 +442,13 @@ main {
   height: 16px;
   border-radius: 50%;
   background: var(--surface);
-  box-shadow: 0 1px 3px rgb(23 33 27 / 18%);
+  box-shadow: var(--shadow-2);
   transition: transform 160ms ease;
 }
 
 .program-switch input:checked + .switch-track {
-  border-color: #b8dccb;
-  background: #d9eee5;
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
 }
 
 .program-switch input:checked + .switch-track::after {
@@ -419,6 +462,8 @@ main {
 
 section {
   margin-top: 18px;
+  /* keep anchored section headings clear of the sticky header */
+  scroll-margin-top: 96px;
 }
 
 [data-page] {
@@ -492,15 +537,15 @@ section {
 .strategy-settings-card-status.live,
 .strategy-settings-card-status.ok {
   color: var(--green);
-  border-color: #b8dccb;
-  background: #edf7f1;
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
 }
 
 .strategy-settings-card-status.blocked,
 .strategy-settings-card-status.error {
   color: var(--red);
-  border-color: #f1c0bd;
-  background: #fff0ef;
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
 }
 
 .strategy-settings-card-summary {
@@ -515,17 +560,17 @@ section {
 }
 
 .compact-section.has-unsaved {
-  border-color: #e7c480;
+  border-color: var(--warn-line);
 }
 
 .dirty-badge {
   display: none;
   margin-left: 8px;
   padding: 2px 7px;
-  border: 1px solid #e7c480;
+  border: 1px solid var(--warn-line);
   border-radius: 999px;
   color: var(--amber);
-  background: #fff8e8;
+  background: var(--warn-bg);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -655,9 +700,9 @@ h2 {
 }
 
 .workspace-safety-confirm {
-  border-color: #d8c38f;
-  background: #fff9e8;
-  color: #705816;
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+  color: var(--warn-text);
   text-transform: none;
 }
 
@@ -869,14 +914,14 @@ tbody tr:last-child td {
 
 .config-same {
   color: var(--green);
-  background: #e7f3ed;
-  border-color: #b8dccb;
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
 }
 
 .config-diff {
   color: var(--amber);
-  background: #fff4df;
-  border-color: #edd2a7;
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
 }
 
 .config-diff-details {
@@ -890,9 +935,9 @@ tbody tr:last-child td {
   align-items: center;
   min-height: 24px;
   padding: 2px 7px;
-  border: 1px solid #edd2a7;
+  border: 1px solid var(--warn-line);
   border-radius: 999px;
-  background: #fff4df;
+  background: var(--warn-bg);
   color: var(--amber);
   font-size: 11px;
   font-weight: 800;
@@ -970,7 +1015,7 @@ tbody tr:last-child td {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: #fbfcfb;
+  background: var(--surface-subtle);
   color: var(--text);
   font-size: 12px;
   font-weight: 650;
@@ -980,8 +1025,8 @@ tbody tr:last-child td {
 
 .holder-label.known {
   color: var(--blue);
-  background: #e8f0fa;
-  border-color: #bfd2ea;
+  background: var(--info-bg);
+  border-color: var(--info-line);
 }
 
 .holder-label.unknown {
@@ -1015,7 +1060,7 @@ tbody tr:last-child td {
   padding: 6px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fbfcfb;
+  background: var(--surface-subtle);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -1090,9 +1135,9 @@ tbody tr:last-child td {
 }
 
 .market-limit-hint.limit-warning {
-  border-color: #efb7b7;
-  background: #fff5f5;
-  color: #9d2b2b;
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--danger-text);
 }
 
 .field input,
@@ -1248,8 +1293,8 @@ tbody tr:last-child td {
 
 .account-option:has(input:checked) {
   color: var(--blue);
-  border-color: #bfd2ea;
-  background: #e8f0fa;
+  border-color: var(--info-line);
+  background: var(--info-bg);
 }
 
 .control-button {
@@ -1285,8 +1330,8 @@ tbody tr:last-child td {
 
 .ghost-button.danger {
   color: var(--red);
-  border-color: #e6bbb4;
-  background: #fbe9e6;
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
 }
 
 .ghost-button:disabled {
@@ -1297,9 +1342,9 @@ tbody tr:last-child td {
 .danger-button {
   min-height: 28px;
   padding: 5px 9px;
-  border: 1px solid #e6bbb4;
+  border: 1px solid var(--danger-line);
   border-radius: 6px;
-  background: #fbe9e6;
+  background: var(--danger-bg);
   color: var(--red);
   font-size: 12px;
   font-weight: 700;
