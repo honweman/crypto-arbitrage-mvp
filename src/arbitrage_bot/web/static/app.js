@@ -6724,6 +6724,9 @@ function balanceStatusClass(status) {
       applyMobileTableLabels();
       updateCoreFormStates();
     });
+    window.addEventListener("crypto-arb-theme-change", () => {
+      if (currentUserBacktests) renderUserBacktests(currentUserBacktests);
+    });
     document.getElementById("grid-form").addEventListener("input", () => {
       gridFormDirty = true;
     });

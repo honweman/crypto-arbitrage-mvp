@@ -27,8 +27,37 @@
   --info-line: #bfd2ea;
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1520;
+  --surface: #171f2e;
+  --surface-2: #1e2839;
+  --surface-3: #141c2a;
+  --surface-subtle: #141c2a;
+  --text: #e5eaf2;
+  --muted: #8b98ab;
+  --line: #2a3549;
+  --green: #34d399;
+  --red: #f87171;
+  --amber: #fbbf24;
+  --blue: #60a5fa;
+  --focus: #e5eaf2;
+  --shadow: 0 1px 2px rgb(0 0 0 / 35%);
+  --shadow-2: 0 1px 3px rgb(0 0 0 / 50%);
+  --ok-bg: rgb(52 211 153 / 13%);
+  --ok-line: rgb(52 211 153 / 35%);
+  --warn-bg: rgb(251 191 36 / 13%);
+  --warn-line: rgb(251 191 36 / 35%);
+  --warn-text: #fbd38d;
+  --danger-bg: rgb(248 113 113 / 13%);
+  --danger-line: rgb(248 113 113 / 35%);
+  --danger-text: #fda4a4;
+  --info-bg: rgb(96 165 250 / 13%);
+  --info-line: rgb(96 165 250 / 35%);
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     color-scheme: dark;
     --bg: #0f1520;
     --surface: #171f2e;
@@ -447,6 +476,7 @@ main {
   box-shadow: var(--shadow);
 }
 
+.theme-switch,
 .program-switch {
   display: inline-flex;
   align-items: center;
@@ -458,10 +488,17 @@ main {
   user-select: none;
 }
 
+.theme-switch input,
 .program-switch input {
   position: absolute;
   opacity: 0;
   pointer-events: none;
+}
+
+.theme-icon {
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
 }
 
 .switch-track {
@@ -492,10 +529,17 @@ main {
   background: var(--ok-bg);
 }
 
+.theme-switch input:checked + .switch-track {
+  border-color: var(--info-line);
+  background: var(--info-bg);
+}
+
+.theme-switch input:checked + .switch-track::after,
 .program-switch input:checked + .switch-track::after {
   transform: translateX(18px);
 }
 
+.theme-switch input:focus-visible + .switch-track,
 .program-switch input:focus-visible + .switch-track {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -1718,6 +1762,12 @@ tbody tr:last-child td {
   }
   .language-switch select {
     min-width: 78px;
+  }
+  .theme-switch {
+    gap: 6px;
+  }
+  .theme-label {
+    display: none;
   }
   .portfolio-bar .metric:nth-child(1),
   .portfolio-bar .metric:nth-child(2) {
