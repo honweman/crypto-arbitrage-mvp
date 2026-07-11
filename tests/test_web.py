@@ -186,11 +186,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260711-backtest2" defer></script>',
+            '<script src="/static/app.js?v=20260711-pages4" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260711-backtest2" defer></script>',
+            '<script src="/static/i18n.js?v=20260711-pages4" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -316,7 +316,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260711-backtest2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260711-pages4">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -478,6 +478,12 @@ class WebMonitorTest(unittest.TestCase):
             },
         }
         status_overview = state_payload_for_view(payload, "status", sections="overview")
+        quant_overview = state_payload_for_view(payload, "quant", sections="backtest-points")
+        quant_derivatives = state_payload_for_view(
+            payload,
+            "quant",
+            sections="derivatives-risk,funding-basis,contract-strategies,options-arbitrage",
+        )
         settings = state_payload_for_view(payload, "settings", sections="risk-form")
         records = state_payload_for_view(payload, "records", sections="console-strategies")
         records_open_orders = state_payload_for_view(
@@ -491,7 +497,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(status_overview["readiness"], {})
         self.assertIn("totals", status_overview["account_balances"])
         self.assertNotIn("accounts", status_overview["account_balances"])
-        self.assertNotIn("positions", status_overview["derivatives"])
+        self.assertNotIn("derivatives", status_overview)
         self.assertNotIn(
             "orders",
             status_overview["market_maker"]["instances"][0]["plan"],
@@ -504,6 +510,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertNotIn("rows", status_overview["options_arbitrage"])
         self.assertNotIn("rows", status_overview["contract_strategies"])
         self.assertNotIn("holders", status_overview["onchain"])
+        self.assertNotIn("positions", quant_overview["derivatives"])
+        self.assertIn("positions", quant_derivatives["derivatives"])
+        self.assertIn("rows", quant_derivatives["funding_basis"])
+        self.assertIn("rows", quant_derivatives["options_arbitrage"])
+        self.assertIn("rows", quant_derivatives["contract_strategies"])
         self.assertNotIn("strategy_universe", settings["config"])
         self.assertNotIn("strategy_instances", settings["strategy_center"])
         self.assertIn("open_orders", records["order_activity"])
@@ -565,25 +576,23 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="strategy-instance-symbol"', HTML)
         self.assertIn("renderStrategyInstanceMarketOptions", APP_JS)
 
-    def test_page_hides_temporarily_disabled_modules(self) -> None:
+    def test_page_separates_core_trading_and_quant_modules(self) -> None:
         self.assertIn('id="overview" data-page="status"', HTML)
-        self.assertIn('data-ui-feature="cash_and_carry" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="derivatives" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="market_config" data-ui-hidden-default="true"', HTML)
+        self.assertIn('id="mm-section" data-page="trading"', HTML)
+        self.assertIn('id="slow-section" data-page="trading"', HTML)
+        self.assertIn('id="spot-arbitrage-section" data-page="trading"', HTML)
+        self.assertIn('id="cash-carry-section" data-page="quant"', HTML)
+        self.assertIn('id="derivatives-section" data-page="quant"', HTML)
+        self.assertIn('id="funding-arbitrage-section" data-page="quant"', HTML)
+        self.assertIn('id="signal-bot-section" data-page="quant"', HTML)
+        self.assertIn('id="options-arbitrage-section" data-page="quant"', HTML)
+        self.assertIn('id="contract-strategies-section" data-page="quant"', HTML)
+        self.assertIn('id="spot-grid-section" data-page="quant"', HTML)
+        self.assertIn('id="dca-section" data-page="quant"', HTML)
+        self.assertIn('id="execution-section" data-page="quant"', HTML)
+        self.assertIn('id="backtest-section" data-page="quant"', HTML)
         self.assertIn('data-ui-feature="readiness" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="scan_status" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="funding_arbitrage" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="signal_bot" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="options_arbitrage derivatives" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="contract_strategies derivatives" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="spot_grid" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="dca" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="execution_algo" data-ui-hidden-default="true"', HTML)
-        self.assertIn('id="backtest-section"', HTML)
-        self.assertNotIn(
-            'data-ui-feature="backtest" data-ui-hidden-default="true"',
-            HTML,
-        )
         self.assertIn('data-ui-feature="orders_detail" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="strategy_timeline" data-ui-hidden-default="true"', HTML)
         self.assertIn('data-ui-feature="audit_trail" data-ui-hidden-default="true"', HTML)
@@ -593,22 +602,35 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("const HIDDEN_UI_FEATURES = new Set", APP_JS)
         self.assertIn("function applyFeatureVisibility", APP_JS)
         self.assertIn('status: [', APP_JS)
+        self.assertIn('trading: [', APP_JS)
+        self.assertIn('quant: [', APP_JS)
         self.assertIn('.ui-feature-hidden', STYLES_CSS)
         self.assertIn('[data-page].ui-feature-hidden', STYLES_CSS)
         self.assertIn('.statusbar[data-page].ui-feature-hidden', STYLES_CSS)
 
-    def test_page_has_status_settings_and_records_views(self) -> None:
+    def test_page_has_monitor_trading_quant_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)
+        self.assertIn('data-view-tab="trading"', HTML)
+        self.assertIn('data-view-tab="quant"', HTML)
         self.assertIn('data-view-tab="settings"', HTML)
         self.assertIn('data-view-tab="records"', HTML)
         self.assertIn('href="#status"', HTML)
+        self.assertIn('href="#trading"', HTML)
+        self.assertIn('href="#quant"', HTML)
         self.assertIn('href="#settings"', HTML)
         self.assertIn('href="#records"', HTML)
-        self.assertIn('const PAGE_IDS = new Set(["status", "settings", "records"])', HTML)
+        self.assertIn(
+            'const PAGE_IDS = new Set(["status", "trading", "quant", "settings", "records"])',
+            HTML,
+        )
         self.assertIn('if (hashPage === "monitor") return "status";', HTML)
-        self.assertIn('if (hashPage === "control") return "settings";', HTML)
+        self.assertIn('if (hashPage === "control") return "trading";', HTML)
         self.assertIn("new URLSearchParams", HTML)
         self.assertIn("/api/state?${params.toString()}", HTML)
+        self.assertEqual(
+            APP_JS.count('params.set("sections", sectionIds.join(","));'),
+            2,
+        )
         self.assertIn("pageStateCache", HTML)
 
     def test_page_softens_initial_state_fetch_failure(self) -> None:
@@ -4771,6 +4793,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         full = await state.get()
         status = await state.get(view="status")
+        trading = await state.get(view="trading")
+        quant = await state.get(view="quant")
         settings = await state.get(view="settings")
         records = await state.get(view="records")
 
@@ -4784,19 +4808,31 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recent_opportunities", full)
 
         self.assertIn("account_balances", status)
-        self.assertIn("derivatives", status)
+        self.assertNotIn("derivatives", status)
         self.assertIn("funding_basis", status)
         self.assertIn("options_arbitrage", status)
         self.assertIn("contract_strategies", status)
-        self.assertIn("rows", status["contract_strategies"])
+        self.assertNotIn("rows", status["contract_strategies"])
         self.assertIn("execution_protection", status)
         self.assertIn("readiness", status)
         self.assertNotIn("trading_console", status)
         self.assertNotIn("recent_opportunities", status)
 
+        self.assertIn("config", trading["market_maker"])
+        self.assertIn("spot_markets", trading["config"])
+        self.assertNotIn("account_balances", trading)
+        self.assertNotIn("trading_console", trading)
+
+        self.assertIn("derivatives", quant)
+        self.assertIn("accounts", quant["derivatives"])
+        self.assertIn("rows", quant["funding_basis"])
+        self.assertIn("rows", quant["options_arbitrage"])
+        self.assertIn("rows", quant["contract_strategies"])
+        self.assertIn("config", quant["spot_grid"])
+        self.assertIn("config", quant["dca"])
+        self.assertIn("config", quant["execution_algo"])
+
         self.assertIn("trading_console", settings)
-        self.assertIn("config", settings["market_maker"])
-        self.assertIn("spot_markets", settings["config"])
         self.assertNotIn("account_balances", settings)
         self.assertNotIn("derivatives", settings)
         self.assertIn("funding_basis", settings)
@@ -4850,7 +4886,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         )
 
         full_task = (await state.get())["slow_execution"]["tasks"]["tasks"][0]
-        view_task = (await state.get(view="settings"))["slow_execution"]["tasks"][
+        view_task = (await state.get(view="trading"))["slow_execution"]["tasks"][
             "tasks"
         ][0]
 
@@ -4863,7 +4899,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view_task["config"]["price_mode"], "taker")
         self.assertIn("total_quote", view_task["config"])
 
-    async def test_settings_view_includes_compact_market_limits(self) -> None:
+    async def test_trading_view_includes_compact_market_limits(self) -> None:
         payload = {
             "status": "running",
             "config": {"spot_markets": []},
@@ -4895,11 +4931,11 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-        settings = state_payload_for_view(payload, "settings", sections="slow-orders")
+        trading = state_payload_for_view(payload, "trading", sections="slow-orders")
 
-        self.assertNotIn("account_balances", settings)
-        self.assertEqual(settings["market_limits"][0]["exchange"], "bithumb-spot")
-        self.assertEqual(settings["market_limits"][0]["limits"]["cost_min"], 5000.0)
+        self.assertNotIn("account_balances", trading)
+        self.assertEqual(trading["market_limits"][0]["exchange"], "bithumb-spot")
+        self.assertEqual(trading["market_limits"][0]["limits"]["cost_min"], 5000.0)
 
     async def test_program_state_persists_in_runtime_store(self) -> None:
         cfg = make_config()
@@ -5138,7 +5174,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
             restored = MonitorState(cfg, 1.0, runtime_store_path=store_path)
             runtime_cfg = await restored.runtime_config(cfg)
-            payload = await restored.get(view="settings")
+            payload = await restored.get(view="quant")
 
         self.assertTrue(runtime_cfg.spot_grid.enabled)
         self.assertEqual(runtime_cfg.spot_grid.grid_count, 12)

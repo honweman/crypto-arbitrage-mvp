@@ -2,13 +2,13 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     const money = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     const compact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 	    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
-	    const PAGE_IDS = new Set(["status", "settings", "records"]);
+	    const PAGE_IDS = new Set(["status", "trading", "quant", "settings", "records"]);
 	    let currentPage = pageFromLocation();
 	    let lastState = null;
 	    let refreshQueued = false;
 	    const pageStateCache = {};
-	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, settings: 3000, records: 2000 };
-	    const PAGE_REFRESH_INTERVAL_MS = { status: 2000, settings: 5000, records: 3500 };
+	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, trading: 2000, quant: 4000, settings: 3000, records: 2000 };
+	    const PAGE_REFRESH_INTERVAL_MS = { status: 2000, trading: 3000, quant: 6000, settings: 5000, records: 3500 };
 	    const REFRESH_INTERVAL_MS = PAGE_REFRESH_INTERVAL_MS.status;
 	    const REFRESH_FAILURE_BACKOFF_MS = 15000;
 	    const REFRESH_JITTER_MS = 300;
@@ -19,30 +19,34 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "readiness-actions",
 	        "markets",
 	        "account-balances",
-	        "derivatives-risk",
-	        "funding-basis",
-	        "contract-strategies",
-	        "options-arbitrage",
 	        "rates",
 	        "opportunities",
 	        "holders",
 	      ],
-	      settings: [
-	        "user-workspace-section",
+	      trading: [
 	        "strategy-settings-cards",
-	        "markets-config",
-	        "carry-config",
-	        "risk-form",
-	        "strategy-instances",
-	        "api-accounts",
-	        "funding-arb-form",
-	        "signal-bot-form",
 	        "mm-orders",
 	        "slow-orders",
+	        "markets-config",
+	      ],
+	      quant: [
+	        "backtest-points",
 	        "grid-orders",
 	        "dca-orders",
 	        "exec-schedule",
-	        "backtest-points",
+	        "carry-config",
+	        "funding-arb-form",
+	        "signal-bot-form",
+	        "derivatives-risk",
+	        "funding-basis",
+	        "contract-strategies",
+	        "options-arbitrage",
+	      ],
+	      settings: [
+	        "user-workspace-section",
+	        "risk-form",
+	        "strategy-instances",
+	        "api-accounts",
 	      ],
 	      records: [
 	        "console-strategies",
@@ -55,27 +59,39 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const HIDDEN_UI_FEATURES = new Set([
 	      "api_accounts",
 	      "audit_trail",
-	      "cash_and_carry",
-	      "contract_strategies",
-	      "dca",
-	      "derivatives",
-	      "execution_algo",
-	      "funding_arbitrage",
-	      "funding_basis",
-	      "market_config",
 	      "onchain_history",
 	      "onchain_monitor",
-	      "options_arbitrage",
 	      "orders_detail",
 	      "quote_rates",
 	      "readiness",
 	      "scan_status",
-	      "signal_bot",
-	      "spot_grid",
 	      "strategy_center",
 	      "strategy_timeline",
 	    ]);
-	    const lastVisibleRenderAt = { status: 0, settings: 0, records: 0 };
+	    const PAGE_DOM_ORDER = {
+	      trading: [
+	        "trading-page-heading",
+	        "strategy-settings-section",
+	        "mm-section",
+	        "slow-section",
+	        "spot-arbitrage-section",
+	      ],
+	      quant: [
+	        "quant-page-heading",
+	        "backtest-section",
+	        "spot-grid-section",
+	        "dca-section",
+	        "execution-section",
+	        "cash-carry-section",
+	        "funding-arbitrage-section",
+	        "signal-bot-section",
+	        "derivatives-section",
+	        "funding-basis-section",
+	        "contract-strategies-section",
+	        "options-arbitrage-section",
+	      ],
+	    };
+	    const lastVisibleRenderAt = { status: 0, trading: 0, quant: 0, settings: 0, records: 0 };
 
     function uiFeatureNamesFor(el) {
       return String(el?.dataset?.uiFeature || "")
@@ -102,16 +118,26 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function pageFromLocation() {
       const hashPage = window.location.hash.replace("#", "");
       if (hashPage === "monitor") return "status";
-      if (hashPage === "control") return "settings";
+      if (hashPage === "control") return "trading";
       return PAGE_IDS.has(hashPage) ? hashPage : "status";
+    }
+
+    function applyPageSectionOrder(page) {
+      const main = document.querySelector("main");
+      if (!main) return;
+      for (const id of PAGE_DOM_ORDER[page] || []) {
+        const section = document.getElementById(id);
+        if (section) main.appendChild(section);
+      }
     }
 
 		    function setActivePage(page, options = {}) {
 		      const activePage = PAGE_IDS.has(page) ? page : "status";
 		      currentPage = activePage;
-		      if (activePage !== "settings") scheduleUserBacktestPoll(false);
+		      if (activePage !== "quant") scheduleUserBacktestPoll(false);
 	      clearRefreshTimer();
 	      applyFeatureVisibility();
+	      applyPageSectionOrder(activePage);
 		      document.querySelectorAll("[data-page]").forEach((el) => {
 		        el.classList.toggle("active-page", el.dataset.page === activePage);
 		      });
@@ -199,7 +225,8 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function openSettingsSection(sectionId) {
       const section = document.getElementById(sectionId);
       if (!section || isUiFeatureHidden(section)) return;
-      if (currentPage !== "settings") setActivePage("settings", { refresh: false });
+      const targetPage = PAGE_IDS.has(section.dataset.page) ? section.dataset.page : "settings";
+      if (currentPage !== targetPage) setActivePage(targetPage, { refresh: false });
       section.classList.add("section-open");
       const title = section.querySelector(".section-title");
       if (title) title.setAttribute("aria-expanded", "true");
@@ -1719,13 +1746,19 @@ function balanceStatusClass(status) {
       const mmQuote = mmPlan
         ? `${quoteCurrency(mmSymbol)} ${money.format(mm.config?.quote_per_level || mmPlan.orders?.[0]?.quote_notional || 0)}/level`
         : "";
+      const spot = data.spot_arbitrage || {};
+      const spotOpportunities = Array.isArray(data.opportunities) ? data.opportunities.length : 0;
       const cards = [
         {
-          title: "Risk Controls",
-          status: risk.allow_live_trading ? "live" : "blocked",
-          summary: risk.allow_live_trading ? "Live trading allowed" : "Live trading blocked",
-          detail: `max/order USD ${money.format(risk.max_order_quote || 0)} · exposure USD ${money.format(risk.max_exposure_quote || 0)} · max open ${risk.max_open_orders || 0}`,
-          target: "risk-section",
+          title: "Market Maker",
+          status: mmStatus,
+          summary: mmPlan
+            ? `${mmPlan.exchange || "--"} ${mmPlan.symbol || "--"}`
+            : `${marketMakerInstances(mm).length || 0} instance(s)`,
+          detail: mmPlan
+            ? `mid ${fmt.format(mmPlan.mid_price)} · ${mmQuote} · open ${mmRuntime.open_order_count || 0}`
+            : marketMakerStatusReason(mm) || "Open to edit ladder and risk",
+          target: "mm-section",
         },
         {
           title: "Auto Buy/Sell",
@@ -1737,15 +1770,18 @@ function balanceStatusClass(status) {
           target: "slow-section",
         },
         {
-          title: "Market Maker",
-          status: mmStatus,
-          summary: mmPlan
-            ? `${mmPlan.exchange || "--"} ${mmPlan.symbol || "--"}`
-            : `${marketMakerInstances(mm).length || 0} instance(s)`,
-          detail: mmPlan
-            ? `mid ${fmt.format(mmPlan.mid_price)} · ${mmQuote} · open ${mmRuntime.open_order_count || 0}`
-            : marketMakerStatusReason(mm) || "Open to edit ladder and risk",
-          target: "mm-section",
+          title: "Spot Arbitrage",
+          status: spot.status || "disabled",
+          summary: `${spot.mode || "dry_run"} · ${spot.status || "disabled"}`,
+          detail: `${spotOpportunities} ${uiText("active opportunity(s)")}`,
+          target: "spot-arbitrage-section",
+        },
+        {
+          title: "Risk Controls",
+          status: risk.allow_live_trading ? "live" : "blocked",
+          summary: risk.allow_live_trading ? "Live trading allowed" : "Live trading blocked",
+          detail: `max/order USD ${money.format(risk.max_order_quote || 0)} · exposure USD ${money.format(risk.max_exposure_quote || 0)} · max open ${risk.max_open_orders || 0}`,
+          target: "risk-section",
         },
       ];
       for (const card of cards) body.appendChild(renderStrategySettingsCard(card));
@@ -2427,7 +2463,7 @@ function balanceStatusClass(status) {
     function scheduleUserBacktestPoll(active) {
       if (userBacktestPollTimer) clearTimeout(userBacktestPollTimer);
       userBacktestPollTimer = null;
-      if (!active || currentPage !== "settings" || !isSectionOpenFor("backtest-points")) return;
+      if (!active || currentPage !== "quant" || !isSectionOpenFor("backtest-points")) return;
       userBacktestPollTimer = setTimeout(() => {
         loadUserBacktests({ runId: selectedBacktestRunId, force: true });
       }, 2000);
@@ -2476,7 +2512,7 @@ function balanceStatusClass(status) {
     async function loadUserBacktests({ runId = "", force = false } = {}) {
       if (userBacktestLoadBusy) return;
       if (!force && Date.now() - userBacktestLastLoadedAt < 3000) return;
-      if (currentPage !== "settings" || !isSectionOpenFor("backtest-points")) return;
+      if (currentPage !== "quant" || !isSectionOpenFor("backtest-points")) return;
       userBacktestLoadBusy = true;
       try {
         const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
@@ -6376,17 +6412,9 @@ function balanceStatusClass(status) {
         return;
       }
       lastVisibleRenderAt[activePage] = now;
-      if (activePage === "settings") {
+      if (activePage === "trading") {
         if (Array.isArray(data.market_limits)) currentMarketLimits = data.market_limits;
-	        renderOpenSection("user-workspace-section", () => renderUserWorkspace(data.user_workspace));
         renderOpenSection("strategy-settings-cards", () => renderStrategySettingCards(data));
-        renderOpenSection("markets-config", () => renderMarketsConfig(data));
-        renderOpenSection("carry-config", () => renderCashCarryConfig(data));
-        renderOpenSection("risk-form", () => renderRiskControls(data.operations || { risk: data.config?.risk }, data.trading_console));
-        renderOpenSection("strategy-instances", () => renderStrategyCenter(data.strategy_center));
-        renderOpenSection("api-accounts", () => renderApiAccountsPanel(data.strategy_center));
-        renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
-        renderOpenSection("signal-bot-form", () => renderSignalBotPanel(data.strategy_center));
         renderOpenSection("mm-orders", () => {
           renderMarketMakerConfig(data.market_maker);
           renderMarketMakerSafety(data.market_maker);
@@ -6397,6 +6425,14 @@ function balanceStatusClass(status) {
           renderSlowExecution(data.slow_execution);
           renderSlowExecutionTasks(data.slow_execution?.tasks, data.slow_execution?.config);
         });
+        renderOpenSection("markets-config", () => renderMarketsConfig(data));
+        finishVisiblePageRender();
+        return;
+      }
+      if (activePage === "quant") {
+        renderOpenSection("carry-config", () => renderCashCarryConfig(data));
+        renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
+        renderOpenSection("signal-bot-form", () => renderSignalBotPanel(data.strategy_center));
         renderOpenSection("grid-orders", () => {
           renderSpotGridConfig(data.spot_grid?.config, data.spot_grid?.accounts);
           renderSpotGrid(data.spot_grid);
@@ -6415,6 +6451,18 @@ function balanceStatusClass(status) {
           else renderUserBacktests({ active_count: 0, runs: [], selected: null });
           loadUserBacktests();
         });
+        renderOpenSection("derivatives-risk", () => renderDerivativesRisk(data.derivatives));
+        renderOpenSection("funding-basis", () => renderFundingBasis(data.funding_basis));
+        renderOpenSection("contract-strategies", () => renderContractStrategies(data.contract_strategies));
+        renderOpenSection("options-arbitrage", () => renderOptionsArbitrage(data.options_arbitrage));
+        finishVisiblePageRender();
+        return;
+      }
+      if (activePage === "settings") {
+		        renderOpenSection("user-workspace-section", () => renderUserWorkspace(data.user_workspace));
+        renderOpenSection("risk-form", () => renderRiskControls(data.operations || { risk: data.config?.risk }, data.trading_console));
+        renderOpenSection("strategy-instances", () => renderStrategyCenter(data.strategy_center));
+        renderOpenSection("api-accounts", () => renderApiAccountsPanel(data.strategy_center));
         finishVisiblePageRender();
         return;
       }
@@ -6430,10 +6478,6 @@ function balanceStatusClass(status) {
       renderOpenSection("readiness-actions", () => renderReadiness(data.readiness, data.runtime_store));
       renderOpenSection("markets", () => renderMarkets(data.markets));
       renderOpenSection("account-balances", () => renderAccountBalances(data.account_balances));
-      renderOpenSection("derivatives-risk", () => renderDerivativesRisk(data.derivatives));
-      renderOpenSection("funding-basis", () => renderFundingBasis(data.funding_basis));
-      renderOpenSection("contract-strategies", () => renderContractStrategies(data.contract_strategies));
-      renderOpenSection("options-arbitrage", () => renderOptionsArbitrage(data.options_arbitrage));
       renderOpenSection("rates", () => renderRates(data.quote_rates));
       renderOpenSection("opportunities", () => renderOpportunities(data.opportunities));
       renderOpenSection("holders", () => renderHolders(data.onchain));
@@ -6451,7 +6495,7 @@ function balanceStatusClass(status) {
       try {
         const params = new URLSearchParams({ view: requestedPage });
         const sectionIds = openSectionIdsForPage(requestedPage);
-        if (sectionIds.length > 0) params.set("sections", sectionIds.join(","));
+        params.set("sections", sectionIds.join(","));
         const stateUrl = `/api/state?${params.toString()}`;
         const res = await fetchWithTimeout(stateUrl, { cache: "no-store" });
         if (res.status === 401) {
@@ -6535,7 +6579,7 @@ function balanceStatusClass(status) {
       const requestedPage = PAGE_IDS.has(currentPage) ? currentPage : "status";
       const params = new URLSearchParams({ view: requestedPage });
       const sectionIds = openSectionIdsForPage(requestedPage);
-      if (sectionIds.length > 0) params.set("sections", sectionIds.join(","));
+      params.set("sections", sectionIds.join(","));
       const baseIntervalMs = PAGE_REFRESH_INTERVAL_MS[requestedPage] || REFRESH_INTERVAL_MS;
       params.set("interval", String(baseIntervalMs / 1000));
       const key = params.toString();

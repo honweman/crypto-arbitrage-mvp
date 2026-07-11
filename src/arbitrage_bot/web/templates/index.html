@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20260711-backtest2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260711-pages4">
 
 </head>
 <body>
@@ -14,7 +14,9 @@
       <h1>Crypto Trading Dashboard</h1>
       <div class="subtle">Multi-asset arbitrage · market making · auto buy/sell</div>
       <nav class="view-nav" aria-label="Page views">
-        <a class="view-tab active" data-view-tab="status" href="#status">Status</a>
+        <a class="view-tab active" data-view-tab="status" href="#status">Monitor</a>
+        <a class="view-tab" data-view-tab="trading" href="#trading">Trading</a>
+        <a class="view-tab" data-view-tab="quant" href="#quant">Quant</a>
         <a class="view-tab" data-view-tab="settings" href="#settings">Settings</a>
         <a class="view-tab" data-view-tab="records" href="#records">Records</a>
       </nav>
@@ -43,6 +45,16 @@
   </header>
 
   <main>
+    <div id="trading-page-heading" class="page-heading" data-page="trading">
+      <h2>Core Trading</h2>
+      <span class="page-mode-badge guarded">Risk gated</span>
+    </div>
+
+    <div id="quant-page-heading" class="page-heading" data-page="quant">
+      <h2>Quant Strategies</h2>
+      <span class="page-mode-badge research">Paper by default</span>
+    </div>
+
     <div class="portfolio-bar" data-page="status">
       <div class="metric">
         <div class="label">Position</div>
@@ -326,9 +338,9 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="market_config" data-ui-hidden-default="true">
+    <section id="spot-arbitrage-section" data-page="trading" class="compact-section" data-ui-feature="market_config">
       <div class="section-title">
-        <h2>Markets</h2>
+        <h2>Spot Arbitrage</h2>
         <span id="markets-config-meta" class="subtle"></span>
       </div>
       <form id="markets-form" class="control-panel">
@@ -365,7 +377,7 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="cash_and_carry" data-ui-hidden-default="true">
+    <section id="cash-carry-section" data-page="quant" class="compact-section" data-ui-feature="cash_and_carry">
       <div class="section-title">
         <h2>Cash & Carry Pairs</h2>
         <span id="carry-config-meta" class="subtle"></span>
@@ -705,7 +717,7 @@
       </details>
     </section>
 
-    <section id="strategy-settings-section" data-page="settings" class="compact-section">
+    <section id="strategy-settings-section" data-page="trading" class="compact-section section-open">
       <div class="section-title">
         <h2>Strategy Settings</h2>
         <span id="strategy-settings-meta" class="subtle"></span>
@@ -787,16 +799,16 @@
           <label for="risk-max-price-jump">Max Jump Bps</label>
           <input id="risk-max-price-jump" type="number" min="0" step="any">
         </div>
-        <div class="form-divider" data-ui-feature="derivatives" data-ui-hidden-default="true">Derivatives</div>
-        <div class="field" data-ui-feature="derivatives" data-ui-hidden-default="true">
+        <div class="form-divider" data-ui-feature="derivatives">Derivatives</div>
+        <div class="field" data-ui-feature="derivatives">
           <label for="risk-max-derivative-leverage">Max Leverage</label>
           <input id="risk-max-derivative-leverage" type="number" min="0" step="any">
         </div>
-        <div class="field" data-ui-feature="derivatives" data-ui-hidden-default="true">
+        <div class="field" data-ui-feature="derivatives">
           <label for="risk-min-liquidation-buffer">Min Liq Buffer %</label>
           <input id="risk-min-liquidation-buffer" type="number" min="0" step="any">
         </div>
-        <div class="field" data-ui-feature="derivatives" data-ui-hidden-default="true">
+        <div class="field" data-ui-feature="derivatives">
           <label for="risk-max-margin-usage">Max Margin Used %</label>
           <input id="risk-max-margin-usage" type="number" min="0" step="any">
         </div>
@@ -969,7 +981,7 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="funding_arbitrage" data-ui-hidden-default="true">
+    <section id="funding-arbitrage-section" data-page="quant" class="compact-section" data-ui-feature="funding_arbitrage">
       <div class="section-title">
         <h2>Funding Arbitrage</h2>
         <span id="funding-arb-meta" class="subtle"></span>
@@ -1031,7 +1043,7 @@
       </form>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="signal_bot" data-ui-hidden-default="true">
+    <section id="signal-bot-section" data-page="quant" class="compact-section" data-ui-feature="signal_bot">
       <div class="section-title">
         <h2>Signal Bot</h2>
         <span id="signal-bot-meta" class="subtle"></span>
@@ -1085,7 +1097,7 @@
       </div>
     </section>
 
-    <section data-page="status" class="compact-section" data-ui-feature="derivatives" data-ui-hidden-default="true">
+    <section id="derivatives-section" data-page="quant" class="compact-section" data-ui-feature="derivatives">
       <div class="section-title">
         <h2>Derivatives Risk</h2>
         <span id="derivatives-risk-meta" class="subtle"></span>
@@ -1111,7 +1123,7 @@
       </div>
     </section>
 
-    <section data-page="status" class="compact-section" data-ui-feature="funding_basis cash_and_carry" data-ui-hidden-default="true">
+    <section id="funding-basis-section" data-page="quant" class="compact-section" data-ui-feature="funding_basis cash_and_carry">
       <div class="section-title">
         <h2>Funding / Basis</h2>
         <span id="funding-basis-meta" class="subtle"></span>
@@ -1135,7 +1147,7 @@
       </div>
     </section>
 
-    <section data-page="status" class="compact-section" data-ui-feature="contract_strategies derivatives" data-ui-hidden-default="true">
+    <section id="contract-strategies-section" data-page="quant" class="compact-section" data-ui-feature="contract_strategies derivatives">
       <div class="section-title">
         <h2>Contract Strategies</h2>
         <span id="contract-strategies-meta" class="subtle"></span>
@@ -1158,7 +1170,7 @@
       </div>
     </section>
 
-    <section data-page="status" class="compact-section" data-ui-feature="options_arbitrage derivatives" data-ui-hidden-default="true">
+    <section id="options-arbitrage-section" data-page="quant" class="compact-section" data-ui-feature="options_arbitrage derivatives">
       <div class="section-title">
         <h2>Options Arbitrage</h2>
         <span id="options-arbitrage-meta" class="subtle"></span>
@@ -1387,7 +1399,7 @@
       <div id="opportunities" class="feed"></div>
     </section>
 
-    <section id="slow-section" data-page="settings" class="compact-section">
+    <section id="slow-section" data-page="trading" class="compact-section">
       <div class="section-title">
         <h2>Auto Buy/Sell</h2>
         <span id="slow-meta" class="subtle"></span>
@@ -1523,7 +1535,7 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="spot_grid" data-ui-hidden-default="true">
+    <section id="spot-grid-section" data-page="quant" class="compact-section" data-ui-feature="spot_grid">
       <div class="section-title">
         <h2>Spot Grid</h2>
         <span id="grid-meta" class="subtle"></span>
@@ -1618,7 +1630,7 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="dca" data-ui-hidden-default="true">
+    <section id="dca-section" data-page="quant" class="compact-section" data-ui-feature="dca">
       <div class="section-title">
         <h2>DCA Bot</h2>
         <span id="dca-meta" class="subtle"></span>
@@ -1712,7 +1724,7 @@
       </div>
     </section>
 
-    <section data-page="settings" class="compact-section" data-ui-feature="execution_algo" data-ui-hidden-default="true">
+    <section id="execution-section" data-page="quant" class="compact-section" data-ui-feature="execution_algo">
       <div class="section-title">
         <h2>TWAP / VWAP / POV</h2>
         <span id="exec-meta" class="subtle"></span>
@@ -1823,7 +1835,7 @@
       </div>
     </section>
 
-    <section id="backtest-section" data-page="settings" class="compact-section" data-ui-feature="backtest">
+    <section id="backtest-section" data-page="quant" class="compact-section" data-ui-feature="backtest">
       <div class="section-title">
         <h2>Historical Backtest</h2>
         <span id="backtest-meta" class="subtle"></span>
@@ -1939,7 +1951,7 @@
       </details>
     </section>
 
-    <section id="mm-section" data-page="settings" class="compact-section">
+    <section id="mm-section" data-page="trading" class="compact-section">
       <div class="section-title">
         <h2>Market Maker</h2>
         <span id="mm-meta" class="subtle"></span>
@@ -2174,8 +2186,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260711-backtest2" defer></script>
-  <script src="/static/app.js?v=20260711-backtest2" defer></script>
+  <script src="/static/i18n.js?v=20260711-pages4" defer></script>
+  <script src="/static/app.js?v=20260711-pages4" defer></script>
 
 </body>
 </html>

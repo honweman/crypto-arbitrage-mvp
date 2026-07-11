@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 
-STATE_VIEW_IDS = {"status", "settings", "records"}
+STATE_VIEW_IDS = {"status", "trading", "quant", "settings", "records"}
 
 
 def _section_set(sections: Iterable[str] | str | None) -> set[str] | None:
@@ -568,6 +568,8 @@ def state_payload_for_view(
         return payload
 
     is_status = view == "status"
+    is_trading = view == "trading"
+    is_quant = view == "quant"
     is_settings = view == "settings"
     is_records = view == "records"
     section_ids = _section_set(sections)
@@ -575,19 +577,19 @@ def state_payload_for_view(
         section_ids,
         "account-balances",
     )
-    status_derivatives_full = is_status and _section_open(
+    quant_derivatives_full = is_quant and _section_open(
         section_ids,
         "derivatives-risk",
     )
-    status_funding_basis_full = is_status and _section_open(
+    quant_funding_basis_full = is_quant and _section_open(
         section_ids,
         "funding-basis",
     )
-    status_options_full = is_status and _section_open(
+    quant_options_full = is_quant and _section_open(
         section_ids,
         "options-arbitrage",
     )
-    status_contracts_full = is_status and _section_open(
+    quant_contracts_full = is_quant and _section_open(
         section_ids,
         "contract-strategies",
     )
@@ -598,24 +600,25 @@ def state_payload_for_view(
         "readiness-actions",
     )
 
-    config_full = is_settings and _section_open(
-        section_ids,
-        "markets-config",
-        "carry-config",
-        "strategy-instances",
+    config_full = (
+        is_trading and _section_open(section_ids, "markets-config")
+    ) or (
+        is_quant and _section_open(section_ids, "carry-config")
+    ) or (
+        is_settings and _section_open(section_ids, "strategy-instances")
     )
-    market_maker_full = is_settings and _section_open(section_ids, "mm-orders")
-    slow_execution_full = is_settings and _section_open(section_ids, "slow-orders")
-    spot_grid_full = is_settings and _section_open(section_ids, "grid-orders")
-    dca_full = is_settings and _section_open(section_ids, "dca-orders")
-    execution_algo_full = is_settings and _section_open(section_ids, "exec-schedule")
-    backtest_full = is_settings and _section_open(section_ids, "backtest-points")
-    strategy_center_full = is_settings and _section_open(
-        section_ids,
-        "strategy-instances",
-        "api-accounts",
-        "funding-arb-form",
-        "signal-bot-form",
+    market_maker_full = is_trading and _section_open(section_ids, "mm-orders")
+    slow_execution_full = is_trading and _section_open(section_ids, "slow-orders")
+    spot_grid_full = is_quant and _section_open(section_ids, "grid-orders")
+    dca_full = is_quant and _section_open(section_ids, "dca-orders")
+    execution_algo_full = is_quant and _section_open(section_ids, "exec-schedule")
+    backtest_full = is_quant and _section_open(section_ids, "backtest-points")
+    strategy_center_full = (
+        is_settings
+        and _section_open(section_ids, "strategy-instances", "api-accounts")
+    ) or (
+        is_quant
+        and _section_open(section_ids, "funding-arb-form", "signal-bot-form")
     )
     operations_full = is_records and _section_open(
         section_ids,
@@ -694,15 +697,15 @@ def state_payload_for_view(
         ),
         "funding_basis": _compact_funding_basis_payload(
             payload.get("funding_basis", {}),
-            full=status_funding_basis_full,
+            full=quant_funding_basis_full,
         ),
         "options_arbitrage": _compact_options_arbitrage_payload(
             payload.get("options_arbitrage", {}),
-            full=status_options_full,
+            full=quant_options_full,
         ),
         "contract_strategies": _compact_contract_strategies_payload(
             payload.get("contract_strategies", {}),
-            full=status_contracts_full,
+            full=quant_contracts_full,
         ),
         "execution_protection": _compact_execution_protection_payload(
             payload.get("execution_protection", {}),
@@ -729,22 +732,23 @@ def state_payload_for_view(
                     payload.get("account_balances", {}),
                     full=status_account_balances_full,
                 ),
-                "derivatives": _compact_derivatives_payload(
-                    payload.get("derivatives", {}),
-                    full=status_derivatives_full,
-                ),
                 "readiness": payload.get("readiness", {})
                 if status_readiness_full
                 else {},
                 "runtime_store": payload.get("runtime_store", {}),
             }
         )
+    elif is_quant:
+        result["derivatives"] = _compact_derivatives_payload(
+            payload.get("derivatives", {}),
+            full=quant_derivatives_full,
+        )
     elif is_settings and _section_open(section_ids, "risk-form"):
         result["trading_console"] = payload.get("trading_console", {})
     elif is_records:
         result["trading_console"] = payload.get("trading_console", {})
 
-    if is_settings and _section_open(section_ids, "markets-config", "slow-orders"):
+    if is_trading and _section_open(section_ids, "markets-config", "slow-orders"):
         result["market_limits"] = _compact_market_limits_payload(
             payload.get("account_balances", {}),
         )
@@ -758,11 +762,11 @@ def strategy_center_payload_for_view(
     sections: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     section_ids = _section_set(sections)
-    full = view == "settings" and _section_open(
-        section_ids,
-        "strategy-instances",
-        "api-accounts",
-        "funding-arb-form",
-        "signal-bot-form",
+    full = (
+        view == "settings"
+        and _section_open(section_ids, "strategy-instances", "api-accounts")
+    ) or (
+        view == "quant"
+        and _section_open(section_ids, "funding-arb-form", "signal-bot-form")
     )
     return _compact_strategy_center_payload(strategy_center, full=full)

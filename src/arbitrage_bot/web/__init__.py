@@ -4639,7 +4639,13 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         view=view,
         sections=sections,
     )
-    if view in (None, "settings"):
+    quant_sections = {
+        item.strip() for item in str(sections or "").split(",") if item.strip()
+    }
+    if view in (None, "settings") or (
+        view == "quant"
+        and (sections is None or "backtest-points" in quant_sections)
+    ):
         payload["user_workspace"] = build_user_workspace_payload(
             _user_workspace_store(request),
             user=requesting_user,
