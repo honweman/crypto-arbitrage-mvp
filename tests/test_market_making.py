@@ -848,8 +848,8 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
                 "id": f"old-mm-{index}",
                 "side": order.side,
                 "price": prepared["price"],
-                "amount": prepared["amount"],
-                "remaining": prepared["amount"],
+                "amount": order.quote_notional / float(prepared["price"]),
+                "remaining": order.quote_notional / float(prepared["price"]),
             }
             for index, (order, prepared) in enumerate(
                 zip(plan.orders, prepared_orders),

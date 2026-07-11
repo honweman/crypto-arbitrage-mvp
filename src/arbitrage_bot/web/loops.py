@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable
 from dataclasses import replace
 from typing import Any
 
@@ -2690,18 +2691,22 @@ async def _market_maker_instance_task_loop(
                     existing_open_orders_for_cycle = (
                         None if force_replace else open_order_snapshot.get("open_orders")
                     )
-                    payload = await run_market_maker_cycle(
-                        runtime_cfg,
-                        manager,
-                        live=True,
-                        replace_existing=False,
-                        replace_order_ids=open_order_ids,
-                        previous_plan=previous_plan_for_cycle,
-                        existing_open_orders=existing_open_orders_for_cycle,
-                        previous_mid_price=previous_mid_price,
-                        last_cancel_at=last_cancel_at,
-                        order_book=order_book,
-                        inventory_base=inventory_base,
+                    payload, shutdown_requested = (
+                        await _complete_market_maker_cycle_on_shutdown(
+                            run_market_maker_cycle(
+                                runtime_cfg,
+                                manager,
+                                live=True,
+                                replace_existing=False,
+                                replace_order_ids=open_order_ids,
+                                previous_plan=previous_plan_for_cycle,
+                                existing_open_orders=existing_open_orders_for_cycle,
+                                previous_mid_price=previous_mid_price,
+                                last_cancel_at=last_cancel_at,
+                                order_book=order_book,
+                                inventory_base=inventory_base,
+                            )
+                        )
                     )
                     if force_replace:
                         payload["force_replace_reason"] = force_replace_reason
@@ -2783,6 +2788,8 @@ async def _market_maker_instance_task_loop(
                         "updated_at": time.time(),
                     }
                     await state.set_market_maker_instance_runtime(instance_id, runtime)
+                    if shutdown_requested:
+                        raise asyncio.CancelledError
             except Exception as exc:  # noqa: BLE001
                 runtime = {
                     **runtime,
@@ -2799,6 +2806,17 @@ async def _market_maker_instance_task_loop(
     finally:
         await orderbook_cache.close()
         await manager.close()
+
+
+async def _complete_market_maker_cycle_on_shutdown(
+    cycle: Awaitable[dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    """Finish an in-flight cancel/replace cycle before honoring shutdown."""
+    cycle_task = asyncio.ensure_future(cycle)
+    try:
+        return await asyncio.shield(cycle_task), False
+    except asyncio.CancelledError:
+        return await cycle_task, True
 
 
 async def market_maker_task_loop(
@@ -2871,6 +2889,7 @@ __all__ = [
     "_daily_report_due",
     "_market_maker_force_replace_reason",
     "_market_maker_order_sync_delta",
+    "_complete_market_maker_cycle_on_shutdown",
     "auto_buy_sell_task_loop",
     "build_daily_report_message",
     "market_maker_task_loop",

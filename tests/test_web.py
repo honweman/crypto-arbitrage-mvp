@@ -109,6 +109,7 @@ from arbitrage_bot.web import (
 )
 from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
+from arbitrage_bot.web.loops import _complete_market_maker_cycle_on_shutdown
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore, totp_code
 from arbitrage_bot.web_config import (
@@ -3668,6 +3669,29 @@ class CookieSecretTest(unittest.TestCase):
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_market_maker_cycle_finishes_before_shutdown(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def cycle() -> dict[str, object]:
+            started.set()
+            await release.wait()
+            return {"status": "placed"}
+
+        task = asyncio.create_task(
+            _complete_market_maker_cycle_on_shutdown(cycle())
+        )
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+
+        self.assertFalse(task.done())
+        release.set()
+        payload, shutdown_requested = await task
+
+        self.assertEqual(payload, {"status": "placed"})
+        self.assertTrue(shutdown_requested)
+
     async def test_login_lockout_after_repeated_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

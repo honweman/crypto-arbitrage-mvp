@@ -233,14 +233,18 @@ def _previous_plan_from_open_orders(
             return None
         side = str(raw.get("side") or "").lower()
         price = _number_or_none(raw.get("price"))
-        amount = _number_or_none(raw.get("remaining"))
-        if amount is None:
-            amount = _number_or_none(raw.get("amount"))
+        amount = _number_or_none(raw.get("amount"))
+        remaining = _number_or_none(raw.get("remaining"))
+        filled = _number_or_none(raw.get("filled"))
         if side not in open_by_side or price is None or price <= 0:
             return None
-        open_by_side[side].append(
-            {"side": side, "price": price, "amount": amount}
-        )
+        amount_tolerance = max(abs(amount or 0.0), 1.0) * 1e-10
+        if amount is not None and remaining is not None:
+            if abs(amount - remaining) > amount_tolerance:
+                return None
+        elif filled is not None and filled > amount_tolerance:
+            return None
+        open_by_side[side].append({"side": side, "price": price})
 
     previous_orders: list[dict[str, Any]] = []
     for side in ("buy", "sell"):
@@ -253,12 +257,6 @@ def _previous_plan_from_open_orders(
         if len(expected) != len(observed):
             return None
         for expected_order, observed_order in zip(expected, observed):
-            expected_amount = _number_or_none(expected_order.get("amount"))
-            observed_amount = _number_or_none(observed_order.get("amount"))
-            if expected_amount is not None and observed_amount is not None:
-                tolerance = max(abs(expected_amount), 1.0) * 1e-10
-                if abs(expected_amount - observed_amount) > tolerance:
-                    return None
             previous_orders.append(
                 {
                     "side": side,
