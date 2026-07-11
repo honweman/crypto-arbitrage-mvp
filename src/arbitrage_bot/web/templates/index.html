@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Trading Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260710-workspace5">
+  <link rel="stylesheet" href="/static/styles.css?v=20260711-user-strategy2">
 
 </head>
 <body>
@@ -498,6 +498,178 @@
             </tr>
           </thead>
           <tbody id="user-exchange-accounts"></tbody>
+        </table>
+      </div>
+
+      <div class="workspace-strategy-header">
+        <div>
+          <strong>User Strategies</strong>
+          <span id="user-strategy-meta" class="subtle"></span>
+        </div>
+        <button id="user-strategy-new" class="control-button" type="button">New Strategy</button>
+      </div>
+      <form id="user-strategy-form" class="control-panel" hidden>
+        <input id="user-strategy-id" type="hidden">
+        <div class="field">
+          <label for="user-strategy-project">Project</label>
+          <select id="user-strategy-project" required></select>
+        </div>
+        <div class="field">
+          <label for="user-strategy-name">Strategy Name</label>
+          <input id="user-strategy-name" type="text" maxlength="80" placeholder="ACS Coinbase MM" required>
+        </div>
+        <div class="field">
+          <label for="user-strategy-type">Strategy Type</label>
+          <select id="user-strategy-type" required></select>
+        </div>
+        <div class="field account-field">
+          <label>Exchange Accounts</label>
+          <div id="user-strategy-accounts" class="account-options"></div>
+          <span id="user-strategy-account-hint" class="field-hint"></span>
+        </div>
+        <label class="check-field">
+          <input id="user-strategy-enabled" type="checkbox">
+          Paper Enabled
+        </label>
+
+        <div class="form-divider">Strategy Parameters</div>
+        <div class="field" data-user-strategy-types="market_maker">
+          <label for="user-strategy-mm-levels">Levels / Side</label>
+          <input id="user-strategy-mm-levels" type="number" min="1" max="50" step="1">
+        </div>
+        <div class="field" data-user-strategy-types="market_maker">
+          <label for="user-strategy-mm-band">Price Band %</label>
+          <input id="user-strategy-mm-band" type="number" min="0.01" max="50" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="market_maker">
+          <label for="user-strategy-mm-quote">Quote / Level</label>
+          <input id="user-strategy-mm-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="market_maker">
+          <label for="user-strategy-mm-refresh">Refresh Seconds</label>
+          <input id="user-strategy-mm-refresh" type="number" min="1" step="any">
+        </div>
+        <label class="check-field" data-user-strategy-types="market_maker">
+          <input id="user-strategy-mm-post-only" type="checkbox">
+          Post Only
+        </label>
+
+        <div class="field" data-user-strategy-types="auto_buy_sell dca">
+          <label for="user-strategy-side">Side</label>
+          <select id="user-strategy-side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="field" data-user-strategy-types="auto_buy_sell dca">
+          <label for="user-strategy-total-quote">Total Quote</label>
+          <input id="user-strategy-total-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="auto_buy_sell dca">
+          <label for="user-strategy-order-quote">Quote / Order</label>
+          <input id="user-strategy-order-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="auto_buy_sell dca">
+          <label for="user-strategy-interval">Interval Seconds</label>
+          <input id="user-strategy-interval" type="number" min="1" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="auto_buy_sell">
+          <label for="user-strategy-start-price">Start Price</label>
+          <input id="user-strategy-start-price" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="auto_buy_sell">
+          <label for="user-strategy-stop-price">Stop Price</label>
+          <input id="user-strategy-stop-price" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="dca">
+          <label for="user-strategy-trigger-price">Trigger Price</label>
+          <input id="user-strategy-trigger-price" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="dca">
+          <label for="user-strategy-take-profit">Take Profit %</label>
+          <input id="user-strategy-take-profit" type="number" min="0" step="any">
+        </div>
+
+        <div class="field" data-user-strategy-types="spot_grid">
+          <label for="user-strategy-grid-lower">Lower Price</label>
+          <input id="user-strategy-grid-lower" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="spot_grid">
+          <label for="user-strategy-grid-upper">Upper Price</label>
+          <input id="user-strategy-grid-upper" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="spot_grid">
+          <label for="user-strategy-grid-count">Grid Count</label>
+          <input id="user-strategy-grid-count" type="number" min="2" max="200" step="1">
+        </div>
+        <div class="field" data-user-strategy-types="spot_grid">
+          <label for="user-strategy-grid-quote">Quote / Grid</label>
+          <input id="user-strategy-grid-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="spot_grid">
+          <label for="user-strategy-grid-spacing">Spacing</label>
+          <select id="user-strategy-grid-spacing">
+            <option value="arithmetic">Arithmetic</option>
+            <option value="geometric">Geometric</option>
+          </select>
+        </div>
+
+        <div class="field" data-user-strategy-types="spot_spread">
+          <label for="user-strategy-profit-bps">Min Profit Bps</label>
+          <input id="user-strategy-profit-bps" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="spot_spread">
+          <label for="user-strategy-cycle-quote">Max Cycle Quote</label>
+          <input id="user-strategy-cycle-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="spot_spread">
+          <label for="user-strategy-scan-seconds">Scan Seconds</label>
+          <input id="user-strategy-scan-seconds" type="number" min="0.1" step="any">
+        </div>
+
+        <div class="form-divider">Safety Limits</div>
+        <div class="field">
+          <label for="user-strategy-risk-order">Max Order Quote</label>
+          <input id="user-strategy-risk-order" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="user-strategy-risk-total">Max Total Quote</label>
+          <input id="user-strategy-risk-total" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="user-strategy-risk-loss">Max Daily Loss</label>
+          <input id="user-strategy-risk-loss" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="user-strategy-risk-orders">Max Open Orders</label>
+          <input id="user-strategy-risk-orders" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="user-strategy-risk-slippage">Max Slippage Bps</label>
+          <input id="user-strategy-risk-slippage" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="user-strategy-risk-book-age">Max Book Age Sec</label>
+          <input id="user-strategy-risk-book-age" type="number" min="0" step="any">
+        </div>
+        <div class="subtle wide-field">Paper mode only. This strategy cannot place or cancel live orders.</div>
+        <button id="user-strategy-save" class="control-button" type="submit">Save Strategy</button>
+        <button id="user-strategy-cancel" class="ghost-button" type="button">Close</button>
+      </form>
+      <div class="table-wrap stacked-table">
+        <table class="mobile-card-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Project</th>
+              <th>Accounts</th>
+              <th>Budget</th>
+              <th>Status</th>
+              <th>Mode</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="user-strategies"></tbody>
         </table>
       </div>
     </section>
@@ -1944,8 +2116,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260710-workspace5" defer></script>
-  <script src="/static/app.js?v=20260710-workspace5" defer></script>
+  <script src="/static/i18n.js?v=20260711-user-strategy2" defer></script>
+  <script src="/static/app.js?v=20260711-user-strategy2" defer></script>
 
 </body>
 </html>

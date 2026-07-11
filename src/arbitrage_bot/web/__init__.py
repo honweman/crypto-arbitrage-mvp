@@ -160,6 +160,7 @@ from ..user_account_check import (
     WorkspaceAccountCheckService,
     WorkspaceMarketDiscoveryService,
 )
+from ..user_strategies import UserStrategy
 from ..user_workspace import (
     UserExchangeAccount,
     UserProject,
@@ -2634,13 +2635,19 @@ def build_user_workspace_payload(
             "status": "user_account_required",
             "projects": [],
             "accounts": [],
+            "strategies": [],
             "exchange_catalog": [],
+            "strategy_catalog": [],
             "vault_available": store.cipher.available,
             "summary": {
                 "project_count": 0,
                 "pending_project_count": 0,
                 "account_count": 0,
                 "configured_account_count": 0,
+                "strategy_count": 0,
+                "enabled_strategy_count": 0,
+                "ready_strategy_count": 0,
+                "blocked_strategy_count": 0,
             },
         }
     try:
@@ -2654,13 +2661,19 @@ def build_user_workspace_payload(
             "error": str(exc),
             "projects": [],
             "accounts": [],
+            "strategies": [],
             "exchange_catalog": [],
+            "strategy_catalog": [],
             "vault_available": store.cipher.available,
             "summary": {
                 "project_count": 0,
                 "pending_project_count": 0,
                 "account_count": 0,
                 "configured_account_count": 0,
+                "strategy_count": 0,
+                "enabled_strategy_count": 0,
+                "ready_strategy_count": 0,
+                "blocked_strategy_count": 0,
             },
         }
 
@@ -6248,6 +6261,90 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 "error": account.connection_error,
             }
             response_extra = {"connection_test": check_result}
+        elif action == "upsert_strategy":
+            raw = dict(
+                payload.get("strategy")
+                if isinstance(payload.get("strategy"), dict)
+                else payload
+            )
+            strategy_id = str(raw.get("id") or "").strip()
+            existing = store.get_strategy(strategy_id) if strategy_id else None
+            if existing is not None:
+                _require_owner_or_admin(user, existing.owner_email)
+                base = existing.to_dict()
+                base.update(raw)
+                raw = base
+            project_id = str(raw.get("project_id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            owner = _workspace_owner(
+                raw,
+                user=user,
+                existing_owner=(
+                    existing.owner_email if existing else project.owner_email
+                ),
+            )
+            if owner != project.owner_email:
+                raise ValueError("project and strategy owners must match")
+            raw["owner_email"] = owner
+            raw["mode"] = "paper"
+            strategy = UserStrategy.from_dict(raw)
+            _require_user_assets(user, [project.asset])
+            if strategy.enabled:
+                readiness = store.strategy_readiness(strategy)
+                if not readiness["ready"]:
+                    raise ValueError(
+                        "strategy cannot be enabled: "
+                        + "; ".join(readiness["blockers"])
+                    )
+            strategy = store.upsert_strategy(strategy)
+            audit_target = strategy.id
+            audit_detail = f"saved paper strategy {strategy.name}"
+            audit_payload = strategy.to_dict()
+        elif action == "set_strategy_enabled":
+            strategy_id = str(
+                payload.get("strategy_id") or payload.get("id") or ""
+            ).strip()
+            strategy = store.get_strategy(strategy_id)
+            if strategy is None:
+                raise ValueError(f"strategy not found: {strategy_id}")
+            _require_owner_or_admin(user, strategy.owner_email)
+            enabled = payload.get("enabled")
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be true or false")
+            updated = replace(strategy, enabled=enabled)
+            if enabled:
+                readiness = store.strategy_readiness(updated)
+                if not readiness["ready"]:
+                    raise ValueError(
+                        "strategy cannot be enabled: "
+                        + "; ".join(readiness["blockers"])
+                    )
+            strategy = store.upsert_strategy(updated)
+            audit_target = strategy.id
+            audit_detail = (
+                f"{'resumed' if enabled else 'paused'} paper strategy "
+                f"{strategy.name}"
+            )
+            audit_payload = {
+                "strategy_id": strategy.id,
+                "enabled": strategy.enabled,
+                "mode": "paper",
+            }
+        elif action == "delete_strategy":
+            strategy_id = str(
+                payload.get("strategy_id") or payload.get("id") or ""
+            ).strip()
+            strategy = store.get_strategy(strategy_id)
+            if strategy is None:
+                raise ValueError(f"strategy not found: {strategy_id}")
+            _require_owner_or_admin(user, strategy.owner_email)
+            store.delete_strategy(strategy.id)
+            audit_target = strategy.id
+            audit_detail = f"deleted paper strategy {strategy.name}"
+            audit_payload = {"strategy_id": strategy.id, "mode": "paper"}
         elif action == "delete_account":
             account_id = str(payload.get("account_id") or payload.get("id") or "").strip()
             account = store.get_account(account_id)

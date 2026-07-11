@@ -15,6 +15,13 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .user_strategies import (
+    USER_STRATEGY_DEFINITIONS,
+    UserStrategy,
+    strategy_parameter_blockers,
+    user_strategy_catalog,
+)
+
 
 PROJECT_STATUSES = {"pending", "active", "disabled"}
 MARKET_TYPES = {"spot", "swap", "future"}
@@ -100,6 +107,14 @@ def _clean_email(value: Any) -> str:
 
 def _clean_text(value: Any, *, max_length: int = 80) -> str:
     return str(value or "").strip()[:max_length]
+
+
+def _strict_bool(value: Any, *, label: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be true or false")
+    return value
 
 
 def _clean_asset(value: Any, *, label: str) -> str:
@@ -228,9 +243,15 @@ class UserExchangeAccount:
             market_type=market_type,
             api_variant=api_variant,
             symbol=_clean_symbol(raw.get("symbol")),
-            enabled=bool(raw.get("enabled", False)),
-            withdrawal_disabled_confirmed=bool(
-                raw.get("withdrawal_disabled_confirmed", False)
+            enabled=_strict_bool(
+                raw.get("enabled"),
+                label="account enabled",
+                default=False,
+            ),
+            withdrawal_disabled_confirmed=_strict_bool(
+                raw.get("withdrawal_disabled_confirmed"),
+                label="withdrawal-disabled confirmation",
+                default=False,
             ),
             connection_status=connection_status,
             connection_checked_at=(
@@ -399,6 +420,18 @@ class UserWorkspaceStore:
                     ON user_exchange_accounts(owner_email);
                 CREATE INDEX IF NOT EXISTS idx_user_exchange_accounts_project
                     ON user_exchange_accounts(project_id);
+                CREATE TABLE IF NOT EXISTS user_strategies (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    strategy_type TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_strategies_owner
+                    ON user_strategies(owner_email);
+                CREATE INDEX IF NOT EXISTS idx_user_strategies_project
+                    ON user_strategies(project_id);
                 CREATE TABLE IF NOT EXISTS user_api_credentials (
                     account_id TEXT PRIMARY KEY,
                     owner_email TEXT NOT NULL,
@@ -515,6 +548,23 @@ class UserWorkspaceStore:
             connection.commit()
         return accounts
 
+    def list_strategies(
+        self,
+        *,
+        owner_email: str,
+        is_admin: bool,
+    ) -> list[UserStrategy]:
+        self._ensure()
+        where, params = self._scope_sql(owner_email, is_admin)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM user_strategies"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+        return [UserStrategy.from_dict(json.loads(row["payload"])) for row in rows]
+
     def get_project(self, project_id: str) -> UserProject | None:
         self._ensure()
         with self._connect() as connection:
@@ -541,6 +591,15 @@ class UserWorkspaceStore:
             connection.commit()
         return account
 
+    def get_strategy(self, strategy_id: str) -> UserStrategy | None:
+        self._ensure()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_strategies WHERE id = ?",
+                (strategy_id,),
+            ).fetchone()
+        return UserStrategy.from_dict(json.loads(row["payload"])) if row else None
+
     def _disable_stale_accounts_in_connection(
         self,
         connection: sqlite3.Connection,
@@ -561,12 +620,27 @@ class UserWorkspaceStore:
                 """,
                 (updated.updated_at, self._dump(updated.to_dict()), updated.id),
             )
+            self._disable_account_strategies_in_connection(connection, updated.id)
             result.append(updated)
         return result
 
     def upsert_project(self, project: UserProject) -> UserProject:
         self._ensure()
-        updated = replace(project, updated_at=_now())
+        existing = self.get_project(project.id)
+        if existing is not None and existing.owner_email != project.owner_email:
+            raise ValueError("project owner cannot be changed")
+        scope_changed = bool(
+            existing is not None
+            and (
+                existing.asset != project.asset
+                or existing.quote_currency != project.quote_currency
+            )
+        )
+        updated = replace(
+            project,
+            created_at=existing.created_at if existing is not None else project.created_at,
+            updated_at=_now(),
+        )
         with self._connect() as connection:
             connection.execute(
                 """
@@ -583,8 +657,12 @@ class UserWorkspaceStore:
                     self._dump(updated.to_dict()),
                 ),
             )
-            if updated.status != "active":
+            if updated.status != "active" or scope_changed:
                 self._disable_project_accounts_in_connection(
+                    connection,
+                    updated.id,
+                )
+                self._disable_project_strategies_in_connection(
                     connection,
                     updated.id,
                 )
@@ -625,6 +703,68 @@ class UserWorkspaceStore:
             changed += 1
         return changed
 
+    def _disable_project_strategies_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        project_id: str,
+    ) -> int:
+        changed = 0
+        rows = connection.execute(
+            "SELECT payload FROM user_strategies WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+        for row in rows:
+            strategy = UserStrategy.from_dict(json.loads(row["payload"]))
+            if not strategy.enabled:
+                continue
+            updated = replace(strategy, enabled=False, updated_at=_now())
+            connection.execute(
+                """
+                UPDATE user_strategies
+                SET updated_at = ?, payload = ?
+                WHERE id = ?
+                """,
+                (updated.updated_at, self._dump(updated.to_dict()), updated.id),
+            )
+            changed += 1
+        return changed
+
+    def _disable_account_strategies_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        account_id: str,
+    ) -> int:
+        changed = 0
+        rows = connection.execute("SELECT payload FROM user_strategies").fetchall()
+        for row in rows:
+            strategy = UserStrategy.from_dict(json.loads(row["payload"]))
+            if not strategy.enabled or account_id not in strategy.account_ids:
+                continue
+            updated = replace(strategy, enabled=False, updated_at=_now())
+            connection.execute(
+                """
+                UPDATE user_strategies
+                SET updated_at = ?, payload = ?
+                WHERE id = ?
+                """,
+                (updated.updated_at, self._dump(updated.to_dict()), updated.id),
+            )
+            changed += 1
+        return changed
+
+    @staticmethod
+    def _strategies_using_account_in_connection(
+        connection: sqlite3.Connection,
+        account_id: str,
+    ) -> list[UserStrategy]:
+        rows = connection.execute("SELECT payload FROM user_strategies").fetchall()
+        return [
+            strategy
+            for row in rows
+            for strategy in [UserStrategy.from_dict(json.loads(row["payload"]))]
+            if account_id in strategy.account_ids
+        ]
+
     def disable_project_accounts(self, project_id: str) -> int:
         """Disable every account under a project without touching credentials."""
         self._ensure()
@@ -639,6 +779,12 @@ class UserWorkspaceStore:
     def delete_project(self, project_id: str) -> None:
         self._ensure()
         with self._connect() as connection:
+            strategy_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM user_strategies WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()["count"]
+            if strategy_count:
+                raise ValueError("delete project strategies first")
             count = connection.execute(
                 "SELECT COUNT(*) AS count FROM user_exchange_accounts WHERE project_id = ?",
                 (project_id,),
@@ -681,9 +827,59 @@ class UserWorkspaceStore:
             raise ValueError(f"project not found: {account.project_id}")
         if project.owner_email != account.owner_email:
             raise ValueError("project and exchange account owners must match")
-        updated = replace(account, updated_at=_now())
         supplied = self._clean_credentials(credentials)
+        existing = self.get_account(account.id)
+        if existing is not None and existing.owner_email != account.owner_email:
+            raise ValueError("exchange account owner cannot be changed")
+        if not account.symbol:
+            account = replace(account, symbol=project.symbol)
+        if account.symbol.split("/", 1)[0] != project.asset:
+            raise ValueError(
+                f"account symbol base must match project asset {project.asset}"
+            )
+        exchange_changed = bool(
+            existing is not None and existing.exchange != account.exchange
+        )
+        if exchange_changed:
+            required = set(EXCHANGES_BY_ID[account.exchange]["required_credentials"])
+            missing = sorted(required.difference(supplied))
+            if missing:
+                raise ValueError("re-enter API key and secret when changing exchange")
+            replace_credentials = True
+        connection_changed = bool(
+            existing is None
+            or (
+                supplied
+                or existing.project_id != account.project_id
+                or existing.exchange != account.exchange
+                or existing.market_type != account.market_type
+                or existing.api_variant != account.api_variant
+                or existing.symbol != account.symbol
+            )
+        )
+        updated = replace(
+            account,
+            created_at=existing.created_at if existing is not None else account.created_at,
+            updated_at=_now(),
+        )
+        if connection_changed:
+            updated = replace(
+                updated,
+                enabled=False,
+                connection_status="unverified",
+                connection_checked_at=None,
+                connection_error="",
+            )
         with self._connect() as connection:
+            if existing is not None and existing.project_id != updated.project_id:
+                referenced_by = self._strategies_using_account_in_connection(
+                    connection,
+                    updated.id,
+                )
+                if referenced_by:
+                    raise ValueError(
+                        "remove the account from its strategies before changing project"
+                    )
             existing_credential = self._credential_row(connection, account.id)
             merged_credentials: dict[str, str] = {}
             if supplied:
@@ -723,6 +919,32 @@ class UserWorkspaceStore:
                         updated.updated_at,
                     ),
                 )
+            configured_fields = set(merged_credentials)
+            if not configured_fields and existing_credential is not None:
+                configured_fields = set(
+                    json.loads(existing_credential["fields"]).get("fields") or []
+                )
+            if updated.enabled:
+                if project.status != "active":
+                    raise ValueError("project must be active before enabling account")
+                if not updated.withdrawal_disabled_confirmed:
+                    raise ValueError(
+                        "confirm that API withdrawal permission is disabled"
+                    )
+                if not self.cipher.available:
+                    raise RuntimeError("credential encryption is not configured")
+                required = set(
+                    EXCHANGES_BY_ID[updated.exchange]["required_credentials"]
+                )
+                missing = sorted(required.difference(configured_fields))
+                if missing:
+                    raise ValueError(
+                        "configure required API credentials before enabling account"
+                    )
+                if not account_connection_is_fresh(updated):
+                    raise ValueError(
+                        "run a successful account connection test before enabling"
+                    )
             connection.execute(
                 """
                 INSERT OR REPLACE INTO user_exchange_accounts(
@@ -738,6 +960,11 @@ class UserWorkspaceStore:
                     self._dump(updated.to_dict()),
                 ),
             )
+            if not updated.enabled:
+                self._disable_account_strategies_in_connection(
+                    connection,
+                    updated.id,
+                )
             connection.commit()
         return updated
 
@@ -762,6 +989,132 @@ class UserWorkspaceStore:
             connection_error=_clean_text(error, max_length=240),
         )
         return self.upsert_account(updated)
+
+    def upsert_strategy(self, strategy: UserStrategy) -> UserStrategy:
+        self._ensure()
+        existing = self.get_strategy(strategy.id)
+        if existing is not None and existing.owner_email != strategy.owner_email:
+            raise ValueError("strategy owner cannot be changed")
+        project = self.get_project(strategy.project_id)
+        if project is None:
+            raise ValueError(f"project not found: {strategy.project_id}")
+        if project.owner_email != strategy.owner_email:
+            raise ValueError("project and strategy owners must match")
+        for account_id in strategy.account_ids:
+            account = self.get_account(account_id)
+            if account is None:
+                raise ValueError(f"exchange account not found: {account_id}")
+            if account.owner_email != strategy.owner_email:
+                raise ValueError("strategy and exchange account owners must match")
+            if account.project_id != strategy.project_id:
+                raise ValueError("strategy accounts must belong to the selected project")
+        updated = replace(
+            strategy,
+            created_at=(
+                existing.created_at if existing is not None else strategy.created_at
+            ),
+            updated_at=_now(),
+        )
+        if updated.enabled:
+            readiness = self.strategy_readiness(updated)
+            if not readiness["ready"]:
+                raise ValueError(
+                    "strategy cannot be enabled: "
+                    + "; ".join(readiness["blockers"])
+                )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO user_strategies(
+                    id, owner_email, project_id, strategy_type, updated_at, payload
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    updated.id,
+                    updated.owner_email,
+                    updated.project_id,
+                    updated.strategy_type,
+                    updated.updated_at,
+                    self._dump(updated.to_dict()),
+                ),
+            )
+            connection.commit()
+        return updated
+
+    def strategy_readiness(self, strategy: UserStrategy) -> dict[str, Any]:
+        blockers = list(strategy_parameter_blockers(strategy))
+        warnings = ["paper mode only; live order submission is disabled"]
+        project = self.get_project(strategy.project_id)
+        definition = USER_STRATEGY_DEFINITIONS[strategy.strategy_type]
+        if project is None:
+            blockers.append("project is unavailable")
+        elif project.status != "active":
+            blockers.append("project is not active")
+        elif project.owner_email != strategy.owner_email:
+            blockers.append("project owner does not match strategy owner")
+
+        account_count = len(strategy.account_ids)
+        if account_count < int(definition["min_accounts"]):
+            blockers.append(
+                f"{strategy.strategy_type} requires at least "
+                f"{definition['min_accounts']} account(s)"
+            )
+        if account_count > int(definition["max_accounts"]):
+            blockers.append(
+                f"{strategy.strategy_type} supports at most "
+                f"{definition['max_accounts']} account(s)"
+            )
+
+        accounts: list[UserExchangeAccount] = []
+        for account_id in strategy.account_ids:
+            account = self.get_account(account_id)
+            if account is None:
+                blockers.append(f"account is unavailable: {account_id}")
+                continue
+            accounts.append(account)
+            if account.owner_email != strategy.owner_email:
+                blockers.append(f"account owner mismatch: {account.label}")
+            if account.project_id != strategy.project_id:
+                blockers.append(f"account project mismatch: {account.label}")
+            if account.market_type != "spot":
+                blockers.append(f"spot account required: {account.label}")
+            if not account.symbol:
+                blockers.append(f"account symbol is missing: {account.label}")
+            elif project is not None and account.symbol.split("/", 1)[0] != project.asset:
+                blockers.append(f"account symbol asset mismatch: {account.label}")
+            if not account.enabled:
+                blockers.append(f"account is disabled: {account.label}")
+            if not account.withdrawal_disabled_confirmed:
+                blockers.append(
+                    f"withdrawal-disabled confirmation is missing: {account.label}"
+                )
+            if not account_connection_is_fresh(account):
+                blockers.append(f"account connection test is stale: {account.label}")
+            credential_status = self.credential_status(account.id)
+            if not credential_status["configured"]:
+                blockers.append(f"account credentials are missing: {account.label}")
+            if not credential_status["vault_available"]:
+                blockers.append(f"credential vault is unavailable: {account.label}")
+
+        if strategy.strategy_type == "spot_spread":
+            exchanges = {account.exchange for account in accounts}
+            if len(exchanges) < 2:
+                blockers.append("spot arbitrage requires two different exchanges")
+
+        unique_blockers = list(dict.fromkeys(blockers))
+        return {
+            "ready": not unique_blockers,
+            "mode": "paper",
+            "live_submit_allowed": False,
+            "blockers": unique_blockers,
+            "warnings": warnings,
+        }
+
+    def delete_strategy(self, strategy_id: str) -> None:
+        self._ensure()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM user_strategies WHERE id = ?", (strategy_id,))
+            connection.commit()
 
     def credential_status(self, account_id: str) -> dict[str, Any]:
         self._ensure()
@@ -806,6 +1159,15 @@ class UserWorkspaceStore:
     def delete_account(self, account_id: str) -> None:
         self._ensure()
         with self._connect() as connection:
+            referenced_by = self._strategies_using_account_in_connection(
+                connection,
+                account_id,
+            )
+            if referenced_by:
+                raise ValueError(
+                    "delete or update strategies using this account first: "
+                    + ", ".join(strategy.name for strategy in referenced_by[:5])
+                )
             connection.execute(
                 "DELETE FROM user_api_credentials WHERE account_id = ?",
                 (account_id,),
@@ -819,6 +1181,7 @@ class UserWorkspaceStore:
     def public_payload(self, *, owner_email: str, is_admin: bool) -> dict[str, Any]:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
         accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)
+        strategies = self.list_strategies(owner_email=owner_email, is_admin=is_admin)
         project_rows = [project.to_dict() for project in projects]
         account_rows = []
         for account in accounts:
@@ -826,11 +1189,39 @@ class UserWorkspaceStore:
             row["connection_fresh"] = account_connection_is_fresh(account)
             row["credentials"] = self.credential_status(account.id)
             account_rows.append(row)
+        account_map = {account.id: account for account in accounts}
+        strategy_rows = []
+        for strategy in strategies:
+            row = strategy.to_dict()
+            readiness = self.strategy_readiness(strategy)
+            row["readiness"] = readiness
+            row["effective_enabled"] = strategy.enabled and readiness["ready"]
+            row["status"] = (
+                "paper_ready"
+                if row["effective_enabled"]
+                else "blocked"
+                if strategy.enabled
+                else "paused"
+            )
+            row["accounts"] = [
+                {
+                    "id": account.id,
+                    "label": account.label,
+                    "exchange": account.exchange,
+                    "symbol": account.symbol,
+                }
+                for account_id in strategy.account_ids
+                for account in [account_map.get(account_id)]
+                if account is not None
+            ]
+            strategy_rows.append(row)
         return {
             "status": "ok",
             "projects": project_rows,
             "accounts": account_rows,
+            "strategies": strategy_rows,
             "exchange_catalog": exchange_catalog(),
+            "strategy_catalog": user_strategy_catalog(),
             "vault_available": self.cipher.available,
             "summary": {
                 "project_count": len(project_rows),
@@ -840,6 +1231,18 @@ class UserWorkspaceStore:
                 "account_count": len(account_rows),
                 "configured_account_count": sum(
                     1 for row in account_rows if row["credentials"]["configured"]
+                ),
+                "strategy_count": len(strategy_rows),
+                "enabled_strategy_count": sum(
+                    1 for row in strategy_rows if row["enabled"]
+                ),
+                "ready_strategy_count": sum(
+                    1 for row in strategy_rows if row["effective_enabled"]
+                ),
+                "blocked_strategy_count": sum(
+                    1
+                    for row in strategy_rows
+                    if row["enabled"] and not row["effective_enabled"]
                 ),
             },
         }

@@ -20,6 +20,22 @@ MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_account_boolean_fields_are_strict(self) -> None:
+        base = {
+            "owner_email": "trader@example.com",
+            "project_id": "project-acs",
+            "exchange": "coinbase",
+        }
+        with self.assertRaisesRegex(ValueError, "account enabled must be true or false"):
+            UserExchangeAccount.from_dict({**base, "enabled": "false"})
+        with self.assertRaisesRegex(
+            ValueError,
+            "withdrawal-disabled confirmation must be true or false",
+        ):
+            UserExchangeAccount.from_dict(
+                {**base, "withdrawal_disabled_confirmed": "true"}
+            )
+
     def test_encrypts_credentials_and_public_payload_never_returns_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             "os.environ",
@@ -328,9 +344,15 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertFalse(migrated.enabled)
 
     def test_stale_healthy_connection_is_disabled_on_read_without_restart(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        ):
             path = Path(tmp) / "workspace.sqlite3"
-            store = UserWorkspaceStore(path, master_key_env=None)
+            store = UserWorkspaceStore(
+                path,
+                master_key_env="TEST_WORKSPACE_MASTER_KEY",
+            )
             project = store.upsert_project(
                 UserProject.from_dict(
                     {
@@ -348,18 +370,24 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                         "project_id": project.id,
                         "exchange": "coinbase",
                         "symbol": project.symbol,
-                        "enabled": True,
-                        "connection_status": "healthy",
-                        "connection_checked_at": (
-                            time.time() - CONNECTION_MAX_AGE_SECONDS - 1
-                        ),
+                        "withdrawal_disabled_confirmed": True,
                     }
-                )
+                ),
+                credentials={"api_key": "key", "secret": "secret"},
+            )
+            account = store.update_account_connection(account.id, status="healthy")
+            account = store.upsert_account(
+                UserExchangeAccount.from_dict({**account.to_dict(), "enabled": True})
             )
 
-            expired = store.get_account(account.id)
-            restarted_store = UserWorkspaceStore(path, master_key_env=None)
-            persisted = restarted_store.get_account(account.id)
+            future = time.time() + CONNECTION_MAX_AGE_SECONDS + 1
+            with patch("arbitrage_bot.user_workspace._now", return_value=future):
+                expired = store.get_account(account.id)
+                restarted_store = UserWorkspaceStore(
+                    path,
+                    master_key_env="TEST_WORKSPACE_MASTER_KEY",
+                )
+                persisted = restarted_store.get_account(account.id)
 
         self.assertIsNotNone(expired)
         self.assertEqual(expired.connection_status, "healthy")

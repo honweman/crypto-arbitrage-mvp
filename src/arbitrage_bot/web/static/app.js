@@ -3170,7 +3170,7 @@ function balanceStatusClass(status) {
       const vaultText = workspace?.vault_available ? "encrypted vault ready" : "credential vault unavailable";
       const statusText = workspace?.status === "user_account_required"
         ? "registered account required"
-        : workspace?.error || `${summary.project_count || 0} projects · ${summary.pending_project_count || 0} pending · ${summary.configured_account_count || 0}/${summary.account_count || 0} API accounts configured · ${vaultText}`;
+        : workspace?.error || `${summary.project_count || 0} projects · ${summary.pending_project_count || 0} pending · ${summary.configured_account_count || 0}/${summary.account_count || 0} API accounts configured · ${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("paper ready")} · ${vaultText}`;
       if (userWorkspaceNoticeUntil <= Date.now()) {
         userWorkspaceNoticeText = "";
         userWorkspaceNoticeUntil = 0;
@@ -3178,13 +3178,14 @@ function balanceStatusClass(status) {
       text("user-workspace-meta", statusText);
       text("user-workspace-notice", userWorkspaceNoticeText);
       const formsDisabled = workspace?.status === "user_account_required" || workspace?.status === "error";
-      document.querySelectorAll("#user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button").forEach((control) => {
+      document.querySelectorAll("#user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button, #user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
         control.disabled = formsDisabled;
       });
       renderUserProjectForm(workspace);
       renderUserProjects(workspace);
       renderUserExchangeAccountForm(workspace);
       renderUserExchangeAccounts(workspace);
+      renderUserStrategies(workspace);
       if (!formsDisabled) syncUserExchangeMarketTypes();
     }
 
@@ -3375,6 +3376,371 @@ function balanceStatusClass(status) {
         if (selectedUserExchangeAccountId === account.id) resetUserExchangeAccountForm();
       } catch (error) {
         setUserWorkspaceNotice(`delete failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function workspaceStrategyDefinition(strategyType) {
+      return (currentUserWorkspace?.strategy_catalog || []).find(
+        (row) => row.id === strategyType
+      ) || null;
+    }
+
+    function workspaceStrategyProjectOptions(selectedProjectId = "") {
+      const projects = (currentUserWorkspace?.projects || []).map((project) => ({
+        value: project.id,
+        label: workspaceProjectLabel(project),
+        title: `${project.status} · ${project.owner_email}`,
+      }));
+      const selected = selectedProjectId
+        || projects.find((row) => workspaceProject(row.value)?.status === "active")?.value
+        || projects[0]?.value
+        || "";
+      setSelectOptions("user-strategy-project", projects, selected, "Select project");
+      return selected;
+    }
+
+    function workspaceStrategyTypeOptions(selectedType = "") {
+      const rows = (currentUserWorkspace?.strategy_catalog || []).map((definition) => ({
+        value: definition.id,
+        label: uiText(definition.label || definition.id),
+        title: `${definition.min_accounts}-${definition.max_accounts} accounts · paper`,
+      }));
+      const selected = selectedType || rows[0]?.value || "market_maker";
+      setSelectOptions("user-strategy-type", rows, selected, "Select strategy");
+      return selected;
+    }
+
+    function selectedUserStrategyAccountIds() {
+      return Array.from(
+        document.querySelectorAll("#user-strategy-accounts input[type='checkbox']:checked")
+      ).map((input) => input.value);
+    }
+
+    function renderUserStrategyAccountOptions(selectedAccountIds = []) {
+      const container = document.getElementById("user-strategy-accounts");
+      const projectId = document.getElementById("user-strategy-project")?.value || "";
+      const strategyType = document.getElementById("user-strategy-type")?.value || "";
+      const definition = workspaceStrategyDefinition(strategyType);
+      const selected = new Set(selectedAccountIds);
+      const accounts = (currentUserWorkspace?.accounts || []).filter(
+        (account) => account.project_id === projectId
+      );
+      container.innerHTML = "";
+      if (accounts.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "subtle";
+        empty.textContent = uiText("No exchange accounts for this project.");
+        container.appendChild(empty);
+      } else {
+        for (const account of accounts) {
+          const label = document.createElement("label");
+          label.className = "account-option";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = account.id;
+          input.checked = selected.has(account.id);
+          input.disabled = false;
+          input.title = account.enabled && account.connection_fresh
+            ? uiText("Account ready")
+            : uiText("Account must be enabled with a fresh connection test.");
+          const name = document.createElement("span");
+          name.textContent = `${account.label} · ${account.exchange} ${account.symbol}`;
+          label.append(input, name);
+          container.appendChild(label);
+        }
+      }
+      const minAccounts = Number(definition?.min_accounts || 0);
+      const maxAccounts = Number(definition?.max_accounts || 0);
+      text(
+        "user-strategy-account-hint",
+        minAccounts === maxAccounts
+          ? `${uiText("Required accounts")}: ${minAccounts}`
+          : `${uiText("Required accounts")}: ${minAccounts}-${maxAccounts}`
+      );
+    }
+
+    function setUserStrategyParameterValues(strategyType, parameters = {}) {
+      const definition = workspaceStrategyDefinition(strategyType);
+      const values = { ...(definition?.default_parameters || {}), ...parameters };
+      if (strategyType === "market_maker") {
+        setFieldValue("user-strategy-mm-levels", values.levels);
+        setFieldValue("user-strategy-mm-band", values.price_band_pct);
+        setFieldValue("user-strategy-mm-quote", values.quote_per_level);
+        setFieldValue("user-strategy-mm-refresh", values.refresh_seconds);
+        setCheckedValue("user-strategy-mm-post-only", values.post_only);
+      } else if (["auto_buy_sell", "dca"].includes(strategyType)) {
+        setFieldValue("user-strategy-side", values.side);
+        setFieldValue("user-strategy-total-quote", values.total_quote);
+        setFieldValue("user-strategy-order-quote", values.quote_per_order);
+        setFieldValue("user-strategy-interval", values.interval_seconds);
+        if (strategyType === "auto_buy_sell") {
+          setFieldValue("user-strategy-start-price", values.start_price);
+          setFieldValue("user-strategy-stop-price", values.stop_price);
+        } else {
+          setFieldValue("user-strategy-trigger-price", values.trigger_price);
+          setFieldValue("user-strategy-take-profit", values.take_profit_pct);
+        }
+      } else if (strategyType === "spot_grid") {
+        setFieldValue("user-strategy-grid-lower", values.lower_price);
+        setFieldValue("user-strategy-grid-upper", values.upper_price);
+        setFieldValue("user-strategy-grid-count", values.grid_count);
+        setFieldValue("user-strategy-grid-quote", values.quote_per_grid);
+        setFieldValue("user-strategy-grid-spacing", values.spacing);
+      } else if (strategyType === "spot_spread") {
+        setFieldValue("user-strategy-profit-bps", values.min_profit_bps);
+        setFieldValue("user-strategy-cycle-quote", values.max_cycle_quote);
+        setFieldValue("user-strategy-scan-seconds", values.scan_interval_seconds);
+      }
+    }
+
+    function setUserStrategyRiskValues(strategyType, risk = {}) {
+      const defaults = workspaceStrategyDefinition(strategyType)?.default_risk || {};
+      const values = { ...defaults, ...risk };
+      setFieldValue("user-strategy-risk-order", values.max_order_quote);
+      setFieldValue("user-strategy-risk-total", values.max_total_quote);
+      setFieldValue("user-strategy-risk-loss", values.max_daily_loss_quote);
+      setFieldValue("user-strategy-risk-orders", values.max_open_orders);
+      setFieldValue("user-strategy-risk-slippage", values.max_slippage_bps);
+      setFieldValue("user-strategy-risk-book-age", values.max_order_book_age_seconds);
+    }
+
+    function syncUserStrategyTypeFields({ applyDefaults = false } = {}) {
+      const strategyType = document.getElementById("user-strategy-type")?.value || "";
+      document.querySelectorAll("[data-user-strategy-types]").forEach((field) => {
+        const supported = String(field.dataset.userStrategyTypes || "")
+          .split(/\s+/)
+          .filter(Boolean);
+        field.hidden = !supported.includes(strategyType);
+      });
+      if (applyDefaults) {
+        setUserStrategyParameterValues(strategyType);
+        setUserStrategyRiskValues(strategyType);
+      }
+      renderUserStrategyAccountOptions(selectedUserStrategyAccountIds());
+    }
+
+    function openUserStrategyForm(strategy = null) {
+      selectedUserStrategyId = strategy?.id || "";
+      userStrategyFormDirty = false;
+      const form = document.getElementById("user-strategy-form");
+      form.hidden = false;
+      setFieldValue("user-strategy-id", strategy?.id || "");
+      const projectId = workspaceStrategyProjectOptions(strategy?.project_id || "");
+      const strategyType = workspaceStrategyTypeOptions(strategy?.strategy_type || "");
+      const definition = workspaceStrategyDefinition(strategyType);
+      const project = workspaceProject(projectId);
+      setFieldValue(
+        "user-strategy-name",
+        strategy?.name || `${project?.asset || ""} ${uiText(definition?.label || "Strategy")}`.trim()
+      );
+      setCheckedValue("user-strategy-enabled", strategy?.enabled || false);
+      setUserStrategyParameterValues(strategyType, strategy?.parameters || {});
+      setUserStrategyRiskValues(strategyType, strategy?.risk || {});
+      syncUserStrategyTypeFields();
+      renderUserStrategyAccountOptions(strategy?.account_ids || []);
+      document.getElementById("user-strategy-name")?.focus();
+    }
+
+    function closeUserStrategyForm() {
+      selectedUserStrategyId = "";
+      userStrategyFormDirty = false;
+      userStrategyFormBusy = false;
+      document.getElementById("user-strategy-form").hidden = true;
+      setFieldValue("user-strategy-id", "");
+    }
+
+    function userStrategyParametersFromForm(strategyType) {
+      if (strategyType === "market_maker") {
+        return {
+          levels: numericValue("user-strategy-mm-levels"),
+          price_band_pct: numericValue("user-strategy-mm-band"),
+          quote_per_level: numericValue("user-strategy-mm-quote"),
+          refresh_seconds: numericValue("user-strategy-mm-refresh"),
+          post_only: document.getElementById("user-strategy-mm-post-only").checked,
+        };
+      }
+      if (strategyType === "auto_buy_sell") {
+        return {
+          side: document.getElementById("user-strategy-side").value,
+          total_quote: numericValue("user-strategy-total-quote"),
+          quote_per_order: numericValue("user-strategy-order-quote"),
+          interval_seconds: numericValue("user-strategy-interval"),
+          start_price: numericValue("user-strategy-start-price"),
+          stop_price: numericValue("user-strategy-stop-price"),
+        };
+      }
+      if (strategyType === "dca") {
+        return {
+          side: document.getElementById("user-strategy-side").value,
+          total_quote: numericValue("user-strategy-total-quote"),
+          quote_per_order: numericValue("user-strategy-order-quote"),
+          interval_seconds: numericValue("user-strategy-interval"),
+          trigger_price: numericValue("user-strategy-trigger-price"),
+          take_profit_pct: numericValue("user-strategy-take-profit"),
+        };
+      }
+      if (strategyType === "spot_grid") {
+        return {
+          lower_price: numericValue("user-strategy-grid-lower"),
+          upper_price: numericValue("user-strategy-grid-upper"),
+          grid_count: numericValue("user-strategy-grid-count"),
+          quote_per_grid: numericValue("user-strategy-grid-quote"),
+          spacing: document.getElementById("user-strategy-grid-spacing").value,
+        };
+      }
+      return {
+        min_profit_bps: numericValue("user-strategy-profit-bps"),
+        max_cycle_quote: numericValue("user-strategy-cycle-quote"),
+        scan_interval_seconds: numericValue("user-strategy-scan-seconds"),
+      };
+    }
+
+    function userStrategyRiskFromForm() {
+      return {
+        max_order_quote: numericValue("user-strategy-risk-order"),
+        max_total_quote: numericValue("user-strategy-risk-total"),
+        max_daily_loss_quote: numericValue("user-strategy-risk-loss"),
+        max_open_orders: numericValue("user-strategy-risk-orders"),
+        max_slippage_bps: numericValue("user-strategy-risk-slippage"),
+        max_order_book_age_seconds: numericValue("user-strategy-risk-book-age"),
+      };
+    }
+
+    function userStrategyPayloadFromForm() {
+      const strategyType = document.getElementById("user-strategy-type").value;
+      const strategy = {
+        project_id: document.getElementById("user-strategy-project").value,
+        name: document.getElementById("user-strategy-name").value.trim(),
+        strategy_type: strategyType,
+        account_ids: selectedUserStrategyAccountIds(),
+        enabled: document.getElementById("user-strategy-enabled").checked,
+        mode: "paper",
+        parameters: userStrategyParametersFromForm(strategyType),
+        risk: userStrategyRiskFromForm(),
+      };
+      const id = document.getElementById("user-strategy-id").value.trim();
+      if (id) strategy.id = id;
+      return strategy;
+    }
+
+    function renderUserStrategies(workspace) {
+      const body = document.getElementById("user-strategies");
+      if (!body) return;
+      body.innerHTML = "";
+      const strategies = workspace?.strategies || [];
+      const summary = workspace?.summary || {};
+      text(
+        "user-strategy-meta",
+        `${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("paper ready")}`
+      );
+      if (strategies.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">${escapeHtml(uiText("No user strategies yet."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      const projectMap = new Map(
+        (workspace?.projects || []).map((project) => [project.id, project])
+      );
+      for (const strategy of strategies) {
+        const project = projectMap.get(strategy.project_id);
+        const readiness = strategy.readiness || {};
+        const blockers = readiness.blockers || [];
+        const accounts = (strategy.accounts || [])
+          .map((account) => `${account.exchange} ${account.symbol}`)
+          .join(" · ");
+        const statusClass = strategy.status === "paper_ready"
+          ? "ok"
+          : strategy.status === "blocked"
+            ? "risk-blocked"
+            : "subtle";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || strategy.id)}<br><span class="subtle">${escapeHtml(uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type))}</span></td>
+          <td>${escapeHtml(project?.name || strategy.project_id || "--")}</td>
+          <td>${escapeHtml(accounts || "--")}</td>
+          <td class="num">${formatSymbolQuantity(strategy.risk?.max_total_quote || 0, project?.symbol || "", "quote")}</td>
+          <td class="${statusClass}" title="${escapeHtml(blockers.join("; "))}">${escapeHtml(uiText(strategy.status || "paused"))}${blockers.length ? `<br><span class="subtle">${escapeHtml(blockers[0])}</span>` : ""}</td>
+          <td>${escapeHtml(uiText("Paper only"))}</td>
+          <td><div class="workspace-table-actions"></div></td>
+        `;
+        const actions = tr.querySelector(".workspace-table-actions");
+        const editButton = document.createElement("button");
+        editButton.className = "control-button";
+        editButton.type = "button";
+        editButton.textContent = uiText("Edit");
+        editButton.addEventListener("click", () => openUserStrategyForm(strategy));
+        actions.appendChild(editButton);
+        const toggleButton = document.createElement("button");
+        toggleButton.className = "ghost-button";
+        toggleButton.type = "button";
+        toggleButton.textContent = uiText(strategy.enabled ? "Pause" : "Resume");
+        toggleButton.addEventListener("click", () => toggleUserStrategy(strategy, toggleButton));
+        actions.appendChild(toggleButton);
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger-button";
+        deleteButton.type = "button";
+        deleteButton.textContent = uiText("Delete");
+        deleteButton.addEventListener("click", () => deleteUserStrategy(strategy, deleteButton));
+        actions.appendChild(deleteButton);
+        body.appendChild(tr);
+      }
+      applyMobileTableLabels();
+    }
+
+    async function applyUserStrategy(event) {
+      event.preventDefault();
+      if (userStrategyFormBusy) return;
+      userStrategyFormBusy = true;
+      const button = document.getElementById("user-strategy-save");
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "upsert_strategy",
+          strategy: userStrategyPayloadFromForm(),
+        });
+        setUserWorkspaceNotice(uiText("Paper strategy saved."));
+        closeUserStrategyForm();
+      } catch (error) {
+        setUserWorkspaceNotice(`strategy update failed: ${error.message || error}`);
+      } finally {
+        userStrategyFormBusy = false;
+        button.disabled = false;
+      }
+    }
+
+    async function toggleUserStrategy(strategy, button) {
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "set_strategy_enabled",
+          strategy_id: strategy.id,
+          enabled: !strategy.enabled,
+        });
+        setUserWorkspaceNotice(
+          uiText(strategy.enabled ? "Paper strategy paused." : "Paper strategy resumed.")
+        );
+      } catch (error) {
+        setUserWorkspaceNotice(`strategy control failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function deleteUserStrategy(strategy, button) {
+      if (!dangerConfirm("Delete this paper strategy?")) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "delete_strategy",
+          strategy_id: strategy.id,
+        });
+        if (selectedUserStrategyId === strategy.id) closeUserStrategyForm();
+        setUserWorkspaceNotice(uiText("Paper strategy deleted."));
+      } catch (error) {
+        setUserWorkspaceNotice(`strategy delete failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -3922,19 +4288,22 @@ function balanceStatusClass(status) {
     let apiAccountFormBusy = false;
     let fundingArbFormDirty = false;
     let fundingArbFormBusy = false;
-	    let signalBotFormDirty = false;
-	    let signalBotFormBusy = false;
-	    let userProjectFormDirty = false;
-	    let userProjectFormBusy = false;
-	    let selectedUserProjectId = "";
-	    let userExchangeAccountFormDirty = false;
-	    let userExchangeAccountFormBusy = false;
-	    let selectedUserExchangeAccountId = "";
-	    let currentUserWorkspace = null;
-	    let userMarketDiscoveryBusy = false;
-	    const discoveredUserMarkets = new Map();
-	    let userWorkspaceNoticeText = "";
-	    let userWorkspaceNoticeUntil = 0;
+    let signalBotFormDirty = false;
+    let signalBotFormBusy = false;
+    let userProjectFormDirty = false;
+    let userProjectFormBusy = false;
+    let selectedUserProjectId = "";
+    let userExchangeAccountFormDirty = false;
+    let userExchangeAccountFormBusy = false;
+    let selectedUserExchangeAccountId = "";
+    let userStrategyFormDirty = false;
+    let userStrategyFormBusy = false;
+    let selectedUserStrategyId = "";
+    let currentUserWorkspace = null;
+    let userMarketDiscoveryBusy = false;
+    const discoveredUserMarkets = new Map();
+    let userWorkspaceNoticeText = "";
+    let userWorkspaceNoticeUntil = 0;
 
     async function setProgramRunning(running) {
       if (programToggleBusy) return;
@@ -5555,6 +5924,35 @@ function balanceStatusClass(status) {
 	    document.getElementById("user-exchange-account-form").addEventListener("submit", applyUserExchangeAccount);
 	    document.getElementById("user-exchange-new").addEventListener("click", resetUserExchangeAccountForm);
 	    document.getElementById("user-exchange-load-markets").addEventListener("click", loadUserExchangeMarkets);
+    document.getElementById("user-strategy-new").addEventListener("click", () => openUserStrategyForm());
+    document.getElementById("user-strategy-cancel").addEventListener("click", closeUserStrategyForm);
+    document.getElementById("user-strategy-form").addEventListener("input", () => {
+      userStrategyFormDirty = true;
+    });
+    document.getElementById("user-strategy-form").addEventListener("change", (event) => {
+      userStrategyFormDirty = true;
+      if (event.target?.id === "user-strategy-project") {
+        renderUserStrategyAccountOptions([]);
+      } else if (event.target?.id === "user-strategy-type") {
+        syncUserStrategyTypeFields({ applyDefaults: true });
+      } else if (
+        event.target?.matches("#user-strategy-accounts input[type='checkbox']")
+        && event.target.checked
+      ) {
+        const definition = workspaceStrategyDefinition(
+          document.getElementById("user-strategy-type").value
+        );
+        if (Number(definition?.max_accounts || 0) === 1) {
+          const accountInputs = document.querySelectorAll(
+            "#user-strategy-accounts input[type='checkbox']"
+          );
+          accountInputs.forEach((input) => {
+            if (input !== event.target) input.checked = false;
+          });
+        }
+      }
+    });
+    document.getElementById("user-strategy-form").addEventListener("submit", applyUserStrategy);
 	    document.getElementById("markets-form").addEventListener("submit", addSpotMarket);
     document.getElementById("carry-form").addEventListener("submit", addCashCarryPair);
     document.getElementById("risk-form").addEventListener("submit", applyRiskConfig);
@@ -5580,6 +5978,14 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     window.addEventListener("crypto-arb-language-change", () => {
       updateSlowLabels();
+      renderUserStrategies(currentUserWorkspace);
+      const userStrategyForm = document.getElementById("user-strategy-form");
+      if (userStrategyForm && !userStrategyForm.hidden) {
+        const strategyType = document.getElementById("user-strategy-type").value;
+        const selectedAccounts = selectedUserStrategyAccountIds();
+        workspaceStrategyTypeOptions(strategyType);
+        renderUserStrategyAccountOptions(selectedAccounts);
+      }
       applyMobileTableLabels();
       updateCoreFormStates();
     });

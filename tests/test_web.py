@@ -184,11 +184,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260710-workspace5" defer></script>',
+            '<script src="/static/app.js?v=20260711-user-strategy2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260710-workspace5" defer></script>',
+            '<script src="/static/i18n.js?v=20260711-user-strategy2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -205,6 +205,20 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('"Language": "언어"', i18n_js)
         self.assertIn('"Account / Project / Exchange / Pair"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
+
+    def test_page_includes_paper_only_user_strategy_controls(self) -> None:
+        self.assertIn('id="user-strategy-form"', INDEX_HTML)
+        self.assertIn('id="user-strategy-accounts"', INDEX_HTML)
+        self.assertIn('id="user-strategy-risk-order"', INDEX_HTML)
+        self.assertIn('id="user-strategy-risk-total"', INDEX_HTML)
+        self.assertIn('id="user-strategies"', INDEX_HTML)
+        strategy_form = INDEX_HTML.split('id="user-strategy-form"', 1)[1].split(
+            "</form>",
+            1,
+        )[0]
+        self.assertNotIn("live_enabled", strategy_form)
+        self.assertNotIn("Live Ready", strategy_form)
+        self.assertIn("Paper mode only", strategy_form)
 
     def test_market_maker_payload_keeps_multiple_instances(self) -> None:
         coinbase = MarketMakerConfig(
@@ -288,7 +302,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260710-workspace5">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260711-user-strategy2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -6027,6 +6041,72 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     )
                     enable_payload = await enable_response.json()
 
+                    strategy_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_strategy",
+                            "strategy": {
+                                "name": "ACS Coinbase MM",
+                                "project_id": project["id"],
+                                "strategy_type": "market_maker",
+                                "account_ids": [account["id"]],
+                                "enabled": True,
+                            },
+                        },
+                    )
+                    strategy_payload = await strategy_response.json()
+                    strategy = strategy_payload["workspace"]["strategies"][0]
+                    live_strategy_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_strategy",
+                            "strategy": {
+                                "id": strategy["id"],
+                                "live_enabled": True,
+                            },
+                        },
+                    )
+                    live_strategy_payload = await live_strategy_response.json()
+                    account_delete_blocked_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "delete_account",
+                            "account_id": account["id"],
+                        },
+                    )
+                    account_delete_blocked_payload = (
+                        await account_delete_blocked_response.json()
+                    )
+                    invalid_strategy_toggle_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "set_strategy_enabled",
+                            "strategy_id": strategy["id"],
+                            "enabled": "false",
+                        },
+                    )
+                    invalid_strategy_toggle_payload = (
+                        await invalid_strategy_toggle_response.json()
+                    )
+                    pause_strategy_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "set_strategy_enabled",
+                            "strategy_id": strategy["id"],
+                            "enabled": False,
+                        },
+                    )
+                    pause_strategy_payload = await pause_strategy_response.json()
+                    resume_strategy_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "set_strategy_enabled",
+                            "strategy_id": strategy["id"],
+                            "enabled": True,
+                        },
+                    )
+                    resume_strategy_payload = await resume_strategy_response.json()
+
                     exchange_change_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -6089,11 +6169,37 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             enable_payload["workspace"]["accounts"][0]["connection_fresh"]
         )
+        self.assertEqual(strategy_response.status, 200, strategy_payload)
+        self.assertEqual(strategy["status"], "paper_ready")
+        self.assertTrue(strategy["effective_enabled"])
+        self.assertFalse(strategy["readiness"]["live_submit_allowed"])
+        self.assertEqual(live_strategy_response.status, 400, live_strategy_payload)
+        self.assertIn("paper-only", live_strategy_payload["error"])
+        self.assertEqual(
+            account_delete_blocked_response.status,
+            400,
+            account_delete_blocked_payload,
+        )
+        self.assertIn("strategies using this account", account_delete_blocked_payload["error"])
+        self.assertEqual(
+            invalid_strategy_toggle_response.status,
+            400,
+            invalid_strategy_toggle_payload,
+        )
+        self.assertIn(
+            "enabled must be true or false",
+            invalid_strategy_toggle_payload["error"],
+        )
+        self.assertEqual(pause_strategy_response.status, 200, pause_strategy_payload)
+        self.assertFalse(pause_strategy_payload["workspace"]["strategies"][0]["enabled"])
+        self.assertEqual(resume_strategy_response.status, 200, resume_strategy_payload)
+        self.assertTrue(resume_strategy_payload["workspace"]["strategies"][0]["enabled"])
         self.assertEqual(exchange_change_response.status, 400, exchange_change_payload)
         self.assertIn("re-enter API key", exchange_change_payload["error"])
         self.assertEqual(scope_change_response.status, 200, scope_change_payload)
         self.assertEqual(scope_change_payload["workspace"]["projects"][0]["status"], "pending")
         self.assertFalse(scope_change_payload["workspace"]["accounts"][0]["enabled"])
+        self.assertFalse(scope_change_payload["workspace"]["strategies"][0]["enabled"])
         self.assertEqual(settings_state["user_workspace"]["summary"]["project_count"], 1)
         self.assertNotIn(b"test-api-key-value", database_bytes)
         self.assertNotIn(b"test-secret-value", database_bytes)
