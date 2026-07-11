@@ -1032,4 +1032,3 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
         return await call_handler()
 
     return security_middleware
-
