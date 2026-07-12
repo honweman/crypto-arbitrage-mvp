@@ -25,6 +25,19 @@
   --danger-text: #9d2b2b;
   --info-bg: #e8f0fa;
   --info-line: #bfd2ea;
+  --button-bg: #17211b;
+  --button-border: #17211b;
+  --button-text: #ffffff;
+  --button-hover-bg: #26362e;
+  --button-ghost-bg: #ffffff;
+  --button-ghost-border: #b8c2cf;
+  --button-ghost-text: #17211b;
+  --button-danger-bg: #fff1f0;
+  --button-danger-border: #d68179;
+  --button-danger-text: #8f1d15;
+  --button-disabled-bg: #e7ebf0;
+  --button-disabled-border: #c8d0db;
+  --button-disabled-text: #64748b;
 }
 
 :root[data-theme="dark"] {
@@ -54,6 +67,19 @@
   --danger-text: #fda4a4;
   --info-bg: rgb(96 165 250 / 13%);
   --info-line: rgb(96 165 250 / 35%);
+  --button-bg: #3b82f6;
+  --button-border: #60a5fa;
+  --button-text: #08111f;
+  --button-hover-bg: #60a5fa;
+  --button-ghost-bg: #1e2839;
+  --button-ghost-border: #526078;
+  --button-ghost-text: #f1f5f9;
+  --button-danger-bg: #5a2028;
+  --button-danger-border: #f87171;
+  --button-danger-text: #fee2e2;
+  --button-disabled-bg: #222c3d;
+  --button-disabled-border: #3a465a;
+  --button-disabled-text: #94a3b8;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -84,6 +110,19 @@
     --danger-text: #fda4a4;
     --info-bg: rgb(96 165 250 / 13%);
     --info-line: rgb(96 165 250 / 35%);
+    --button-bg: #3b82f6;
+    --button-border: #60a5fa;
+    --button-text: #08111f;
+    --button-hover-bg: #60a5fa;
+    --button-ghost-bg: #1e2839;
+    --button-ghost-border: #526078;
+    --button-ghost-text: #f1f5f9;
+    --button-danger-bg: #5a2028;
+    --button-danger-border: #f87171;
+    --button-danger-text: #fee2e2;
+    --button-disabled-bg: #222c3d;
+    --button-disabled-border: #3a465a;
+    --button-disabled-text: #94a3b8;
   }
 }
 
@@ -1634,28 +1673,27 @@ tbody tr:last-child td {
 .control-button {
   min-height: 38px;
   align-self: end;
-  border: 1px solid var(--focus);
+  border: 1px solid var(--button-border);
   border-radius: 6px;
-  background: var(--focus);
-  color: white;
+  background: var(--button-bg);
+  color: var(--button-text);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   cursor: pointer;
 }
 
-.control-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
+.control-button:not(:disabled):hover {
+  background: var(--button-hover-bg);
 }
 
 .ghost-button {
   min-height: 38px;
   align-self: end;
-  border: 1px solid var(--line);
+  border: 1px solid var(--button-ghost-border);
   border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  background: var(--button-ghost-bg);
+  color: var(--button-ghost-text);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1663,32 +1701,51 @@ tbody tr:last-child td {
 }
 
 .ghost-button.danger {
-  color: var(--red);
-  border-color: var(--danger-line);
-  background: var(--danger-bg);
-}
-
-.ghost-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
+  color: var(--button-danger-text);
+  border-color: var(--button-danger-border);
+  background: var(--button-danger-bg);
 }
 
 .danger-button {
   min-height: 28px;
   padding: 5px 9px;
-  border: 1px solid var(--danger-line);
+  border: 1px solid var(--button-danger-border);
   border-radius: 6px;
-  background: var(--danger-bg);
-  color: var(--red);
+  background: var(--button-danger-bg);
+  color: var(--button-danger-text);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   cursor: pointer;
 }
 
+.control-button:disabled,
+.ghost-button:disabled,
 .danger-button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  border-color: var(--button-disabled-border);
+  background: var(--button-disabled-bg);
+  color: var(--button-disabled-text);
+  opacity: 1;
+}
+
+.control-button:focus-visible,
+.ghost-button:focus-visible,
+.danger-button:focus-visible,
+.view-tab:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.rebalance-confirm-button {
+  min-height: 38px;
+  align-self: end;
+}
+
+.rebalance-confirm-button.is-confirmed {
+  color: var(--green);
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
 }
 
 @media (max-width: 980px) {

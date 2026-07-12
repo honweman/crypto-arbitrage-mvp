@@ -195,11 +195,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260712-rebalance5" defer></script>',
+            '<script src="/static/app.js?v=20260712-rebalance7" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260712-rebalance5" defer></script>',
+            '<script src="/static/i18n.js?v=20260712-rebalance7" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -234,12 +234,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260712-rebalance5"></script>',
+            '<script src="/static/theme.js?v=20260712-rebalance7"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index('/static/theme.js?v=20260712-rebalance5'),
-            INDEX_HTML.index('/static/styles.css?v=20260712-rebalance5'),
+            INDEX_HTML.index('/static/theme.js?v=20260712-rebalance7'),
+            INDEX_HTML.index('/static/styles.css?v=20260712-rebalance7'),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn('root.dataset.theme = theme', theme_js)
@@ -344,7 +344,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance5">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance7">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -792,13 +792,17 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="rebalance-coordinate-mm"', HTML)
         self.assertIn('id="rebalance-coordination-timeout"', HTML)
         self.assertIn('id="rebalance-live-confirm"', HTML)
-        self.assertIn('placeholder="ENABLE LIVE REBALANCE"', HTML)
+        self.assertIn('aria-pressed="false">Confirm Live</button>', HTML)
+        self.assertNotIn('placeholder="ENABLE LIVE REBALANCE"', HTML)
         self.assertIn('id="rebalance-readiness"', HTML)
         self.assertIn('id="rebalance-feedback"', HTML)
         self.assertIn('id="rebalance-open-risk"', HTML)
         self.assertIn('id="rebalance-reset"', HTML)
         self.assertIn("RESET REBALANCE", APP_JS)
         self.assertIn("liveRebalanceValidationError", APP_JS)
+        self.assertIn("confirmLiveRebalance", APP_JS)
+        self.assertIn("lastState?.operations?.risk", APP_JS)
+        self.assertNotIn("window.prompt", APP_JS)
         self.assertIn("Previous task is complete.", APP_JS)
 
     def test_cross_exchange_rebalance_config_requires_matching_assets(self) -> None:
