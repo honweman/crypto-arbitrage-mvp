@@ -2501,12 +2501,7 @@ async def cross_exchange_rebalance_task_loop(
     manager = ExchangeManager()
     coordination_owner = CROSS_EXCHANGE_REBALANCE_STRATEGY_ID
     coordination_active = False
-    current_path = cfg.cross_exchange_rebalance.runtime_path
-    runtime = load_rebalance_runtime(
-        current_path,
-        cfg.cross_exchange_rebalance,
-        common_quote_currency=cfg.common_quote_currency,
-    )
+    current_path, runtime = await _load_initial_rebalance_runtime(cfg, state)
     last_logged_status: str | None = None
     try:
         await state.set_cross_exchange_rebalance_runtime(runtime)
@@ -2826,6 +2821,21 @@ async def cross_exchange_rebalance_task_loop(
     finally:
         await state.release_coordination_hold(coordination_owner)
         await manager.close()
+
+
+async def _load_initial_rebalance_runtime(
+    cfg: BotConfig,
+    state: MonitorState,
+) -> tuple[str, dict[str, Any]]:
+    runtime_cfg = await state.runtime_config(cfg)
+    rebalance = runtime_cfg.cross_exchange_rebalance
+    current_path = rebalance.runtime_path
+    runtime = load_rebalance_runtime(
+        current_path,
+        rebalance,
+        common_quote_currency=runtime_cfg.common_quote_currency,
+    )
+    return current_path, runtime
 
 
 async def _market_maker_instance_task_loop(

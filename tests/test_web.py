@@ -37,6 +37,10 @@ from arbitrage_bot.config import (
     TradeLogConfig,
     WebSecurityConfig,
 )
+from arbitrage_bot.cross_exchange_rebalancer import (
+    new_rebalance_runtime,
+    save_rebalance_runtime,
+)
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
 from arbitrage_bot.trade_log import (
@@ -114,7 +118,10 @@ from arbitrage_bot.web import (
 )
 from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
-from arbitrage_bot.web.loops import _complete_market_maker_cycle_on_shutdown
+from arbitrage_bot.web.loops import (
+    _complete_market_maker_cycle_on_shutdown,
+    _load_initial_rebalance_runtime,
+)
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore, totp_code
 from arbitrage_bot.web_config import (
@@ -5958,6 +5965,55 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pauses["market_maker"])
         self.assertTrue(payload["runtime_store"]["loaded"])
         self.assertIsNone(payload["runtime_store"]["error"])
+
+    async def test_rebalance_startup_loads_runtime_with_effective_overrides(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = str(Path(tmp) / "base-runtime.json")
+            effective_path = str(Path(tmp) / "effective-runtime.json")
+            cfg = make_config(
+                cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+                    runtime_path=base_path,
+                )
+            )
+            state = MonitorState(cfg, 1.0)
+            await state.set_cross_exchange_rebalance_overrides(
+                {
+                    "enabled": True,
+                    "live_enabled": True,
+                    "buy_exchange": "coinbase-spot",
+                    "buy_symbol": "ACS/USDC",
+                    "sell_exchange": "bithumb-spot",
+                    "sell_symbol": "ACS/KRW",
+                    "total_quote_common": 100.0,
+                    "runtime_path": effective_path,
+                },
+                cfg=cfg,
+            )
+            runtime_cfg = await state.runtime_config(cfg)
+            stored = new_rebalance_runtime(
+                runtime_cfg.cross_exchange_rebalance,
+                common_quote_currency=runtime_cfg.common_quote_currency,
+            )
+            stored.update(
+                {
+                    "status": "waiting_for_cost",
+                    "completed_quote_common": 25.0,
+                    "remaining_quote_common": 75.0,
+                    "progress_pct": 25.0,
+                    "cycle_count": 58,
+                    "live_cycle_count": 3,
+                }
+            )
+            save_rebalance_runtime(effective_path, stored)
+
+            loaded_path, loaded = await _load_initial_rebalance_runtime(cfg, state)
+
+        self.assertEqual(loaded_path, effective_path)
+        self.assertEqual(loaded["completed_quote_common"], 25.0)
+        self.assertEqual(loaded["cycle_count"], 58)
+        self.assertEqual(loaded["live_cycle_count"], 3)
 
     async def test_admin_users_endpoint_rejects_non_admin_callers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
