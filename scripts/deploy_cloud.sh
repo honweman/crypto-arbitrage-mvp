@@ -7,6 +7,7 @@ LEGACY_SERVICE="${3:-${CRYPTO_ARB_DEPLOY_SERVICE:-crypto-arb-web.service}}"
 OWNER="${CRYPTO_ARB_DEPLOY_OWNER:-cryptoarb:cryptoarb}"
 NGINX_CONF="${CRYPTO_ARB_NGINX_CONF:-/etc/nginx/conf.d/crypto-arb.conf}"
 RELEASE_ROOT="/opt/crypto-arbitrage-releases"
+OWNER_USER="${OWNER%%:*}"
 
 if [[ -z "$REMOTE" ]]; then
   cat >&2 <<'USAGE'
@@ -34,10 +35,12 @@ done
 REMOTE_PYTHON="${CRYPTO_ARB_DEPLOY_PYTHON:-}"
 if [[ -z "$REMOTE_PYTHON" ]]; then
   REMOTE_PYTHON="$(
-    ssh "$REMOTE" "if command -v python3.11 >/dev/null 2>&1; then
-      command -v python3.11
-    elif [[ -x '$SHARED_DIR/.venv/bin/python' ]]; then
+    ssh "$REMOTE" "if [[ -x '$SHARED_DIR/.venv/bin/python' ]]; then
       printf '%s\\n' '$SHARED_DIR/.venv/bin/python'
+    elif [[ -x '/opt/uv-python/cpython-3.11-linux-x86_64-gnu/bin/python3.11' ]]; then
+      printf '%s\\n' '/opt/uv-python/cpython-3.11-linux-x86_64-gnu/bin/python3.11'
+    elif command -v python3.11 >/dev/null 2>&1; then
+      command -v python3.11
     else
       command -v python3
     fi"
@@ -48,13 +51,14 @@ if [[ ! "$REMOTE_PYTHON" =~ ^/[A-Za-z0-9._/+:-]+$ ]]; then
   echo "remote Python path is invalid: $REMOTE_PYTHON" >&2
   exit 1
 fi
-if ! ssh "$REMOTE" \
-  "'$REMOTE_PYTHON' -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'"; then
-  echo "deployment requires Python 3.11 or newer on $REMOTE" >&2
+if ! ssh "$REMOTE" "runuser -u '$OWNER_USER' -- \
+  '$REMOTE_PYTHON' -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'"; then
+  echo "deployment requires Python 3.11+ executable by $OWNER_USER on $REMOTE" >&2
   exit 1
 fi
 REMOTE_PYTHON_VERSION="$(
-  ssh "$REMOTE" "'$REMOTE_PYTHON' -c 'import platform; print(platform.python_version())'"
+  ssh "$REMOTE" "runuser -u '$OWNER_USER' -- \
+    '$REMOTE_PYTHON' -c 'import platform; print(platform.python_version())'"
 )"
 echo "using remote Python $REMOTE_PYTHON_VERSION at $REMOTE_PYTHON"
 
@@ -80,8 +84,6 @@ fi
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 CANDIDATE_DIR="$RELEASE_ROOT/$CANDIDATE_SLOT"
 ARCHIVE_DIR="$RELEASE_ROOT/archive/${CANDIDATE_SLOT}_$TIMESTAMP"
-OWNER_USER="${OWNER%%:*}"
-
 local_excludes=(
   --exclude=.git
   --exclude=.venv
