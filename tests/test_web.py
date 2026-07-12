@@ -78,7 +78,9 @@ from arbitrage_bot.web import (
     _make_session_token,
     _session_identity,
     _session_valid,
+    api_create_auto_buy_sell_task,
     api_cross_exchange_rebalance,
+    api_market_maker,
     build_daily_report_message,
     default_web_audit_path,
     build_order_attribution_map,
@@ -195,11 +197,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260712-rebalance7" defer></script>',
+            '<script src="/static/app.js?v=20260712-coreflow5" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260712-rebalance7" defer></script>',
+            '<script src="/static/i18n.js?v=20260712-coreflow5" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -227,6 +229,29 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('"Continue Setup": "설정 계속"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
 
+    def test_core_strategy_forms_use_review_start_workflows(self) -> None:
+        for element_id in (
+            "mm-workflow",
+            "mm-start",
+            "mm-stop",
+            "slow-workflow",
+            "slow-create-task",
+            "rebalance-readiness",
+            "rebalance-stop",
+            "spot-workflow",
+        ):
+            self.assertIn(f'id="{element_id}"', INDEX_HTML)
+        self.assertIn(">Save Defaults</button>", INDEX_HTML)
+        self.assertIn(">Review &amp; Start</button>", INDEX_HTML)
+        self.assertIn(">Review &amp; Start Live</button>", INDEX_HTML)
+        self.assertIn('class="check-field strategy-internal-state" hidden', INDEX_HTML)
+        self.assertIn("function coreLiveRiskReadiness", APP_JS)
+        self.assertIn("function startMarketMaker", APP_JS)
+        self.assertIn("function stopCrossExchangeRebalance", APP_JS)
+        self.assertIn("LIVE_AUTO_BUY_SELL_CONFIRMATION", APP_JS)
+        self.assertIn("LIVE_MARKET_MAKER_CONFIRMATION", APP_JS)
+        self.assertIn(".strategy-internal-state[hidden]", STYLES_CSS)
+
     def test_page_includes_persistent_dark_mode_toggle(self) -> None:
         theme_js = Path("src/arbitrage_bot/web/static/theme.js").read_text(
             encoding="utf-8",
@@ -239,7 +264,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index('/static/theme.js?v=20260712-rebalance7'),
-            INDEX_HTML.index('/static/styles.css?v=20260712-rebalance7'),
+            INDEX_HTML.index('/static/styles.css?v=20260712-coreflow5'),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn('root.dataset.theme = theme', theme_js)
@@ -344,7 +369,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance7">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260712-coreflow5">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -792,7 +817,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="rebalance-coordinate-mm"', HTML)
         self.assertIn('id="rebalance-coordination-timeout"', HTML)
         self.assertIn('id="rebalance-live-confirm"', HTML)
-        self.assertIn('aria-pressed="false">Confirm Live</button>', HTML)
+        self.assertIn(
+            'aria-pressed="false">Review &amp; Start Live</button>',
+            HTML,
+        )
+        self.assertIn('id="rebalance-stop"', HTML)
         self.assertNotIn('placeholder="ENABLE LIVE REBALANCE"', HTML)
         self.assertIn('id="rebalance-readiness"', HTML)
         self.assertIn('id="rebalance-feedback"', HTML)
@@ -3915,6 +3944,119 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             restored_cfg.cross_exchange_rebalance.sell_symbol,
             "ACS/USDC",
         )
+
+    async def test_market_maker_api_requires_confirmation_when_starting_live(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/market-maker"
+            method = "POST"
+
+            def __init__(self, app: dict[str, object], payload: dict[str, object]) -> None:
+                self.app = app
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                spot_exchanges=[
+                    ExchangeConfig(id="coinbase", label="coinbase-spot"),
+                ],
+                spot_markets=[
+                    SpotMarketConfig(
+                        asset="ACS",
+                        exchange="coinbase-spot",
+                        symbol="ACS/USDC",
+                        quote_currency="USDC",
+                    ),
+                ],
+                market_maker=MarketMakerConfig(
+                    id="coinbase-spot-acs-usdc",
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                ),
+            )
+            state = MonitorState(
+                cfg,
+                1.0,
+                runtime_store_path=os.path.join(tmp, "web_runtime_overrides.json"),
+            )
+            app: dict[str, object] = {"monitor_state": state, "config": cfg}
+            payload: dict[str, object] = {
+                "id": "coinbase-spot-acs-usdc",
+                "enabled": True,
+                "live_enabled": True,
+                "exchange": "coinbase-spot",
+                "symbol": "ACS/USDC",
+                "levels": 2,
+                "price_band_pct": 1.0,
+                "quote_per_level": 1.0,
+                "poll_seconds": 10.0,
+                "post_only": True,
+            }
+
+            denied = await api_market_maker(
+                FakeRequest(app, payload)  # type: ignore[arg-type]
+            )
+            approved = await api_market_maker(
+                FakeRequest(  # type: ignore[arg-type]
+                    app,
+                    {
+                        **payload,
+                        "confirm_live": "ENABLE LIVE MARKET MAKER",
+                    },
+                )
+            )
+            unchanged_live = await api_market_maker(
+                FakeRequest(app, payload)  # type: ignore[arg-type]
+            )
+            live_change_denied = await api_market_maker(
+                FakeRequest(  # type: ignore[arg-type]
+                    app,
+                    {**payload, "quote_per_level": 2.0},
+                )
+            )
+            runtime_cfg = await state.runtime_config(cfg)
+
+        self.assertEqual(denied.status, 400)
+        self.assertIn("confirm_live", json.loads(denied.text)["error"])
+        self.assertEqual(approved.status, 200, approved.text)
+        self.assertEqual(unchanged_live.status, 200, unchanged_live.text)
+        self.assertEqual(live_change_denied.status, 400)
+        self.assertIn("confirm_live", json.loads(live_change_denied.text)["error"])
+        self.assertTrue(runtime_cfg.market_maker.enabled)
+        self.assertTrue(runtime_cfg.market_maker.live_enabled)
+
+    async def test_auto_buy_sell_task_api_requires_start_confirmation(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/auto-buy-sell/tasks"
+            method = "POST"
+            app: dict[str, object] = {
+                "monitor_state": object(),
+                "config": make_config(),
+                "auto_buy_sell_tasks": object(),
+            }
+
+            async def json(self) -> dict[str, object]:
+                return {}
+
+        response = await api_create_auto_buy_sell_task(  # type: ignore[arg-type]
+            FakeRequest()
+        )
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("confirm_live", json.loads(response.text)["error"])
 
     async def test_login_lockout_after_repeated_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

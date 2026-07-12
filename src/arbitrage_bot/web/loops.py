@@ -805,12 +805,11 @@ async def monitor_loop(
                     rows = []
                     quote_rates = runtime_cfg.quote_rates
                     warnings = []
-                    market_maker_payload = {
-                        "status": "disabled",
-                        "mode": "dry_run",
-                        "plan": None,
-                        "error": None,
-                    }
+                    market_maker_payload = build_market_maker_payload(
+                        runtime_cfg,
+                        {},
+                        base_cfg=cfg,
+                    )
                     slow_execution_payload = {
                         "status": "disabled",
                         "mode": "dry_run",

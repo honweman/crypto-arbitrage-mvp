@@ -3,6 +3,12 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     const compact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 	    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
 	    const PAGE_IDS = new Set(["status", "trading", "quant", "settings", "records"]);
+	    const CORE_CONTROL_SECTION_IDS = new Set([
+	      "mm-section",
+	      "slow-section",
+	      "rebalance-section",
+	      "spot-arbitrage-section",
+	    ]);
 	    let currentPage = pageFromLocation();
 	    let lastState = null;
 	    let refreshQueued = false;
@@ -12,6 +18,8 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const REFRESH_INTERVAL_MS = PAGE_REFRESH_INTERVAL_MS.status;
 	    const REFRESH_FAILURE_BACKOFF_MS = 15000;
 	    const REFRESH_JITTER_MS = 300;
+	    const LIVE_AUTO_BUY_SELL_CONFIRMATION = "ENABLE LIVE AUTO BUY SELL";
+	    const LIVE_MARKET_MAKER_CONFIRMATION = "ENABLE LIVE MARKET MAKER";
 	    const LIVE_REBALANCE_CONFIRMATION = "ENABLE LIVE REBALANCE";
 	    let refreshTimer = null;
 	    const PAGE_SECTION_IDS = {
@@ -175,6 +183,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         title.addEventListener("click", (event) => {
           if (event.target.closest("a, button, input, label, select, textarea")) return;
           if (isUiFeatureHidden(section)) return;
+          if (!section.classList.contains("section-open")) closeOtherCoreControlSections(section.id);
           section.classList.toggle("section-open");
           sync();
           refreshOpenedSection(section);
@@ -183,12 +192,24 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
           if (event.key !== "Enter" && event.key !== " ") return;
           if (isUiFeatureHidden(section)) return;
           event.preventDefault();
+          if (!section.classList.contains("section-open")) closeOtherCoreControlSections(section.id);
           section.classList.toggle("section-open");
           sync();
           refreshOpenedSection(section);
         });
         sync();
       });
+    }
+
+    function closeOtherCoreControlSections(activeSectionId) {
+      if (!CORE_CONTROL_SECTION_IDS.has(activeSectionId)) return;
+      for (const sectionId of CORE_CONTROL_SECTION_IDS) {
+        if (sectionId === activeSectionId) continue;
+        const section = document.getElementById(sectionId);
+        if (!section) continue;
+        section.classList.remove("section-open");
+        section.querySelector(".section-title")?.setAttribute("aria-expanded", "false");
+      }
     }
 
     function text(id, value) {
@@ -230,6 +251,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       if (!section || isUiFeatureHidden(section)) return;
       const targetPage = PAGE_IDS.has(section.dataset.page) ? section.dataset.page : "settings";
       if (currentPage !== targetPage) setActivePage(targetPage, { refresh: false });
+      closeOtherCoreControlSections(sectionId);
       section.classList.add("section-open");
       const title = section.querySelector(".section-title");
       if (title) title.setAttribute("aria-expanded", "true");
@@ -309,13 +331,26 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 
     function updateCoreFormStates() {
       setCoreFormState("risk-section", "risk-apply", riskFormDirty, riskFormBusy);
-      setCoreFormState("slow-section", "slow-apply", slowFormDirty, slowFormBusy);
-      setCoreFormState("mm-section", "mm-apply", mmFormDirty, mmFormBusy);
+      setCoreFormState(
+        "slow-section",
+        "slow-apply",
+        slowFormDirty,
+        slowFormBusy,
+        "Save Defaults",
+      );
+      setCoreFormState(
+        "mm-section",
+        "mm-apply",
+        mmFormDirty,
+        mmFormBusy,
+        "Save Settings",
+      );
       setCoreFormState(
         "rebalance-section",
         "rebalance-apply",
         rebalanceFormDirty,
         rebalanceFormBusy,
+        "Save Settings",
       );
     }
 
@@ -327,11 +362,67 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function markSlowFormDirty() {
       slowFormDirty = true;
       updateCoreFormStates();
+      renderSlowExecutionWorkflow(lastState?.slow_execution);
     }
 
     function markMarketMakerFormDirty() {
       mmFormDirty = true;
       updateCoreFormStates();
+      renderMarketMakerWorkflow(lastState?.market_maker);
+    }
+
+    function renderStrategyWorkflow(rootId, steps) {
+      const root = document.getElementById(rootId);
+      if (!root) return;
+      root.innerHTML = steps.map((step, index) => {
+        const state = ["ready", "live", "blocked"].includes(step.state)
+          ? step.state
+          : "idle";
+        return `
+          <div class="strategy-workflow-step is-${state}">
+            <span class="strategy-workflow-index">${index + 1}</span>
+            <div class="strategy-workflow-copy">
+              <div class="strategy-workflow-title">
+                <span>${escapeHtml(uiText(step.title))}</span>
+                <span class="strategy-workflow-state">${escapeHtml(uiText(step.label || state))}</span>
+              </div>
+              <div class="strategy-workflow-detail" title="${escapeHtml(uiText(step.detail || ""))}">${escapeHtml(uiText(step.detail || "--"))}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function coreLiveRiskReadiness(strategyId, exchanges = []) {
+      const risk = lastState?.operations?.risk || lastState?.config?.risk || {};
+      const accountKeys = [...new Set(exchanges.filter(Boolean))];
+      const globalReady = risk.enabled !== false
+        && risk.trading_enabled !== false
+        && risk.allow_live_trading === true;
+      const strategyReady = risk.strategy_enabled?.[strategyId] !== false;
+      const blockedAccount = accountKeys.find(
+        (exchange) => risk.account_enabled?.[exchange] === false,
+      ) || "";
+      const accountsReady = !blockedAccount;
+      let detail = "Risk checks passed";
+      if (!globalReady) detail = "Global live gate is off";
+      else if (!strategyReady) detail = "Strategy risk switch is off";
+      else if (!accountsReady) detail = `${blockedAccount} ${uiText("account risk switch is off")}`;
+      return {
+        ready: globalReady && strategyReady && accountsReady,
+        globalReady,
+        strategyReady,
+        accountsReady,
+        detail,
+      };
+    }
+
+    function setStrategyFeedback(id, message = "", level = "") {
+      const feedback = document.getElementById(id);
+      if (!feedback) return;
+      feedback.textContent = message ? uiText(message) : "";
+      feedback.classList.toggle("is-error", level === "error");
+      feedback.classList.toggle("is-ok", level === "ok");
     }
 
     function formatSymbolQuantity(value, symbol, mode) {
@@ -1432,6 +1523,50 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderSpotArbitrageWorkflow(data) {
+      const markets = currentSpotMarkets || [];
+      const assetVenues = new Map();
+      for (const market of markets) {
+        const venues = assetVenues.get(market.asset) || new Set();
+        if (market.exchange) venues.add(market.exchange);
+        assetVenues.set(market.asset, venues);
+      }
+      const readyAssets = [...assetVenues.entries()]
+        .filter(([, venues]) => venues.size >= 2)
+        .map(([asset]) => asset);
+      const parametersReady = readyAssets.length > 0;
+      const risk = coreLiveRiskReadiness(
+        "spot_spread",
+        markets.map((market) => market.exchange),
+      );
+      const spot = data.spot_arbitrage || {};
+      const live = spot.mode === "live";
+      renderStrategyWorkflow("spot-workflow", [
+        {
+          title: "Markets",
+          state: parametersReady ? "ready" : "blocked",
+          label: parametersReady ? "Ready" : "Required",
+          detail: parametersReady
+            ? `${readyAssets.join(", ")} · ${markets.length} ${uiText("market(s)")}`
+            : "Add the same asset on at least two accounts",
+        },
+        {
+          title: "Risk Check",
+          state: risk.ready ? "ready" : "blocked",
+          label: risk.ready ? "Ready" : "Blocked",
+          detail: risk.detail,
+        },
+        {
+          title: "Run State",
+          state: live ? "live" : "idle",
+          label: live ? "Live" : "Dry Run",
+          detail: spot.status || "waiting for market data",
+        },
+      ]);
+      const riskButton = document.getElementById("spot-open-risk");
+      if (riskButton) riskButton.hidden = risk.ready;
+    }
+
     function renderMarketsConfig(data) {
       if (marketsConfigBusy) return;
       const config = data.config || {};
@@ -1443,6 +1578,7 @@ function balanceStatusClass(status) {
         "markets-config-meta",
         `${currentSpotMarkets.length} market${currentSpotMarkets.length === 1 ? "" : "s"} · ${exchanges.length} account${exchanges.length === 1 ? "" : "s"}`
       );
+      renderSpotArbitrageWorkflow(data);
 
       const body = document.getElementById("markets-config");
       body.innerHTML = "";
@@ -2035,6 +2171,7 @@ function balanceStatusClass(status) {
       );
 
       const market = safety.market || {};
+      const maxLevelGapBps = Number(market.max_level_gap_bps || 0);
       const age = market.order_book_received_at
         ? Math.max(0, Date.now() / 1000 - market.order_book_received_at)
         : market.order_book_timestamp_ms
@@ -2047,7 +2184,7 @@ function balanceStatusClass(status) {
       );
       text(
         "mm-safety-market-detail",
-        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${(market.max_level_gap_bps || 0).toFixed ? market.max_level_gap_bps.toFixed(1) : market.max_level_gap_bps || 0}/${limits.max_order_book_gap_bps || "--"} bps · age ${age == null ? "--" : age.toFixed(1) + "s"}`
+        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${Number.isFinite(maxLevelGapBps) ? maxLevelGapBps.toFixed(1) : "--"}/${limits.max_order_book_gap_bps || "--"} bps · age ${age == null ? "--" : age.toFixed(1) + "s"}`
       );
       renderMarketMakerQuality(marketMaker);
     }
@@ -5545,12 +5682,125 @@ function balanceStatusClass(status) {
       }
     }
 
+    function marketMakerFormReadiness(payload = marketMakerPayloadFromForm()) {
+      const missing = [];
+      if (!payload.exchange) missing.push(uiText("account"));
+      if (!payload.symbol) missing.push(uiText("pair"));
+      if (!(payload.levels >= 1)) missing.push(uiText("levels"));
+      if (!(payload.price_band_pct > 0)) missing.push(uiText("price band"));
+      if (!(payload.quote_per_level > 0)) missing.push(uiText("quote per level"));
+      if (!(payload.poll_seconds >= 1)) missing.push(uiText("refresh interval"));
+      return {
+        ready: missing.length === 0,
+        detail: missing.length
+          ? `${uiText("Missing")}: ${missing.join(", ")}`
+          : `${payload.exchange} · ${payload.symbol} · ${payload.levels} ${uiText("levels per side")}`,
+      };
+    }
+
+    function marketMakerLiveState(marketMaker = lastState?.market_maker) {
+      const selected = selectedMarketMakerInstance(marketMaker || {});
+      const config = selected?.config || marketMaker?.config || {};
+      const runtime = selected?.runtime || marketMaker?.runtime || {};
+      return {
+        configuredLive: Boolean(config.enabled && config.live_enabled),
+        status: runtime.status || selected?.status || marketMaker?.status || "stopped",
+        mode: runtime.mode || selected?.mode || marketMaker?.mode || "dry_run",
+      };
+    }
+
+    function renderMarketMakerWorkflow(marketMaker = lastState?.market_maker) {
+      if (!marketMaker || !document.getElementById("mm-levels")) return;
+      const payload = marketMakerPayloadFromForm();
+      const parameters = marketMakerFormReadiness(payload);
+      const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
+      const live = marketMakerLiveState(marketMaker);
+      renderStrategyWorkflow("mm-workflow", [
+        {
+          title: "Parameters",
+          state: parameters.ready ? "ready" : "blocked",
+          label: parameters.ready ? (mmFormDirty ? "Unsaved" : "Ready") : "Required",
+          detail: parameters.detail,
+        },
+        {
+          title: "Risk Check",
+          state: risk.ready ? "ready" : "blocked",
+          label: risk.ready ? "Ready" : "Blocked",
+          detail: risk.detail,
+        },
+        {
+          title: "Run State",
+          state: live.configuredLive ? "live" : "idle",
+          label: live.configuredLive ? "Live" : "Stopped",
+          detail: `${live.mode} · ${live.status}`,
+        },
+      ]);
+      const startButton = document.getElementById("mm-start");
+      const stopButton = document.getElementById("mm-stop");
+      const riskButton = document.getElementById("mm-open-risk");
+      if (startButton) {
+        startButton.hidden = live.configuredLive;
+        startButton.disabled = mmFormBusy || !parameters.ready || !risk.ready;
+      }
+      if (stopButton) {
+        stopButton.hidden = !live.configuredLive;
+        stopButton.disabled = mmFormBusy;
+      }
+      if (riskButton) riskButton.hidden = risk.ready;
+    }
+
+    function marketMakerConfirmationDetail(payload) {
+      const quote = quoteCurrency(payload.symbol);
+      const plannedOrders = Math.max(0, Number(payload.levels || 0)) * 2;
+      const plannedQuote = plannedOrders * Math.max(0, Number(payload.quote_per_level || 0));
+      return [
+        `${uiText("Account")}: ${payload.exchange}`,
+        `${uiText("Trading pair")}: ${payload.symbol}`,
+        `${uiText("Orders")}: ${plannedOrders} (${payload.levels} ${uiText("levels per side")})`,
+        `${uiText("Quote/Level")}: ${quote} ${money.format(payload.quote_per_level)}`,
+        `${uiText("Planned total")}: ${quote} ${money.format(plannedQuote)}`,
+        `${uiText("Band %")}: ${fmt.format(payload.price_band_pct)}`,
+        `${uiText("Refresh Sec")}: ${fmt.format(payload.poll_seconds)}`,
+        `${uiText("Post Only")}: ${payload.post_only ? uiText("Yes") : uiText("No")}`,
+      ].join("\n");
+    }
+
+    function syncSelectedMarketMakerId(result, preferredId, exchange = "", symbol = "") {
+      const instances = Array.isArray(result?.instances) ? result.instances : [];
+      const exact = instances.find((instance) => instance.id === preferredId);
+      const route = instances.find(
+        (instance) => instance.exchange === exchange && instance.symbol === symbol,
+      );
+      const resolvedId = exact?.id || route?.id || result?.config?.id || preferredId || "";
+      if (!resolvedId) return;
+      selectedMarketMakerInstanceId = resolvedId;
+      if (resolvedId !== preferredId) text("mm-meta", `saved as ${resolvedId}`);
+    }
+
+    async function postMarketMakerConfig(payload) {
+      const res = await fetch("/api/market-maker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "market maker update failed");
+      syncSelectedMarketMakerId(
+        result,
+        payload.id || selectedMarketMakerInstanceId,
+        payload.exchange,
+        payload.symbol,
+      );
+      return result;
+    }
+
     function renderMarketMakerConfig(marketMaker) {
       if (!marketMaker || mmFormBusy) return;
       renderMarketMakerInstanceSelect(marketMaker);
       renderMarketMakerInstanceStatus(marketMaker);
       if (mmFormDirty) {
         updateCoreFormStates();
+        renderMarketMakerWorkflow(marketMaker);
         return;
       }
       const selected = selectedMarketMakerInstance(marketMaker);
@@ -5580,6 +5830,7 @@ function balanceStatusClass(status) {
       setNumericField("mm-inventory-max", config.inventory_max_deviation_base || 0);
       document.getElementById("mm-post-only").checked = Boolean(config.post_only);
       updateCoreFormStates();
+      renderMarketMakerWorkflow(marketMaker);
     }
 
     function marketMakerPayloadFromForm() {
@@ -5627,10 +5878,15 @@ function balanceStatusClass(status) {
       const result = await res.json();
       if (!res.ok) throw new Error(result.error || "market maker update failed");
       mmFormDirty = false;
-      if (result.config?.id && result.config.id !== selectedMarketMakerInstanceId) {
-        selectedMarketMakerInstanceId = result.config.id;
-        text("mm-meta", `saved as ${result.config.id}`);
-      }
+      const selectedDraft = instances.find(
+        (instance) => instance.id === selectedMarketMakerInstanceId,
+      ) || {};
+      syncSelectedMarketMakerId(
+        result,
+        selectedMarketMakerInstanceId,
+        selectedDraft.exchange,
+        selectedDraft.symbol,
+      );
       await refresh({ force: true });
     }
 
@@ -5678,27 +5934,119 @@ function balanceStatusClass(status) {
     async function applyMarketMakerConfig(event) {
       event.preventDefault();
       if (mmFormBusy) return;
-      mmFormBusy = true;
-      updateCoreFormStates();
-      try {
-        const res = await fetch("/api/market-maker", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(marketMakerPayloadFromForm()),
-        });
-        const result = await res.json();
-        if (!res.ok) throw new Error(result.error || "market maker update failed");
-        mmFormDirty = false;
-        if (result.config?.id && result.config.id !== selectedMarketMakerInstanceId) {
-          selectedMarketMakerInstanceId = result.config.id;
-          text("mm-meta", `saved as ${result.config.id}`);
+      const payload = marketMakerPayloadFromForm();
+      const parameters = marketMakerFormReadiness(payload);
+      if (!parameters.ready) {
+        setStrategyFeedback("mm-feedback", parameters.detail, "error");
+        renderMarketMakerWorkflow(lastState?.market_maker);
+        return;
+      }
+      if (payload.enabled && payload.live_enabled) {
+        const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
+        if (!risk.ready) {
+          setStrategyFeedback("mm-feedback", risk.detail, "error");
+          renderMarketMakerWorkflow(lastState?.market_maker);
+          return;
         }
-        await refresh();
+        if (!dangerConfirm(
+          "Apply these changes to the running live Market Maker?",
+          marketMakerConfirmationDetail(payload),
+        )) return;
+        payload.confirm_live = LIVE_MARKET_MAKER_CONFIRMATION;
+      }
+      mmFormBusy = true;
+      setStrategyFeedback("mm-feedback");
+      updateCoreFormStates();
+      renderMarketMakerWorkflow(lastState?.market_maker);
+      try {
+        await postMarketMakerConfig(payload);
+        mmFormDirty = false;
+        setStrategyFeedback("mm-feedback", "Market Maker settings saved.", "ok");
+        await refresh({ force: true });
       } catch (error) {
-        text("mm-meta", `update failed: ${error.message || error}`);
+        setStrategyFeedback("mm-feedback", error.message || String(error), "error");
       } finally {
         mmFormBusy = false;
         updateCoreFormStates();
+        renderMarketMakerWorkflow(lastState?.market_maker);
+      }
+    }
+
+    async function startMarketMaker() {
+      if (mmFormBusy) return;
+      const payload = {
+        ...marketMakerPayloadFromForm(),
+        enabled: true,
+        live_enabled: true,
+        confirm_live: LIVE_MARKET_MAKER_CONFIRMATION,
+      };
+      const parameters = marketMakerFormReadiness(payload);
+      const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
+      if (!parameters.ready || !risk.ready) {
+        setStrategyFeedback(
+          "mm-feedback",
+          parameters.ready ? risk.detail : parameters.detail,
+          "error",
+        );
+        renderMarketMakerWorkflow(lastState?.market_maker);
+        return;
+      }
+      if (!dangerConfirm(
+        "Start live Market Maker with these settings?",
+        marketMakerConfirmationDetail(payload),
+      )) return;
+      mmFormBusy = true;
+      setStrategyFeedback("mm-feedback");
+      document.getElementById("mm-enabled").checked = true;
+      document.getElementById("mm-live-enabled").checked = true;
+      updateCoreFormStates();
+      renderMarketMakerWorkflow(lastState?.market_maker);
+      try {
+        await postMarketMakerConfig(payload);
+        mmFormDirty = false;
+        setStrategyFeedback("mm-feedback", "Live Market Maker started.", "ok");
+        await refresh({ force: true });
+      } catch (error) {
+        document.getElementById("mm-enabled").checked = false;
+        document.getElementById("mm-live-enabled").checked = false;
+        setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+      } finally {
+        mmFormBusy = false;
+        updateCoreFormStates();
+        renderMarketMakerWorkflow(lastState?.market_maker);
+      }
+    }
+
+    async function stopMarketMaker() {
+      if (mmFormBusy) return;
+      const payload = {
+        ...marketMakerPayloadFromForm(),
+        enabled: false,
+        live_enabled: false,
+      };
+      if (!dangerConfirm(
+        "Stop this Market Maker and cancel its managed orders?",
+        `${payload.exchange} · ${payload.symbol}`,
+      )) return;
+      mmFormBusy = true;
+      setStrategyFeedback("mm-feedback");
+      document.getElementById("mm-enabled").checked = false;
+      document.getElementById("mm-live-enabled").checked = false;
+      updateCoreFormStates();
+      renderMarketMakerWorkflow(lastState?.market_maker);
+      try {
+        await postMarketMakerConfig(payload);
+        mmFormDirty = false;
+        setStrategyFeedback("mm-feedback", "Market Maker stop requested.", "ok");
+        await refresh({ force: true });
+      } catch (error) {
+        document.getElementById("mm-enabled").checked = true;
+        document.getElementById("mm-live-enabled").checked = true;
+        setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+      } finally {
+        mmFormBusy = false;
+        updateCoreFormStates();
+        renderMarketMakerWorkflow(lastState?.market_maker);
       }
     }
 
@@ -5821,10 +6169,104 @@ function balanceStatusClass(status) {
       box.className = `field wide-field market-limit-hint ${belowExchangeMin ? "limit-warning" : ""}`;
     }
 
+    function slowExecutionFormReadiness(payload = slowExecutionPayloadFromForm()) {
+      const missing = [];
+      if (!payload.exchange) missing.push(uiText("account"));
+      if (!payload.symbol) missing.push(uiText("pair"));
+      if (!payload.unlimited_total && !(payload.total_base > 0 || payload.total_quote > 0)) {
+        missing.push(uiText("total target"));
+      }
+      if (payload.slice_mode === "configured") {
+        if (!(payload.slice_base_min > 0 && payload.slice_base_max >= payload.slice_base_min)) {
+          missing.push(uiText("order size range"));
+        }
+      }
+      if (!(payload.interval_seconds > 0)) missing.push(uiText("interval"));
+      return {
+        ready: missing.length === 0,
+        detail: missing.length
+          ? `${uiText("Missing")}: ${missing.join(", ")}`
+          : `${payload.exchange} · ${payload.symbol} · ${String(payload.side || "").toUpperCase()}`,
+      };
+    }
+
+    function renderSlowExecutionWorkflow(data = lastState?.slow_execution) {
+      if (!data || !document.getElementById("slow-side")) return;
+      const payload = slowExecutionPayloadFromForm();
+      const parameters = slowExecutionFormReadiness(payload);
+      const risk = coreLiveRiskReadiness("slow_execution", [payload.exchange]);
+      const tasks = data.tasks?.tasks || [];
+      const activeTasks = tasks.filter((task) => !AUTO_TERMINAL_STATUSES.has(task.status || ""));
+      const routeTasks = activeTasks.filter((task) => {
+        const config = task.config || task;
+        return config.exchange === payload.exchange && config.symbol === payload.symbol;
+      });
+      const first = routeTasks[0] || activeTasks[0];
+      const readyToStart = parameters.ready && risk.ready;
+      renderStrategyWorkflow("slow-workflow", [
+        {
+          title: "Parameters",
+          state: parameters.ready ? "ready" : "blocked",
+          label: parameters.ready ? (slowFormDirty ? "Unsaved" : "Ready") : "Required",
+          detail: parameters.detail,
+        },
+        {
+          title: "Risk Check",
+          state: risk.ready ? "ready" : "blocked",
+          label: risk.ready ? "Ready" : "Blocked",
+          detail: risk.detail,
+        },
+        {
+          title: "Task State",
+          state: activeTasks.length ? "live" : readyToStart ? "ready" : "blocked",
+          label: activeTasks.length ? "Running" : readyToStart ? "Ready to start" : "Not ready",
+          detail: first
+            ? `${activeTasks.length} ${uiText("active task(s)")} · ${first.status || "running"}`
+            : "No active task",
+        },
+      ]);
+      const createButton = document.getElementById("slow-create-task");
+      const riskButton = document.getElementById("slow-open-risk");
+      if (createButton) {
+        createButton.disabled = slowFormBusy || !parameters.ready || !risk.ready;
+      }
+      if (riskButton) riskButton.hidden = risk.ready;
+    }
+
+    function slowExecutionConfirmationDetail(payload) {
+      const base = baseCurrency(payload.symbol);
+      const quote = quoteCurrency(payload.symbol);
+      let total = uiText("Unlimited");
+      if (!payload.unlimited_total) {
+        total = payload.total_quote > 0
+          ? `${quote} ${money.format(payload.total_quote)}`
+          : `${base} ${fmt.format(payload.total_base)}`;
+      }
+      const size = payload.slice_mode === "top_level"
+        ? uiText("Match top-of-book size")
+        : `${base} ${fmt.format(payload.slice_base_min)} - ${fmt.format(payload.slice_base_max)}`;
+      const side = String(payload.side || "").toLowerCase();
+      const gatePrice = side === "buy" ? "Ask" : "Bid";
+      const startOperator = side === "buy" ? "<=" : ">=";
+      const stopOperator = side === "buy" ? ">=" : "<=";
+      return [
+        `${uiText("Account")}: ${payload.exchange}`,
+        `${uiText("Trading pair")}: ${payload.symbol}`,
+        `${uiText("Side")}: ${side.toUpperCase()}`,
+        `${uiText("Total target")}: ${total}`,
+        `${uiText("Each order")}: ${size}`,
+        `${uiText("Price Mode")}: ${payload.price_mode}`,
+        `${uiText("Place Sec")}: ${fmt.format(payload.interval_seconds)}`,
+        `${uiText("Start Gate")}: ${payload.start_price > 0 ? `${gatePrice} ${startOperator} ${fmt.format(payload.start_price)} ${quote}` : uiText("Immediate")}`,
+        `${uiText("Stop Gate")}: ${payload.stop_price > 0 ? `${gatePrice} ${stopOperator} ${fmt.format(payload.stop_price)} ${quote}` : uiText("None")}`,
+      ].join("\n");
+    }
+
     function renderSlowExecutionConfig(config, accounts) {
       if (!config || slowFormDirty || slowFormBusy) {
         updateCoreFormStates();
         updateSlowMarketLimitHint();
+        renderSlowExecutionWorkflow(lastState?.slow_execution);
         return;
       }
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
@@ -5846,6 +6288,7 @@ function balanceStatusClass(status) {
       setNumericField("slow-stop-price", config.stop_price || 0);
       updateSlowMarketLimitHint();
       updateCoreFormStates();
+      renderSlowExecutionWorkflow(lastState?.slow_execution);
     }
 
     function slowExecutionPayloadFromForm() {
@@ -5873,9 +6316,17 @@ function balanceStatusClass(status) {
     async function applySlowExecutionConfig(event) {
       event.preventDefault();
       if (slowFormBusy) return;
-      slowFormBusy = true;
-      updateCoreFormStates();
       const payload = slowExecutionPayloadFromForm();
+      const parameters = slowExecutionFormReadiness(payload);
+      if (!parameters.ready) {
+        setStrategyFeedback("slow-feedback", parameters.detail, "error");
+        renderSlowExecutionWorkflow(lastState?.slow_execution);
+        return;
+      }
+      slowFormBusy = true;
+      setStrategyFeedback("slow-feedback");
+      updateCoreFormStates();
+      renderSlowExecutionWorkflow(lastState?.slow_execution);
       try {
         const res = await fetch("/api/auto-buy-sell", {
           method: "POST",
@@ -5885,12 +6336,14 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "auto buy/sell update failed");
         slowFormDirty = false;
-        await refresh();
+        setStrategyFeedback("slow-feedback", "Auto Buy/Sell defaults saved.", "ok");
+        await refresh({ force: true });
       } catch (error) {
-        text("slow-meta", `update failed: ${error.message || error}`);
+        setStrategyFeedback("slow-feedback", error.message || String(error), "error");
       } finally {
         slowFormBusy = false;
         updateCoreFormStates();
+        renderSlowExecutionWorkflow(lastState?.slow_execution);
       }
     }
 
@@ -5910,21 +6363,26 @@ function balanceStatusClass(status) {
 
     function rebalanceRiskReadiness(data) {
       const config = data?.config || {};
-      const risk = lastState?.operations?.risk || lastState?.config?.risk || {};
       const buyExchange = selectedStrategyAccount("rebalance-buy") || config.buy_exchange || "";
       const sellExchange = selectedStrategyAccount("rebalance-sell") || config.sell_exchange || "";
-      const globalReady = risk.enabled === true
-        && risk.trading_enabled === true
-        && risk.allow_live_trading === true;
-      const strategyReady = risk.strategy_enabled?.cross_exchange_rebalance === true;
-      const accountsReady = [buyExchange, sellExchange]
-        .filter(Boolean)
-        .every((exchange) => risk.account_enabled?.[exchange] !== false);
+      return coreLiveRiskReadiness(
+        "cross_exchange_rebalance",
+        [buyExchange, sellExchange],
+      );
+    }
+
+    function rebalanceFormReadiness(payload = crossExchangeRebalancePayloadFromForm()) {
+      const missing = [];
+      if (!payload.buy_exchange || !payload.buy_symbol) missing.push(uiText("cash source"));
+      if (!payload.sell_exchange || !payload.sell_symbol) missing.push(uiText("cash destination"));
+      if (!(payload.total_quote_common > 0)) missing.push(uiText("total target"));
+      if (!(payload.quote_per_cycle_common > 0)) missing.push(uiText("per-cycle amount"));
+      if (!(payload.interval_seconds > 0)) missing.push(uiText("interval"));
       return {
-        ready: globalReady && strategyReady && accountsReady,
-        globalReady,
-        strategyReady,
-        accountsReady,
+        ready: missing.length === 0,
+        detail: missing.length
+          ? `${uiText("Missing")}: ${missing.join(", ")}`
+          : `${payload.buy_exchange} ${payload.buy_symbol} -> ${payload.sell_exchange} ${payload.sell_symbol}`,
       };
     }
 
@@ -5952,26 +6410,56 @@ function balanceStatusClass(status) {
       if (!readiness || !data) return;
       const resetRequired = rebalanceProgressRequiresReset(data);
       const risk = rebalanceRiskReadiness(data);
-      const liveEnabled = Boolean(document.getElementById("rebalance-live-enabled")?.checked);
-      const confirmationReady = rebalanceLiveConfirmed;
-      const confirmationLabel = confirmationReady
-        ? "Confirmation ready"
-        : liveEnabled
-          ? "Confirmation required"
-          : "Confirmation pending";
-      readiness.innerHTML = `
-        <span class="config-chip ${resetRequired ? "config-diff" : "config-same"}">${escapeHtml(uiText(resetRequired ? "Reset required" : "Progress ready"))}</span>
-        <span class="config-chip ${risk.ready ? "config-same" : "config-diff"}">${escapeHtml(uiText(risk.ready ? "Rebalance risk ready" : "Rebalance risk off"))}</span>
-        <span class="config-chip ${confirmationReady ? "config-same" : "config-diff"}">${escapeHtml(uiText(confirmationLabel))}</span>
-      `;
+      const payload = crossExchangeRebalancePayloadFromForm();
+      const parameters = rebalanceFormReadiness(payload);
+      const config = data.config || {};
+      const runtime = data.runtime || {};
+      const configuredLive = Boolean(config.enabled && config.live_enabled);
+      renderStrategyWorkflow("rebalance-readiness", [
+        {
+          title: "Parameters",
+          state: parameters.ready && !resetRequired ? "ready" : "blocked",
+          label: resetRequired
+            ? "Reset required"
+            : parameters.ready
+              ? (rebalanceFormDirty ? "Unsaved" : "Ready")
+              : "Required",
+          detail: resetRequired ? "Previous target is complete" : parameters.detail,
+        },
+        {
+          title: "Risk Check",
+          state: risk.ready ? "ready" : "blocked",
+          label: risk.ready ? "Ready" : "Blocked",
+          detail: risk.detail,
+        },
+        {
+          title: "Run State",
+          state: configuredLive ? "live" : "idle",
+          label: configuredLive ? "Live" : "Stopped",
+          detail: `${runtime.mode || data.mode || "dry_run"} · ${runtime.status || data.status || "disabled"}`,
+        },
+      ]);
       const riskButton = document.getElementById("rebalance-open-risk");
       if (riskButton) riskButton.hidden = risk.ready;
-      const confirmButton = document.getElementById("rebalance-live-confirm");
-      if (confirmButton) {
-        confirmButton.disabled = !liveEnabled || rebalanceFormBusy;
-        confirmButton.classList.toggle("is-confirmed", confirmationReady);
-        confirmButton.setAttribute("aria-pressed", confirmationReady ? "true" : "false");
-        confirmButton.textContent = uiText(confirmationReady ? "Live Confirmed" : "Confirm Live");
+      const startButton = document.getElementById("rebalance-live-confirm");
+      if (startButton) {
+        startButton.hidden = configuredLive;
+        startButton.disabled = rebalanceFormBusy || resetRequired || !parameters.ready || !risk.ready;
+        startButton.classList.remove("is-confirmed");
+        startButton.setAttribute("aria-pressed", "false");
+        startButton.textContent = uiText("Review & Start Live");
+      }
+      const stopButton = document.getElementById("rebalance-stop");
+      if (stopButton) {
+        stopButton.hidden = !configuredLive;
+        stopButton.disabled = rebalanceFormBusy;
+      }
+      const resetButton = document.getElementById("rebalance-reset");
+      const hasProgress = Number(runtime.completed_quote_common || 0) > 0
+        || Number(runtime.completed_destination_quote_common || 0) > 0
+        || Number(runtime.completed_base || 0) > 0;
+      if (resetButton) {
+        resetButton.disabled = rebalanceFormBusy || configuredLive || !hasProgress;
       }
     }
 
@@ -5991,7 +6479,7 @@ function balanceStatusClass(status) {
         return "The source or destination account is disabled in Risk Controls.";
       }
       if (requireConfirmation && !rebalanceLiveConfirmed) {
-        return "Click Confirm Live before saving live settings.";
+        return "Review and confirm the live settings before starting.";
       }
       return "";
     }
@@ -6008,10 +6496,17 @@ function balanceStatusClass(status) {
       ].join("\n");
     }
 
-    function confirmLiveRebalance() {
-      const payload = crossExchangeRebalancePayloadFromForm();
-      if (!payload.live_enabled) {
-        setRebalanceFeedback("Turn on Live Ready before confirming live.", "error");
+    async function confirmLiveRebalance() {
+      if (rebalanceFormBusy) return;
+      const payload = {
+        ...crossExchangeRebalancePayloadFromForm(),
+        enabled: true,
+        live_enabled: true,
+      };
+      const parameters = rebalanceFormReadiness(payload);
+      if (!parameters.ready) {
+        setRebalanceFeedback(parameters.detail, "error");
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
         return;
       }
       const validationError = liveRebalanceValidationError(
@@ -6029,8 +6524,13 @@ function balanceStatusClass(status) {
         liveRebalanceConfirmationDetail(payload),
       )) return;
       rebalanceLiveConfirmed = true;
-      setRebalanceFeedback("Live rebalance confirmed. Click Apply to save.", "ok");
-      renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+      payload.confirm_live = LIVE_REBALANCE_CONFIRMATION;
+      document.getElementById("rebalance-enabled").checked = true;
+      document.getElementById("rebalance-live-enabled").checked = true;
+      await submitCrossExchangeRebalance(
+        payload,
+        "Live rebalance started.",
+      );
     }
 
     function updateRebalanceUnitLabels(data = lastState?.cross_exchange_rebalance) {
@@ -6130,22 +6630,13 @@ function balanceStatusClass(status) {
       };
     }
 
-    async function applyCrossExchangeRebalanceConfig(event) {
-      event.preventDefault();
-      if (rebalanceFormBusy) return;
-      const payload = crossExchangeRebalancePayloadFromForm();
-      const validationError = liveRebalanceValidationError(
-        lastState?.cross_exchange_rebalance,
-        payload,
-      );
-      if (validationError) {
-        setRebalanceFeedback(validationError, "error");
-        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
-        return;
-      }
+    async function submitCrossExchangeRebalance(payload, successMessage) {
+      if (rebalanceFormBusy) return false;
+      const previousConfig = lastState?.cross_exchange_rebalance?.config || {};
       rebalanceFormBusy = true;
       setRebalanceFeedback();
       updateCoreFormStates();
+      renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
       try {
         const res = await fetch("/api/cross-exchange-rebalance", {
           method: "POST",
@@ -6156,10 +6647,15 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "rebalance update failed");
         rebalanceFormDirty = false;
         invalidateLiveRebalanceConfirmation();
-        setRebalanceFeedback("Rebalance settings saved.", "ok");
+        setRebalanceFeedback(successMessage, "ok");
         await refresh({ force: true });
+        return true;
       } catch (error) {
+        document.getElementById("rebalance-enabled").checked = Boolean(previousConfig.enabled);
+        document.getElementById("rebalance-live-enabled").checked = Boolean(previousConfig.live_enabled);
+        invalidateLiveRebalanceConfirmation();
         setRebalanceFeedback(error.message || String(error), "error");
+        return false;
       } finally {
         rebalanceFormBusy = false;
         renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
@@ -6167,9 +6663,57 @@ function balanceStatusClass(status) {
       }
     }
 
+    async function applyCrossExchangeRebalanceConfig(event) {
+      event.preventDefault();
+      if (rebalanceFormBusy) return;
+      const payload = crossExchangeRebalancePayloadFromForm();
+      const parameters = rebalanceFormReadiness(payload);
+      if (!parameters.ready) {
+        setRebalanceFeedback(parameters.detail, "error");
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+        return;
+      }
+      if (payload.live_enabled) {
+        const validationError = liveRebalanceValidationError(
+          lastState?.cross_exchange_rebalance,
+          payload,
+          false,
+        );
+        if (validationError) {
+          setRebalanceFeedback(validationError, "error");
+          renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+          return;
+        }
+        if (!dangerConfirm(
+          "Apply these changes to the running live rebalance?",
+          liveRebalanceConfirmationDetail(payload),
+        )) return;
+        rebalanceLiveConfirmed = true;
+        payload.confirm_live = LIVE_REBALANCE_CONFIRMATION;
+      }
+      await submitCrossExchangeRebalance(payload, "Rebalance settings saved.");
+    }
+
+    async function stopCrossExchangeRebalance() {
+      if (rebalanceFormBusy) return;
+      const payload = {
+        ...crossExchangeRebalancePayloadFromForm(),
+        enabled: false,
+        live_enabled: false,
+        confirm_live: "",
+      };
+      if (!dangerConfirm(
+        "Stop the live rebalance after the current operation?",
+        `${payload.buy_exchange} ${payload.buy_symbol} -> ${payload.sell_exchange} ${payload.sell_symbol}`,
+      )) return;
+      document.getElementById("rebalance-enabled").checked = false;
+      document.getElementById("rebalance-live-enabled").checked = false;
+      await submitCrossExchangeRebalance(payload, "Rebalance stop requested.");
+    }
+
     async function resetCrossExchangeRebalanceProgress() {
-      if (document.getElementById("rebalance-live-enabled").checked) {
-        setRebalanceFeedback("Disable Live Ready before resetting progress.", "error");
+      if (lastState?.cross_exchange_rebalance?.config?.live_enabled) {
+        setRebalanceFeedback("Stop the live rebalance before resetting progress.", "error");
         return;
       }
       if (!dangerConfirm("Reset cross-exchange rebalance progress?")) return;
@@ -6557,26 +7101,50 @@ function balanceStatusClass(status) {
 
     async function createAutoBuySellTask() {
       if (slowFormBusy) return;
+      const payload = {
+        ...slowExecutionPayloadFromForm(),
+        enabled: true,
+        confirm_live: LIVE_AUTO_BUY_SELL_CONFIRMATION,
+      };
+      const parameters = slowExecutionFormReadiness(payload);
+      const risk = coreLiveRiskReadiness("slow_execution", [payload.exchange]);
+      if (!parameters.ready || !risk.ready) {
+        setStrategyFeedback(
+          "slow-feedback",
+          parameters.ready ? risk.detail : parameters.detail,
+          "error",
+        );
+        renderSlowExecutionWorkflow(lastState?.slow_execution);
+        return;
+      }
+      if (!dangerConfirm(
+        "Create and start this live Auto Buy/Sell task?",
+        slowExecutionConfirmationDetail(payload),
+      )) return;
       slowFormBusy = true;
       const button = document.getElementById("slow-create-task");
       button.disabled = true;
+      setStrategyFeedback("slow-feedback");
       updateCoreFormStates();
+      renderSlowExecutionWorkflow(lastState?.slow_execution);
       try {
         const res = await fetch("/api/auto-buy-sell/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(slowExecutionPayloadFromForm()),
+          body: JSON.stringify(payload),
         });
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "create task failed");
         slowFormDirty = false;
-        await refresh();
+        setStrategyFeedback("slow-feedback", "Auto Buy/Sell task started.", "ok");
+        await refresh({ force: true });
       } catch (error) {
-        text("slow-meta", `create failed: ${error.message || error}`);
+        setStrategyFeedback("slow-feedback", error.message || String(error), "error");
       } finally {
         button.disabled = false;
         slowFormBusy = false;
         updateCoreFormStates();
+        renderSlowExecutionWorkflow(lastState?.slow_execution);
       }
     }
 
@@ -7120,6 +7688,12 @@ function balanceStatusClass(status) {
     document.getElementById("mm-add").addEventListener("click", addMarketMakerInstance);
     document.getElementById("mm-delete").addEventListener("click", deleteMarketMakerInstance);
     document.getElementById("mm-form").addEventListener("submit", applyMarketMakerConfig);
+    document.getElementById("mm-start").addEventListener("click", startMarketMaker);
+    document.getElementById("mm-stop").addEventListener("click", stopMarketMaker);
+    document.getElementById("mm-open-risk").addEventListener(
+      "click",
+      () => openSettingsSection("risk-section"),
+    );
     document.getElementById("slow-form").addEventListener("input", markSlowFormDirty);
     document.getElementById("slow-form").addEventListener("change", markSlowFormDirty);
     document.getElementById("slow-side").addEventListener("change", updateSlowLabels);
@@ -7151,6 +7725,10 @@ function balanceStatusClass(status) {
       "click",
       confirmLiveRebalance,
     );
+    document.getElementById("rebalance-stop").addEventListener(
+      "click",
+      stopCrossExchangeRebalance,
+    );
     document.getElementById("rebalance-open-risk").addEventListener(
       "click",
       () => openSettingsSection("risk-section"),
@@ -7160,6 +7738,9 @@ function balanceStatusClass(status) {
       updateRebalanceUnitLabels();
       setRebalanceFeedback(rebalanceFeedbackMessage, rebalanceFeedbackLevel);
       renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+      renderMarketMakerWorkflow(lastState?.market_maker);
+      renderSlowExecutionWorkflow(lastState?.slow_execution);
+      if (lastState) renderSpotArbitrageWorkflow(lastState);
       if (!rebalanceFormDirty && lastState?.cross_exchange_rebalance) {
         for (const id of ["rebalance-buy-accounts", "rebalance-sell-accounts"]) {
           const selector = document.getElementById(id);
@@ -7248,7 +7829,15 @@ function balanceStatusClass(status) {
     });
     document.getElementById("signal-bot-form").addEventListener("submit", applySignalBotConfig);
     document.getElementById("slow-create-task").addEventListener("click", createAutoBuySellTask);
+    document.getElementById("slow-open-risk").addEventListener(
+      "click",
+      () => openSettingsSection("risk-section"),
+    );
     document.getElementById("slow-clear-terminal").addEventListener("click", clearTerminalAutoBuySellTasks);
+    document.getElementById("spot-open-risk").addEventListener(
+      "click",
+      () => openSettingsSection("risk-section"),
+    );
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         clearRefreshTimer();

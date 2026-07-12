@@ -800,6 +800,7 @@ h2 {
 .compact-section.section-open > .mm-safety-grid,
 .compact-section.section-open > .mini-grid,
 .compact-section.section-open > .strategy-settings-grid,
+.compact-section.section-open > .strategy-workflow,
 .compact-section.section-open > .backtest-progress,
 .compact-section.section-open > .backtest-warnings {
   display: grid;
@@ -1107,6 +1108,108 @@ tbody tr:last-child td {
   line-height: 1.45;
 }
 
+.strategy-workflow {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.strategy-workflow-step {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.strategy-workflow-index {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.strategy-workflow-copy {
+  min-width: 0;
+}
+
+.strategy-workflow-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.strategy-workflow-detail {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strategy-workflow-state {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.strategy-workflow-step.is-ready .strategy-workflow-index,
+.strategy-workflow-step.is-live .strategy-workflow-index {
+  color: var(--green);
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
+}
+
+.strategy-workflow-step.is-ready .strategy-workflow-state,
+.strategy-workflow-step.is-live .strategy-workflow-state {
+  color: var(--green);
+}
+
+.strategy-workflow-step.is-blocked .strategy-workflow-index {
+  color: var(--red);
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+}
+
+.strategy-workflow-step.is-blocked .strategy-workflow-state {
+  color: var(--red);
+}
+
+.strategy-feedback {
+  margin-bottom: 10px;
+}
+
+.strategy-feedback.is-error {
+  color: var(--red);
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+  font-weight: 700;
+}
+
+.strategy-feedback.is-ok {
+  color: var(--green);
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
+}
+
 .config-compare:empty,
 .cleanup-preview:empty {
   display: none !important;
@@ -1321,6 +1424,23 @@ tbody tr:last-child td {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.strategy-action-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.strategy-action-bar > button {
+  min-width: 128px;
+  padding-inline: 12px;
+}
+
+.strategy-internal-state[hidden] {
+  display: none !important;
 }
 
 .form-divider {
@@ -1932,6 +2052,10 @@ tbody tr:last-child td {
   .backtest-chart-wrap { min-height: 190px; }
   #backtest-chart { height: 150px; }
   .strategy-settings-grid { grid-template-columns: 1fr; }
+  .strategy-workflow { grid-template-columns: 1fr; }
+  .strategy-workflow-detail { white-space: normal; }
+  .strategy-action-bar { display: grid; grid-template-columns: 1fr; }
+  .strategy-action-bar > button { width: 100%; }
   .instance-status-row { grid-template-columns: 1fr; }
   .instance-status-pill { justify-self: start; }
   .instance-status-name,

@@ -280,6 +280,8 @@ ACCOUNT_BALANCE_POLL_SECONDS = 10.0
 ORDER_ACTIVITY_POLL_SECONDS = 5.0
 ORDER_ACTIVITY_LIMIT = 20
 SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS = 10.0
+LIVE_AUTO_BUY_SELL_CONFIRMATION = "ENABLE LIVE AUTO BUY SELL"
+LIVE_MARKET_MAKER_CONFIRMATION = "ENABLE LIVE MARKET MAKER"
 STRATEGY_IDS = {
     "market_maker",
     "slow_execution",
@@ -6372,6 +6374,30 @@ async def api_market_maker(request: web.Request) -> web.Response:
                     updated_instances.append(instance)
             if not replaced_instance:
                 updated_instances.append(updated_config)
+        current_by_id = {instance.id: instance for instance in current_instances}
+        live_changes_requiring_confirmation = [
+            instance
+            for instance in updated_instances
+            if instance.enabled
+            and instance.live_enabled
+            and not (
+                current_by_id.get(instance.id)
+                and current_by_id[instance.id].enabled
+                and current_by_id[instance.id].live_enabled
+                and current_by_id[instance.id] == instance
+            )
+        ]
+        if (
+            live_changes_requiring_confirmation
+            and (
+                not isinstance(payload, dict)
+                or payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION
+            )
+        ):
+            raise ValueError(
+                "starting or changing live Market Maker requires "
+                f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
+            )
         _require_user_assets(
             _request_user(request),
             [
@@ -6477,6 +6503,13 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     try:
         payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        if payload.get("confirm_live") != LIVE_AUTO_BUY_SELL_CONFIRMATION:
+            raise ValueError(
+                "starting Auto Buy/Sell requires "
+                f"confirm_live={LIVE_AUTO_BUY_SELL_CONFIRMATION}"
+            )
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
         accounts = slow_execution_accounts(
