@@ -393,6 +393,106 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       }).join("");
     }
 
+    function strategyLifecycleRows(strategyId, data = lastState) {
+      const rows = data?.strategy_lifecycle?.instances;
+      if (!Array.isArray(rows)) return [];
+      return rows.filter((row) => row?.strategy_id === strategyId);
+    }
+
+    function strategyLifecycleRow(strategyId, options = {}) {
+      const rows = strategyLifecycleRows(strategyId, options.data || lastState);
+      if (options.instanceId) {
+        const exact = rows.find((row) => row.instance_id === options.instanceId);
+        if (exact) return exact;
+      }
+      if (options.account || options.symbol) {
+        const route = rows.find((row) => (
+          (!options.account || row.account === options.account)
+          && (!options.symbol || row.symbol === options.symbol)
+        ));
+        if (route) return route;
+      }
+      return rows[0] || null;
+    }
+
+    function lifecyclePriority(row) {
+      const convergence = row?.convergence_state || "";
+      if (convergence === "error") return 0;
+      if (convergence === "blocked") return 1;
+      if (convergence === "transitioning") return 2;
+      const actualPriority = {
+        starting: 3,
+        pausing: 4,
+        stopping: 4,
+        waiting: 5,
+        running: 6,
+        paused: 7,
+        complete: 8,
+        stopped: 9,
+      };
+      return actualPriority[row?.actual_state] ?? 10;
+    }
+
+    function strategyLifecycleSummary(strategyId, data = lastState) {
+      const rows = strategyLifecycleRows(strategyId, data);
+      const worst = [...rows].sort((left, right) => lifecyclePriority(left) - lifecyclePriority(right))[0] || null;
+      return {
+        rows,
+        worst,
+        converged: rows.filter((row) => row.converged).length,
+      };
+    }
+
+    function lifecycleStateLabel(value) {
+      const labels = {
+        starting: "Starting",
+        running: "Running",
+        waiting: "Waiting",
+        pausing: "Pausing",
+        paused: "Paused",
+        stopping: "Stopping",
+        stopped: "Stopped",
+        blocked: "Blocked",
+        error: "Error",
+        complete: "Complete",
+        in_sync: "In sync",
+        transitioning: "Transitioning",
+      };
+      return uiText(labels[value] || String(value || "--"));
+    }
+
+    function lifecycleDetail(row, { compact = false } = {}) {
+      if (!row) return "";
+      const desired = lifecycleStateLabel(row.desired_state);
+      const actual = lifecycleStateLabel(row.actual_state);
+      const convergence = lifecycleStateLabel(row.convergence_state);
+      const parts = compact
+        ? [`${desired} → ${actual}`, convergence]
+        : [
+            `${uiText("Desired")}: ${desired}`,
+            `${uiText("Actual")}: ${actual}`,
+            convergence,
+          ];
+      if (row.raw_status && row.raw_status !== row.actual_state) {
+        const rawLabels = { no_task: "No active task" };
+        parts.push(uiText(rawLabels[row.raw_status] || row.raw_status));
+      }
+      if (row.reason) parts.push(row.reason);
+      return parts.filter(Boolean).join(" · ");
+    }
+
+    function lifecycleWorkflowStep(row, fallback) {
+      if (!row) return fallback;
+      const blocked = ["blocked", "error"].includes(row.convergence_state);
+      const active = ["running", "waiting"].includes(row.actual_state);
+      return {
+        title: fallback.title,
+        state: blocked ? "blocked" : active && row.mode === "live" ? "live" : row.converged ? "ready" : "idle",
+        label: lifecycleStateLabel(row.actual_state),
+        detail: lifecycleDetail(row),
+      };
+    }
+
     function coreLiveRiskReadiness(strategyId, exchanges = []) {
       const risk = lastState?.operations?.risk || lastState?.config?.risk || {};
       const accountKeys = [...new Set(exchanges.filter(Boolean))];
@@ -1541,6 +1641,7 @@ function balanceStatusClass(status) {
       );
       const spot = data.spot_arbitrage || {};
       const live = spot.mode === "live";
+      const lifecycle = strategyLifecycleRow("spot_spread", { data });
       renderStrategyWorkflow("spot-workflow", [
         {
           title: "Markets",
@@ -1556,12 +1657,12 @@ function balanceStatusClass(status) {
           label: risk.ready ? "Ready" : "Blocked",
           detail: risk.detail,
         },
-        {
+        lifecycleWorkflowStep(lifecycle, {
           title: "Run State",
           state: live ? "live" : "idle",
           label: live ? "Live" : "Dry Run",
           detail: spot.status || "waiting for market data",
-        },
+        }),
       ]);
       const riskButton = document.getElementById("spot-open-risk");
       if (riskButton) riskButton.hidden = risk.ready;
@@ -1851,7 +1952,7 @@ function balanceStatusClass(status) {
 
     function strategySettingsStatusClass(status) {
       const value = String(status || "").toLowerCase();
-      if (["live", "running", "unchanged", "placed", "ready", "ok", "enabled"].includes(value)) return "ok";
+      if (["live", "running", "waiting", "complete", "unchanged", "placed", "ready", "ok", "enabled"].includes(value)) return "ok";
       if (["blocked", "blocked_by_risk", "error", "sync_error", "open_order_sync_error"].includes(value)) return "blocked";
       return "";
     }
@@ -1863,7 +1964,7 @@ function balanceStatusClass(status) {
       card.innerHTML = `
         <div class="strategy-settings-card-title">
           <span>${escapeHtml(uiText(title))}</span>
-          <span class="strategy-settings-card-status ${strategySettingsStatusClass(status)}">${escapeHtml(status || "--")}</span>
+          <span class="strategy-settings-card-status ${strategySettingsStatusClass(status)}">${escapeHtml(uiText(status || "--"))}</span>
         </div>
         <div class="strategy-settings-card-summary">${escapeHtml(summary || "--")}</div>
         <div class="strategy-settings-card-detail">${escapeHtml(detail || "--")}</div>
@@ -1903,43 +2004,52 @@ function balanceStatusClass(status) {
       const rebalance = data.cross_exchange_rebalance || {};
       const rebalanceRuntime = rebalance.runtime || {};
       const rebalancePlan = rebalance.plan || rebalanceRuntime.last_payload?.plan || null;
+      const mmLifecycle = strategyLifecycleSummary("market_maker", data);
+      const autoLifecycle = strategyLifecycleSummary("slow_execution", data);
+      const rebalanceLifecycle = strategyLifecycleSummary("cross_exchange_rebalance", data);
+      const spotLifecycle = strategyLifecycleSummary("spot_spread", data);
+      const lifecycleCardDetail = (summary, fallback) => {
+        if (!summary.worst) return fallback;
+        const sync = `${summary.converged}/${summary.rows.length} ${uiText("In sync")}`;
+        return `${sync} · ${lifecycleDetail(summary.worst, { compact: true })}`;
+      };
       const cards = [
         {
           title: "Market Maker",
-          status: mmStatus,
+          status: mmLifecycle.worst?.actual_state || mmStatus,
           summary: mmPlan
             ? `${mmPlan.exchange || "--"} ${mmPlan.symbol || "--"}`
             : `${marketMakerInstances(mm).length || 0} instance(s)`,
-          detail: mmPlan
+          detail: lifecycleCardDetail(mmLifecycle, mmPlan
             ? `mid ${fmt.format(mmPlan.mid_price)} · ${mmQuote} · open ${mmRuntime.open_order_count || 0}`
-            : marketMakerStatusReason(mm) || "Open to edit ladder and risk",
+            : marketMakerStatusReason(mm) || "Open to edit ladder and risk"),
           target: "mm-section",
         },
         {
           title: "Auto Buy/Sell",
-          status: activeTasks.length ? "running" : (auto.status || "disabled"),
+          status: autoLifecycle.worst?.actual_state || (activeTasks.length ? "running" : (auto.status || "disabled")),
           summary: activeTasks.length ? `${activeTasks.length}/${tasks.length} active task(s)` : (auto.status || "disabled"),
-          detail: firstTask
+          detail: lifecycleCardDetail(autoLifecycle, firstTask
             ? `${firstTaskConfig.exchange || "--"} ${firstTaskConfig.symbol || "--"} · ${String(firstTaskConfig.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${autoProgressText}`
-            : "Open to create or edit a task",
+            : "Open to create or edit a task"),
           target: "slow-section",
         },
         {
           title: "Cross-Exchange Rebalance",
-          status: rebalanceRuntime.status || rebalance.status || "disabled",
+          status: rebalanceLifecycle.worst?.actual_state || rebalanceRuntime.status || rebalance.status || "disabled",
           summary: rebalancePlan
             ? `${rebalancePlan.buy_exchange} -> ${rebalancePlan.sell_exchange}`
             : (rebalance.status || "disabled"),
-          detail: rebalancePlan
+          detail: lifecycleCardDetail(rebalanceLifecycle, rebalancePlan
             ? `${rebalancePlan.base_asset} · ${Number(rebalanceRuntime.progress_pct || 0).toFixed(1)}% · cost ${Number(rebalancePlan.expected_cost_bps || 0).toFixed(2)} bps`
-            : "No plan",
+            : "No plan"),
           target: "rebalance-section",
         },
         {
           title: "Spot Arbitrage",
-          status: spot.status || "disabled",
+          status: spotLifecycle.worst?.actual_state || spot.status || "disabled",
           summary: `${spot.mode || "dry_run"} · ${spot.status || "disabled"}`,
-          detail: `${spotOpportunities} ${uiText("active opportunity(s)")}`,
+          detail: lifecycleCardDetail(spotLifecycle, `${spotOpportunities} ${uiText("active opportunity(s)")}`),
           target: "spot-arbitrage-section",
         },
         {
@@ -5715,6 +5825,12 @@ function balanceStatusClass(status) {
       const parameters = marketMakerFormReadiness(payload);
       const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
       const live = marketMakerLiveState(marketMaker);
+      const selected = selectedMarketMakerInstance(marketMaker);
+      const lifecycle = strategyLifecycleRow("market_maker", {
+        instanceId: selected?.config?.id || selected?.id || selectedMarketMakerInstanceId,
+        account: payload.exchange,
+        symbol: payload.symbol,
+      });
       renderStrategyWorkflow("mm-workflow", [
         {
           title: "Parameters",
@@ -5728,12 +5844,12 @@ function balanceStatusClass(status) {
           label: risk.ready ? "Ready" : "Blocked",
           detail: risk.detail,
         },
-        {
+        lifecycleWorkflowStep(lifecycle, {
           title: "Run State",
           state: live.configuredLive ? "live" : "idle",
           label: live.configuredLive ? "Live" : "Stopped",
           detail: `${live.mode} · ${live.status}`,
-        },
+        }),
       ]);
       const startButton = document.getElementById("mm-start");
       const stopButton = document.getElementById("mm-stop");
@@ -6202,6 +6318,11 @@ function balanceStatusClass(status) {
         return config.exchange === payload.exchange && config.symbol === payload.symbol;
       });
       const first = routeTasks[0] || activeTasks[0];
+      const lifecycle = strategyLifecycleRow("slow_execution", {
+        instanceId: first?.id || "default",
+        account: payload.exchange,
+        symbol: payload.symbol,
+      });
       const readyToStart = parameters.ready && risk.ready;
       renderStrategyWorkflow("slow-workflow", [
         {
@@ -6216,14 +6337,14 @@ function balanceStatusClass(status) {
           label: risk.ready ? "Ready" : "Blocked",
           detail: risk.detail,
         },
-        {
+        lifecycleWorkflowStep(lifecycle, {
           title: "Task State",
           state: activeTasks.length ? "live" : readyToStart ? "ready" : "blocked",
           label: activeTasks.length ? "Running" : readyToStart ? "Ready to start" : "Not ready",
           detail: first
             ? `${activeTasks.length} ${uiText("active task(s)")} · ${first.status || "running"}`
             : "No active task",
-        },
+        }),
       ]);
       const createButton = document.getElementById("slow-create-task");
       const riskButton = document.getElementById("slow-open-risk");
@@ -6415,6 +6536,7 @@ function balanceStatusClass(status) {
       const config = data.config || {};
       const runtime = data.runtime || {};
       const configuredLive = Boolean(config.enabled && config.live_enabled);
+      const lifecycle = strategyLifecycleRow("cross_exchange_rebalance");
       renderStrategyWorkflow("rebalance-readiness", [
         {
           title: "Parameters",
@@ -6432,12 +6554,12 @@ function balanceStatusClass(status) {
           label: risk.ready ? "Ready" : "Blocked",
           detail: risk.detail,
         },
-        {
+        lifecycleWorkflowStep(lifecycle, {
           title: "Run State",
           state: configuredLive ? "live" : "idle",
           label: configuredLive ? "Live" : "Stopped",
           detail: `${runtime.mode || data.mode || "dry_run"} · ${runtime.status || data.status || "disabled"}`,
-        },
+        }),
       ]);
       const riskButton = document.getElementById("rebalance-open-risk");
       if (riskButton) riskButton.hidden = risk.ready;

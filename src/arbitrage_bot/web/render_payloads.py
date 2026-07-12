@@ -652,6 +652,7 @@ def state_payload_for_view(
         "opportunities": payload.get("opportunities", []),
         "portfolio": payload.get("portfolio", {}),
         "program": payload.get("program", {}),
+        "strategy_lifecycle": payload.get("strategy_lifecycle", {}),
         "warnings": payload.get("warnings", []),
         "market_maker": _compact_market_maker_payload(
             payload.get("market_maker", {}),

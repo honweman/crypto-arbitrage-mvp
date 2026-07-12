@@ -421,6 +421,70 @@ def _filter_state_payload_for_user(
             payload.get("order_activity", {}).get("open_orders", [])
         )
 
+    def filter_strategy_lifecycle(lifecycle: Any) -> None:
+        if not isinstance(lifecycle, dict):
+            return
+
+        def scoped_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | None:
+            item = dict(row)
+            asset = str(row.get("asset") or "").strip().upper()
+            if asset:
+                return item if in_scope(asset) else None
+            symbol = str(row.get("symbol") or "").strip()
+            if "," in symbol and "/" not in symbol:
+                assets = [
+                    value.strip().upper()
+                    for value in symbol.split(",")
+                    if value.strip() and in_scope(value)
+                ]
+                if not assets:
+                    return None
+                item["symbol"] = ",".join(assets)
+                return item
+            return item if symbol_in_scope(symbol) else None
+
+        instances = []
+        for row in lifecycle.get("instances", []):
+            if not isinstance(row, dict):
+                continue
+            scoped = scoped_lifecycle_row(row)
+            if scoped is not None:
+                instances.append(scoped)
+        lifecycle["instances"] = instances
+        lifecycle["summary"] = {
+            "instance_count": len(instances),
+            "converged_count": sum(bool(row.get("converged")) for row in instances),
+            "attention_count": sum(
+                not bool(row.get("converged")) for row in instances
+            ),
+            "blocked_count": sum(
+                row.get("convergence_state") == "blocked" for row in instances
+            ),
+            "error_count": sum(
+                row.get("convergence_state") == "error" for row in instances
+            ),
+            "transitioning_count": sum(
+                row.get("convergence_state") == "transitioning"
+                for row in instances
+            ),
+        }
+        lifecycle["status"] = (
+            "error"
+            if lifecycle["summary"]["error_count"]
+            else "blocked"
+            if lifecycle["summary"]["blocked_count"]
+            else "transitioning"
+            if lifecycle["summary"]["transitioning_count"]
+            else "ok"
+        )
+        updated_values = [
+            float(row["updated_at"])
+            for row in instances
+            if isinstance(row.get("updated_at"), (int, float))
+            and float(row["updated_at"]) > 0
+        ]
+        lifecycle["updated_at"] = max(updated_values, default=None)
+
     def filter_readiness(readiness: Any) -> None:
         if not isinstance(readiness, dict):
             return
@@ -529,6 +593,7 @@ def _filter_state_payload_for_user(
     filter_order_activity(payload.get("order_activity"))
     filter_account_balances(payload.get("account_balances"))
     filter_trading_console(payload.get("trading_console"))
+    filter_strategy_lifecycle(payload.get("strategy_lifecycle"))
     filter_readiness(payload.get("readiness"))
     filter_strategy_center(payload.get("strategy_center"))
     payload["auth"] = user.public_dict(available_assets=available_assets)

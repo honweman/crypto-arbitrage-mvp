@@ -3453,7 +3453,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "error": None,
         },
         "spot_arbitrage": {
-            "status": "disabled",
+            "status": "starting" if cfg.spot_markets else "disabled",
             "mode": "dry_run",
             "plan": None,
             "risk": None,
@@ -6813,6 +6813,7 @@ async def api_strategy_control(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
     runtime_cfg = await state.runtime_config(cfg)
+    lifecycle = await state.strategy_lifecycle()
     write_web_audit_event(
         runtime_cfg,
         request,
@@ -6827,6 +6828,7 @@ async def api_strategy_control(request: web.Request) -> web.Response:
             "strategy": strategy_id,
             "paused": paused,
             "trading_console": trading_console,
+            "strategy_lifecycle": lifecycle,
         }
     )
 

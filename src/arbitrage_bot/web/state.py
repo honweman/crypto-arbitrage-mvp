@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .render_payloads import state_payload_for_view
+from .strategy_lifecycle import build_strategy_lifecycle_payload
 
 from ..config import (
     BacktestConfig,
@@ -392,6 +393,7 @@ class MonitorState:
         self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
         self._state_view_cache: dict[tuple[str, str], tuple[float, str]] = {}
+        self._refresh_strategy_lifecycle_unlocked(runtime_cfg)
 
     def _runtime_store_status_unlocked(self) -> dict[str, Any]:
         return {
@@ -405,6 +407,26 @@ class MonitorState:
 
     def _clear_state_view_cache_unlocked(self) -> None:
         self._state_view_cache.clear()
+
+    def _refresh_strategy_lifecycle_unlocked(
+        self,
+        cfg: BotConfig | None = None,
+    ) -> dict[str, Any]:
+        runtime_cfg = cfg or self._runtime_config_unlocked(self._base_cfg)
+        lifecycle = build_strategy_lifecycle_payload(
+            runtime_cfg,
+            program=self._program_payload_unlocked(),
+            strategy_paused=self._strategy_paused,
+            market_maker=self._payload.get("market_maker", {}),
+            auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            cross_exchange_rebalance=self._payload.get(
+                "cross_exchange_rebalance",
+                {},
+            ),
+            spot_arbitrage=self._payload.get("spot_arbitrage", {}),
+        )
+        self._payload["strategy_lifecycle"] = lifecycle
+        return lifecycle
 
     def _runtime_store_payload_unlocked(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -534,6 +556,7 @@ class MonitorState:
             ):
                 payload_text = cached[1]
             else:
+                self._refresh_strategy_lifecycle_unlocked()
                 payload = state_payload_for_view(
                     self._payload,
                     view,
@@ -542,6 +565,11 @@ class MonitorState:
                 payload_text = json.dumps(payload, separators=(",", ":"))
                 self._state_view_cache[cache_key] = (now, payload_text)
         return json.loads(payload_text)
+
+    async def strategy_lifecycle(self) -> dict[str, Any]:
+        async with self._lock:
+            lifecycle = self._refresh_strategy_lifecycle_unlocked()
+            return json.loads(json.dumps(lifecycle))
 
     async def portfolio_payload(self) -> dict[str, Any]:
         async with self._lock:
@@ -1255,6 +1283,7 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
+            self._refresh_strategy_lifecycle_unlocked(runtime_cfg)
             self._save_runtime_store_unlocked()
             return json.loads(json.dumps(self._payload["trading_console"]))
 
@@ -1275,6 +1304,7 @@ class MonitorState:
                 self._payload["status"] = "paused"
                 self._payload["warnings"] = ["Program paused"]
             self._payload["program"] = self._program_payload_unlocked()
+            self._refresh_strategy_lifecycle_unlocked()
             self._save_runtime_store_unlocked()
             self._clear_state_view_cache_unlocked()
             return json.loads(json.dumps(self._payload))
@@ -1294,6 +1324,7 @@ class MonitorState:
             self._payload["status"] = "auto_stopped"
             self._payload["program"] = self._program_payload_unlocked()
             self._payload["warnings"] = list(warnings or [reason])
+            self._refresh_strategy_lifecycle_unlocked()
             self._save_runtime_store_unlocked()
             self._clear_state_view_cache_unlocked()
             return json.loads(json.dumps(self._payload))
@@ -1305,10 +1336,12 @@ class MonitorState:
                 self._payload["status"] = "auto_stopped"
                 if self._auto_stop_reason:
                     self._payload["warnings"] = [self._auto_stop_reason]
+                self._refresh_strategy_lifecycle_unlocked()
                 self._clear_state_view_cache_unlocked()
                 return
             self._payload["status"] = "paused"
             self._payload["warnings"] = ["Program paused"]
+            self._refresh_strategy_lifecycle_unlocked()
             self._clear_state_view_cache_unlocked()
 
     async def set_order_activity(self, order_activity: dict[str, Any]) -> None:
@@ -1409,6 +1442,7 @@ class MonitorState:
                 self._payload["market_maker"]["error"] = runtime.get(
                     "last_error"
                 ) or runtime.get("status_reason")
+            self._refresh_strategy_lifecycle_unlocked()
             self._clear_state_view_cache_unlocked()
 
     def _aggregate_market_maker_runtime_unlocked(
@@ -1529,6 +1563,7 @@ class MonitorState:
             aggregate = self._aggregate_market_maker_runtime_unlocked(instances)
             self._market_maker_runtime = aggregate
             self._sync_market_maker_payload_runtime_unlocked(aggregate)
+            self._refresh_strategy_lifecycle_unlocked()
             self._clear_state_view_cache_unlocked()
 
     async def market_maker_runtime(self) -> dict[str, Any]:
@@ -1555,6 +1590,7 @@ class MonitorState:
                 payload["risk"] = last_payload.get("risk")
                 payload["execution"] = last_payload.get("execution")
                 payload["error"] = runtime.get("last_error")
+            self._refresh_strategy_lifecycle_unlocked()
             self._clear_state_view_cache_unlocked()
 
     async def cross_exchange_rebalance_runtime(self) -> dict[str, Any]:
@@ -1584,6 +1620,7 @@ class MonitorState:
             self._auto_buy_sell_tasks = tasks
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["tasks"] = tasks
+            self._refresh_strategy_lifecycle_unlocked()
             self._clear_state_view_cache_unlocked()
 
     async def auto_buy_sell_tasks(self) -> dict[str, Any]:
@@ -1786,6 +1823,7 @@ class MonitorState:
                 "operations": build_operations_payload(cfg),
                 "warnings": warnings,
             }
+            self._refresh_strategy_lifecycle_unlocked(cfg)
             self._clear_state_view_cache_unlocked()
 
     async def set_error(
@@ -1833,6 +1871,7 @@ class MonitorState:
                     "operations": build_operations_payload(cfg),
                 }
             )
+            self._refresh_strategy_lifecycle_unlocked(cfg)
             self._clear_state_view_cache_unlocked()
 
 

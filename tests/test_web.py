@@ -197,11 +197,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260712-coreflow5" defer></script>',
+            '<script src="/static/app.js?v=20260712-lifecycle2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260712-coreflow5" defer></script>',
+            '<script src="/static/i18n.js?v=20260712-lifecycle2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -246,6 +246,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn(">Review &amp; Start Live</button>", INDEX_HTML)
         self.assertIn('class="check-field strategy-internal-state" hidden', INDEX_HTML)
         self.assertIn("function coreLiveRiskReadiness", APP_JS)
+        self.assertIn("function strategyLifecycleRows", APP_JS)
+        self.assertIn("function lifecycleWorkflowStep", APP_JS)
+        self.assertIn('data?.strategy_lifecycle?.instances', APP_JS)
         self.assertIn("function startMarketMaker", APP_JS)
         self.assertIn("function stopCrossExchangeRebalance", APP_JS)
         self.assertIn("LIVE_AUTO_BUY_SELL_CONFIRMATION", APP_JS)
@@ -264,7 +267,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index('/static/theme.js?v=20260712-rebalance7'),
-            INDEX_HTML.index('/static/styles.css?v=20260712-coreflow5'),
+            INDEX_HTML.index('/static/styles.css?v=20260712-lifecycle2'),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn('root.dataset.theme = theme', theme_js)
@@ -369,7 +372,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260712-coreflow5">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260712-lifecycle2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -2749,6 +2752,32 @@ class WebMonitorTest(unittest.TestCase):
                     {"id": "spot_spread", "symbol": "ACS,BTC"},
                 ],
             },
+            "strategy_lifecycle": {
+                "status": "blocked",
+                "instances": [
+                    {
+                        "key": "slow_execution:acs-task",
+                        "strategy_id": "slow_execution",
+                        "symbol": "ACS/USDC",
+                        "converged": True,
+                        "convergence_state": "in_sync",
+                    },
+                    {
+                        "key": "market_maker:btc",
+                        "strategy_id": "market_maker",
+                        "symbol": "BTC/USDT",
+                        "converged": False,
+                        "convergence_state": "blocked",
+                    },
+                    {
+                        "key": "spot_spread:default",
+                        "strategy_id": "spot_spread",
+                        "symbol": "ACS,BTC",
+                        "converged": True,
+                        "convergence_state": "in_sync",
+                    },
+                ],
+            },
         }
 
         filtered = _filter_state_payload_for_user(payload, cfg=cfg, user=user)
@@ -2792,6 +2821,18 @@ class WebMonitorTest(unittest.TestCase):
             ["slow_execution", "spot_spread"],
         )
         self.assertEqual(filtered["trading_console"]["strategies"][1]["symbol"], "ACS")
+        self.assertEqual(
+            [row["key"] for row in filtered["strategy_lifecycle"]["instances"]],
+            ["slow_execution:acs-task", "spot_spread:default"],
+        )
+        self.assertEqual(
+            filtered["strategy_lifecycle"]["instances"][1]["symbol"],
+            "ACS",
+        )
+        self.assertEqual(
+            filtered["strategy_lifecycle"]["summary"]["attention_count"],
+            0,
+        )
         self.assertEqual(filtered["auth"]["mode"], "user")
         self.assertEqual(filtered["auth"]["email"], "trader@example.com")
         self.assertEqual(filtered["auth"]["asset_scope"], ["ACS"])
