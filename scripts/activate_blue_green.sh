@@ -7,6 +7,7 @@ SHARED_DIR="${3:-/opt/crypto-arbitrage-mvp}"
 LEGACY_SERVICE="${4:-crypto-arb-web.service}"
 NGINX_CONF="${5:-/etc/nginx/conf.d/crypto-arb.conf}"
 OWNER="${6:-cryptoarb:cryptoarb}"
+STABILIZATION_SECONDS="${CRYPTO_ARB_DEPLOY_STABILIZATION_SECONDS:-20}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "blue/green activation must run as root" >&2
@@ -18,6 +19,11 @@ if [[ "$CANDIDATE_SLOT" != "blue" && "$CANDIDATE_SLOT" != "green" ]]; then
 fi
 if [[ "$CANDIDATE_PORT" != "8081" && "$CANDIDATE_PORT" != "8082" ]]; then
   echo "candidate port must be 8081 or 8082" >&2
+  exit 2
+fi
+if [[ ! "$STABILIZATION_SECONDS" =~ ^[0-9]+$ ]] \
+  || ((STABILIZATION_SECONDS > 120)); then
+  echo "deployment stabilization seconds must be an integer from 0 to 120" >&2
   exit 2
 fi
 
@@ -46,6 +52,23 @@ if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
     exit 1
   fi
 fi
+
+EXPECTED_PROGRAM_RUNNING="$(
+  python3 - "$SHARED_DIR/data/web_runtime_overrides.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    payload = {}
+program = payload.get("program") if isinstance(payload.get("program"), dict) else {}
+running = program.get("running", payload.get("running", True))
+print("1" if bool(running) else "0")
+PY
+)"
 if [[ "$OLD_SLOT" == "$CANDIDATE_SLOT" ]]; then
   echo "candidate slot is already active: $CANDIDATE_SLOT" >&2
   exit 1
@@ -65,11 +88,12 @@ fi
 json_health_matches() {
   local mode="$1"
   local path="$2"
-  python3 - "$mode" "$path" <<'PY'
+  local expected_program_running="${3:-ignore}"
+  python3 - "$mode" "$path" "$expected_program_running" <<'PY'
 import json
 import sys
 
-mode, path = sys.argv[1:]
+mode, path, expected_program_running = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -98,10 +122,19 @@ elif mode == "standby":
         and not bool(deployment.get("leader_ready"))
     )
 elif mode == "leader":
+    runtime = payload.get("runtime")
+    program_matches = True
+    if expected_program_running == "1":
+        program_matches = bool(
+            isinstance(runtime, dict)
+            and runtime.get("program_running")
+            and runtime.get("status") not in {"auto_stopped", "error"}
+        )
     valid = (
         deployment.get("role") == "leader"
         and bool(deployment.get("leader_ready"))
         and bool(payload.get("safe_to_replace"))
+        and program_matches
     )
 else:
     valid = False
@@ -115,12 +148,14 @@ wait_for_health() {
   local mode="$1"
   local port="$2"
   local attempts="$3"
+  local expected_program_running="${4:-ignore}"
   local stable=0
   local attempt
   for ((attempt = 1; attempt <= attempts; attempt += 1)); do
     if curl -sS --max-time 2 "http://127.0.0.1:${port}/api/health" \
       > "$HEALTH_FILE" 2>/dev/null \
-      && json_health_matches "$mode" "$HEALTH_FILE" >/dev/null 2>&1; then
+      && json_health_matches \
+        "$mode" "$HEALTH_FILE" "$expected_program_running" >/dev/null 2>&1; then
       stable=$((stable + 1))
       if [[ "$stable" -ge 2 ]]; then
         return 0
@@ -131,7 +166,7 @@ wait_for_health() {
     sleep 1
   done
   if [[ -s "$HEALTH_FILE" ]]; then
-    json_health_matches "$mode" "$HEALTH_FILE" || true
+    json_health_matches "$mode" "$HEALTH_FILE" "$expected_program_running" || true
   fi
   return 1
 }
@@ -273,8 +308,16 @@ if [[ "$GUARD_STARTED" -eq 1 ]]; then
   GUARD_STARTED=0
 fi
 
-if ! wait_for_health leader "$CANDIDATE_PORT" 90; then
+if ! wait_for_health leader "$CANDIDATE_PORT" 90 "$EXPECTED_PROGRAM_RUNNING"; then
   echo "candidate did not become a healthy runtime leader" >&2
+  exit 1
+fi
+if ((STABILIZATION_SECONDS > 0)); then
+  echo "observing runtime leader for ${STABILIZATION_SECONDS}s"
+  sleep "$STABILIZATION_SECONDS"
+fi
+if ! wait_for_health leader "$CANDIDATE_PORT" 30 "$EXPECTED_PROGRAM_RUNNING"; then
+  echo "candidate failed the post-leader stabilization check" >&2
   exit 1
 fi
 

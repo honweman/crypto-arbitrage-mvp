@@ -9,6 +9,7 @@ from typing import Any
 
 
 RECOVERY_WAIT_SECONDS = 5.0
+IN_FLIGHT_GRACE_SECONDS = 30.0
 DEFAULT_TERMINAL_RETENTION_SECONDS = 14 * 24 * 60 * 60
 DEFAULT_MAX_TERMINAL_ROWS = 200_000
 COMPACT_EVERY_RESERVATIONS = 1_000
@@ -284,15 +285,31 @@ class OrderIntentStore:
 
     def summary(self) -> dict[str, Any]:
         self._ensure()
+        now = time.time()
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) AS count FROM order_intents GROUP BY status"
             ).fetchall()
+            fresh_reserved = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM order_intents
+                    WHERE status = 'reserved' AND updated_at > ?
+                    """,
+                    (now - IN_FLIGHT_GRACE_SECONDS,),
+                ).fetchone()[0]
+            )
         counts = {str(row["status"]): int(row["count"]) for row in rows}
+        reserved_count = counts.get("reserved", 0)
+        stale_reserved = max(0, reserved_count - fresh_reserved)
+        uncertain_count = stale_reserved + counts.get("unknown", 0)
         return {
             "path": str(self.path),
             "counts": counts,
-            "pending_count": counts.get("reserved", 0) + counts.get("unknown", 0),
+            "pending_count": uncertain_count,
+            "uncertain_count": uncertain_count,
+            "in_flight_count": fresh_reserved,
+            "stale_reserved_count": stale_reserved,
             "total_count": sum(counts.values()),
         }
 

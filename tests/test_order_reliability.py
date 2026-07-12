@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from arbitrage_bot.config import ExchangeConfig
 from arbitrage_bot.exchanges import ExchangeManager, normalize_client_order_id
@@ -62,6 +63,39 @@ class OrderIntentStoreTest(unittest.TestCase):
             self.assertEqual(compacted["expired_removed"], 1)
             self.assertIsNone(store.get("submitted"))
             self.assertEqual(store.get("uncertain")["status"], "unknown")
+
+    def test_fresh_reservation_is_in_flight_until_its_outcome_is_uncertain(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OrderIntentStore(Path(tmp) / "orders.sqlite3")
+            intent = {
+                "exchange": "coinbase-spot",
+                "symbol": "ACS/USDC",
+                "side": "buy",
+                "amount": 10.0,
+                "price": 0.1,
+                "post_only": False,
+            }
+
+            store.reserve("in-flight", intent)
+            in_flight = store.summary()
+            reserved = store.get("in-flight")
+            assert reserved is not None
+            with patch(
+                "arbitrage_bot.order_reliability.time.time",
+                return_value=float(reserved["updated_at"]) + 31.0,
+            ):
+                stale = store.summary()
+            store.mark_unknown("in-flight", "network timeout")
+            uncertain = store.summary()
+
+            self.assertEqual(in_flight["pending_count"], 0)
+            self.assertEqual(in_flight["in_flight_count"], 1)
+            self.assertEqual(stale["pending_count"], 1)
+            self.assertEqual(stale["stale_reserved_count"], 1)
+            self.assertEqual(uncertain["pending_count"], 1)
+            self.assertEqual(uncertain["in_flight_count"], 0)
 
 
 class IdempotentExchangeSubmissionTest(unittest.IsolatedAsyncioTestCase):
