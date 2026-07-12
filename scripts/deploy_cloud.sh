@@ -31,6 +31,33 @@ for required in \
   fi
 done
 
+REMOTE_PYTHON="${CRYPTO_ARB_DEPLOY_PYTHON:-}"
+if [[ -z "$REMOTE_PYTHON" ]]; then
+  REMOTE_PYTHON="$(
+    ssh "$REMOTE" "if command -v python3.11 >/dev/null 2>&1; then
+      command -v python3.11
+    elif [[ -x '$SHARED_DIR/.venv/bin/python' ]]; then
+      printf '%s\\n' '$SHARED_DIR/.venv/bin/python'
+    else
+      command -v python3
+    fi"
+  )"
+fi
+REMOTE_PYTHON="$(printf '%s' "$REMOTE_PYTHON" | tr -d '[:space:]')"
+if [[ ! "$REMOTE_PYTHON" =~ ^/[A-Za-z0-9._/+:-]+$ ]]; then
+  echo "remote Python path is invalid: $REMOTE_PYTHON" >&2
+  exit 1
+fi
+if ! ssh "$REMOTE" \
+  "'$REMOTE_PYTHON' -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'"; then
+  echo "deployment requires Python 3.11 or newer on $REMOTE" >&2
+  exit 1
+fi
+REMOTE_PYTHON_VERSION="$(
+  ssh "$REMOTE" "'$REMOTE_PYTHON' -c 'import platform; print(platform.python_version())'"
+)"
+echo "using remote Python $REMOTE_PYTHON_VERSION at $REMOTE_PYTHON"
+
 ACTIVE_SLOT="$(
   ssh "$REMOTE" \
     "test -f '$SHARED_DIR/data/active_release_slot' && cat '$SHARED_DIR/data/active_release_slot' || true"
@@ -107,7 +134,7 @@ chown -R '$OWNER' '$CANDIDATE_DIR'
 
 echo "installing candidate dependencies while the current release stays online"
 ssh "$REMOTE" "set -Eeuo pipefail
-python3 -m venv '$CANDIDATE_DIR/.venv'
+'$REMOTE_PYTHON' -m venv '$CANDIDATE_DIR/.venv'
 '$CANDIDATE_DIR/.venv/bin/python' -m pip install --disable-pip-version-check -e '$CANDIDATE_DIR'
 chown -R '$OWNER' '$CANDIDATE_DIR/.venv'
 runuser -u '$OWNER_USER' -- \
