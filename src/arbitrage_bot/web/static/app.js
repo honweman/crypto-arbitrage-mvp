@@ -27,6 +27,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "strategy-settings-cards",
 	        "mm-orders",
 	        "slow-orders",
+	        "rebalance-plan",
 	        "markets-config",
 	      ],
 	      quant: [
@@ -74,6 +75,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "strategy-settings-section",
 	        "mm-section",
 	        "slow-section",
+	        "rebalance-section",
 	        "spot-arbitrage-section",
 	      ],
 	      quant: [
@@ -308,6 +310,12 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       setCoreFormState("risk-section", "risk-apply", riskFormDirty, riskFormBusy);
       setCoreFormState("slow-section", "slow-apply", slowFormDirty, slowFormBusy);
       setCoreFormState("mm-section", "mm-apply", mmFormDirty, mmFormBusy);
+      setCoreFormState(
+        "rebalance-section",
+        "rebalance-apply",
+        rebalanceFormDirty,
+        rebalanceFormBusy,
+      );
     }
 
     function markRiskFormDirty() {
@@ -1755,6 +1763,9 @@ function balanceStatusClass(status) {
         : "";
       const spot = data.spot_arbitrage || {};
       const spotOpportunities = Array.isArray(data.opportunities) ? data.opportunities.length : 0;
+      const rebalance = data.cross_exchange_rebalance || {};
+      const rebalanceRuntime = rebalance.runtime || {};
+      const rebalancePlan = rebalance.plan || rebalanceRuntime.last_payload?.plan || null;
       const cards = [
         {
           title: "Market Maker",
@@ -1775,6 +1786,17 @@ function balanceStatusClass(status) {
             ? `${firstTaskConfig.exchange || "--"} ${firstTaskConfig.symbol || "--"} · ${String(firstTaskConfig.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${autoProgressText}`
             : "Open to create or edit a task",
           target: "slow-section",
+        },
+        {
+          title: "Cross-Exchange Rebalance",
+          status: rebalanceRuntime.status || rebalance.status || "disabled",
+          summary: rebalancePlan
+            ? `${rebalancePlan.buy_exchange} -> ${rebalancePlan.sell_exchange}`
+            : (rebalance.status || "disabled"),
+          detail: rebalancePlan
+            ? `${rebalancePlan.base_asset} · ${Number(rebalanceRuntime.progress_pct || 0).toFixed(1)}% · cost ${Number(rebalancePlan.expected_cost_bps || 0).toFixed(2)} bps`
+            : "No plan",
+          target: "rebalance-section",
         },
         {
           title: "Spot Arbitrage",
@@ -4924,6 +4946,8 @@ function balanceStatusClass(status) {
     let selectedMarketMakerInstanceId = "";
     let slowFormDirty = false;
     let slowFormBusy = false;
+    let rebalanceFormDirty = false;
+    let rebalanceFormBusy = false;
     let gridFormDirty = false;
     let gridFormBusy = false;
     let dcaFormDirty = false;
@@ -5866,6 +5890,220 @@ function balanceStatusClass(status) {
       }
     }
 
+    function updateRebalanceUnitLabels(data = lastState?.cross_exchange_rebalance) {
+      const config = data?.config || {};
+      const plan = data?.plan || data?.runtime?.last_payload?.plan || {};
+      const common = plan.common_quote_currency || lastState?.config?.common_quote_currency || "USD";
+      const buySymbol = selectedStrategySymbol("rebalance-buy") || config.buy_symbol || "";
+      const sellSymbol = selectedStrategySymbol("rebalance-sell") || config.sell_symbol || "";
+      text(
+        "rebalance-total-label",
+        uiText("Total USD").replace("USD", common),
+      );
+      text(
+        "rebalance-cycle-label",
+        uiText("Per Cycle USD").replace("USD", common),
+      );
+      text(
+        "rebalance-buy-reserve-label",
+        `${uiText("Source Cash Reserve")} ${quoteCurrency(buySymbol) || "Quote"}`,
+      );
+      text(
+        "rebalance-sell-reserve-label",
+        `${uiText("Destination Token Reserve")} ${baseCurrency(sellSymbol) || "Base"}`,
+      );
+    }
+
+    function renderCrossExchangeRebalanceConfig(data) {
+      const config = data?.config;
+      if (!config || rebalanceFormDirty || rebalanceFormBusy) {
+        updateCoreFormStates();
+        updateRebalanceUnitLabels(data);
+        return;
+      }
+      document.getElementById("rebalance-enabled").checked = Boolean(config.enabled);
+      document.getElementById("rebalance-live-enabled").checked = Boolean(config.live_enabled);
+      renderStrategyAccounts(
+        "rebalance-buy-accounts",
+        "rebalance-buy",
+        data.accounts,
+        config.buy_exchange || "",
+        config.buy_symbol || "",
+        () => {
+          rebalanceFormDirty = true;
+          updateRebalanceUnitLabels(data);
+        },
+      );
+      renderStrategyAccounts(
+        "rebalance-sell-accounts",
+        "rebalance-sell",
+        data.accounts,
+        config.sell_exchange || "",
+        config.sell_symbol || "",
+        () => {
+          rebalanceFormDirty = true;
+          updateRebalanceUnitLabels(data);
+        },
+      );
+      setNumericField("rebalance-total", config.total_quote_common || 0);
+      setNumericField("rebalance-cycle", config.quote_per_cycle_common || 0);
+      setNumericField("rebalance-interval", config.interval_seconds || 30);
+      setNumericField("rebalance-ttl", config.order_ttl_seconds ?? 2);
+      setNumericField("rebalance-max-cost", config.max_cost_bps ?? 50);
+      setNumericField("rebalance-max-slippage", config.max_slippage_bps ?? 50);
+      setNumericField("rebalance-buy-reserve", config.buy_quote_reserve || 0);
+      setNumericField("rebalance-sell-reserve", config.sell_base_reserve || 0);
+      document.getElementById("rebalance-block-orders").checked = config.block_conflicting_open_orders !== false;
+      document.getElementById("rebalance-halt-error").checked = config.halt_on_error !== false;
+      updateRebalanceUnitLabels(data);
+      updateCoreFormStates();
+    }
+
+    function crossExchangeRebalancePayloadFromForm() {
+      return {
+        action: "update",
+        enabled: document.getElementById("rebalance-enabled").checked,
+        live_enabled: document.getElementById("rebalance-live-enabled").checked,
+        buy_exchange: selectedStrategyAccount("rebalance-buy"),
+        buy_symbol: selectedStrategySymbol("rebalance-buy"),
+        sell_exchange: selectedStrategyAccount("rebalance-sell"),
+        sell_symbol: selectedStrategySymbol("rebalance-sell"),
+        total_quote_common: numericValue("rebalance-total"),
+        quote_per_cycle_common: numericValue("rebalance-cycle"),
+        interval_seconds: numericValue("rebalance-interval"),
+        order_ttl_seconds: numericValue("rebalance-ttl"),
+        max_cost_bps: numericValue("rebalance-max-cost"),
+        max_slippage_bps: numericValue("rebalance-max-slippage"),
+        buy_quote_reserve: numericValue("rebalance-buy-reserve"),
+        sell_base_reserve: numericValue("rebalance-sell-reserve"),
+        block_conflicting_open_orders: document.getElementById("rebalance-block-orders").checked,
+        halt_on_error: document.getElementById("rebalance-halt-error").checked,
+        confirm_live: document.getElementById("rebalance-live-confirm").value.trim(),
+      };
+    }
+
+    async function applyCrossExchangeRebalanceConfig(event) {
+      event.preventDefault();
+      if (rebalanceFormBusy) return;
+      rebalanceFormBusy = true;
+      updateCoreFormStates();
+      try {
+        const res = await fetch("/api/cross-exchange-rebalance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(crossExchangeRebalancePayloadFromForm()),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "rebalance update failed");
+        rebalanceFormDirty = false;
+        document.getElementById("rebalance-live-confirm").value = "";
+        await refresh({ force: true });
+      } catch (error) {
+        text("rebalance-meta", `update failed: ${error.message || error}`);
+      } finally {
+        rebalanceFormBusy = false;
+        updateCoreFormStates();
+      }
+    }
+
+    async function resetCrossExchangeRebalanceProgress() {
+      if (document.getElementById("rebalance-live-enabled").checked) {
+        text("rebalance-meta", uiText("Disable Live Ready before resetting progress."));
+        return;
+      }
+      if (!dangerConfirm("Reset cross-exchange rebalance progress?")) return;
+      const confirmation = window.prompt("Type RESET REBALANCE to continue", "");
+      if (confirmation !== "RESET REBALANCE") return;
+      const button = document.getElementById("rebalance-reset");
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/cross-exchange-rebalance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "reset", confirm_reset: confirmation }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "rebalance reset failed");
+        await refresh({ force: true });
+      } catch (error) {
+        text("rebalance-meta", `reset failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function renderCrossExchangeRebalance(data) {
+      const runtime = data?.runtime || {};
+      const lastPayload = runtime.last_payload || {};
+      const plan = data?.plan || lastPayload.plan || null;
+      const status = runtime.status || data?.status || "disabled";
+      const mode = runtime.mode || data?.mode || "dry_run";
+      const target = Number(data?.config?.total_quote_common || plan?.target_quote_common || 0);
+      const completed = Number(runtime.completed_quote_common || 0);
+      const remaining = Math.max(0, Number(runtime.remaining_quote_common ?? target - completed));
+      const progressPct = Number(runtime.progress_pct ?? (target > 0 ? completed / target * 100 : 0));
+      const common = plan?.common_quote_currency || lastState?.config?.common_quote_currency || "USD";
+      const reason = runtime.halt_reason
+        || (lastPayload.risk?.reasons || [])[0]
+        || (lastPayload.errors || [])[0]
+        || "";
+      text(
+        "rebalance-meta",
+        `${mode} · ${status} · ${progressPct.toFixed(1)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(2)} bps` : ""}${reason ? ` · ${reason}` : ""}`,
+      );
+      const progress = document.getElementById("rebalance-progress");
+      progress.innerHTML = `
+        <span class="config-chip ${runtime.halted ? "config-diff" : "config-match"}">${escapeHtml(status)}</span>
+        <span>${escapeHtml(common)} ${money.format(completed)} / ${money.format(target)} · ${uiText("remaining")} ${money.format(remaining)}</span>
+        <span>${escapeHtml(baseCurrency(plan?.buy_symbol || data?.config?.buy_symbol || ""))} ${fmt.format(runtime.completed_base || 0)}</span>
+      `;
+
+      const body = document.getElementById("rebalance-plan");
+      body.innerHTML = "";
+      if (!plan) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8">${escapeHtml(uiText("No rebalance plan."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      const rows = [
+        {
+          role: "Cash Source",
+          exchange: plan.buy_exchange,
+          symbol: plan.buy_symbol,
+          side: "buy",
+          price: plan.buy_average_price,
+          base: plan.quantity_base,
+          local: `${plan.buy_quote_currency} ${fmt.format(plan.buy_cost_local)}`,
+          common: `${common} ${money.format(plan.buy_cost_common)}`,
+        },
+        {
+          role: "Cash Destination",
+          exchange: plan.sell_exchange,
+          symbol: plan.sell_symbol,
+          side: "sell",
+          price: plan.sell_average_price,
+          base: plan.quantity_base,
+          local: `${plan.sell_quote_currency} ${fmt.format(plan.sell_proceeds_local)}`,
+          common: `${common} ${money.format(plan.sell_proceeds_common)}`,
+        },
+      ];
+      for (const row of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(uiText(row.role))}</td>
+          <td>${escapeHtml(row.exchange || "--")}</td>
+          <td>${escapeHtml(row.symbol || "--")}</td>
+          <td class="${row.side === "buy" ? "side-buy" : "side-sell"}">${row.side.toUpperCase()}</td>
+          <td class="num">${fmt.format(row.price || 0)}</td>
+          <td class="num">${fmt.format(row.base || 0)}</td>
+          <td class="num">${escapeHtml(row.local)}</td>
+          <td class="num">${escapeHtml(row.common)}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function selectedStrategyAccount(inputName) {
       return accountSelectorValue(inputName);
     }
@@ -6432,6 +6670,10 @@ function balanceStatusClass(status) {
           renderSlowExecution(data.slow_execution);
           renderSlowExecutionTasks(data.slow_execution?.tasks, data.slow_execution?.config);
         });
+        renderOpenSection("rebalance-plan", () => {
+          renderCrossExchangeRebalanceConfig(data.cross_exchange_rebalance);
+          renderCrossExchangeRebalance(data.cross_exchange_rebalance);
+        });
         renderOpenSection("markets-config", () => renderMarketsConfig(data));
         finishVisiblePageRender();
         return;
@@ -6716,8 +6958,35 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("change", markSlowFormDirty);
     document.getElementById("slow-side").addEventListener("change", updateSlowLabels);
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
+    document.getElementById("rebalance-form").addEventListener("input", () => {
+      rebalanceFormDirty = true;
+      updateCoreFormStates();
+    });
+    document.getElementById("rebalance-form").addEventListener("change", () => {
+      rebalanceFormDirty = true;
+      updateRebalanceUnitLabels();
+      updateCoreFormStates();
+    });
+    document.getElementById("rebalance-form").addEventListener(
+      "submit",
+      applyCrossExchangeRebalanceConfig,
+    );
+    document.getElementById("rebalance-reset").addEventListener(
+      "click",
+      resetCrossExchangeRebalanceProgress,
+    );
     window.addEventListener("crypto-arb-language-change", () => {
       updateSlowLabels();
+      updateRebalanceUnitLabels();
+      if (!rebalanceFormDirty && lastState?.cross_exchange_rebalance) {
+        for (const id of ["rebalance-buy-accounts", "rebalance-sell-accounts"]) {
+          const selector = document.getElementById(id);
+          if (selector) selector.dataset.signature = "";
+        }
+        renderCrossExchangeRebalanceConfig(lastState.cross_exchange_rebalance);
+        renderCrossExchangeRebalance(lastState.cross_exchange_rebalance);
+      }
+      if (lastState) renderStrategySettingCards(lastState);
       renderUserStrategies(currentUserWorkspace);
       renderBacktestSelectors(currentUserWorkspace);
       if (currentUserBacktests) renderUserBacktests(currentUserBacktests);

@@ -38,6 +38,26 @@
     "cancel_existing_orders": false,
     "client_order_prefix": "crypto-arb-mm"
   },
+  "cross_exchange_rebalance": {
+    "enabled": false,
+    "live_enabled": false,
+    "buy_exchange": "binance-spot",
+    "buy_symbol": "BTC/USDT",
+    "sell_exchange": "okx-spot",
+    "sell_symbol": "BTC/USDT",
+    "total_quote_common": 0.0,
+    "quote_per_cycle_common": 0.0,
+    "interval_seconds": 30.0,
+    "order_ttl_seconds": 2.0,
+    "max_cost_bps": 50.0,
+    "max_slippage_bps": 50.0,
+    "buy_quote_reserve": 0.0,
+    "sell_base_reserve": 0.0,
+    "block_conflicting_open_orders": true,
+    "halt_on_error": true,
+    "client_order_prefix": "crypto-arb-rebalance",
+    "runtime_path": "data/cross_exchange_rebalance_runtime.json"
+  },
   "spot_grid": {
     "enabled": false,
     "live_enabled": false,

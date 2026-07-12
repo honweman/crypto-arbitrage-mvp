@@ -12,6 +12,15 @@ from .market_maker_alerts import market_maker_problem_warnings
 from ..alerts import AlertService
 from ..auto_buy_sell_task import AutoBuySellTaskService
 from ..config import BotConfig
+from ..cross_exchange_rebalancer import (
+    STRATEGY_ID as CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+    apply_rebalance_cycle_to_runtime,
+    load_rebalance_runtime,
+    new_rebalance_runtime,
+    rebalance_config_fingerprint,
+    run_cross_exchange_rebalance_cycle,
+    save_rebalance_runtime,
+)
 from ..exchanges import ExchangeManager
 from ..main import (
     StrategyName,
@@ -2420,6 +2429,239 @@ async def spot_grid_task_loop(
         await manager.close()
 
 
+def _cross_exchange_rebalance_live_gate(
+    cfg: BotConfig,
+    *,
+    program_running: bool,
+    strategy_paused: bool,
+) -> tuple[bool, str, list[str]]:
+    rebalance = cfg.cross_exchange_rebalance
+    if not rebalance.enabled:
+        return False, "disabled", ["cross-exchange rebalance is disabled"]
+    if strategy_paused:
+        return False, "paused", ["cross-exchange rebalance is paused"]
+    if not program_running:
+        return False, "program_paused", ["program is paused"]
+    if not rebalance.live_enabled:
+        return False, "dry_run", []
+    reasons = []
+    if not cfg.risk.enabled or not cfg.risk.trading_enabled:
+        reasons.append("risk trading is disabled")
+    if not cfg.risk.allow_live_trading:
+        reasons.append("risk.allow_live_trading is false")
+    if not cfg.risk.strategy_enabled.get(
+        CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+        False,
+    ):
+        reasons.append(
+            "risk.strategy_enabled.cross_exchange_rebalance is not explicitly true"
+        )
+    for exchange_key in (rebalance.buy_exchange, rebalance.sell_exchange):
+        if exchange_key and not _risk_account_enabled(cfg, exchange_key):
+            reasons.append(f"{exchange_key} account is disabled")
+    return (not reasons), "blocked_by_risk" if reasons else "live", reasons
+
+
+async def cross_exchange_rebalance_task_loop(
+    cfg: BotConfig,
+    state: MonitorState,
+) -> None:
+    manager = ExchangeManager()
+    current_path = cfg.cross_exchange_rebalance.runtime_path
+    runtime = load_rebalance_runtime(
+        current_path,
+        cfg.cross_exchange_rebalance,
+        common_quote_currency=cfg.common_quote_currency,
+    )
+    last_logged_status: str | None = None
+    try:
+        await state.set_cross_exchange_rebalance_runtime(runtime)
+        while True:
+            runtime_cfg = await state.runtime_config(cfg)
+            rebalance = runtime_cfg.cross_exchange_rebalance
+            started = time.monotonic()
+            interval = max(1.0, rebalance.interval_seconds)
+            fingerprint = rebalance_config_fingerprint(
+                rebalance,
+                common_quote_currency=runtime_cfg.common_quote_currency,
+            )
+            if current_path != rebalance.runtime_path:
+                current_path = rebalance.runtime_path
+                runtime = load_rebalance_runtime(
+                    current_path,
+                    rebalance,
+                    common_quote_currency=runtime_cfg.common_quote_currency,
+                )
+            elif runtime.get("config_fingerprint") != fingerprint:
+                runtime = new_rebalance_runtime(
+                    rebalance,
+                    common_quote_currency=runtime_cfg.common_quote_currency,
+                )
+
+            strategy_pauses = await state.strategy_pauses()
+            program_running = await state.is_running()
+            live_allowed, gate_status, gate_reasons = (
+                _cross_exchange_rebalance_live_gate(
+                    runtime_cfg,
+                    program_running=program_running,
+                    strategy_paused=strategy_pauses.get(
+                        CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                        False,
+                    ),
+                )
+            )
+            shutdown_requested = False
+            payload: dict[str, Any]
+            if not rebalance.enabled:
+                payload = {
+                    "type": "cross_exchange_rebalance_execution",
+                    "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                    "mode": "dry_run",
+                    "status": "disabled",
+                }
+            elif runtime.get("halted"):
+                payload = {
+                    "type": "cross_exchange_rebalance_execution",
+                    "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                    "mode": "live" if rebalance.live_enabled else "dry_run",
+                    "status": "halted",
+                    "risk": {
+                        "approved": False,
+                        "level": "blocked",
+                        "reasons": [
+                            str(
+                                runtime.get("halt_reason")
+                                or "manual review is required"
+                            )
+                        ],
+                    },
+                }
+            elif gate_status in {"paused", "program_paused"}:
+                payload = {
+                    "type": "cross_exchange_rebalance_execution",
+                    "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                    "mode": "paused",
+                    "status": gate_status,
+                    "risk": {
+                        "approved": False,
+                        "level": "blocked",
+                        "reasons": gate_reasons,
+                    },
+                }
+            else:
+                try:
+                    buy_exchange = _find_exchange_by_key(
+                        runtime_cfg,
+                        rebalance.buy_exchange,
+                    )
+                    sell_exchange = _find_exchange_by_key(
+                        runtime_cfg,
+                        rebalance.sell_exchange,
+                    )
+                    buy_book, sell_book = await asyncio.gather(
+                        manager.fetch_order_book(
+                            buy_exchange,
+                            rebalance.buy_symbol,
+                            runtime_cfg.order_book_depth,
+                        ),
+                        manager.fetch_order_book(
+                            sell_exchange,
+                            rebalance.sell_symbol,
+                            runtime_cfg.order_book_depth,
+                        ),
+                    )
+                    books = {}
+                    if buy_book is not None:
+                        books[(rebalance.buy_exchange, rebalance.buy_symbol)] = buy_book
+                    if sell_book is not None:
+                        books[(rebalance.sell_exchange, rebalance.sell_symbol)] = (
+                            sell_book
+                        )
+                    quote_rates = await state.quote_rates()
+                    cycle = run_cross_exchange_rebalance_cycle(
+                        runtime_cfg,
+                        manager,
+                        books=books,
+                        quote_rates=quote_rates,
+                        completed_quote_common=float(
+                            runtime.get("completed_quote_common") or 0.0
+                        ),
+                        live=live_allowed,
+                    )
+                    if live_allowed:
+                        (
+                            payload,
+                            shutdown_requested,
+                        ) = await _complete_market_maker_cycle_on_shutdown(cycle)
+                    else:
+                        payload = await cycle
+                    if rebalance.live_enabled and gate_reasons:
+                        payload["mode"] = "live"
+                        payload["status"] = "blocked_by_risk"
+                        payload["risk"] = {
+                            "approved": False,
+                            "level": "blocked",
+                            "reasons": gate_reasons,
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    payload = {
+                        "type": "cross_exchange_rebalance_execution",
+                        "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                        "mode": "live" if live_allowed else "dry_run",
+                        "status": "error",
+                        "errors": [f"{exc.__class__.__name__}: {exc}"],
+                    }
+
+            if payload.get("status") in {"disabled", "paused", "program_paused"}:
+                runtime = {
+                    **runtime,
+                    "status": payload["status"],
+                    "last_payload": payload,
+                    "last_error": None,
+                    "updated_at": time.time(),
+                }
+            elif payload.get("status") == "halted":
+                runtime = {
+                    **runtime,
+                    "status": "halted",
+                    "last_payload": payload,
+                    "updated_at": time.time(),
+                }
+            else:
+                runtime = apply_rebalance_cycle_to_runtime(
+                    runtime,
+                    payload,
+                    rebalance,
+                )
+                runtime["last_error"] = (
+                    (payload.get("errors") or [None])[0]
+                    if payload.get("status") == "error"
+                    else None
+                )
+            runtime["config_fingerprint"] = fingerprint
+            runtime["mode"] = payload.get("mode", "dry_run")
+            if rebalance.enabled:
+                save_rebalance_runtime(current_path, runtime)
+            await state.set_cross_exchange_rebalance_runtime(runtime)
+
+            status = str(payload.get("status") or "unknown")
+            if live_allowed or status != last_logged_status:
+                write_trade_event(runtime_cfg.trade_log, payload)
+                write_strategy_timeline_from_payload(
+                    runtime_cfg.strategy_timeline,
+                    payload,
+                    source="cross_exchange_rebalance_task",
+                )
+                last_logged_status = status
+            if shutdown_requested:
+                raise asyncio.CancelledError
+            sleep_for = max(0.0, interval - (time.monotonic() - started))
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+    finally:
+        await manager.close()
+
+
 async def _market_maker_instance_task_loop(
     cfg: BotConfig,
     state: MonitorState,
@@ -2892,6 +3134,7 @@ __all__ = [
     "_complete_market_maker_cycle_on_shutdown",
     "auto_buy_sell_task_loop",
     "build_daily_report_message",
+    "cross_exchange_rebalance_task_loop",
     "market_maker_task_loop",
     "monitor_loop",
     "spot_grid_task_loop",

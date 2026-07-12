@@ -1,10 +1,12 @@
 import os
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
-from arbitrage_bot.account_check import run_account_checks
+from arbitrage_bot.account_check import _symbols_by_exchange, run_account_checks
 from arbitrage_bot.config import (
     BotConfig,
+    CrossExchangeRebalanceConfig,
     ExchangeConfig,
     MarketMakerConfig,
     OnchainMonitorConfig,
@@ -107,6 +109,22 @@ class FakeAccountCheckManager:
 
 
 class AccountCheckTest(unittest.IsolatedAsyncioTestCase):
+    def test_rebalance_routes_are_included_in_preflight_symbols(self) -> None:
+        cfg = replace(
+            self._cfg(RiskConfig()),
+            cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+                buy_exchange="bybit-spot",
+                buy_symbol="ACS/USDT",
+                sell_exchange="coinbase-spot",
+                sell_symbol="ACS/USDC",
+            ),
+        )
+
+        symbols = _symbols_by_exchange(cfg)
+
+        self.assertIn("ACS/USDT", symbols["bybit-spot"])
+        self.assertEqual(symbols["coinbase-spot"], ["ACS/USDC"])
+
     async def test_missing_api_env_skips_private_checks(self) -> None:
         cfg = self._cfg(RiskConfig(allow_live_trading=True))
         manager = FakeAccountCheckManager()

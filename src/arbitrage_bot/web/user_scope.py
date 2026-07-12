@@ -24,6 +24,14 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
         assets.add(_base_asset_from_symbol(cfg.market_maker.symbol))
     if cfg.slow_execution.symbol:
         assets.add(_base_asset_from_symbol(cfg.slow_execution.symbol))
+    if cfg.cross_exchange_rebalance.buy_symbol:
+        assets.add(
+            _base_asset_from_symbol(cfg.cross_exchange_rebalance.buy_symbol)
+        )
+    if cfg.cross_exchange_rebalance.sell_symbol:
+        assets.add(
+            _base_asset_from_symbol(cfg.cross_exchange_rebalance.sell_symbol)
+        )
     if cfg.spot_grid.symbol:
         assets.add(_base_asset_from_symbol(cfg.spot_grid.symbol))
     if cfg.dca.symbol:
@@ -336,8 +344,12 @@ def _filter_state_payload_for_user(
         section["accounts"] = filter_accounts(section.get("accounts"))
         config = section.get("config") if isinstance(section.get("config"), dict) else {}
         plan = section.get("plan") if isinstance(section.get("plan"), dict) else {}
-        symbol = str(config.get("symbol") or plan.get("symbol") or "")
-        if symbol and not symbol_in_scope(symbol):
+        symbols = [
+            str(config.get("symbol") or plan.get("symbol") or ""),
+            str(config.get("buy_symbol") or plan.get("buy_symbol") or ""),
+            str(config.get("sell_symbol") or plan.get("sell_symbol") or ""),
+        ]
+        if any(symbol and not symbol_in_scope(symbol) for symbol in symbols):
             section.update(
                 {
                     "status": "out_of_scope",
@@ -509,6 +521,7 @@ def _filter_state_payload_for_user(
             }
     filter_strategy_section(payload.get("market_maker"))
     filter_strategy_section(payload.get("slow_execution"))
+    filter_strategy_section(payload.get("cross_exchange_rebalance"))
     filter_strategy_section(payload.get("spot_grid"))
     filter_strategy_section(payload.get("dca"))
     filter_strategy_section(payload.get("execution_algo"))

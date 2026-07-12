@@ -13,6 +13,7 @@ def register_routes(app: web.Application) -> None:
         api_cleanup_auto_buy_sell_tasks,
         api_control,
         api_control_auto_buy_sell_task,
+        api_cross_exchange_rebalance,
         api_create_auto_buy_sell_task,
         api_backtest,
         api_dca,
@@ -70,6 +71,10 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/cash-and-carry-pairs", api_cash_and_carry_pairs)
     app.router.add_post("/api/risk", api_risk)
     app.router.add_post("/api/market-maker", api_market_maker)
+    app.router.add_post(
+        "/api/cross-exchange-rebalance",
+        api_cross_exchange_rebalance,
+    )
     app.router.add_post("/api/spot-grid", api_spot_grid)
     app.router.add_post("/api/dca", api_dca)
     app.router.add_post("/api/execution-algo", api_execution_algo)

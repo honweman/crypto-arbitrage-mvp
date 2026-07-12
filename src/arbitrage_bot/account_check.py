@@ -59,6 +59,18 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
         symbols.setdefault(cfg.slow_execution.exchange, set()).add(
             cfg.slow_execution.symbol
         )
+    for exchange, symbol in (
+        (
+            cfg.cross_exchange_rebalance.buy_exchange,
+            cfg.cross_exchange_rebalance.buy_symbol,
+        ),
+        (
+            cfg.cross_exchange_rebalance.sell_exchange,
+            cfg.cross_exchange_rebalance.sell_symbol,
+        ),
+    ):
+        if exchange and symbol:
+            symbols.setdefault(exchange, set()).add(symbol)
     if cfg.spot_grid.exchange and cfg.spot_grid.symbol:
         symbols.setdefault(cfg.spot_grid.exchange, set()).add(cfg.spot_grid.symbol)
     if cfg.dca.exchange and cfg.dca.symbol:

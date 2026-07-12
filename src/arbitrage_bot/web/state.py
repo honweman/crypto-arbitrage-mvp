@@ -14,6 +14,7 @@ from ..config import (
     BacktestConfig,
     BotConfig,
     CashAndCarryPair,
+    CrossExchangeRebalanceConfig,
     DcaConfig,
     ExecutionAlgoConfig,
     MarketMakerConfig,
@@ -30,11 +31,13 @@ from ..web_config import (
     _cash_and_carry_pairs_from_payload,
     _execution_symbols_by_exchange,
     _grid_symbols_by_exchange,
+    _rebalance_symbols_by_exchange,
     _spot_markets_from_payload,
     _spot_symbols_by_exchange,
     backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
     contract_strategies_config_to_dict,
+    cross_exchange_rebalance_config_to_dict,
     dca_config_to_dict,
     execution_algo_config_to_dict,
     exchange_configs_to_list,
@@ -313,6 +316,9 @@ class MonitorState:
         self._slow_execution_overrides: dict[str, Any] = dict(
             store_data.get("slow_execution_overrides", {})
         )
+        self._cross_exchange_rebalance_overrides: dict[str, Any] = dict(
+            store_data.get("cross_exchange_rebalance_overrides", {})
+        )
         self._spot_grid_overrides: dict[str, Any] = dict(
             store_data.get("spot_grid_overrides", {})
         )
@@ -376,6 +382,9 @@ class MonitorState:
                 "updated_at": time.time(),
             },
         )
+        self._cross_exchange_rebalance_runtime: dict[str, Any] = self._payload[
+            "cross_exchange_rebalance"
+        ].get("runtime", {})
         self._auto_buy_sell_tasks = self._payload["slow_execution"]["tasks"]
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
         self._state_view_cache: dict[tuple[str, str], tuple[float, str]] = {}
@@ -400,6 +409,9 @@ class MonitorState:
             "risk_overrides": self._risk_overrides,
             "market_maker_overrides": self._market_maker_overrides,
             "slow_execution_overrides": self._slow_execution_overrides,
+            "cross_exchange_rebalance_overrides": (
+                self._cross_exchange_rebalance_overrides
+            ),
             "spot_grid_overrides": self._spot_grid_overrides,
             "dca_overrides": self._dca_overrides,
             "execution_algo_overrides": self._execution_algo_overrides,
@@ -480,6 +492,10 @@ class MonitorState:
             slow_execution=replace(
                 cfg.slow_execution,
                 **self._slow_execution_overrides,
+            ),
+            cross_exchange_rebalance=replace(
+                cfg.cross_exchange_rebalance,
+                **self._cross_exchange_rebalance_overrides,
             ),
             spot_grid=replace(
                 cfg.spot_grid,
@@ -584,6 +600,16 @@ class MonitorState:
     ) -> SpotGridConfig:
         async with self._lock:
             return replace(base_config, **self._spot_grid_overrides)
+
+    async def cross_exchange_rebalance_config(
+        self,
+        base_config: CrossExchangeRebalanceConfig,
+    ) -> CrossExchangeRebalanceConfig:
+        async with self._lock:
+            return replace(
+                base_config,
+                **self._cross_exchange_rebalance_overrides,
+            )
 
     async def dca_config(
         self,
@@ -729,6 +755,48 @@ class MonitorState:
                             market_maker_configs_for_runtime(runtime_cfg)
                         ),
                         "market_maker": self._payload.get("market_maker", {}),
+                        "trading_console": self._payload["trading_console"],
+                    }
+                )
+            )
+
+    async def set_cross_exchange_rebalance_overrides(
+        self,
+        overrides: dict[str, Any],
+        *,
+        cfg: BotConfig,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._cross_exchange_rebalance_overrides.update(overrides)
+            runtime_cfg = self._runtime_config_unlocked(cfg)
+            payload = self._payload.get("cross_exchange_rebalance")
+            if isinstance(payload, dict):
+                payload["config"] = cross_exchange_rebalance_config_to_dict(
+                    runtime_cfg.cross_exchange_rebalance
+                )
+                payload["accounts"] = slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _rebalance_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
+                )
+            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._payload["trading_console"] = build_trading_console_payload(
+                runtime_cfg,
+                strategy_paused=self._strategy_paused,
+                order_activity=self._payload.get("order_activity", {}),
+                auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+            )
+            self._save_runtime_store_unlocked()
+            return json.loads(
+                json.dumps(
+                    {
+                        "config": cross_exchange_rebalance_config_to_dict(
+                            runtime_cfg.cross_exchange_rebalance
+                        ),
+                        "cross_exchange_rebalance": self._payload.get(
+                            "cross_exchange_rebalance",
+                            {},
+                        ),
                         "trading_console": self._payload["trading_console"],
                     }
                 )
@@ -937,6 +1005,14 @@ class MonitorState:
                     _all_account_exchanges(runtime_cfg),
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                     spot_markets=runtime_cfg.spot_markets,
+                )
+            if "cross_exchange_rebalance" in self._payload:
+                self._payload["cross_exchange_rebalance"]["accounts"] = (
+                    slow_execution_accounts(
+                        runtime_cfg.spot_exchanges,
+                        _rebalance_symbols_by_exchange(runtime_cfg),
+                        spot_markets=runtime_cfg.spot_markets,
+                    )
                 )
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
@@ -1370,6 +1446,32 @@ class MonitorState:
         async with self._lock:
             return json.loads(json.dumps(self._market_maker_runtime))
 
+    async def set_cross_exchange_rebalance_runtime(
+        self,
+        runtime: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            self._cross_exchange_rebalance_runtime = runtime
+            payload = self._payload.get("cross_exchange_rebalance")
+            if isinstance(payload, dict):
+                payload["runtime"] = runtime
+                last_payload = (
+                    runtime.get("last_payload")
+                    if isinstance(runtime.get("last_payload"), dict)
+                    else {}
+                )
+                payload["status"] = runtime.get("status", payload.get("status"))
+                payload["mode"] = last_payload.get("mode", payload.get("mode"))
+                payload["plan"] = last_payload.get("plan", payload.get("plan"))
+                payload["risk"] = last_payload.get("risk")
+                payload["execution"] = last_payload.get("execution")
+                payload["error"] = runtime.get("last_error")
+            self._clear_state_view_cache_unlocked()
+
+    async def cross_exchange_rebalance_runtime(self) -> dict[str, Any]:
+        async with self._lock:
+            return json.loads(json.dumps(self._cross_exchange_rebalance_runtime))
+
     async def set_spot_grid_runtime(self, runtime: dict[str, Any]) -> None:
         async with self._lock:
             self._spot_grid_runtime = runtime
@@ -1511,6 +1613,18 @@ class MonitorState:
                 funding_basis=funding_basis,
                 options_arbitrage=options_arbitrage,
             )
+            cross_exchange_rebalance = dict(
+                self._payload.get("cross_exchange_rebalance", {})
+            )
+            cross_exchange_rebalance["config"] = (
+                cross_exchange_rebalance_config_to_dict(cfg.cross_exchange_rebalance)
+            )
+            cross_exchange_rebalance["accounts"] = slow_execution_accounts(
+                cfg.spot_exchanges,
+                _rebalance_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
+            )
+            cross_exchange_rebalance["runtime"] = self._cross_exchange_rebalance_runtime
             self._payload = {
                 "status": status,
                 "config": {
@@ -1526,7 +1640,9 @@ class MonitorState:
                     "contract_strategies": contract_strategies_config_to_dict(
                         cfg.contract_strategies
                     ),
-                    "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
+                        "spot_exchanges": exchange_configs_to_list(
+                            cfg.spot_exchanges
+                        ),
                     "derivative_exchanges": exchange_configs_to_list(
                         cfg.derivative_exchanges
                     ),
@@ -1552,6 +1668,7 @@ class MonitorState:
                 "onchain": onchain,
                 "market_maker": market_maker,
                 "slow_execution": slow_execution,
+                "cross_exchange_rebalance": cross_exchange_rebalance,
                 "spot_grid": spot_grid,
                 "dca": dca,
                 "execution_algo": execution_algo,
@@ -1609,9 +1726,7 @@ class MonitorState:
                         "contract_strategies": contract_strategies_config_to_dict(
                             cfg.contract_strategies
                         ),
-                        "spot_exchanges": exchange_configs_to_list(
-                            cfg.spot_exchanges
-                        ),
+                        "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
                         "derivative_exchanges": exchange_configs_to_list(
                             cfg.derivative_exchanges
                         ),

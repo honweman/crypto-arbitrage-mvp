@@ -158,10 +158,14 @@ def build_spot_arbitrage_orders(
     return orders, errors
 
 
-def _risk_orders(orders: list[ExecutableArbitrageOrder]) -> list[RiskOrder]:
+def _risk_orders(
+    orders: list[ExecutableArbitrageOrder],
+    *,
+    strategy: str,
+) -> list[RiskOrder]:
     return [
         RiskOrder(
-            strategy="spot_spread",
+            strategy=strategy,
             exchange=order.exchange.key,
             symbol=order.leg.symbol,
             side=order.leg.side,
@@ -468,6 +472,7 @@ async def _place_orders(
     *,
     order_ttl_seconds: float = DEFAULT_ORDER_TTL_SECONDS,
     opportunity_observed_at: float | None = None,
+    client_order_prefix: str = "crypto-arb-spot",
 ) -> dict[str, Any]:
     timestamp = int(time.time() * 1000)
 
@@ -478,7 +483,7 @@ async def _place_orders(
             side=order.leg.side,
             prepared=order.prepared or {},
             post_only=False,
-            client_order_id=f"crypto-arb-spot-{timestamp}-{index}",
+            client_order_id=f"{client_order_prefix}-{timestamp}-{index}",
         )
 
     submit_started_at = time.time()
@@ -582,11 +587,14 @@ async def run_spot_arbitrage_execution_cycle(
     quote_rates: dict[str, float],
     live: bool,
     order_ttl_seconds: float = DEFAULT_ORDER_TTL_SECONDS,
+    strategy_id: str = "spot_spread",
+    event_type: str = "spot_spread_execution",
+    client_order_prefix: str = "crypto-arb-spot",
 ) -> dict[str, Any]:
     cycle_started_at = time.time()
     payload: dict[str, Any] = {
-        "type": "spot_spread_execution",
-        "strategy": "spot_spread",
+        "type": event_type,
+        "strategy": strategy_id,
         "mode": "live" if live else "dry_run",
         "status": "no_opportunity",
         "timing": {
@@ -646,8 +654,8 @@ async def run_spot_arbitrage_execution_cycle(
     )
     risk = evaluate_order_batch(
         cfg.risk,
-        _risk_orders(orders),
-        strategy="spot_spread",
+        _risk_orders(orders, strategy=strategy_id),
+        strategy=strategy_id,
         live=live,
         plan_observed_at=opportunity.observed_at,
         current_positions_base=portfolio_positions_base(cfg.portfolio),
@@ -712,6 +720,7 @@ async def run_spot_arbitrage_execution_cycle(
             prepared_orders,
             order_ttl_seconds=order_ttl_seconds,
             opportunity_observed_at=opportunity.observed_at,
+            client_order_prefix=client_order_prefix,
         )
         payload["execution"] = execution
         payload["paper_vs_live"] = _paper_vs_live_payload(opportunity, execution)

@@ -19,6 +19,7 @@ from arbitrage_bot.config import (
     BacktestConfig,
     BotConfig,
     CashAndCarryPair,
+    CrossExchangeRebalanceConfig,
     DcaConfig,
     ExchangeConfig,
     ExecutionAlgoConfig,
@@ -62,6 +63,7 @@ from arbitrage_bot.web import (
     _cash_and_carry_pairs_from_payload,
     _backtest_overrides_from_payload,
     _dca_overrides_from_payload,
+    _exchange_balance_symbols,
     _execution_algo_overrides_from_payload,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
@@ -76,6 +78,7 @@ from arbitrage_bot.web import (
     _make_session_token,
     _session_identity,
     _session_valid,
+    api_cross_exchange_rebalance,
     build_daily_report_message,
     default_web_audit_path,
     build_order_attribution_map,
@@ -113,6 +116,7 @@ from arbitrage_bot.web.loops import _complete_market_maker_cycle_on_shutdown
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore, totp_code
 from arbitrage_bot.web_config import (
+    cross_exchange_rebalance_config_from_payload,
     market_maker_config_from_payload,
     market_maker_configs_from_payload,
     strategy_universe_to_dict,
@@ -148,6 +152,7 @@ def make_config(
     alerts: AlertConfig | None = None,
     web_security: WebSecurityConfig | None = None,
     quote_rates: dict[str, float] | None = None,
+    cross_exchange_rebalance: CrossExchangeRebalanceConfig | None = None,
 ) -> BotConfig:
     return BotConfig(
         poll_seconds=1.0,
@@ -176,6 +181,9 @@ def make_config(
         option_combos=option_combos or [],
         spot_exchanges=spot_exchanges or [],
         derivative_exchanges=derivative_exchanges or [],
+        cross_exchange_rebalance=(
+            cross_exchange_rebalance or CrossExchangeRebalanceConfig()
+        ),
         risk=risk or RiskConfig(),
         trade_log=trade_log or TradeLogConfig(enabled=False),
         strategy_timeline=strategy_timeline or StrategyTimelineConfig(enabled=False),
@@ -187,11 +195,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260712-security1" defer></script>',
+            '<script src="/static/app.js?v=20260712-rebalance3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260712-security1" defer></script>',
+            '<script src="/static/i18n.js?v=20260712-rebalance3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -226,12 +234,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260712-security1"></script>',
+            '<script src="/static/theme.js?v=20260712-rebalance3"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index('/static/theme.js?v=20260712-security1'),
-            INDEX_HTML.index('/static/styles.css?v=20260712-security1'),
+            INDEX_HTML.index('/static/theme.js?v=20260712-rebalance3'),
+            INDEX_HTML.index('/static/styles.css?v=20260712-rebalance3'),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn('root.dataset.theme = theme', theme_js)
@@ -336,7 +344,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260712-security1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance3">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -601,6 +609,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="mm-section" data-page="trading"', HTML)
         self.assertIn('id="slow-section" data-page="trading"', HTML)
         self.assertIn('id="spot-arbitrage-section" data-page="trading"', HTML)
+        self.assertIn('id="rebalance-section" data-page="trading"', HTML)
         self.assertIn('id="cash-carry-section" data-page="quant"', HTML)
         self.assertIn('id="derivatives-section" data-page="quant"', HTML)
         self.assertIn('id="funding-arbitrage-section" data-page="quant"', HTML)
@@ -773,6 +782,94 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="mm-quality-inventory"', HTML)
         self.assertIn('id="mm-quality-fills"', HTML)
         self.assertIn('id="mm-quality-spread"', HTML)
+
+    def test_page_includes_cross_exchange_rebalance_controls(self) -> None:
+        self.assertIn("Cross-Exchange Rebalance", HTML)
+        self.assertIn("/api/cross-exchange-rebalance", HTML)
+        self.assertIn('id="rebalance-form"', HTML)
+        self.assertIn('id="rebalance-buy-accounts"', HTML)
+        self.assertIn('id="rebalance-sell-accounts"', HTML)
+        self.assertIn('id="rebalance-live-confirm"', HTML)
+        self.assertIn('placeholder="ENABLE LIVE REBALANCE"', HTML)
+        self.assertIn('id="rebalance-reset"', HTML)
+        self.assertIn("RESET REBALANCE", APP_JS)
+
+    def test_cross_exchange_rebalance_config_requires_matching_assets(self) -> None:
+        base = CrossExchangeRebalanceConfig()
+        accounts = {"bithumb-spot", "coinbase-spot"}
+        symbols = {
+            "bithumb-spot": ["ACS/KRW"],
+            "coinbase-spot": ["ACS/USDC", "BTC/USDC"],
+        }
+
+        configured = cross_exchange_rebalance_config_from_payload(
+            {
+                "enabled": True,
+                "buy_exchange": "bithumb-spot",
+                "buy_symbol": "ACS/KRW",
+                "sell_exchange": "coinbase-spot",
+                "sell_symbol": "ACS/USDC",
+                "total_quote_common": 100,
+                "quote_per_cycle_common": 10,
+                "interval_seconds": 30,
+            },
+            base_config=base,
+            allowed_exchanges=accounts,
+            symbols_by_exchange=symbols,
+        )
+
+        self.assertTrue(configured.enabled)
+        self.assertEqual(configured.buy_symbol, "ACS/KRW")
+        self.assertEqual(configured.sell_symbol, "ACS/USDC")
+        disabled = cross_exchange_rebalance_config_from_payload(
+            {
+                "enabled": False,
+                "live_enabled": False,
+                "buy_exchange": "",
+                "buy_symbol": "",
+                "sell_exchange": "",
+                "sell_symbol": "",
+                "total_quote_common": 0,
+                "quote_per_cycle_common": 0,
+                "interval_seconds": 30,
+            },
+            base_config=base,
+            allowed_exchanges=accounts,
+            symbols_by_exchange=symbols,
+        )
+        self.assertFalse(disabled.enabled)
+        self.assertEqual(disabled.buy_exchange, "")
+        self.assertEqual(disabled.total_quote_common, 0.0)
+        with self.assertRaisesRegex(ValueError, "same base asset"):
+            cross_exchange_rebalance_config_from_payload(
+                {
+                    "enabled": True,
+                    "buy_exchange": "bithumb-spot",
+                    "buy_symbol": "ACS/KRW",
+                    "sell_exchange": "coinbase-spot",
+                    "sell_symbol": "BTC/USDC",
+                    "total_quote_common": 100,
+                    "quote_per_cycle_common": 10,
+                },
+                base_config=base,
+                allowed_exchanges=accounts,
+                symbols_by_exchange=symbols,
+            )
+
+    def test_rebalance_routes_are_included_in_web_balance_symbols(self) -> None:
+        cfg = make_config(
+            cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+                buy_exchange="bithumb-spot",
+                buy_symbol="ACS/KRW",
+                sell_exchange="coinbase-spot",
+                sell_symbol="ACS/USDC",
+            )
+        )
+
+        symbols = _exchange_balance_symbols(cfg)
+
+        self.assertEqual(symbols["bithumb-spot"], ["ACS/KRW"])
+        self.assertEqual(symbols["coinbase-spot"], ["ACS/USDC"])
 
     def test_page_includes_spot_grid_and_dca_controls(self) -> None:
         self.assertIn("Spot Grid", HTML)
@@ -2542,6 +2639,20 @@ class WebMonitorTest(unittest.TestCase):
                     ]
                 },
             },
+            "cross_exchange_rebalance": {
+                "status": "planned",
+                "config": {
+                    "buy_symbol": "BTC/USDT",
+                    "sell_symbol": "BTC/USDT",
+                },
+                "plan": {
+                    "buy_symbol": "BTC/USDT",
+                    "sell_symbol": "BTC/USDT",
+                },
+                "accounts": [
+                    {"key": "binance-spot", "symbols": ["BTC/USDT"]}
+                ],
+            },
             "order_activity": {
                 "accounts": [
                     {
@@ -2613,6 +2724,10 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertEqual(len(filtered["opportunities"]), 1)
         self.assertEqual(filtered["market_maker"]["status"], "out_of_scope")
+        self.assertEqual(
+            filtered["cross_exchange_rebalance"]["status"],
+            "out_of_scope",
+        )
         self.assertEqual(
             [task["id"] for task in filtered["slow_execution"]["tasks"]["tasks"]],
             ["acs-task"],
@@ -3691,6 +3806,104 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload, {"status": "placed"})
         self.assertTrue(shutdown_requested)
+
+    async def test_rebalance_api_requires_live_phrase_and_persists_config(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/cross-exchange-rebalance"
+            method = "POST"
+
+            def __init__(
+                self,
+                app: dict[str, object],
+                payload: dict[str, object],
+            ) -> None:
+                self.app = app
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                spot_exchanges=[
+                    ExchangeConfig(id="bithumb", label="bithumb-spot"),
+                    ExchangeConfig(id="coinbase", label="coinbase-spot"),
+                ],
+                spot_markets=[
+                    SpotMarketConfig(
+                        asset="ACS",
+                        exchange="bithumb-spot",
+                        symbol="ACS/KRW",
+                        quote_currency="KRW",
+                    ),
+                    SpotMarketConfig(
+                        asset="ACS",
+                        exchange="coinbase-spot",
+                        symbol="ACS/USDC",
+                        quote_currency="USDC",
+                    ),
+                ],
+                quote_rates={"USD": 1.0, "KRW": 0.00075, "USDC": 1.0},
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                ),
+            )
+            store_path = os.path.join(tmp, "web_runtime_overrides.json")
+            state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            app: dict[str, object] = {"monitor_state": state, "config": cfg}
+            payload: dict[str, object] = {
+                "action": "update",
+                "enabled": True,
+                "live_enabled": True,
+                "buy_exchange": "bithumb-spot",
+                "buy_symbol": "ACS/KRW",
+                "sell_exchange": "coinbase-spot",
+                "sell_symbol": "ACS/USDC",
+                "total_quote_common": 100.0,
+                "quote_per_cycle_common": 10.0,
+                "interval_seconds": 30.0,
+            }
+
+            denied = await api_cross_exchange_rebalance(
+                FakeRequest(app, payload)  # type: ignore[arg-type]
+            )
+            approved = await api_cross_exchange_rebalance(
+                FakeRequest(  # type: ignore[arg-type]
+                    app,
+                    {**payload, "confirm_live": "ENABLE LIVE REBALANCE"},
+                )
+            )
+            reconfirm_denied = await api_cross_exchange_rebalance(
+                FakeRequest(  # type: ignore[arg-type]
+                    app,
+                    {**payload, "total_quote_common": 110.0},
+                )
+            )
+            restored = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            restored_cfg = await restored.runtime_config(cfg)
+
+        self.assertEqual(denied.status, 400)
+        self.assertIn("confirm_live", json.loads(denied.text)["error"])
+        self.assertEqual(approved.status, 200, approved.text)
+        self.assertTrue(json.loads(approved.text)["ok"])
+        self.assertEqual(reconfirm_denied.status, 400)
+        self.assertIn("saving live config", reconfirm_denied.text)
+        self.assertTrue(restored_cfg.cross_exchange_rebalance.enabled)
+        self.assertTrue(restored_cfg.cross_exchange_rebalance.live_enabled)
+        self.assertEqual(
+            restored_cfg.cross_exchange_rebalance.buy_exchange,
+            "bithumb-spot",
+        )
+        self.assertEqual(
+            restored_cfg.cross_exchange_rebalance.sell_symbol,
+            "ACS/USDC",
+        )
 
     async def test_login_lockout_after_repeated_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

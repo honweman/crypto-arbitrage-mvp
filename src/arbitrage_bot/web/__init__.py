@@ -126,6 +126,7 @@ from ..backtesting import run_paper_backtest
 from ..config import (
     BotConfig,
     CashAndCarryPair,
+    CrossExchangeRebalanceConfig,
     ExchangeConfig,
     MarketMakerConfig,
     RiskConfig,
@@ -134,6 +135,10 @@ from ..config import (
     load_config,
 )
 from ..contract_strategies import build_contract_strategies_payload
+from ..cross_exchange_rebalancer import (
+    new_rebalance_runtime,
+    save_rebalance_runtime,
+)
 from ..derivatives import derivative_account_summary, normalize_derivative_position
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
@@ -241,6 +246,7 @@ from ..web_config import (
     _grid_symbols_by_exchange,
     _market_maker_overrides_from_payload,
     _market_maker_symbols_by_exchange,
+    _rebalance_symbols_by_exchange,
     _risk_overrides_from_payload,
     _slow_execution_overrides_from_payload,
     _spot_grid_overrides_from_payload,
@@ -249,6 +255,8 @@ from ..web_config import (
     backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
     contract_strategies_config_to_dict,
+    cross_exchange_rebalance_config_from_payload,
+    cross_exchange_rebalance_config_to_dict,
     dca_config_to_dict,
     execution_algo_config_to_dict,
     exchange_configs_to_list,
@@ -275,6 +283,7 @@ SPOT_ARBITRAGE_EXECUTION_COOLDOWN_SECONDS = 10.0
 STRATEGY_IDS = {
     "market_maker",
     "slow_execution",
+    "cross_exchange_rebalance",
     "spot_grid",
     "dca",
     "execution_algo",
@@ -572,6 +581,27 @@ def build_trading_console_payload(
             and _risk_strategy_enabled(cfg, "slow_execution"),
         ),
         strategy_row(
+            strategy_id="cross_exchange_rebalance",
+            label="Cross-Exchange Rebalance",
+            configured=cfg.cross_exchange_rebalance.enabled,
+            exchange=cfg.cross_exchange_rebalance.buy_exchange,
+            symbol=(
+                f"{cfg.cross_exchange_rebalance.buy_symbol} -> "
+                f"{cfg.cross_exchange_rebalance.sell_symbol}"
+            ).strip(" ->"),
+            strategy_allowed=(
+                cfg.risk.strategy_enabled.get(
+                    "cross_exchange_rebalance",
+                    False,
+                )
+                and _risk_account_enabled(
+                    cfg,
+                    cfg.cross_exchange_rebalance.sell_exchange,
+                )
+            ),
+            live_ready=cfg.cross_exchange_rebalance.live_enabled,
+        ),
+        strategy_row(
             strategy_id="spot_grid",
             label="Spot Grid",
             configured=cfg.spot_grid.enabled,
@@ -738,6 +768,19 @@ def _exchange_balance_symbols(
     runtime_exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     if runtime_exec_cfg.exchange and runtime_exec_cfg.symbol:
         symbols.setdefault(runtime_exec_cfg.exchange, set()).add(runtime_exec_cfg.symbol)
+
+    for exchange, symbol in (
+        (
+            cfg.cross_exchange_rebalance.buy_exchange,
+            cfg.cross_exchange_rebalance.buy_symbol,
+        ),
+        (
+            cfg.cross_exchange_rebalance.sell_exchange,
+            cfg.cross_exchange_rebalance.sell_symbol,
+        ),
+    ):
+        if exchange and symbol:
+            symbols.setdefault(exchange, set()).add(symbol)
 
     if cfg.spot_grid.exchange and cfg.spot_grid.symbol:
         symbols.setdefault(cfg.spot_grid.exchange, set()).add(cfg.spot_grid.symbol)
@@ -2875,6 +2918,10 @@ def _load_runtime_overrides(path: Path, cfg: BotConfig) -> dict[str, Any]:
             raw.get("slow_execution_overrides"),
             cfg.slow_execution,
         ),
+        "cross_exchange_rebalance_overrides": _dataclass_overrides(
+            raw.get("cross_exchange_rebalance_overrides"),
+            cfg.cross_exchange_rebalance,
+        ),
         "spot_grid_overrides": _dataclass_overrides(
             raw.get("spot_grid_overrides"),
             cfg.spot_grid,
@@ -3279,6 +3326,34 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "tasks": [],
                 "task_count": 0,
                 "active_count": 0,
+                "updated_at": time.time(),
+            },
+            "error": None,
+        },
+        "cross_exchange_rebalance": {
+            "status": (
+                "disabled" if not cfg.cross_exchange_rebalance.enabled else "starting"
+            ),
+            "mode": "dry_run",
+            "plan": None,
+            "config": cross_exchange_rebalance_config_to_dict(
+                cfg.cross_exchange_rebalance
+            ),
+            "accounts": slow_execution_accounts(
+                cfg.spot_exchanges,
+                _rebalance_symbols_by_exchange(cfg),
+                spot_markets=cfg.spot_markets,
+            ),
+            "runtime": {
+                "status": (
+                    "disabled"
+                    if not cfg.cross_exchange_rebalance.enabled
+                    else "starting"
+                ),
+                "halted": False,
+                "completed_quote_common": 0.0,
+                "completed_base": 0.0,
+                "cycle_count": 0,
                 "updated_at": time.time(),
             },
             "error": None,
@@ -4618,6 +4693,7 @@ from .loops import (
     _market_maker_order_sync_delta,
     auto_buy_sell_task_loop,
     build_daily_report_message,
+    cross_exchange_rebalance_task_loop,
     market_maker_task_loop,
     monitor_loop,
     spot_grid_task_loop,
@@ -4952,9 +5028,113 @@ async def api_slow_execution(request: web.Request) -> web.Response:
             "config": slow_execution_config_to_dict(current_config),
             "accounts": slow_execution_accounts(
                 runtime_cfg.spot_exchanges,
-                _spot_symbols_by_exchange(runtime_cfg),
+                _rebalance_symbols_by_exchange(runtime_cfg),
                 spot_markets=runtime_cfg.spot_markets,
             ),
+        }
+    )
+
+
+async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        runtime_cfg = await state.runtime_config(cfg)
+        current_config = runtime_cfg.cross_exchange_rebalance
+        action = str(payload.get("action") or "update").strip().lower()
+        if action == "reset":
+            _require_admin_user(_request_user(request))
+            if current_config.live_enabled:
+                raise ValueError("disable Live Ready before resetting progress")
+            if payload.get("confirm_reset") != "RESET REBALANCE":
+                raise ValueError("reset requires confirm_reset=RESET REBALANCE")
+            runtime = new_rebalance_runtime(
+                current_config,
+                common_quote_currency=runtime_cfg.common_quote_currency,
+            )
+            save_rebalance_runtime(current_config.runtime_path, runtime)
+            await state.set_cross_exchange_rebalance_runtime(runtime)
+            write_web_audit_event(
+                runtime_cfg,
+                request,
+                action="cross_exchange_rebalance_reset",
+                target=(
+                    f"{current_config.buy_exchange} -> {current_config.sell_exchange}"
+                ),
+                detail="reset cross-exchange rebalance progress",
+                payload={"action": "reset"},
+            )
+            return web.json_response({"ok": True, "runtime": runtime})
+        if action != "update":
+            raise ValueError("action must be update or reset")
+
+        symbols_by_exchange = _rebalance_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
+        )
+        updated_config = cross_exchange_rebalance_config_from_payload(
+            payload,
+            base_config=current_config,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        if (
+            updated_config.live_enabled
+            and payload.get("confirm_live") != "ENABLE LIVE REBALANCE"
+        ):
+            raise ValueError(
+                "saving live config requires confirm_live=ENABLE LIVE REBALANCE"
+            )
+        _require_user_assets(
+            _request_user(request),
+            [
+                _base_asset_from_symbol(updated_config.buy_symbol),
+                _base_asset_from_symbol(updated_config.sell_symbol),
+            ],
+        )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    overrides = cross_exchange_rebalance_config_to_dict(updated_config)
+    update = await state.set_cross_exchange_rebalance_overrides(
+        overrides,
+        cfg=cfg,
+    )
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="cross_exchange_rebalance_config",
+        target=(
+            f"{updated_config.buy_exchange} {updated_config.buy_symbol} -> "
+            f"{updated_config.sell_exchange} {updated_config.sell_symbol}"
+        ),
+        detail="updated cross-exchange rebalance config",
+        payload={
+            key: value
+            for key, value in overrides.items()
+            if key not in {"client_order_prefix", "runtime_path"}
+        },
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "config": cross_exchange_rebalance_config_to_dict(
+                runtime_cfg.cross_exchange_rebalance
+            ),
+            "accounts": slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                _rebalance_symbols_by_exchange(runtime_cfg),
+                spot_markets=runtime_cfg.spot_markets,
+            ),
+            **update,
         }
     )
 
@@ -6714,6 +6894,9 @@ def create_app(
             )
         )
         mm_task = asyncio.create_task(market_maker_task_loop(cfg, state))
+        rebalance_task = asyncio.create_task(
+            cross_exchange_rebalance_task_loop(cfg, state)
+        )
         grid_task = asyncio.create_task(spot_grid_task_loop(cfg, state))
         auto_task = asyncio.create_task(
             auto_buy_sell_task_loop(cfg, state, auto_buy_sell_tasks)
@@ -6727,6 +6910,7 @@ def create_app(
         )
         app_["monitor_task"] = monitor_task
         app_["market_maker_task"] = mm_task
+        app_["cross_exchange_rebalance_task"] = rebalance_task
         app_["spot_grid_task"] = grid_task
         app_["auto_buy_sell_task"] = auto_task
         app_["user_paper_task"] = user_paper_task
@@ -6735,6 +6919,7 @@ def create_app(
         finally:
             monitor_task.cancel()
             mm_task.cancel()
+            rebalance_task.cancel()
             grid_task.cancel()
             auto_task.cancel()
             user_paper_task.cancel()
@@ -6742,6 +6927,8 @@ def create_app(
                 await monitor_task
             with contextlib.suppress(asyncio.CancelledError):
                 await mm_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await rebalance_task
             with contextlib.suppress(asyncio.CancelledError):
                 await grid_task
             with contextlib.suppress(asyncio.CancelledError):

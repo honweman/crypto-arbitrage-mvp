@@ -90,6 +90,26 @@
     "client_order_prefix": "crypto-arb-slow",
     "block_conflicting_market_maker": true
   },
+  "cross_exchange_rebalance": {
+    "enabled": false,
+    "live_enabled": false,
+    "buy_exchange": "bithumb-spot",
+    "buy_symbol": "ACS/KRW",
+    "sell_exchange": "coinbase-spot",
+    "sell_symbol": "ACS/USDC",
+    "total_quote_common": 0.0,
+    "quote_per_cycle_common": 0.0,
+    "interval_seconds": 30.0,
+    "order_ttl_seconds": 2.0,
+    "max_cost_bps": 50.0,
+    "max_slippage_bps": 50.0,
+    "buy_quote_reserve": 0.0,
+    "sell_base_reserve": 0.0,
+    "block_conflicting_open_orders": true,
+    "halt_on_error": true,
+    "client_order_prefix": "crypto-arb-rebalance",
+    "runtime_path": "data/cross_exchange_rebalance_runtime.json"
+  },
   "spot_grid": {
     "enabled": false,
     "live_enabled": false,
@@ -254,6 +274,7 @@
     "strategy_enabled": {
       "market_maker": true,
       "slow_execution": true,
+      "cross_exchange_rebalance": false,
       "spot_grid": true,
       "dca": true,
       "execution_algo": true,

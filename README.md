@@ -381,6 +381,54 @@ PYTHONPATH=src .venv/bin/python -m arbitrage_bot.auto_buy_sell \
 
 The preferred command name is now `arbitrage_bot.auto_buy_sell`; `arbitrage_bot.slow_executor` remains as a backward-compatible alias. Auto Buy/Sell tracks submitted base amount, not confirmed fills. If an order rests unfilled, it still counts toward the submitted schedule. For fill-aware execution, add order and trade polling before using it for larger live sizes.
 
+## Cross-exchange inventory rebalance
+
+The Trading page includes a synthetic cross-exchange rebalance task. It buys a
+project token with cash on the source account and simultaneously sells the same
+base quantity on the destination account. The result is equivalent to moving
+cash from the source venue to the destination venue while moving project-token
+inventory in the opposite direction. It does not make an on-chain deposit,
+withdrawal, or exchange-to-exchange transfer, so both accounts must be funded in
+advance.
+
+The two pairs may use different quote currencies. For example, buying `ACS/KRW`
+on Bithumb and selling `ACS/USDC` on Coinbase uses `quote_rates` to convert both
+legs into `common_quote_currency` before checking the target amount, cycle size,
+fees, rebalance cost, slippage, and global risk limits.
+
+```json
+"cross_exchange_rebalance": {
+  "enabled": false,
+  "live_enabled": false,
+  "buy_exchange": "bithumb-spot",
+  "buy_symbol": "ACS/KRW",
+  "sell_exchange": "coinbase-spot",
+  "sell_symbol": "ACS/USDC",
+  "total_quote_common": 100.0,
+  "quote_per_cycle_common": 10.0,
+  "interval_seconds": 30.0,
+  "order_ttl_seconds": 2.0,
+  "max_cost_bps": 50.0,
+  "max_slippage_bps": 50.0,
+  "buy_quote_reserve": 0.0,
+  "sell_base_reserve": 0.0,
+  "block_conflicting_open_orders": true,
+  "halt_on_error": true
+}
+```
+
+The task is disabled and dry-run by default. Live execution requires all of the
+global live risk switches, both account switches,
+`risk.strategy_enabled.cross_exchange_rebalance=true`, `live_enabled=true`, and
+the exact web confirmation phrase `ENABLE LIVE REBALANCE`. Opposite-side open
+orders on either route block the cycle to avoid self-trading with MM or another
+strategy. Insufficient source cash, insufficient destination token inventory,
+stale books, excessive slippage, and missing FX rates also block before orders
+are submitted. If the two legs fill by different amounts or one leg fails, the
+task records the residual hedge, advances no progress, and remains halted for
+manual review. Confirmed balanced progress is persisted in
+`data/cross_exchange_rebalance_runtime.json` across service restarts.
+
 ## Read-only account preflight
 
 Before using `--live`, run the account preflight check. It does not create or cancel orders. It checks configured API environment variables, public market metadata, current order book, private balances, open orders, and the active risk switches for each configured account.

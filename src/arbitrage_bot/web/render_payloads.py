@@ -609,6 +609,10 @@ def state_payload_for_view(
     )
     market_maker_full = is_trading and _section_open(section_ids, "mm-orders")
     slow_execution_full = is_trading and _section_open(section_ids, "slow-orders")
+    cross_exchange_rebalance_full = is_trading and _section_open(
+        section_ids,
+        "rebalance-plan",
+    )
     spot_grid_full = is_quant and _section_open(section_ids, "grid-orders")
     dca_full = is_quant and _section_open(section_ids, "dca-orders")
     execution_algo_full = is_quant and _section_open(section_ids, "exec-schedule")
@@ -656,6 +660,10 @@ def state_payload_for_view(
         "slow_execution": _compact_slow_execution_payload(
             payload.get("slow_execution", {}),
             full=slow_execution_full,
+        ),
+        "cross_exchange_rebalance": _compact_strategy_plan_payload(
+            payload.get("cross_exchange_rebalance", {}),
+            full=cross_exchange_rebalance_full,
         ),
         "spot_grid": _compact_strategy_plan_payload(
             payload.get("spot_grid", {}),

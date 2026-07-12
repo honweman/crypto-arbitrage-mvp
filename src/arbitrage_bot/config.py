@@ -135,6 +135,28 @@ class SlowExecutionConfig:
 
 
 @dataclass(frozen=True)
+class CrossExchangeRebalanceConfig:
+    enabled: bool = False
+    live_enabled: bool = False
+    buy_exchange: str = ""
+    buy_symbol: str = ""
+    sell_exchange: str = ""
+    sell_symbol: str = ""
+    total_quote_common: float = 0.0
+    quote_per_cycle_common: float = 0.0
+    interval_seconds: float = 30.0
+    order_ttl_seconds: float = 2.0
+    max_cost_bps: float = 50.0
+    max_slippage_bps: float = 50.0
+    buy_quote_reserve: float = 0.0
+    sell_base_reserve: float = 0.0
+    block_conflicting_open_orders: bool = True
+    halt_on_error: bool = True
+    client_order_prefix: str = "crypto-arb-rebalance"
+    runtime_path: str = "data/cross_exchange_rebalance_runtime.json"
+
+
+@dataclass(frozen=True)
 class SpotGridConfig:
     enabled: bool = False
     live_enabled: bool = False
@@ -447,6 +469,9 @@ class BotConfig:
     derivative_exchanges: list[ExchangeConfig]
     option_combos: list[OptionComboConfig] = field(default_factory=list)
     market_makers: list[MarketMakerConfig] = field(default_factory=list)
+    cross_exchange_rebalance: CrossExchangeRebalanceConfig = field(
+        default_factory=CrossExchangeRebalanceConfig
+    )
     spot_grid: SpotGridConfig = field(default_factory=SpotGridConfig)
     dca: DcaConfig = field(default_factory=DcaConfig)
     execution_algo: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
@@ -687,6 +712,7 @@ def load_config(path: str | Path) -> BotConfig:
     market_maker_raw = raw.get("market_maker", {})
     market_makers_raw = raw.get("market_makers", [])
     slow_execution_raw = raw.get("slow_execution", {})
+    cross_exchange_rebalance_raw = raw.get("cross_exchange_rebalance", {})
     spot_grid_raw = raw.get("spot_grid", {})
     dca_raw = raw.get("dca", {})
     execution_algo_raw = raw.get("execution_algo", {})
@@ -796,6 +822,58 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             block_conflicting_market_maker=bool(
                 slow_execution_raw.get("block_conflicting_market_maker", True)
+            ),
+        ),
+        cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+            enabled=bool(cross_exchange_rebalance_raw.get("enabled", False)),
+            live_enabled=bool(cross_exchange_rebalance_raw.get("live_enabled", False)),
+            buy_exchange=str(cross_exchange_rebalance_raw.get("buy_exchange", "")),
+            buy_symbol=str(cross_exchange_rebalance_raw.get("buy_symbol", "")),
+            sell_exchange=str(cross_exchange_rebalance_raw.get("sell_exchange", "")),
+            sell_symbol=str(cross_exchange_rebalance_raw.get("sell_symbol", "")),
+            total_quote_common=float(
+                cross_exchange_rebalance_raw.get("total_quote_common", 0.0)
+            ),
+            quote_per_cycle_common=float(
+                cross_exchange_rebalance_raw.get(
+                    "quote_per_cycle_common",
+                    0.0,
+                )
+            ),
+            interval_seconds=float(
+                cross_exchange_rebalance_raw.get("interval_seconds", 30.0)
+            ),
+            order_ttl_seconds=float(
+                cross_exchange_rebalance_raw.get("order_ttl_seconds", 2.0)
+            ),
+            max_cost_bps=float(cross_exchange_rebalance_raw.get("max_cost_bps", 50.0)),
+            max_slippage_bps=float(
+                cross_exchange_rebalance_raw.get("max_slippage_bps", 50.0)
+            ),
+            buy_quote_reserve=float(
+                cross_exchange_rebalance_raw.get("buy_quote_reserve", 0.0)
+            ),
+            sell_base_reserve=float(
+                cross_exchange_rebalance_raw.get("sell_base_reserve", 0.0)
+            ),
+            block_conflicting_open_orders=bool(
+                cross_exchange_rebalance_raw.get(
+                    "block_conflicting_open_orders",
+                    True,
+                )
+            ),
+            halt_on_error=bool(cross_exchange_rebalance_raw.get("halt_on_error", True)),
+            client_order_prefix=str(
+                cross_exchange_rebalance_raw.get(
+                    "client_order_prefix",
+                    "crypto-arb-rebalance",
+                )
+            ),
+            runtime_path=str(
+                cross_exchange_rebalance_raw.get(
+                    "runtime_path",
+                    "data/cross_exchange_rebalance_runtime.json",
+                )
             ),
         ),
         spot_grid=SpotGridConfig(

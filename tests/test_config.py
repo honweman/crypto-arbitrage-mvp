@@ -71,6 +71,22 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.slow_execution.price_mode, "taker")
         self.assertEqual(cfg.slow_execution.price_offset_bps, 0.0)
         self.assertFalse(cfg.slow_execution.post_only)
+        self.assertFalse(cfg.cross_exchange_rebalance.enabled)
+        self.assertFalse(cfg.cross_exchange_rebalance.live_enabled)
+        self.assertEqual(
+            cfg.cross_exchange_rebalance.buy_exchange,
+            "bithumb-spot",
+        )
+        self.assertEqual(cfg.cross_exchange_rebalance.buy_symbol, "ACS/KRW")
+        self.assertEqual(
+            cfg.cross_exchange_rebalance.sell_exchange,
+            "coinbase-spot",
+        )
+        self.assertEqual(cfg.cross_exchange_rebalance.sell_symbol, "ACS/USDC")
+        self.assertEqual(cfg.cross_exchange_rebalance.total_quote_common, 0.0)
+        self.assertEqual(cfg.cross_exchange_rebalance.quote_per_cycle_common, 0.0)
+        self.assertTrue(cfg.cross_exchange_rebalance.block_conflicting_open_orders)
+        self.assertTrue(cfg.cross_exchange_rebalance.halt_on_error)
         self.assertFalse(cfg.spot_grid.enabled)
         self.assertFalse(cfg.spot_grid.live_enabled)
         self.assertEqual(cfg.spot_grid.exchange, "bybit-spot")
@@ -162,6 +178,7 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(cfg.risk.require_post_only)
         self.assertTrue(cfg.risk.strategy_enabled["market_maker"])
         self.assertTrue(cfg.risk.strategy_enabled["slow_execution"])
+        self.assertFalse(cfg.risk.strategy_enabled["cross_exchange_rebalance"])
         self.assertTrue(cfg.risk.strategy_enabled["spot_grid"])
         self.assertTrue(cfg.risk.strategy_enabled["dca"])
         self.assertTrue(cfg.risk.strategy_enabled["execution_algo"])

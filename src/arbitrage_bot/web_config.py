@@ -9,6 +9,7 @@ from .config import (
     BacktestConfig,
     CashAndCarryPair,
     ContractStrategiesConfig,
+    CrossExchangeRebalanceConfig,
     DcaConfig,
     ExchangeConfig,
     ExecutionAlgoConfig,
@@ -43,6 +44,12 @@ def contract_strategies_config_to_dict(
 
 
 def slow_execution_config_to_dict(cfg: SlowExecutionConfig) -> dict[str, Any]:
+    return asdict(cfg)
+
+
+def cross_exchange_rebalance_config_to_dict(
+    cfg: CrossExchangeRebalanceConfig,
+) -> dict[str, Any]:
     return asdict(cfg)
 
 
@@ -108,6 +115,21 @@ def _spot_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     symbols: dict[str, set[str]] = {}
     for market in cfg.spot_markets:
         symbols.setdefault(market.exchange, set()).add(market.symbol)
+    return {exchange: sorted(items) for exchange, items in symbols.items()}
+
+
+def _rebalance_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols: dict[str, set[str]] = {
+        exchange: set(items)
+        for exchange, items in _spot_symbols_by_exchange(cfg).items()
+    }
+    rebalance = cfg.cross_exchange_rebalance
+    for exchange, symbol in (
+        (rebalance.buy_exchange, rebalance.buy_symbol),
+        (rebalance.sell_exchange, rebalance.sell_symbol),
+    ):
+        if exchange and symbol:
+            symbols.setdefault(exchange, set()).add(symbol)
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
@@ -249,12 +271,14 @@ def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
     spot_symbols = _spot_symbols_by_exchange(cfg)
     grid_symbols = _grid_symbols_by_exchange(cfg)
     execution_symbols = _execution_symbols_by_exchange(cfg)
+    rebalance_symbols = _rebalance_symbols_by_exchange(cfg)
     market_maker_symbols = _market_maker_symbols_by_exchange(cfg)
     derivative_symbols = _derivative_symbols_by_exchange(cfg)
     all_symbols = _merge_symbols_by_exchange(
         spot_symbols,
         grid_symbols,
         execution_symbols,
+        rebalance_symbols,
         market_maker_symbols,
         derivative_symbols,
     )
@@ -472,6 +496,136 @@ def _account_symbol_overrides_from_payload(
         overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]
 
     return overrides
+
+
+def _rebalance_route_overrides_from_payload(
+    payload: dict[str, Any],
+    *,
+    prefix: str,
+    allowed_exchanges: set[str] | None,
+    symbols_by_exchange: dict[str, list[str]],
+    allow_empty: bool = False,
+) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    exchange_field = f"{prefix}_exchange"
+    symbol_field = f"{prefix}_symbol"
+    if exchange_field in payload:
+        exchange = str(payload[exchange_field]).strip()
+        if not exchange:
+            if allow_empty:
+                overrides[exchange_field] = ""
+            else:
+                raise ValueError(f"{exchange_field} is required")
+        elif allowed_exchanges is not None and exchange not in allowed_exchanges:
+            raise ValueError(f"unknown exchange account: {exchange}")
+        elif exchange:
+            overrides[exchange_field] = exchange
+    if symbol_field in payload:
+        symbol = str(payload[symbol_field]).strip()
+        if not symbol:
+            if allow_empty:
+                overrides[symbol_field] = ""
+            else:
+                raise ValueError(f"{symbol_field} is required")
+        selected_exchange = overrides.get(exchange_field)
+        if (
+            symbol
+            and selected_exchange
+            and symbols_by_exchange.get(selected_exchange)
+        ):
+            if symbol not in symbols_by_exchange[selected_exchange]:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        if symbol:
+            overrides[symbol_field] = symbol
+    elif exchange_field in overrides and symbols_by_exchange.get(
+        overrides[exchange_field]
+    ):
+        overrides[symbol_field] = symbols_by_exchange[overrides[exchange_field]][0]
+    return overrides
+
+
+def _symbol_base(symbol: str) -> str:
+    return str(symbol or "").split("/", 1)[0].upper()
+
+
+def cross_exchange_rebalance_config_from_payload(
+    payload: dict[str, Any],
+    *,
+    base_config: CrossExchangeRebalanceConfig | None = None,
+    allowed_exchanges: set[str] | None = None,
+    symbols_by_exchange: dict[str, list[str]] | None = None,
+) -> CrossExchangeRebalanceConfig:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    symbols_by_exchange = symbols_by_exchange or {}
+    allow_empty = payload.get("enabled") is False
+    overrides: dict[str, Any] = {}
+    for prefix in ("buy", "sell"):
+        overrides.update(
+            _rebalance_route_overrides_from_payload(
+                payload,
+                prefix=prefix,
+                allowed_exchanges=allowed_exchanges,
+                symbols_by_exchange=symbols_by_exchange,
+                allow_empty=allow_empty,
+            )
+        )
+    for field in {
+        "enabled",
+        "live_enabled",
+        "block_conflicting_open_orders",
+        "halt_on_error",
+    }:
+        if field in payload:
+            if not isinstance(payload[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+            overrides[field] = payload[field]
+    for field in {"total_quote_common", "quote_per_cycle_common"}:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+    if "interval_seconds" in payload:
+        overrides["interval_seconds"] = _non_negative_float(
+            payload,
+            "interval_seconds",
+        )
+        if overrides["interval_seconds"] <= 0:
+            raise ValueError("interval_seconds must be positive")
+    for field in {
+        "order_ttl_seconds",
+        "max_cost_bps",
+        "max_slippage_bps",
+        "buy_quote_reserve",
+        "sell_base_reserve",
+    }:
+        if field in payload:
+            overrides[field] = _non_negative_float(payload, field)
+
+    config = replace(base_config or CrossExchangeRebalanceConfig(), **overrides)
+    if config.live_enabled and not config.enabled:
+        raise ValueError("live_enabled requires enabled=true")
+    if config.enabled:
+        if not config.buy_exchange or not config.buy_symbol:
+            raise ValueError("cash source account and symbol are required")
+        if not config.sell_exchange or not config.sell_symbol:
+            raise ValueError("cash destination account and symbol are required")
+        for exchange, symbol in (
+            (config.buy_exchange, config.buy_symbol),
+            (config.sell_exchange, config.sell_symbol),
+        ):
+            if allowed_exchanges is not None and exchange not in allowed_exchanges:
+                raise ValueError(f"unknown exchange account: {exchange}")
+            configured_symbols = symbols_by_exchange.get(exchange, [])
+            if configured_symbols and symbol not in configured_symbols:
+                raise ValueError(f"symbol is not configured for account: {symbol}")
+        if config.buy_exchange == config.sell_exchange:
+            raise ValueError("buy and sell exchange accounts must be different")
+        if _symbol_base(config.buy_symbol) != _symbol_base(config.sell_symbol):
+            raise ValueError("buy and sell symbols must use the same base asset")
+        if config.total_quote_common <= 0:
+            raise ValueError("total_quote_common must be positive")
+        if config.quote_per_cycle_common <= 0:
+            raise ValueError("quote_per_cycle_common must be positive")
+    return config
 
 
 def _market_maker_overrides_from_payload(
