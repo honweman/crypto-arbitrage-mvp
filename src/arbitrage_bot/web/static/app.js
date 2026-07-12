@@ -12,6 +12,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const REFRESH_INTERVAL_MS = PAGE_REFRESH_INTERVAL_MS.status;
 	    const REFRESH_FAILURE_BACKOFF_MS = 15000;
 	    const REFRESH_JITTER_MS = 300;
+	    const LIVE_REBALANCE_CONFIRMATION = "ENABLE LIVE REBALANCE";
 	    let refreshTimer = null;
 	    const PAGE_SECTION_IDS = {
 	      status: [
@@ -4948,6 +4949,8 @@ function balanceStatusClass(status) {
     let slowFormBusy = false;
     let rebalanceFormDirty = false;
     let rebalanceFormBusy = false;
+    let rebalanceFeedbackMessage = "";
+    let rebalanceFeedbackLevel = "";
     let gridFormDirty = false;
     let gridFormBusy = false;
     let dcaFormDirty = false;
@@ -5890,6 +5893,98 @@ function balanceStatusClass(status) {
       }
     }
 
+    function setRebalanceFeedback(message = "", level = "") {
+      rebalanceFeedbackMessage = message;
+      rebalanceFeedbackLevel = level;
+      const feedback = document.getElementById("rebalance-feedback");
+      if (!feedback) return;
+      feedback.textContent = message ? uiText(message) : "";
+      feedback.classList.toggle("is-error", level === "error");
+      feedback.classList.toggle("is-ok", level === "ok");
+    }
+
+    function rebalanceRiskReadiness(data) {
+      const config = data?.config || {};
+      const risk = lastState?.config?.risk || {};
+      const buyExchange = selectedStrategyAccount("rebalance-buy") || config.buy_exchange || "";
+      const sellExchange = selectedStrategyAccount("rebalance-sell") || config.sell_exchange || "";
+      const globalReady = risk.enabled === true
+        && risk.trading_enabled === true
+        && risk.allow_live_trading === true;
+      const strategyReady = risk.strategy_enabled?.cross_exchange_rebalance === true;
+      const accountsReady = [buyExchange, sellExchange]
+        .filter(Boolean)
+        .every((exchange) => risk.account_enabled?.[exchange] !== false);
+      return {
+        ready: globalReady && strategyReady && accountsReady,
+        globalReady,
+        strategyReady,
+        accountsReady,
+      };
+    }
+
+    function rebalanceProgressRequiresReset(data, payload = null) {
+      const config = data?.config || {};
+      const runtime = data?.runtime || {};
+      const selected = payload || {
+        buy_exchange: selectedStrategyAccount("rebalance-buy") || config.buy_exchange || "",
+        buy_symbol: selectedStrategySymbol("rebalance-buy") || config.buy_symbol || "",
+        sell_exchange: selectedStrategyAccount("rebalance-sell") || config.sell_exchange || "",
+        sell_symbol: selectedStrategySymbol("rebalance-sell") || config.sell_symbol || "",
+        total_quote_common: numericValue("rebalance-total") || config.total_quote_common || 0,
+      };
+      const sameRoute = selected.buy_exchange === config.buy_exchange
+        && selected.buy_symbol === config.buy_symbol
+        && selected.sell_exchange === config.sell_exchange
+        && selected.sell_symbol === config.sell_symbol;
+      const target = Math.max(0, Number(selected.total_quote_common || 0));
+      const completed = Math.max(0, Number(runtime.completed_quote_common || 0));
+      return sameRoute && target > 0 && completed >= target - Math.max(target * 1e-12, 1e-9);
+    }
+
+    function renderRebalanceReadiness(data = lastState?.cross_exchange_rebalance) {
+      const readiness = document.getElementById("rebalance-readiness");
+      if (!readiness || !data) return;
+      const resetRequired = rebalanceProgressRequiresReset(data);
+      const risk = rebalanceRiskReadiness(data);
+      const liveEnabled = Boolean(document.getElementById("rebalance-live-enabled")?.checked);
+      const confirmationReady = document.getElementById("rebalance-live-confirm")?.value.trim()
+        === LIVE_REBALANCE_CONFIRMATION;
+      const confirmationLabel = confirmationReady
+        ? "Confirmation ready"
+        : liveEnabled
+          ? "Confirmation required"
+          : "Confirmation pending";
+      readiness.innerHTML = `
+        <span class="config-chip ${resetRequired ? "config-diff" : "config-same"}">${escapeHtml(uiText(resetRequired ? "Reset required" : "Progress ready"))}</span>
+        <span class="config-chip ${risk.ready ? "config-same" : "config-diff"}">${escapeHtml(uiText(risk.ready ? "Rebalance risk ready" : "Rebalance risk off"))}</span>
+        <span class="config-chip ${confirmationReady ? "config-same" : "config-diff"}">${escapeHtml(uiText(confirmationLabel))}</span>
+      `;
+      const riskButton = document.getElementById("rebalance-open-risk");
+      if (riskButton) riskButton.hidden = risk.ready;
+    }
+
+    function liveRebalanceValidationError(data, payload) {
+      if (!payload.live_enabled) return "";
+      if (rebalanceProgressRequiresReset(data, payload)) {
+        return "Previous task is complete. Turn off Live Ready and reset progress before starting a new task.";
+      }
+      const risk = rebalanceRiskReadiness(data);
+      if (!risk.globalReady) {
+        return "Global live trading is blocked in Risk Controls.";
+      }
+      if (!risk.strategyReady) {
+        return "Enable Cross-Exchange Rebalance in Risk Controls before starting live.";
+      }
+      if (!risk.accountsReady) {
+        return "The source or destination account is disabled in Risk Controls.";
+      }
+      if (payload.confirm_live !== LIVE_REBALANCE_CONFIRMATION) {
+        return "Enter ENABLE LIVE REBALANCE exactly to enable live trading.";
+      }
+      return "";
+    }
+
     function updateRebalanceUnitLabels(data = lastState?.cross_exchange_rebalance) {
       const config = data?.config || {};
       const plan = data?.plan || data?.runtime?.last_payload?.plan || {};
@@ -5958,6 +6053,7 @@ function balanceStatusClass(status) {
       document.getElementById("rebalance-block-orders").checked = config.block_conflicting_open_orders !== false;
       document.getElementById("rebalance-halt-error").checked = config.halt_on_error !== false;
       updateRebalanceUnitLabels(data);
+      renderRebalanceReadiness(data);
       updateCoreFormStates();
     }
 
@@ -5989,30 +6085,46 @@ function balanceStatusClass(status) {
     async function applyCrossExchangeRebalanceConfig(event) {
       event.preventDefault();
       if (rebalanceFormBusy) return;
+      const payload = crossExchangeRebalancePayloadFromForm();
+      const validationError = liveRebalanceValidationError(
+        lastState?.cross_exchange_rebalance,
+        payload,
+      );
+      if (validationError) {
+        setRebalanceFeedback(validationError, "error");
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+        if (validationError.includes("ENABLE LIVE REBALANCE")) {
+          document.getElementById("rebalance-live-confirm").focus();
+        }
+        return;
+      }
       rebalanceFormBusy = true;
+      setRebalanceFeedback();
       updateCoreFormStates();
       try {
         const res = await fetch("/api/cross-exchange-rebalance", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(crossExchangeRebalancePayloadFromForm()),
+          body: JSON.stringify(payload),
         });
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "rebalance update failed");
         rebalanceFormDirty = false;
         document.getElementById("rebalance-live-confirm").value = "";
+        setRebalanceFeedback("Rebalance settings saved.", "ok");
         await refresh({ force: true });
       } catch (error) {
-        text("rebalance-meta", `update failed: ${error.message || error}`);
+        setRebalanceFeedback(error.message || String(error), "error");
       } finally {
         rebalanceFormBusy = false;
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
         updateCoreFormStates();
       }
     }
 
     async function resetCrossExchangeRebalanceProgress() {
       if (document.getElementById("rebalance-live-enabled").checked) {
-        text("rebalance-meta", uiText("Disable Live Ready before resetting progress."));
+        setRebalanceFeedback("Disable Live Ready before resetting progress.", "error");
         return;
       }
       if (!dangerConfirm("Reset cross-exchange rebalance progress?")) return;
@@ -6028,11 +6140,13 @@ function balanceStatusClass(status) {
         });
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "rebalance reset failed");
+        setRebalanceFeedback("Rebalance progress reset. Review settings before enabling live.", "ok");
         await refresh({ force: true });
       } catch (error) {
-        text("rebalance-meta", `reset failed: ${error.message || error}`);
+        setRebalanceFeedback(error.message || String(error), "error");
       } finally {
         button.disabled = false;
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
       }
     }
 
@@ -6969,11 +7083,15 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     document.getElementById("rebalance-form").addEventListener("input", () => {
       rebalanceFormDirty = true;
+      setRebalanceFeedback();
+      renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
       updateCoreFormStates();
     });
     document.getElementById("rebalance-form").addEventListener("change", () => {
       rebalanceFormDirty = true;
+      setRebalanceFeedback();
       updateRebalanceUnitLabels();
+      renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
       updateCoreFormStates();
     });
     document.getElementById("rebalance-form").addEventListener(
@@ -6984,9 +7102,15 @@ function balanceStatusClass(status) {
       "click",
       resetCrossExchangeRebalanceProgress,
     );
+    document.getElementById("rebalance-open-risk").addEventListener(
+      "click",
+      () => openSettingsSection("risk-section"),
+    );
     window.addEventListener("crypto-arb-language-change", () => {
       updateSlowLabels();
       updateRebalanceUnitLabels();
+      setRebalanceFeedback(rebalanceFeedbackMessage, rebalanceFeedbackLevel);
+      renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
       if (!rebalanceFormDirty && lastState?.cross_exchange_rebalance) {
         for (const id of ["rebalance-buy-accounts", "rebalance-sell-accounts"]) {
           const selector = document.getElementById(id);

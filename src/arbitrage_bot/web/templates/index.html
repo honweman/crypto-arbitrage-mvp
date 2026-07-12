@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <script src="/static/theme.js?v=20260712-rebalance4"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance4">
+  <script src="/static/theme.js?v=20260712-rebalance5"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance5">
 
 </head>
 <body>
@@ -1549,6 +1549,8 @@
         <h2>Cross-Exchange Rebalance</h2>
         <span id="rebalance-meta" class="subtle"></span>
       </div>
+      <div id="rebalance-readiness" class="config-compare rebalance-readiness"></div>
+      <div id="rebalance-feedback" class="config-compare rebalance-feedback" role="status" aria-live="polite"></div>
       <form id="rebalance-form" class="control-panel">
         <label class="check-field">
           <input id="rebalance-enabled" type="checkbox">
@@ -1624,6 +1626,7 @@
         </div>
         <button id="rebalance-apply" class="control-button" type="submit">Apply</button>
         <button id="rebalance-reset" class="danger-button" type="button">Reset Progress</button>
+        <button id="rebalance-open-risk" class="control-button" type="button" hidden>Risk Controls</button>
       </form>
       <div id="rebalance-progress" class="config-compare"></div>
       <div class="table-wrap">
@@ -2296,8 +2299,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260712-rebalance4" defer></script>
-  <script src="/static/app.js?v=20260712-rebalance4" defer></script>
+  <script src="/static/i18n.js?v=20260712-rebalance5" defer></script>
+  <script src="/static/app.js?v=20260712-rebalance5" defer></script>
 
 </body>
 </html>

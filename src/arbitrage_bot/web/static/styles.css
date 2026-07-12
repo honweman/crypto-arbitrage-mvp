@@ -1073,6 +1073,24 @@ tbody tr:last-child td {
   display: none !important;
 }
 
+.rebalance-readiness,
+.rebalance-feedback {
+  margin-bottom: 10px;
+}
+
+.rebalance-feedback.is-error {
+  color: var(--red);
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+  font-weight: 700;
+}
+
+.rebalance-feedback.is-ok {
+  color: var(--green);
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
+}
+
 .config-compare ul,
 .cleanup-preview ul {
   margin: 6px 0 0;
