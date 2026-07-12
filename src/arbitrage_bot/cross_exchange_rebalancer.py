@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -242,11 +243,143 @@ def build_cross_exchange_rebalance_plan(
         completed_quote_common=completed,
         remaining_quote_common=remaining,
         cycle_quote_common=cycle_quote,
-        expected_progress_quote_common=min(remaining, sell_common),
+        expected_progress_quote_common=min(remaining, buy_common),
         observed_at=min(buy_book.received_at, sell_book.received_at),
         buy_book_received_at=buy_book.received_at,
         sell_book_received_at=sell_book.received_at,
     )
+
+
+def _plan_for_aligned_quantity(
+    cfg: BotConfig,
+    plan: CrossExchangeRebalancePlan,
+    *,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+    quantity_base: float,
+) -> CrossExchangeRebalancePlan:
+    buy_book = books.get((plan.buy_exchange, plan.buy_symbol))
+    sell_book = books.get((plan.sell_exchange, plan.sell_symbol))
+    if buy_book is None or sell_book is None:
+        raise ValueError("order books are unavailable for precision alignment")
+    buy_fill = estimate_fill(
+        buy_book.asks,
+        side="buy",
+        quantity_base=quantity_base,
+        fee_bps=_exchange(cfg, plan.buy_exchange).fee_bps,
+    )
+    sell_fill = estimate_fill(
+        sell_book.bids,
+        side="sell",
+        quantity_base=quantity_base,
+        fee_bps=_exchange(cfg, plan.sell_exchange).fee_bps,
+    )
+    if buy_fill is None or sell_fill is None:
+        raise ValueError("aligned quantity is unavailable in the current order books")
+    buy_common = buy_fill.net_quote * plan.buy_quote_rate
+    sell_common = sell_fill.net_quote * plan.sell_quote_rate
+    expected_cost = buy_common - sell_common
+    expected_cost_bps = expected_cost / buy_common * 10_000 if buy_common > 0 else 0.0
+    return replace(
+        plan,
+        quantity_base=quantity_base,
+        buy_average_price=buy_fill.average_price,
+        buy_fee_quote=buy_fill.fee_quote,
+        buy_cost_local=buy_fill.net_quote,
+        buy_cost_common=buy_common,
+        sell_average_price=sell_fill.average_price,
+        sell_fee_quote=sell_fill.fee_quote,
+        sell_proceeds_local=sell_fill.net_quote,
+        sell_proceeds_common=sell_common,
+        expected_cost_common=expected_cost,
+        expected_cost_bps=expected_cost_bps,
+        expected_progress_quote_common=min(
+            plan.remaining_quote_common,
+            plan.expected_progress_quote_common,
+        ),
+    )
+
+
+async def _align_plan_quantity(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    plan: CrossExchangeRebalancePlan,
+    *,
+    books: dict[tuple[str, str], OrderBookSnapshot],
+) -> tuple[CrossExchangeRebalancePlan, dict[str, Any]]:
+    buy_exchange = _exchange(cfg, plan.buy_exchange)
+    sell_exchange = _exchange(cfg, plan.sell_exchange)
+    requested = plan.quantity_base
+    candidate = requested
+    attempts = []
+    final_validations: list[dict[str, Any]] = []
+    for attempt in range(1, 5):
+        candidate_plan = _plan_for_aligned_quantity(
+            cfg,
+            plan,
+            books=books,
+            quantity_base=candidate,
+        )
+        buy_validation, sell_validation = await asyncio.gather(
+            manager.prepare_limit_order(
+                buy_exchange,
+                symbol=plan.buy_symbol,
+                side="buy",
+                amount=candidate,
+                price=candidate_plan.buy_average_price,
+            ),
+            manager.prepare_limit_order(
+                sell_exchange,
+                symbol=plan.sell_symbol,
+                side="sell",
+                amount=candidate,
+                price=candidate_plan.sell_average_price,
+            ),
+        )
+        final_validations = [buy_validation, sell_validation]
+        errors = [
+            f"{row.get('exchange')} {row.get('symbol')}: {error}"
+            for row in final_validations
+            for error in row.get("errors", [])
+        ]
+        if errors:
+            raise ValueError("; ".join(errors))
+        prepared_amounts = [
+            max(0.0, float(row.get("amount") or 0.0))
+            for row in final_validations
+        ]
+        aligned = min(candidate, *prepared_amounts)
+        attempts.append(
+            {
+                "attempt": attempt,
+                "requested_quantity_base": candidate,
+                "prepared_quantities_base": prepared_amounts,
+                "aligned_quantity_base": aligned,
+            }
+        )
+        if aligned <= 0:
+            raise ValueError("precision-aligned base quantity is zero")
+        tolerance = max(abs(candidate), abs(aligned), 1.0) * 1e-12
+        if (
+            abs(prepared_amounts[0] - prepared_amounts[1]) <= tolerance
+            and abs(candidate - aligned) <= tolerance
+        ):
+            aligned_plan = _plan_for_aligned_quantity(
+                cfg,
+                plan,
+                books=books,
+                quantity_base=aligned,
+            )
+            return aligned_plan, {
+                "status": "aligned",
+                "requested_quantity_base": requested,
+                "aligned_quantity_base": aligned,
+                "reduction_base": max(0.0, requested - aligned),
+                "attempt_count": attempt,
+                "attempts": attempts,
+                "validations": final_validations,
+            }
+        candidate = aligned
+    raise ValueError("could not align both exchange base quantities after 4 attempts")
 
 
 def _raw_order_side(raw: dict[str, Any]) -> str:
@@ -385,24 +518,40 @@ def _execution_progress(
     buy_filled = max(0.0, float(fill_status.get("buy_filled_base") or 0.0))
     sell_filled = max(0.0, float(fill_status.get("sell_filled_base") or 0.0))
     matched_base = min(buy_filled, sell_filled)
+    fill_ratio = (
+        min(1.0, matched_base / plan.quantity_base)
+        if plan.quantity_base > 0
+        else 0.0
+    )
     sell_quote_local = 0.0
     for row in fill_status.get("orders", []):
         if isinstance(row, dict) and row.get("side") == "sell":
             sell_quote_local += max(0.0, float(row.get("filled_quote") or 0.0))
     if sell_quote_local <= 0 and matched_base > 0:
         sell_quote_local = matched_base * plan.sell_average_price
-    progress_quote = min(
+    destination_quote_common = min(
         plan.remaining_quote_common,
         sell_quote_local * plan.sell_quote_rate,
+    )
+    source_quote_local = plan.buy_cost_local * fill_ratio
+    progress_quote = min(
+        plan.remaining_quote_common,
+        plan.expected_progress_quote_common * fill_ratio,
     )
     balanced = not bool(fill_status.get("hedge_required"))
     if not balanced:
         progress_quote = 0.0
         matched_base = 0.0
+        source_quote_local = 0.0
+        destination_quote_common = 0.0
     return {
         "balanced": balanced,
         "matched_base": matched_base,
+        "fill_ratio": fill_ratio if balanced else 0.0,
+        "source_quote_local": source_quote_local,
+        "source_progress_quote_common": progress_quote,
         "destination_quote_local": sell_quote_local if balanced else 0.0,
+        "destination_quote_common": destination_quote_common,
         "progress_quote_common": progress_quote,
         "hedge_required": bool(fill_status.get("hedge_required")),
         "hedge_side": fill_status.get("hedge_side"),
@@ -503,6 +652,46 @@ async def run_cross_exchange_rebalance_cycle(
             "reasons": [f"risk.strategy_enabled.{STRATEGY_ID} is not explicitly true"],
         }
         return payload
+
+    try:
+        plan, precision_alignment = await _align_plan_quantity(
+            cfg,
+            manager,
+            plan,
+            books=books,
+        )
+    except Exception as exc:  # noqa: BLE001
+        payload["status"] = "blocked_by_validation"
+        payload["order_validation"] = {
+            "status": "error",
+            "errors": [f"{exc.__class__.__name__}: {exc}"],
+        }
+        return payload
+    payload["precision_alignment"] = precision_alignment
+    payload["plan"] = plan.to_dict()
+    payload["progress"]["expected_cycle_quote_common"] = (
+        plan.expected_progress_quote_common
+    )
+    if max_cost > 0 and plan.expected_cost_bps > max_cost:
+        payload["status"] = "waiting_for_cost"
+        payload["risk"] = {
+            "approved": False,
+            "level": "blocked",
+            "reasons": [
+                f"precision-aligned rebalance cost {plan.expected_cost_bps:.2f} bps "
+                f"exceeds max_cost_bps {max_cost:.2f}"
+            ],
+        }
+        return payload
+    opportunity = plan.opportunity()
+    payload["opportunity"] = opportunity.to_dict()
+    payload["paper_execution"] = {
+        "status": "estimated",
+        "orders": [leg.to_dict() for leg in opportunity.legs],
+        "expected_cost_common": plan.expected_cost_common,
+        "expected_cost_bps": plan.expected_cost_bps,
+        "expected_progress_quote_common": plan.expected_progress_quote_common,
+    }
 
     conflict_guard = await _conflicting_open_order_guard(cfg, manager, plan)
     payload["conflict_guard"] = conflict_guard
@@ -606,7 +795,7 @@ def new_rebalance_runtime(
     common_quote_currency: str,
 ) -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "config_fingerprint": rebalance_config_fingerprint(
             cfg,
             common_quote_currency=common_quote_currency,
@@ -615,6 +804,7 @@ def new_rebalance_runtime(
         "halted": False,
         "halt_reason": None,
         "completed_quote_common": 0.0,
+        "completed_destination_quote_common": 0.0,
         "completed_base": 0.0,
         "cycle_count": 0,
         "live_cycle_count": 0,
@@ -639,9 +829,15 @@ def load_rebalance_runtime(
         return fresh
     if not isinstance(raw, dict):
         return fresh
+    if raw.get("version") != fresh["version"]:
+        return fresh
     if raw.get("config_fingerprint") != fresh["config_fingerprint"]:
         return fresh
-    for field in ("completed_quote_common", "completed_base"):
+    for field in (
+        "completed_quote_common",
+        "completed_destination_quote_common",
+        "completed_base",
+    ):
         try:
             fresh[field] = max(0.0, float(raw.get(field) or 0.0))
         except (TypeError, ValueError):
@@ -699,12 +895,23 @@ def apply_rebalance_cycle_to_runtime(
         float(execution_progress.get("progress_quote_common") or 0.0),
     )
     progress_base = max(0.0, float(execution_progress.get("matched_base") or 0.0))
+    destination_quote = max(
+        0.0,
+        float(execution_progress.get("destination_quote_common") or 0.0),
+    )
     updated["completed_quote_common"] = min(
         max(0.0, cfg.total_quote_common),
         max(0.0, float(updated.get("completed_quote_common") or 0.0)) + progress_quote,
     )
     updated["completed_base"] = (
         max(0.0, float(updated.get("completed_base") or 0.0)) + progress_base
+    )
+    updated["completed_destination_quote_common"] = (
+        max(
+            0.0,
+            float(updated.get("completed_destination_quote_common") or 0.0),
+        )
+        + destination_quote
     )
     if payload.get("halt_required"):
         updated["halted"] = True

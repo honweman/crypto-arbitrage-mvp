@@ -5898,11 +5898,11 @@ function balanceStatusClass(status) {
       const sellSymbol = selectedStrategySymbol("rebalance-sell") || config.sell_symbol || "";
       text(
         "rebalance-total-label",
-        uiText("Total USD").replace("USD", common),
+        uiText("Source Spend USD").replace("USD", common),
       );
       text(
         "rebalance-cycle-label",
-        uiText("Per Cycle USD").replace("USD", common),
+        uiText("Per Cycle Source USD").replace("USD", common),
       );
       text(
         "rebalance-buy-reserve-label",
@@ -6044,6 +6044,7 @@ function balanceStatusClass(status) {
       const mode = runtime.mode || data?.mode || "dry_run";
       const target = Number(data?.config?.total_quote_common || plan?.target_quote_common || 0);
       const completed = Number(runtime.completed_quote_common || 0);
+      const destinationReceived = Number(runtime.completed_destination_quote_common || 0);
       const remaining = Math.max(0, Number(runtime.remaining_quote_common ?? target - completed));
       const progressPct = Number(runtime.progress_pct ?? (target > 0 ? completed / target * 100 : 0));
       const common = plan?.common_quote_currency || lastState?.config?.common_quote_currency || "USD";
@@ -6060,7 +6061,8 @@ function balanceStatusClass(status) {
       const progress = document.getElementById("rebalance-progress");
       progress.innerHTML = `
         <span class="config-chip ${runtime.halted ? "config-diff" : "config-match"}">${escapeHtml(status)}</span>
-        <span>${escapeHtml(common)} ${money.format(completed)} / ${money.format(target)} · ${uiText("remaining")} ${money.format(remaining)}</span>
+        <span>${uiText("Source spent")} ${escapeHtml(common)} ${money.format(completed)} / ${money.format(target)} · ${uiText("remaining")} ${money.format(remaining)}</span>
+        <span>${uiText("Destination received")} ${escapeHtml(common)} ${money.format(destinationReceived)}</span>
         <span>${escapeHtml(baseCurrency(plan?.buy_symbol || data?.config?.buy_symbol || ""))} ${fmt.format(runtime.completed_base || 0)}</span>
         ${coordinationStatus ? `<span>${escapeHtml(uiText("MM coordination"))}: ${escapeHtml(coordinationStatus)}</span>` : ""}
       `;

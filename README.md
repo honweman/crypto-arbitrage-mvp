@@ -396,6 +396,12 @@ on Bithumb and selling `ACS/USDC` on Coinbase uses `quote_rates` to convert both
 legs into `common_quote_currency` before checking the target amount, cycle size,
 fees, rebalance cost, slippage, and global risk limits.
 
+`total_quote_common` and `quote_per_cycle_common` are source-account spend
+targets. The destination account normally receives less after spreads and fees;
+both source spend and destination proceeds are tracked separately. Before a live
+cycle, both legs are reduced to the same exchange-valid base quantity so
+different amount precisions cannot create a false residual position.
+
 ```json
 "cross_exchange_rebalance": {
   "enabled": false,

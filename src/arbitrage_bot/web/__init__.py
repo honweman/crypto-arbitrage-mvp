@@ -3352,6 +3352,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 ),
                 "halted": False,
                 "completed_quote_common": 0.0,
+                "completed_destination_quote_common": 0.0,
                 "completed_base": 0.0,
                 "cycle_count": 0,
                 "updated_at": time.time(),
