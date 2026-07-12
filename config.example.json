@@ -53,6 +53,8 @@
     "max_slippage_bps": 50.0,
     "buy_quote_reserve": 0.0,
     "sell_base_reserve": 0.0,
+    "coordinate_market_maker": true,
+    "coordination_timeout_seconds": 30.0,
     "block_conflicting_open_orders": true,
     "halt_on_error": true,
     "client_order_prefix": "crypto-arb-rebalance",

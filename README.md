@@ -412,6 +412,8 @@ fees, rebalance cost, slippage, and global risk limits.
   "max_slippage_bps": 50.0,
   "buy_quote_reserve": 0.0,
   "sell_base_reserve": 0.0,
+  "coordinate_market_maker": true,
+  "coordination_timeout_seconds": 30.0,
   "block_conflicting_open_orders": true,
   "halt_on_error": true
 }
@@ -422,7 +424,14 @@ global live risk switches, both account switches,
 `risk.strategy_enabled.cross_exchange_rebalance=true`, `live_enabled=true`, and
 the exact web confirmation phrase `ENABLE LIVE REBALANCE`. Opposite-side open
 orders on either route block the cycle to avoid self-trading with MM or another
-strategy. Insufficient source cash, insufficient destination token inventory,
+strategy. With `coordinate_market_maker=true`, a cost-qualified live cycle first
+places an account-and-symbol hold on matching MM instances. Those instances stop
+replenishing, cancel their orders, and must acknowledge a clean exchange order
+sync before the rebalance refreshes both books and proceeds. MM resumes after a
+normal cycle. A cancellation/sync failure, conflicting order, or unbalanced leg
+keeps the hold active until the issue is resolved or the rebalance is paused or
+disabled. The hold has a renewable expiry so an abandoned task cannot pause MM
+forever. Insufficient source cash, insufficient destination token inventory,
 stale books, excessive slippage, and missing FX rates also block before orders
 are submitted. If the two legs fill by different amounts or one leg fails, the
 task records the residual hedge, advances no progress, and remains halted for

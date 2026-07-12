@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <script src="/static/theme.js?v=20260712-rebalance3"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260712-rebalance3">
+  <script src="/static/theme.js?v=20260712-coordinate1"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260712-coordinate1">
 
 </head>
 <body>
@@ -1603,6 +1603,14 @@
           <input id="rebalance-sell-reserve" type="number" min="0" step="any">
         </div>
         <label class="check-field">
+          <input id="rebalance-coordinate-mm" type="checkbox">
+          Coordinate Matching MM
+        </label>
+        <div class="field">
+          <label for="rebalance-coordination-timeout">Coordination Timeout Sec</label>
+          <input id="rebalance-coordination-timeout" type="number" min="1" max="300" step="1">
+        </div>
+        <label class="check-field">
           <input id="rebalance-block-orders" type="checkbox">
           Block Conflicting Orders
         </label>
@@ -2288,8 +2296,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260712-rebalance3" defer></script>
-  <script src="/static/app.js?v=20260712-rebalance3" defer></script>
+  <script src="/static/i18n.js?v=20260712-coordinate1" defer></script>
+  <script src="/static/app.js?v=20260712-coordinate1" defer></script>
 
 </body>
 </html>

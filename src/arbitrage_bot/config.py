@@ -150,6 +150,8 @@ class CrossExchangeRebalanceConfig:
     max_slippage_bps: float = 50.0
     buy_quote_reserve: float = 0.0
     sell_base_reserve: float = 0.0
+    coordinate_market_maker: bool = True
+    coordination_timeout_seconds: float = 30.0
     block_conflicting_open_orders: bool = True
     halt_on_error: bool = True
     client_order_prefix: str = "crypto-arb-rebalance"
@@ -855,6 +857,18 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             sell_base_reserve=float(
                 cross_exchange_rebalance_raw.get("sell_base_reserve", 0.0)
+            ),
+            coordinate_market_maker=bool(
+                cross_exchange_rebalance_raw.get(
+                    "coordinate_market_maker",
+                    True,
+                )
+            ),
+            coordination_timeout_seconds=float(
+                cross_exchange_rebalance_raw.get(
+                    "coordination_timeout_seconds",
+                    30.0,
+                )
             ),
             block_conflicting_open_orders=bool(
                 cross_exchange_rebalance_raw.get(

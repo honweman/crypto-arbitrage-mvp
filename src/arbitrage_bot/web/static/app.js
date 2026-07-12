@@ -5953,6 +5953,8 @@ function balanceStatusClass(status) {
       setNumericField("rebalance-max-slippage", config.max_slippage_bps ?? 50);
       setNumericField("rebalance-buy-reserve", config.buy_quote_reserve || 0);
       setNumericField("rebalance-sell-reserve", config.sell_base_reserve || 0);
+      document.getElementById("rebalance-coordinate-mm").checked = config.coordinate_market_maker !== false;
+      setNumericField("rebalance-coordination-timeout", config.coordination_timeout_seconds ?? 30);
       document.getElementById("rebalance-block-orders").checked = config.block_conflicting_open_orders !== false;
       document.getElementById("rebalance-halt-error").checked = config.halt_on_error !== false;
       updateRebalanceUnitLabels(data);
@@ -5976,6 +5978,8 @@ function balanceStatusClass(status) {
         max_slippage_bps: numericValue("rebalance-max-slippage"),
         buy_quote_reserve: numericValue("rebalance-buy-reserve"),
         sell_base_reserve: numericValue("rebalance-sell-reserve"),
+        coordinate_market_maker: document.getElementById("rebalance-coordinate-mm").checked,
+        coordination_timeout_seconds: numericValue("rebalance-coordination-timeout"),
         block_conflicting_open_orders: document.getElementById("rebalance-block-orders").checked,
         halt_on_error: document.getElementById("rebalance-halt-error").checked,
         confirm_live: document.getElementById("rebalance-live-confirm").value.trim(),
@@ -6043,19 +6047,22 @@ function balanceStatusClass(status) {
       const remaining = Math.max(0, Number(runtime.remaining_quote_common ?? target - completed));
       const progressPct = Number(runtime.progress_pct ?? (target > 0 ? completed / target * 100 : 0));
       const common = plan?.common_quote_currency || lastState?.config?.common_quote_currency || "USD";
+      const coordination = lastPayload.coordination || {};
+      const coordinationStatus = coordination.status || "";
       const reason = runtime.halt_reason
         || (lastPayload.risk?.reasons || [])[0]
         || (lastPayload.errors || [])[0]
         || "";
       text(
         "rebalance-meta",
-        `${mode} · ${status} · ${progressPct.toFixed(1)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(2)} bps` : ""}${reason ? ` · ${reason}` : ""}`,
+        `${mode} · ${status} · ${progressPct.toFixed(1)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(2)} bps` : ""}${coordinationStatus ? ` · MM ${coordinationStatus}` : ""}${reason ? ` · ${reason}` : ""}`,
       );
       const progress = document.getElementById("rebalance-progress");
       progress.innerHTML = `
         <span class="config-chip ${runtime.halted ? "config-diff" : "config-match"}">${escapeHtml(status)}</span>
         <span>${escapeHtml(common)} ${money.format(completed)} / ${money.format(target)} · ${uiText("remaining")} ${money.format(remaining)}</span>
         <span>${escapeHtml(baseCurrency(plan?.buy_symbol || data?.config?.buy_symbol || ""))} ${fmt.format(runtime.completed_base || 0)}</span>
+        ${coordinationStatus ? `<span>${escapeHtml(uiText("MM coordination"))}: ${escapeHtml(coordinationStatus)}</span>` : ""}
       `;
 
       const body = document.getElementById("rebalance-plan");

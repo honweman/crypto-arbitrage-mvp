@@ -573,6 +573,7 @@ def cross_exchange_rebalance_config_from_payload(
     for field in {
         "enabled",
         "live_enabled",
+        "coordinate_market_maker",
         "block_conflicting_open_orders",
         "halt_on_error",
     }:
@@ -596,9 +597,17 @@ def cross_exchange_rebalance_config_from_payload(
         "max_slippage_bps",
         "buy_quote_reserve",
         "sell_base_reserve",
+        "coordination_timeout_seconds",
     }:
         if field in payload:
             overrides[field] = _non_negative_float(payload, field)
+
+    if "coordination_timeout_seconds" in overrides:
+        timeout = overrides["coordination_timeout_seconds"]
+        if timeout < 1 or timeout > 300:
+            raise ValueError(
+                "coordination_timeout_seconds must be between 1 and 300"
+            )
 
     config = replace(base_config or CrossExchangeRebalanceConfig(), **overrides)
     if config.live_enabled and not config.enabled:

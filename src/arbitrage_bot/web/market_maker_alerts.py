@@ -5,6 +5,7 @@ from typing import Any
 
 MARKET_MAKER_ALERT_STATUSES = {
     "blocked_by_risk",
+    "coordination_cancel_retry",
     "cancel_retry",
     "execution_error",
     "open_order_sync_error",

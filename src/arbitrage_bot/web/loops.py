@@ -6,8 +6,14 @@ from collections.abc import Awaitable
 from dataclasses import replace
 from typing import Any
 
-from .state import MonitorState
+from .coordination import (
+    market_maker_coordination_status,
+    rebalance_coordination_hold_required,
+    rebalance_coordination_resources,
+    wait_for_market_maker_coordination,
+)
 from .market_maker_alerts import market_maker_problem_warnings
+from .state import MonitorState
 
 from ..alerts import AlertService
 from ..auto_buy_sell_task import AutoBuySellTaskService
@@ -2429,6 +2435,33 @@ async def spot_grid_task_loop(
         await manager.close()
 
 
+async def _fetch_rebalance_books(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+) -> dict[tuple[str, str], OrderBookSnapshot]:
+    rebalance = cfg.cross_exchange_rebalance
+    buy_exchange = _find_exchange_by_key(cfg, rebalance.buy_exchange)
+    sell_exchange = _find_exchange_by_key(cfg, rebalance.sell_exchange)
+    buy_book, sell_book = await asyncio.gather(
+        manager.fetch_order_book(
+            buy_exchange,
+            rebalance.buy_symbol,
+            cfg.order_book_depth,
+        ),
+        manager.fetch_order_book(
+            sell_exchange,
+            rebalance.sell_symbol,
+            cfg.order_book_depth,
+        ),
+    )
+    books = {}
+    if buy_book is not None:
+        books[(rebalance.buy_exchange, rebalance.buy_symbol)] = buy_book
+    if sell_book is not None:
+        books[(rebalance.sell_exchange, rebalance.sell_symbol)] = sell_book
+    return books
+
+
 def _cross_exchange_rebalance_live_gate(
     cfg: BotConfig,
     *,
@@ -2467,6 +2500,8 @@ async def cross_exchange_rebalance_task_loop(
     state: MonitorState,
 ) -> None:
     manager = ExchangeManager()
+    coordination_owner = CROSS_EXCHANGE_REBALANCE_STRATEGY_ID
+    coordination_active = False
     current_path = cfg.cross_exchange_rebalance.runtime_path
     runtime = load_rebalance_runtime(
         current_path,
@@ -2513,13 +2548,34 @@ async def cross_exchange_rebalance_task_loop(
             shutdown_requested = False
             payload: dict[str, Any]
             if not rebalance.enabled:
+                if coordination_active:
+                    await state.release_coordination_hold(coordination_owner)
+                    coordination_active = False
                 payload = {
                     "type": "cross_exchange_rebalance_execution",
                     "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
                     "mode": "dry_run",
                     "status": "disabled",
                 }
-            elif runtime.get("halted"):
+            elif runtime.get("halted") and gate_status not in {
+                "paused",
+                "program_paused",
+            }:
+                coordination = None
+                if rebalance.live_enabled and rebalance.coordinate_market_maker:
+                    coordination = await state.acquire_coordination_hold(
+                        coordination_owner,
+                        rebalance_coordination_resources(runtime_cfg),
+                        reason="rebalance halted; MM held for exposure review",
+                        ttl_seconds=max(
+                            60.0,
+                            interval + rebalance.coordination_timeout_seconds + 10.0,
+                        ),
+                    )
+                    coordination_active = True
+                elif coordination_active:
+                    await state.release_coordination_hold(coordination_owner)
+                    coordination_active = False
                 payload = {
                     "type": "cross_exchange_rebalance_execution",
                     "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
@@ -2536,7 +2592,15 @@ async def cross_exchange_rebalance_task_loop(
                         ],
                     },
                 }
+                if coordination is not None:
+                    payload["coordination"] = {
+                        "status": "held_for_safety",
+                        "lease": coordination,
+                    }
             elif gate_status in {"paused", "program_paused"}:
+                if coordination_active:
+                    await state.release_coordination_hold(coordination_owner)
+                    coordination_active = False
                 payload = {
                     "type": "cross_exchange_rebalance_execution",
                     "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
@@ -2550,35 +2614,9 @@ async def cross_exchange_rebalance_task_loop(
                 }
             else:
                 try:
-                    buy_exchange = _find_exchange_by_key(
-                        runtime_cfg,
-                        rebalance.buy_exchange,
-                    )
-                    sell_exchange = _find_exchange_by_key(
-                        runtime_cfg,
-                        rebalance.sell_exchange,
-                    )
-                    buy_book, sell_book = await asyncio.gather(
-                        manager.fetch_order_book(
-                            buy_exchange,
-                            rebalance.buy_symbol,
-                            runtime_cfg.order_book_depth,
-                        ),
-                        manager.fetch_order_book(
-                            sell_exchange,
-                            rebalance.sell_symbol,
-                            runtime_cfg.order_book_depth,
-                        ),
-                    )
-                    books = {}
-                    if buy_book is not None:
-                        books[(rebalance.buy_exchange, rebalance.buy_symbol)] = buy_book
-                    if sell_book is not None:
-                        books[(rebalance.sell_exchange, rebalance.sell_symbol)] = (
-                            sell_book
-                        )
+                    books = await _fetch_rebalance_books(runtime_cfg, manager)
                     quote_rates = await state.quote_rates()
-                    cycle = run_cross_exchange_rebalance_cycle(
+                    preview = await run_cross_exchange_rebalance_cycle(
                         runtime_cfg,
                         manager,
                         books=books,
@@ -2586,15 +2624,135 @@ async def cross_exchange_rebalance_task_loop(
                         completed_quote_common=float(
                             runtime.get("completed_quote_common") or 0.0
                         ),
-                        live=live_allowed,
+                        live=False,
                     )
-                    if live_allowed:
-                        (
-                            payload,
-                            shutdown_requested,
-                        ) = await _complete_market_maker_cycle_on_shutdown(cycle)
+                    if (
+                        live_allowed
+                        and rebalance.coordinate_market_maker
+                        and preview.get("status") == "planned"
+                    ):
+                        lease = await state.acquire_coordination_hold(
+                            coordination_owner,
+                            rebalance_coordination_resources(runtime_cfg),
+                            reason="cross-exchange rebalance preparing a live cycle",
+                            ttl_seconds=max(
+                                60.0,
+                                interval
+                                + rebalance.coordination_timeout_seconds
+                                + 10.0,
+                            ),
+                        )
+                        coordination_active = True
+                        coordination = await wait_for_market_maker_coordination(
+                            state,
+                            runtime_cfg,
+                            owner=coordination_owner,
+                            timeout_seconds=rebalance.coordination_timeout_seconds,
+                        )
+                        coordination["lease"] = lease
+                        if not coordination["ready"]:
+                            payload = {
+                                **preview,
+                                "mode": "live",
+                                "status": "waiting_for_coordination",
+                                "coordination": coordination,
+                                "risk": {
+                                    "approved": False,
+                                    "level": "blocked",
+                                    "reasons": coordination["reasons"],
+                                },
+                            }
+                        else:
+                            fresh_books = await _fetch_rebalance_books(
+                                runtime_cfg,
+                                manager,
+                            )
+                            fresh_quote_rates = await state.quote_rates()
+                            cycle = run_cross_exchange_rebalance_cycle(
+                                runtime_cfg,
+                                manager,
+                                books=fresh_books,
+                                quote_rates=fresh_quote_rates,
+                                completed_quote_common=float(
+                                    runtime.get("completed_quote_common") or 0.0
+                                ),
+                                live=True,
+                            )
+                            (
+                                payload,
+                                shutdown_requested,
+                            ) = await _complete_market_maker_cycle_on_shutdown(cycle)
+                            coordination["status"] = "ready"
+                            payload["coordination"] = coordination
+                            if rebalance_coordination_hold_required(payload):
+                                payload["coordination"]["status"] = (
+                                    "held_for_safety"
+                                )
+                            else:
+                                await state.release_coordination_hold(
+                                    coordination_owner
+                                )
+                                coordination_active = False
+                                payload["coordination"]["released"] = True
+                    elif live_allowed:
+                        if rebalance.coordinate_market_maker:
+                            payload = preview
+                            if coordination_active:
+                                coordination = market_maker_coordination_status(
+                                    runtime_cfg,
+                                    await state.market_maker_runtime(),
+                                    owner=coordination_owner,
+                                )
+                                if coordination["ready"]:
+                                    await state.release_coordination_hold(
+                                        coordination_owner
+                                    )
+                                    coordination_active = False
+                                    coordination["status"] = "released"
+                                    coordination["released"] = True
+                                else:
+                                    lease = await state.acquire_coordination_hold(
+                                        coordination_owner,
+                                        rebalance_coordination_resources(runtime_cfg),
+                                        reason=(
+                                            "waiting for the previous MM cancellation "
+                                            "handoff to finish"
+                                        ),
+                                        ttl_seconds=max(
+                                            60.0,
+                                            interval
+                                            + rebalance.coordination_timeout_seconds
+                                            + 10.0,
+                                        ),
+                                    )
+                                    coordination["status"] = "held_until_clear"
+                                    coordination["lease"] = lease
+                                payload["coordination"] = coordination
+                        else:
+                            if coordination_active:
+                                await state.release_coordination_hold(
+                                    coordination_owner
+                                )
+                                coordination_active = False
+                            cycle = run_cross_exchange_rebalance_cycle(
+                                runtime_cfg,
+                                manager,
+                                books=books,
+                                quote_rates=quote_rates,
+                                completed_quote_common=float(
+                                    runtime.get("completed_quote_common") or 0.0
+                                ),
+                                live=True,
+                            )
+                            (
+                                payload,
+                                shutdown_requested,
+                            ) = await _complete_market_maker_cycle_on_shutdown(cycle)
                     else:
-                        payload = await cycle
+                        if coordination_active:
+                            await state.release_coordination_hold(coordination_owner)
+                            coordination_active = False
+                        payload = preview
                     if rebalance.live_enabled and gate_reasons:
                         payload["mode"] = "live"
                         payload["status"] = "blocked_by_risk"
@@ -2611,6 +2769,14 @@ async def cross_exchange_rebalance_task_loop(
                         "status": "error",
                         "errors": [f"{exc.__class__.__name__}: {exc}"],
                     }
+                    if coordination_active and live_allowed:
+                        payload["halt_required"] = True
+                        payload["coordination"] = {
+                            "status": "held_for_safety",
+                            "reasons": [
+                                "coordination or live execution failed unexpectedly"
+                            ],
+                        }
 
             if payload.get("status") in {"disabled", "paused", "program_paused"}:
                 runtime = {
@@ -2659,6 +2825,7 @@ async def cross_exchange_rebalance_task_loop(
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
     finally:
+        await state.release_coordination_hold(coordination_owner)
         await manager.close()
 
 
@@ -2693,6 +2860,7 @@ async def _market_maker_instance_task_loop(
         "last_error": None,
         "market_data": None,
         "open_order_sync": None,
+        "coordination_hold": None,
         "updated_at": time.time(),
     }
     try:
@@ -2765,6 +2933,18 @@ async def _market_maker_instance_task_loop(
                 strategy_paused=strategy_pauses.get("market_maker", False),
                 program_running=program_running,
             )
+            coordination_hold = await state.coordination_hold_for(
+                maker_cfg.exchange,
+                maker_cfg.symbol,
+                requester=f"market_maker:{instance_id}",
+            )
+            if coordination_hold is not None:
+                live_allowed = False
+                status = "coordinating"
+                reason = str(
+                    coordination_hold.get("reason")
+                    or "temporarily paused for another strategy"
+                )
             try:
                 current_tracking_key = (maker_cfg.exchange, maker_cfg.symbol)
                 previous_tracking_key = (open_order_exchange, open_order_symbol)
@@ -2802,7 +2982,7 @@ async def _market_maker_instance_task_loop(
                     previous_mid_price = None
 
                 open_order_sync: dict[str, Any] | None = None
-                if live_allowed or open_order_ids:
+                if live_allowed or open_order_ids or coordination_hold is not None:
                     tracked_before_sync = list(open_order_ids)
                     open_order_snapshot = await _market_maker_open_order_snapshot(
                         runtime_cfg,
@@ -2836,6 +3016,7 @@ async def _market_maker_instance_task_loop(
                 if not live_allowed:
                     cancel_payload = None
                     if open_order_ids:
+                        ids_before_cancel = list(open_order_ids)
                         cancel_payload = await cancel_market_maker_order_ids(
                             runtime_cfg,
                             manager,
@@ -2852,12 +3033,49 @@ async def _market_maker_instance_task_loop(
                             cancel_payload,
                             source="market_maker_task",
                         )
-                        open_order_ids = []
-                        open_order_exchange = ""
-                        open_order_symbol = ""
+                        open_order_snapshot = (
+                            await _market_maker_open_order_snapshot(
+                                runtime_cfg,
+                                manager,
+                                ids_before_cancel,
+                            )
+                        )
+                        open_order_ids = [
+                            str(order_id)
+                            for order_id in open_order_snapshot.get("order_ids", [])
+                            if order_id
+                        ]
+                        open_order_sync = _market_maker_order_sync_delta(
+                            ids_before_cancel,
+                            open_order_snapshot,
+                        )
+                        if not open_order_ids and not open_order_snapshot.get("error"):
+                            open_order_exchange = ""
+                            open_order_symbol = ""
+                    sync_error = open_order_snapshot.get("error")
+                    if sync_error or open_order_ids:
+                        status = (
+                            "coordination_cancel_retry"
+                            if coordination_hold is not None
+                            else "cancel_retry"
+                        )
+                        reason = (
+                            "could not confirm all MM orders are canceled; "
+                            "new orders remain blocked"
+                        )
                     runtime = {
                         "status": status,
-                        "mode": "paused" if status == "paused" else "dry_run",
+                        "mode": (
+                            "paused"
+                            if status
+                            in {
+                                "paused",
+                                "coordinating",
+                                "coordination_cancel_retry",
+                                "cancel_retry",
+                            }
+                            else "dry_run"
+                        ),
                         "reason": reason,
                         "config": market_maker_config_to_dict(maker_cfg),
                         "open_order_ids": open_order_ids,
@@ -2870,9 +3088,10 @@ async def _market_maker_instance_task_loop(
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,
                         "cycle_count": cycle_count,
-                        "last_error": None,
+                        "last_error": sync_error,
                         "last_execution": cancel_payload,
                         "market_data": None,
+                        "coordination_hold": coordination_hold,
                         "updated_at": time.time(),
                     }
                     await state.set_market_maker_instance_runtime(instance_id, runtime)
@@ -2896,6 +3115,7 @@ async def _market_maker_instance_task_loop(
                             "cycle_count": cycle_count,
                             "last_error": open_order_snapshot.get("error"),
                             "market_data": None,
+                            "coordination_hold": None,
                             "updated_at": time.time(),
                         }
                         await state.set_market_maker_instance_runtime(instance_id, runtime)
@@ -3027,6 +3247,7 @@ async def _market_maker_instance_task_loop(
                         "last_execution": execution,
                         "last_error": None,
                         "market_data": payload.get("market_data"),
+                        "coordination_hold": None,
                         "updated_at": time.time(),
                     }
                     await state.set_market_maker_instance_runtime(instance_id, runtime)

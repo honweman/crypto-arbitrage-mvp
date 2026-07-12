@@ -85,6 +85,11 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.cross_exchange_rebalance.sell_symbol, "ACS/USDC")
         self.assertEqual(cfg.cross_exchange_rebalance.total_quote_common, 0.0)
         self.assertEqual(cfg.cross_exchange_rebalance.quote_per_cycle_common, 0.0)
+        self.assertTrue(cfg.cross_exchange_rebalance.coordinate_market_maker)
+        self.assertEqual(
+            cfg.cross_exchange_rebalance.coordination_timeout_seconds,
+            30.0,
+        )
         self.assertTrue(cfg.cross_exchange_rebalance.block_conflicting_open_orders)
         self.assertTrue(cfg.cross_exchange_rebalance.halt_on_error)
         self.assertFalse(cfg.spot_grid.enabled)

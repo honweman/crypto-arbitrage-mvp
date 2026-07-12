@@ -96,6 +96,7 @@ _MARKET_MAKER_STATUS_PRIORITY = [
     "error",
     "open_order_sync_error",
     "execution_error",
+    "coordination_cancel_retry",
     "cancel_retry",
     "blocked_by_risk",
     "placed",
@@ -103,6 +104,7 @@ _MARKET_MAKER_STATUS_PRIORITY = [
     "planned",
     "starting",
     "disabled",
+    "coordinating",
     "paused",
 ]
 
@@ -110,6 +112,7 @@ _MARKET_MAKER_PROBLEM_STATUSES = {
     "error",
     "open_order_sync_error",
     "execution_error",
+    "coordination_cancel_retry",
     "cancel_retry",
     "blocked_by_risk",
 }
@@ -350,6 +353,7 @@ class MonitorState:
             strategy_id: False for strategy_id in STRATEGY_IDS
         }
         self._strategy_paused.update(store_data.get("strategy_paused", {}))
+        self._coordination_holds: dict[str, dict[str, Any]] = {}
         runtime_cfg = self._runtime_config_unlocked(cfg)
         self._payload = _build_initial_payload(runtime_cfg, poll_seconds)
         if "market_maker" in self._payload:
@@ -1147,6 +1151,91 @@ class MonitorState:
     async def strategy_pauses(self) -> dict[str, bool]:
         async with self._lock:
             return dict(self._strategy_paused)
+
+    def _prune_coordination_holds_unlocked(self) -> None:
+        now = time.time()
+        self._coordination_holds = {
+            owner: hold
+            for owner, hold in self._coordination_holds.items()
+            if float(hold.get("expires_at") or 0.0) > now
+        }
+
+    async def acquire_coordination_hold(
+        self,
+        owner: str,
+        resources: list[tuple[str, str]],
+        *,
+        reason: str,
+        ttl_seconds: float,
+    ) -> dict[str, Any]:
+        normalized = sorted(
+            {
+                (str(exchange).strip(), str(symbol).strip())
+                for exchange, symbol in resources
+                if str(exchange).strip() and str(symbol).strip()
+            }
+        )
+        if not owner.strip():
+            raise ValueError("coordination owner is required")
+        if not normalized:
+            raise ValueError("at least one coordination resource is required")
+        now = time.time()
+        async with self._lock:
+            self._prune_coordination_holds_unlocked()
+            previous = self._coordination_holds.get(owner)
+            hold = {
+                "owner": owner,
+                "reason": reason,
+                "resources": [
+                    {"exchange": exchange, "symbol": symbol}
+                    for exchange, symbol in normalized
+                ],
+                "acquired_at": (
+                    float(previous.get("acquired_at") or now) if previous else now
+                ),
+                "updated_at": now,
+                "expires_at": now + max(1.0, float(ttl_seconds)),
+            }
+            self._coordination_holds[owner] = hold
+            return json.loads(json.dumps(hold))
+
+    async def release_coordination_hold(self, owner: str) -> bool:
+        async with self._lock:
+            self._prune_coordination_holds_unlocked()
+            return self._coordination_holds.pop(owner, None) is not None
+
+    async def coordination_hold_for(
+        self,
+        exchange: str,
+        symbol: str,
+        *,
+        requester: str = "",
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            self._prune_coordination_holds_unlocked()
+            for owner, hold in sorted(self._coordination_holds.items()):
+                if owner == requester:
+                    continue
+                if any(
+                    resource.get("exchange") == exchange
+                    and resource.get("symbol") == symbol
+                    for resource in hold.get("resources", [])
+                    if isinstance(resource, dict)
+                ):
+                    return json.loads(json.dumps(hold))
+            return None
+
+    async def coordination_holds(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            self._prune_coordination_holds_unlocked()
+            return json.loads(
+                json.dumps(
+                    [
+                        self._coordination_holds[owner]
+                        for owner in sorted(self._coordination_holds)
+                    ]
+                )
+            )
 
     async def set_strategy_paused(
         self,
