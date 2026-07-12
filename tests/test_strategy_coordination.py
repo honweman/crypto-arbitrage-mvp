@@ -23,7 +23,7 @@ from arbitrage_bot.web_config import (
 
 
 def make_config():
-    cfg = load_config("config.acs.json")
+    cfg = load_config("config.acs.example.json")
     market_makers = [
         MarketMakerConfig(
             enabled=True,
