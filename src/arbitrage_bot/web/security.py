@@ -578,8 +578,7 @@ def _login_throttled_response(
     response = web.Response(
         text=_login_html(
             error=(
-                "Too many failed attempts. "
-                f"Try again in about {wait_seconds} seconds."
+                f"Too many failed attempts. Try again in about {wait_seconds} seconds."
             ),
             email_login=email_login,
             registration_enabled=cfg.web_security.registration_enabled,
@@ -1096,11 +1095,16 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
         auth_required = bool(password) or email_login
         if not auth_required:
             return await call_handler()
-        if request.path in {
-            "/api/health",
-            "/api/metrics",
-            "/metrics",
-        } and _is_local_ip(remote):
+        if (
+            request.path
+            in {
+                "/api/health",
+                "/api/metrics",
+                "/metrics",
+            }
+            and _is_local_ip(remote)
+            and not proxy_ip_present
+        ):
             return await call_handler()
         session_valid, session_email, session_auth_version = _session_details(
             cfg,
@@ -1124,7 +1128,9 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
             except ValueError:
                 if request.path.startswith("/api/"):
                     return _add_security_headers(
-                        web.json_response({"error": "authentication required"}, status=401)
+                        web.json_response(
+                            {"error": "authentication required"}, status=401
+                        )
                     )
                 redirect = web.HTTPFound("/login")
                 _add_security_headers(redirect)

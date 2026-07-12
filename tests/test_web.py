@@ -64,6 +64,7 @@ from arbitrage_bot.web import (
     _monitor_reconciliation_warmup_active,
     _market_maker_order_sync_delta,
     _market_maker_overrides_from_payload,
+    _preflight_candidate_from_payload,
     _cash_and_carry_pairs_from_payload,
     _backtest_overrides_from_payload,
     _dca_overrides_from_payload,
@@ -83,8 +84,11 @@ from arbitrage_bot.web import (
     _session_identity,
     _session_valid,
     api_create_auto_buy_sell_task,
+    api_cancel_order,
     api_cross_exchange_rebalance,
     api_market_maker,
+    api_risk,
+    api_strategy_center,
     build_daily_report_message,
     default_web_audit_path,
     build_order_attribution_map,
@@ -118,6 +122,10 @@ from arbitrage_bot.web import (
 )
 from arbitrage_bot.web.render_payloads import state_payload_for_view
 from arbitrage_bot.web.routes import register_routes
+from arbitrage_bot.web.strategy_preflight import (
+    StrategyPreflightService,
+    build_strategy_preflight,
+)
 from arbitrage_bot.web.loops import (
     _complete_market_maker_cycle_on_shutdown,
     _load_initial_rebalance_runtime,
@@ -204,11 +212,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260712-lifecycle2" defer></script>',
+            '<script src="/static/app.js?v=20260712-safety2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260712-lifecycle2" defer></script>',
+            '<script src="/static/i18n.js?v=20260712-safety2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -255,7 +263,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("function coreLiveRiskReadiness", APP_JS)
         self.assertIn("function strategyLifecycleRows", APP_JS)
         self.assertIn("function lifecycleWorkflowStep", APP_JS)
-        self.assertIn('data?.strategy_lifecycle?.instances', APP_JS)
+        self.assertIn("data?.strategy_lifecycle?.instances", APP_JS)
         self.assertIn("function startMarketMaker", APP_JS)
         self.assertIn("function stopCrossExchangeRebalance", APP_JS)
         self.assertIn("LIVE_AUTO_BUY_SELL_CONFIRMATION", APP_JS)
@@ -269,17 +277,17 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260712-rebalance7"></script>',
+            '<script src="/static/theme.js?v=20260712-safety2"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index('/static/theme.js?v=20260712-rebalance7'),
-            INDEX_HTML.index('/static/styles.css?v=20260712-lifecycle2'),
+            INDEX_HTML.index("/static/theme.js?v=20260712-safety2"),
+            INDEX_HTML.index("/static/styles.css?v=20260712-safety2"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
-        self.assertIn('root.dataset.theme = theme', theme_js)
+        self.assertIn("root.dataset.theme = theme", theme_js)
         self.assertIn(':root[data-theme="dark"]', STYLES_CSS)
-        self.assertIn(':root:not([data-theme])', STYLES_CSS)
+        self.assertIn(":root:not([data-theme])", STYLES_CSS)
 
     def test_page_includes_paper_only_user_strategy_controls(self) -> None:
         self.assertIn('id="user-strategy-form"', INDEX_HTML)
@@ -318,7 +326,9 @@ class WebMonitorTest(unittest.TestCase):
             market_maker=coinbase,
             market_makers=[coinbase, upbit],
             spot_exchanges=[
-                ExchangeConfig(id="coinbase", label="coinbase-spot", market_type="spot"),
+                ExchangeConfig(
+                    id="coinbase", label="coinbase-spot", market_type="spot"
+                ),
                 ExchangeConfig(id="upbit", label="upbit-spot", market_type="spot"),
             ],
         )
@@ -379,7 +389,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260712-lifecycle2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260712-safety2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -541,14 +551,18 @@ class WebMonitorTest(unittest.TestCase):
             },
         }
         status_overview = state_payload_for_view(payload, "status", sections="overview")
-        quant_overview = state_payload_for_view(payload, "quant", sections="backtest-points")
+        quant_overview = state_payload_for_view(
+            payload, "quant", sections="backtest-points"
+        )
         quant_derivatives = state_payload_for_view(
             payload,
             "quant",
             sections="derivatives-risk,funding-basis,contract-strategies,options-arbitrage",
         )
         settings = state_payload_for_view(payload, "settings", sections="risk-form")
-        records = state_payload_for_view(payload, "records", sections="console-strategies")
+        records = state_payload_for_view(
+            payload, "records", sections="console-strategies"
+        )
         records_open_orders = state_payload_for_view(
             payload,
             "records",
@@ -656,21 +670,35 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="execution-section" data-page="quant"', HTML)
         self.assertIn('id="backtest-section" data-page="quant"', HTML)
         self.assertIn('data-ui-feature="readiness" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="scan_status" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="orders_detail" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="strategy_timeline" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="audit_trail" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="quote_rates" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="onchain_monitor" data-ui-hidden-default="true"', HTML)
-        self.assertIn('data-ui-feature="onchain_history" data-ui-hidden-default="true"', HTML)
+        self.assertIn(
+            'data-ui-feature="scan_status" data-ui-hidden-default="true"', HTML
+        )
+        self.assertIn(
+            'data-ui-feature="orders_detail" data-ui-hidden-default="true"', HTML
+        )
+        self.assertIn(
+            'data-ui-feature="strategy_timeline" data-ui-hidden-default="true"', HTML
+        )
+        self.assertIn(
+            'data-ui-feature="audit_trail" data-ui-hidden-default="true"', HTML
+        )
+        self.assertIn(
+            'data-ui-feature="quote_rates" data-ui-hidden-default="true"', HTML
+        )
+        self.assertIn(
+            'data-ui-feature="onchain_monitor" data-ui-hidden-default="true"', HTML
+        )
+        self.assertIn(
+            'data-ui-feature="onchain_history" data-ui-hidden-default="true"', HTML
+        )
         self.assertIn("const HIDDEN_UI_FEATURES = new Set", APP_JS)
         self.assertIn("function applyFeatureVisibility", APP_JS)
-        self.assertIn('status: [', APP_JS)
-        self.assertIn('trading: [', APP_JS)
-        self.assertIn('quant: [', APP_JS)
-        self.assertIn('.ui-feature-hidden', STYLES_CSS)
-        self.assertIn('[data-page].ui-feature-hidden', STYLES_CSS)
-        self.assertIn('.statusbar[data-page].ui-feature-hidden', STYLES_CSS)
+        self.assertIn("status: [", APP_JS)
+        self.assertIn("trading: [", APP_JS)
+        self.assertIn("quant: [", APP_JS)
+        self.assertIn(".ui-feature-hidden", STYLES_CSS)
+        self.assertIn("[data-page].ui-feature-hidden", STYLES_CSS)
+        self.assertIn(".statusbar[data-page].ui-feature-hidden", STYLES_CSS)
 
     def test_page_has_monitor_trading_quant_settings_and_records_views(self) -> None:
         self.assertIn('data-view-tab="status"', HTML)
@@ -702,7 +730,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("let refreshInFlight = false", HTML)
         self.assertIn("STATE_FETCH_TIMEOUT_MS", HTML)
         self.assertIn("AbortController", HTML)
-        self.assertIn('if (res.status === 401)', HTML)
+        self.assertIn("if (res.status === 401)", HTML)
         self.assertIn('setHeaderStatus("degraded", "Retrying")', HTML)
         self.assertNotIn('status.className = "pill error";', HTML)
 
@@ -768,7 +796,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('class="compact-section', HTML)
         self.assertIn("function setupCompactSections()", HTML)
         self.assertIn("section-open", HTML)
-        self.assertIn('aria-expanded', HTML)
+        self.assertIn("aria-expanded", HTML)
         self.assertIn("renderOpenSection", HTML)
         self.assertIn("PAGE_REFRESH_INTERVAL_MS", HTML)
         self.assertIn("REFRESH_FAILURE_BACKOFF_MS", HTML)
@@ -1319,9 +1347,13 @@ class WebMonitorTest(unittest.TestCase):
         actions = {row["action"] for row in payload["next_actions"]}
         self.assertIn("Configure API environment variables", actions)
         self.assertIn("Enable account in Risk Controls", actions)
-        self.assertEqual(payload["summary"]["action_count"], len(payload["next_actions"]))
+        self.assertEqual(
+            payload["summary"]["action_count"], len(payload["next_actions"])
+        )
 
-    def test_readiness_payload_reports_checking_before_health_cache_is_ready(self) -> None:
+    def test_readiness_payload_reports_checking_before_health_cache_is_ready(
+        self,
+    ) -> None:
         cfg = make_config(
             spot_markets=[
                 SpotMarketConfig(
@@ -2536,7 +2568,9 @@ class WebMonitorTest(unittest.TestCase):
         user_token = _make_session_token(cfg, "trader@example.com")
 
         self.assertTrue(_session_valid(cfg, token))
-        self.assertEqual(_session_identity(cfg, user_token), (True, "trader@example.com"))
+        self.assertEqual(
+            _session_identity(cfg, user_token), (True, "trader@example.com")
+        )
         self.assertFalse(_session_valid(cfg, token + "bad"))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.97"]))
         self.assertTrue(_ip_allowed("66.96.212.97", ["66.96.212.0/24"]))
@@ -2584,7 +2618,9 @@ class WebMonitorTest(unittest.TestCase):
     def test_default_strategy_center_path_uses_config(self) -> None:
         cfg = make_config()
 
-        self.assertEqual(default_strategy_center_path(cfg), "data/strategy_center.sqlite3")
+        self.assertEqual(
+            default_strategy_center_path(cfg), "data/strategy_center.sqlite3"
+        )
 
     def test_user_role_and_asset_permission_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2684,8 +2720,16 @@ class WebMonitorTest(unittest.TestCase):
                 "plan": {"symbol": "ACS/USDC"},
                 "tasks": {
                     "tasks": [
-                        {"id": "acs-task", "status": "running", "config": {"symbol": "ACS/USDC"}},
-                        {"id": "btc-task", "status": "running", "config": {"symbol": "BTC/USDT"}},
+                        {
+                            "id": "acs-task",
+                            "status": "running",
+                            "config": {"symbol": "ACS/USDC"},
+                        },
+                        {
+                            "id": "btc-task",
+                            "status": "running",
+                            "config": {"symbol": "BTC/USDT"},
+                        },
                     ]
                 },
             },
@@ -2699,9 +2743,7 @@ class WebMonitorTest(unittest.TestCase):
                     "buy_symbol": "BTC/USDT",
                     "sell_symbol": "BTC/USDT",
                 },
-                "accounts": [
-                    {"key": "binance-spot", "symbols": ["BTC/USDT"]}
-                ],
+                "accounts": [{"key": "binance-spot", "symbols": ["BTC/USDT"]}],
             },
             "order_activity": {
                 "accounts": [
@@ -2819,7 +2861,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(
             [
                 row["currency"]
-                for row in filtered["account_balances"]["accounts"][0]["balance"]["currencies"]
+                for row in filtered["account_balances"]["accounts"][0]["balance"][
+                    "currencies"
+                ]
             ],
             ["ACS", "USDC"],
         )
@@ -3593,7 +3637,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertFalse(payload["auto_stop_recommended"])
         self.assertEqual(payload["level_counts"]["info"], 2)
 
-    def test_order_reconciliation_does_not_auto_stop_for_unmanaged_attributed_orders(self) -> None:
+    def test_order_reconciliation_does_not_auto_stop_for_unmanaged_attributed_orders(
+        self,
+    ) -> None:
         payload = build_order_reconciliation_payload(
             {
                 "status": "ok",
@@ -3872,6 +3918,156 @@ class CookieSecretTest(unittest.TestCase):
 
 
 class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
+    def test_strategy_preflight_checks_private_data_market_balance_and_budget(
+        self,
+    ) -> None:
+        now = time.time()
+        cfg = make_config(
+            risk=RiskConfig(
+                trading_enabled=True,
+                allow_live_trading=True,
+                account_enabled={"coinbase-spot": True},
+                strategy_enabled={"market_maker": True},
+                max_order_quote=5.0,
+                max_cycle_quote=20.0,
+                max_orders_per_cycle=10,
+                max_open_orders=20,
+                max_order_book_age_seconds=10.0,
+                max_order_book_gap_bps=100.0,
+            ),
+        )
+        candidate = {
+            "exchange": "coinbase-spot",
+            "symbol": "ACS/USDC",
+            "levels": 2,
+            "quote_per_level": 2.0,
+        }
+        state_payload = {
+            "quote_rates": {"USDC": 1.0},
+            "markets": [
+                {
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                    "status": "ok",
+                    "bid": 0.10,
+                    "ask": 0.1005,
+                    "bid_size": 10_000.0,
+                    "ask_size": 10_000.0,
+                }
+            ],
+            "account_balances": {
+                "last_finished": now,
+                "accounts": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "auth": {"configured": True, "missing_env": []},
+                        "errors": [],
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {"currency": "ACS", "free": 1_000.0},
+                                {"currency": "USDC", "free": 1_000.0},
+                            ],
+                        },
+                        "markets": [
+                            {
+                                "symbol": "ACS/USDC",
+                                "status": "ok",
+                                "market": {
+                                    "found": True,
+                                    "active": True,
+                                    "limits": {"cost_min": 1.0},
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            "order_activity": {
+                "last_finished": now,
+                "open_orders": [],
+                "daily_pnl": {"total_realized_pnl": 0.0},
+            },
+            "market_maker": {"runtime": {"instances": []}},
+            "slow_execution": {"tasks": {"tasks": []}},
+        }
+
+        ready = build_strategy_preflight(
+            cfg,
+            strategy_id="market_maker",
+            candidate=candidate,
+            state_payload=state_payload,
+            now=now,
+        )
+        oversized = build_strategy_preflight(
+            cfg,
+            strategy_id="market_maker",
+            candidate={**candidate, "quote_per_level": 6.0},
+            state_payload=state_payload,
+            now=now,
+        )
+
+        self.assertTrue(ready["ready"], ready["blockers"])
+        self.assertFalse(oversized["ready"])
+        self.assertIn("exceeds", "; ".join(oversized["blockers"]))
+
+    async def test_non_admin_cannot_call_platform_trading_apis(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            method = "POST"
+            match_info: dict[str, str] = {}
+
+            def __init__(self, app: dict[str, object], path: str) -> None:
+                self.app = app
+                self.path = path
+
+            def get(self, key: str, default: object = None) -> object:
+                if key == "user_email":
+                    return "trader@example.com"
+                return default
+
+            async def json(self) -> dict[str, object]:
+                raise AssertionError("non-admin request reached payload handling")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            user_store = WebUserStore(Path(tmp) / "users.json")
+            user_store.create_user(
+                email="admin@example.com",
+                username="admin",
+                password="AdminPass!234",
+            )
+            user_store.create_user(
+                email="trader@example.com",
+                username="trader",
+                password="TraderPass!234",
+                allowed_assets=["ACS"],
+            )
+            app: dict[str, object] = {
+                "web_user_store": user_store,
+                "monitor_state": object(),
+                "config": make_config(),
+                "auto_buy_sell_tasks": object(),
+                "strategy_center_store": object(),
+            }
+            responses = [
+                await api_market_maker(  # type: ignore[arg-type]
+                    FakeRequest(app, "/api/market-maker")
+                ),
+                await api_create_auto_buy_sell_task(  # type: ignore[arg-type]
+                    FakeRequest(app, "/api/auto-buy-sell/tasks")
+                ),
+                await api_cancel_order(  # type: ignore[arg-type]
+                    FakeRequest(app, "/api/orders/cancel")
+                ),
+                await api_strategy_center(  # type: ignore[arg-type]
+                    FakeRequest(app, "/api/strategy-center")
+                ),
+            ]
+
+        self.assertTrue(all(response.status == 403 for response in responses))
+        self.assertTrue(all("admin role" in response.text for response in responses))
+
     async def test_market_maker_cycle_finishes_before_shutdown(self) -> None:
         started = asyncio.Event()
         release = asyncio.Event()
@@ -3881,9 +4077,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return {"status": "placed"}
 
-        task = asyncio.create_task(
-            _complete_market_maker_cycle_on_shutdown(cycle())
-        )
+        task = asyncio.create_task(_complete_market_maker_cycle_on_shutdown(cycle()))
         await started.wait()
         task.cancel()
         await asyncio.sleep(0)
@@ -3944,7 +4138,12 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             )
             store_path = os.path.join(tmp, "web_runtime_overrides.json")
             state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
-            app: dict[str, object] = {"monitor_state": state, "config": cfg}
+            preflight = StrategyPreflightService()
+            app: dict[str, object] = {
+                "monitor_state": state,
+                "config": cfg,
+                "strategy_preflight_service": preflight,
+            }
             payload: dict[str, object] = {
                 "action": "update",
                 "enabled": True,
@@ -3961,10 +4160,25 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             denied = await api_cross_exchange_rebalance(
                 FakeRequest(app, payload)  # type: ignore[arg-type]
             )
+            candidate, _ = await _preflight_candidate_from_payload(
+                state,
+                cfg,
+                strategy_id="cross_exchange_rebalance",
+                payload=payload,
+            )
+            grant = preflight.issue(
+                owner_email="legacy-admin",
+                strategy_id="cross_exchange_rebalance",
+                candidate=candidate,
+            )
             approved = await api_cross_exchange_rebalance(
                 FakeRequest(  # type: ignore[arg-type]
                     app,
-                    {**payload, "confirm_live": "ENABLE LIVE REBALANCE"},
+                    {
+                        **payload,
+                        "confirm_live": "ENABLE LIVE REBALANCE",
+                        "preflight_token": grant.token,
+                    },
                 )
             )
             reconfirm_denied = await api_cross_exchange_rebalance(
@@ -3993,14 +4207,18 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "ACS/USDC",
         )
 
-    async def test_market_maker_api_requires_confirmation_when_starting_live(self) -> None:
+    async def test_market_maker_api_requires_confirmation_when_starting_live(
+        self,
+    ) -> None:
         class FakeRequest:
             headers = {"User-Agent": "unit-test"}
             remote = "127.0.0.1"
             path = "/api/market-maker"
             method = "POST"
 
-            def __init__(self, app: dict[str, object], payload: dict[str, object]) -> None:
+            def __init__(
+                self, app: dict[str, object], payload: dict[str, object]
+            ) -> None:
                 self.app = app
                 self._payload = payload
 
@@ -4038,7 +4256,12 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 1.0,
                 runtime_store_path=os.path.join(tmp, "web_runtime_overrides.json"),
             )
-            app: dict[str, object] = {"monitor_state": state, "config": cfg}
+            preflight = StrategyPreflightService()
+            app: dict[str, object] = {
+                "monitor_state": state,
+                "config": cfg,
+                "strategy_preflight_service": preflight,
+            }
             payload: dict[str, object] = {
                 "id": "coinbase-spot-acs-usdc",
                 "enabled": True,
@@ -4055,12 +4278,24 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             denied = await api_market_maker(
                 FakeRequest(app, payload)  # type: ignore[arg-type]
             )
+            candidate, _ = await _preflight_candidate_from_payload(
+                state,
+                cfg,
+                strategy_id="market_maker",
+                payload=payload,
+            )
+            grant = preflight.issue(
+                owner_email="legacy-admin",
+                strategy_id="market_maker",
+                candidate=candidate,
+            )
             approved = await api_market_maker(
                 FakeRequest(  # type: ignore[arg-type]
                     app,
                     {
                         **payload,
                         "confirm_live": "ENABLE LIVE MARKET MAKER",
+                        "preflight_token": grant.token,
                     },
                 )
             )
@@ -4096,6 +4331,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 "auto_buy_sell_tasks": object(),
             }
 
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
             async def json(self) -> dict[str, object]:
                 return {}
 
@@ -4124,9 +4362,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 await client.start_server()
                 try:
                     for _ in range(LOGIN_MAX_FAILURES):
-                        bad = await client.post(
-                            "/login", data={"password": "wrong"}
-                        )
+                        bad = await client.post("/login", data={"password": "wrong"})
                         self.assertEqual(bad.status, 401)
 
                     locked = await client.post("/login", data={"password": "wrong"})
@@ -4141,7 +4377,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await client.close()
 
-    async def test_metrics_endpoint_allows_local_scrape_without_dashboard_session(self) -> None:
+    async def test_metrics_endpoint_allows_local_scrape_without_dashboard_session(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             cfg = make_config(
@@ -4168,6 +4406,42 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(metrics_response.status, 200)
                     self.assertIn("crypto_arb_scan_count", metrics_text)
                     self.assertEqual(state_response.status, 401)
+                finally:
+                    await client.close()
+
+    async def test_proxy_forwarded_health_and_metrics_require_authentication(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            cfg = make_config(
+                strategy_center=StrategyCenterConfig(
+                    path=str(data_dir / "strategy_center.sqlite3"),
+                ),
+                web_security=WebSecurityConfig(
+                    password_env="TEST_WEB_PASSWORD",
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(data_dir / "web_users.json"),
+                ),
+            )
+            with patch.dict(os.environ, {"TEST_WEB_PASSWORD": "123456"}, clear=False):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    headers = {"X-Forwarded-For": "203.0.113.10"}
+                    health = await client.get("/api/health", headers=headers)
+                    metrics = await client.get(
+                        "/metrics",
+                        headers=headers,
+                        allow_redirects=False,
+                    )
+
+                    self.assertEqual(health.status, 401)
+                    self.assertEqual(metrics.status, 302)
+                    self.assertEqual(metrics.headers.get("Location"), "/login")
                 finally:
                     await client.close()
 
@@ -4239,7 +4513,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
-    async def test_fetch_order_activity_payload_summarizes_orders_and_fills(self) -> None:
+    async def test_fetch_order_activity_payload_summarizes_orders_and_fills(
+        self,
+    ) -> None:
         class FakeOrderManager:
             async def fetch_open_orders(
                 self,
@@ -4344,7 +4620,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["recent_trades"][0]["order_id"], "order-closed-1")
         self.assertEqual(payload["recent_trades"][0]["fee"]["currency"], "USDC")
 
-    async def test_fetch_order_activity_payload_treats_unused_accounts_as_idle(self) -> None:
+    async def test_fetch_order_activity_payload_treats_unused_accounts_as_idle(
+        self,
+    ) -> None:
         class FakeOrderManager:
             def __init__(self) -> None:
                 self.calls = 0
@@ -4379,7 +4657,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["checked_account_count"], 0)
         self.assertEqual(manager.calls, 0)
 
-    async def test_cancel_order_payload_validates_and_cancels_configured_symbol(self) -> None:
+    async def test_cancel_order_payload_validates_and_cancels_configured_symbol(
+        self,
+    ) -> None:
         class FakeCancelManager:
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str, str]] = []
@@ -4777,7 +5057,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "no configured symbols",
         )
 
-    async def test_fetch_account_balances_warns_when_used_account_missing_api_env(self) -> None:
+    async def test_fetch_account_balances_warns_when_used_account_missing_api_env(
+        self,
+    ) -> None:
         class FakeBalanceManager:
             def __init__(self) -> None:
                 self.calls = 0
@@ -4818,7 +5100,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "api env vars missing",
         )
 
-    async def test_fetch_derivatives_risk_payload_flags_leverage_and_liquidation(self) -> None:
+    async def test_fetch_derivatives_risk_payload_flags_leverage_and_liquidation(
+        self,
+    ) -> None:
         test_case = self
 
         class FakeDerivativeManager:
@@ -4900,12 +5184,16 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(position["status"], "blocked")
         self.assertAlmostEqual(position["liquidation_buffer_pct"], 15.0)
         self.assertEqual(position["funding_rate"], 0.0001)
-        self.assertTrue(any("leverage" in reason for reason in position["risk_reasons"]))
+        self.assertTrue(
+            any("leverage" in reason for reason in position["risk_reasons"])
+        )
         self.assertTrue(
             any("liquidation buffer" in reason for reason in position["risk_reasons"])
         )
 
-    async def test_fetch_funding_basis_payload_uses_strategy_center_settings(self) -> None:
+    async def test_fetch_funding_basis_payload_uses_strategy_center_settings(
+        self,
+    ) -> None:
         class FakeFundingManager:
             async def fetch_order_books(
                 self,
@@ -5073,7 +5361,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             ["sell", "buy", "buy"],
         )
 
-    async def test_fetch_options_arbitrage_payload_blocks_wide_option_spread(self) -> None:
+    async def test_fetch_options_arbitrage_payload_blocks_wide_option_spread(
+        self,
+    ) -> None:
         class FakeOptionsManager:
             async def fetch_order_books(
                 self,
@@ -5152,11 +5442,11 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("call: spread", row["preflight_reasons"][0])
         self.assertEqual(row["paper_execution"]["state"], "blocked")
         self.assertEqual(row["paper_execution"]["protection"]["status"], "blocked")
-        self.assertFalse(
-            row["paper_execution"]["protection"]["live_submit_allowed"]
-        )
+        self.assertFalse(row["paper_execution"]["protection"]["live_submit_allowed"])
 
-    async def test_fetch_options_arbitrage_payload_finds_box_spread_candidate(self) -> None:
+    async def test_fetch_options_arbitrage_payload_finds_box_spread_candidate(
+        self,
+    ) -> None:
         class FakeOptionsManager:
             async def fetch_order_books(
                 self,
@@ -5457,6 +5747,109 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             "repeated degraded cycles: 3",
         )
 
+    async def test_startup_guard_tracks_only_unverified_current_config(self) -> None:
+        cfg = make_config()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = os.path.join(tmp, "web_runtime_overrides.json")
+            state = MonitorState(cfg, 1.0, runtime_store_path=store_path)
+            initial = await state.config_versions(limit=5)
+            await state.set_risk_overrides(
+                {"max_order_quote": 25.0},
+                cfg=cfg,
+                actor_email="operator@example.com",
+            )
+            pending = await state.startup_config_guard_candidate()
+
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            self.assertEqual(
+                pending["previous_known_good_id"],
+                initial["current_version_id"],
+            )
+            self.assertIsNone(
+                await state.mark_current_config_known_good(
+                    expected_current_hash="stale-hash",
+                )
+            )
+            self.assertIsNotNone(
+                await state.mark_current_config_known_good(
+                    expected_current_hash=pending["hash"],
+                )
+            )
+            self.assertIsNone(await state.startup_config_guard_candidate())
+
+    async def test_runtime_configuration_rolls_back_to_known_good_snapshot(
+        self,
+    ) -> None:
+        cfg = make_config(risk=RiskConfig(max_order_quote=5.0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = MonitorState(
+                cfg,
+                1.0,
+                runtime_store_path=os.path.join(tmp, "runtime.json"),
+            )
+            baseline = await state.config_versions(limit=5)
+            await state.set_risk_overrides(
+                {"max_order_quote": 25.0},
+                cfg=cfg,
+                actor_email="operator@example.com",
+            )
+            changed = await state.config_versions(limit=5)
+
+            with self.assertRaisesRegex(ValueError, "configuration changed"):
+                await state.rollback_config_version(
+                    baseline["current_version_id"],
+                    expected_current_hash="stale-hash",
+                    actor_email="operator@example.com",
+                )
+            result = await state.rollback_config_version(
+                baseline["current_version_id"],
+                expected_current_hash=changed["current_hash"],
+                actor_email="operator@example.com",
+            )
+            runtime = await state.runtime_config(cfg)
+            versions = await state.config_versions(limit=5)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(runtime.risk.max_order_quote, 5.0)
+        self.assertTrue(versions["versions"][0]["known_good"])
+
+    async def test_runtime_configuration_rejects_unverified_live_rollback(
+        self,
+    ) -> None:
+        cfg = make_config(risk=RiskConfig(allow_live_trading=False))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = MonitorState(
+                cfg,
+                1.0,
+                runtime_store_path=os.path.join(tmp, "runtime.json"),
+            )
+            await state.set_risk_overrides(
+                {"allow_live_trading": True},
+                cfg=cfg,
+                actor_email="operator@example.com",
+            )
+            live_version = await state.config_versions(limit=5)
+            await state.set_risk_overrides(
+                {"allow_live_trading": False},
+                cfg=cfg,
+                actor_email="operator@example.com",
+            )
+            safe_version = await state.config_versions(limit=5)
+
+            with self.assertRaisesRegex(ValueError, "unverified configuration"):
+                await state.rollback_config_version(
+                    live_version["current_version_id"],
+                    expected_current_hash=safe_version["current_hash"],
+                    actor_email="operator@example.com",
+                )
+            runtime = await state.runtime_config(cfg)
+
+        self.assertFalse(runtime.risk.allow_live_trading)
+
     async def test_market_update_changes_runtime_spot_markets(self) -> None:
         cfg = make_config(
             spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
@@ -5599,9 +5992,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             ],
             cfg=cfg,
         )
-        accounts = {
-            row["key"]: row for row in update["market_maker"]["accounts"]
-        }
+        accounts = {row["key"]: row for row in update["market_maker"]["accounts"]}
 
         self.assertIn("ACS/USDT", accounts["bybit-spot"]["symbols"])
         self.assertIn("ACS/USDC", accounts["coinbase-spot"]["symbols"])
@@ -5710,9 +6101,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             payload["config"]["cash_and_carry_pairs"][0]["derivative_symbol"],
             "BTC/USDT:USDT",
         )
-        mm_accounts = {
-            row["key"]: row for row in payload["market_maker"]["accounts"]
-        }
+        mm_accounts = {row["key"]: row for row in payload["market_maker"]["accounts"]}
         self.assertIn("BTC/USDT:USDT", mm_accounts["binance-swap"]["symbols"])
         strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
         self.assertTrue(strategies["cash_and_carry"]["configured"])
@@ -5733,6 +6122,64 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         strategies = {row["id"]: row for row in console["strategies"]}
         self.assertTrue(strategies["market_maker"]["paused"])
         self.assertEqual(strategies["market_maker"]["mode"], "paused")
+
+    async def test_risk_api_requires_button_confirmation_for_new_live_switches(
+        self,
+    ) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/risk"
+            method = "POST"
+
+            def __init__(
+                self,
+                app: dict[str, object],
+                payload: dict[str, object],
+            ) -> None:
+                self.app = app
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=str(Path(tmp) / "trades.jsonl"),
+                ),
+                risk=RiskConfig(allow_live_trading=False),
+            )
+            state = MonitorState(
+                cfg,
+                1.0,
+                runtime_store_path=str(Path(tmp) / "runtime.json"),
+            )
+            app: dict[str, object] = {"monitor_state": state, "config": cfg}
+            payload: dict[str, object] = {
+                "allow_live_trading": True,
+                "auto_hedge_live_enabled": True,
+                "max_auto_hedge_quote": 5.0,
+                "auto_hedge_max_attempts": 1,
+            }
+
+            denied = await api_risk(  # type: ignore[arg-type]
+                FakeRequest(app, payload)
+            )
+            approved = await api_risk(  # type: ignore[arg-type]
+                FakeRequest(app, {**payload, "confirm_live_risk": True})
+            )
+            runtime = await state.runtime_config(cfg)
+
+        self.assertEqual(denied.status, 400)
+        self.assertIn("confirm_live_risk", denied.text)
+        self.assertEqual(approved.status, 200)
+        self.assertTrue(runtime.risk.allow_live_trading)
+        self.assertTrue(runtime.risk.auto_hedge_live_enabled)
 
     async def test_risk_update_updates_runtime_config_and_console(self) -> None:
         cfg = make_config(
@@ -6060,7 +6507,11 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     ),
                     (
                         "update_user",
-                        {"action": "update_user", "email": member.email, "role": "admin"},
+                        {
+                            "action": "update_user",
+                            "email": member.email,
+                            "role": "admin",
+                        },
                     ),
                     (
                         "delete_user",
@@ -6082,7 +6533,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            admin = store.create_user(email="admin@example.com", password="Strong-pass-1!")
+            admin = store.create_user(
+                email="admin@example.com", password="Strong-pass-1!"
+            )
             cfg = make_config(
                 web_security=WebSecurityConfig(
                     password_env=None,
@@ -6134,7 +6587,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            admin = store.create_user(email="admin@example.com", password="Strong-pass-1!")
+            admin = store.create_user(
+                email="admin@example.com", password="Strong-pass-1!"
+            )
             member = store.create_user(
                 email="member@example.com",
                 password="Strong-pass-2!",
@@ -6200,7 +6655,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             data_dir = Path(tmp)
             store_path = data_dir / "web_users.json"
             store = WebUserStore(store_path)
-            admin = store.create_user(email="admin@example.com", password="Strong-pass-1!")
+            admin = store.create_user(
+                email="admin@example.com", password="Strong-pass-1!"
+            )
             cfg = make_config(
                 web_security=WebSecurityConfig(
                     password_env=None,
@@ -6279,7 +6736,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(create_response.status, 200, create_payload)
         created_row = next(
-            row for row in create_payload["users"] if row["email"] == "trader@example.com"
+            row
+            for row in create_payload["users"]
+            if row["email"] == "trader@example.com"
         )
         self.assertEqual(created_row["allowed_assets"], ["ACS", "BTC"])
         self.assertEqual(created_row["preferred_asset"], "ACS")
@@ -6294,7 +6753,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(asset_response.status, 200, asset_payload)
         asset_row = next(
-            row for row in asset_payload["users"] if row["email"] == "trader@example.com"
+            row
+            for row in asset_payload["users"]
+            if row["email"] == "trader@example.com"
         )
         self.assertEqual(asset_row["allowed_assets"], ["ACS", "BTC"])
         self.assertEqual(asset_row["preferred_asset"], "BTC")
@@ -6658,9 +7119,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 run_id = create_payload["run"]["id"]
                 completed_payload = None
                 for _ in range(100):
-                    response = await client.get(
-                        f"/api/user-backtests?run_id={run_id}"
-                    )
+                    response = await client.get(f"/api/user-backtests?run_id={run_id}")
                     completed_payload = await response.json()
                     if completed_payload["selected"]["status"] == "complete":
                         break
@@ -6687,7 +7146,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delete.status, 200, delete_payload)
         self.assertEqual(delete_payload["backtests"]["runs"], [])
 
-    async def test_user_workspace_project_approval_and_encrypted_account_flow(self) -> None:
+    async def test_user_workspace_project_approval_and_encrypted_account_flow(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             user_store_path = data_dir / "web_users.json"
@@ -6832,6 +7293,19 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     approve_payload = await approve_response.json()
+                    admin_foreign_account_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "test_account",
+                            "account_id": account["id"],
+                        },
+                    )
+                    admin_foreign_account_payload = (
+                        await admin_foreign_account_response.json()
+                    )
+                    admin_settings_state = await (
+                        await client.get("/api/state?view=settings")
+                    ).json()
                     unregistered_owner_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -6844,7 +7318,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                             },
                         },
                     )
-                    unregistered_owner_payload = await unregistered_owner_response.json()
+                    unregistered_owner_payload = (
+                        await unregistered_owner_response.json()
+                    )
 
                     await client.get("/logout")
                     await client.post(
@@ -7042,9 +7518,24 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(premature_enable_response.status, 403)
         self.assertEqual(member_approve_response.status, 403)
         self.assertEqual(approve_response.status, 200, approve_payload)
-        self.assertEqual(approve_payload["workspace"]["projects"][0]["status"], "active")
-        self.assertEqual(unregistered_owner_response.status, 400, unregistered_owner_payload)
-        self.assertIn("not a registered user", unregistered_owner_payload["error"])
+        self.assertEqual(
+            approve_payload["workspace"]["platform_projects"][0]["status"],
+            "active",
+        )
+        self.assertEqual(
+            admin_foreign_account_response.status,
+            403,
+            admin_foreign_account_payload,
+        )
+        self.assertEqual(admin_settings_state["user_workspace"]["accounts"], [])
+        self.assertEqual(
+            admin_settings_state["user_workspace"]["platform_projects"][0]["id"],
+            project["id"],
+        )
+        self.assertEqual(
+            unregistered_owner_response.status, 403, unregistered_owner_payload
+        )
+        self.assertIn("only own their own funds", unregistered_owner_payload["error"])
         self.assertIn("ACS", persisted_member.allowed_assets)
         self.assertEqual(untested_enable_response.status, 400, untested_enable_payload)
         self.assertIn("connection test", untested_enable_payload["error"])
@@ -7055,9 +7546,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(enable_response.status, 200, enable_payload)
         self.assertTrue(enable_payload["workspace"]["accounts"][0]["enabled"])
-        self.assertTrue(
-            enable_payload["workspace"]["accounts"][0]["connection_fresh"]
-        )
+        self.assertTrue(enable_payload["workspace"]["accounts"][0]["connection_fresh"])
         self.assertEqual(strategy_response.status, 200, strategy_payload)
         self.assertEqual(strategy["status"], "paper_ready")
         self.assertTrue(strategy["effective_enabled"])
@@ -7081,7 +7570,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             400,
             account_delete_blocked_payload,
         )
-        self.assertIn("strategies using this account", account_delete_blocked_payload["error"])
+        self.assertIn(
+            "strategies using this account", account_delete_blocked_payload["error"]
+        )
         self.assertEqual(
             invalid_strategy_toggle_response.status,
             400,
@@ -7092,20 +7583,29 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             invalid_strategy_toggle_payload["error"],
         )
         self.assertEqual(pause_strategy_response.status, 200, pause_strategy_payload)
-        self.assertFalse(pause_strategy_payload["workspace"]["strategies"][0]["enabled"])
+        self.assertFalse(
+            pause_strategy_payload["workspace"]["strategies"][0]["enabled"]
+        )
         self.assertEqual(resume_strategy_response.status, 200, resume_strategy_payload)
-        self.assertTrue(resume_strategy_payload["workspace"]["strategies"][0]["enabled"])
+        self.assertTrue(
+            resume_strategy_payload["workspace"]["strategies"][0]["enabled"]
+        )
         self.assertEqual(exchange_change_response.status, 400, exchange_change_payload)
         self.assertIn("re-enter API key", exchange_change_payload["error"])
         self.assertEqual(scope_change_response.status, 200, scope_change_payload)
-        self.assertEqual(scope_change_payload["workspace"]["projects"][0]["status"], "pending")
+        self.assertEqual(
+            scope_change_payload["workspace"]["projects"][0]["status"], "pending"
+        )
         self.assertFalse(scope_change_payload["workspace"]["accounts"][0]["enabled"])
         self.assertFalse(scope_change_payload["workspace"]["strategies"][0]["enabled"])
-        self.assertEqual(settings_state["user_workspace"]["summary"]["project_count"], 1)
+        self.assertEqual(
+            settings_state["user_workspace"]["summary"]["project_count"], 1
+        )
         self.assertNotIn(b"test-api-key-value", database_bytes)
         self.assertNotIn(b"test-secret-value", database_bytes)
         self.assertNotIn(b"test-api-key-value", paper_database_bytes)
         self.assertNotIn(b"test-secret-value", paper_database_bytes)
+
 
 class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
     async def test_api_state_is_gzip_compressed_for_gzip_clients(self) -> None:
@@ -7158,9 +7658,7 @@ class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
                 await client.start_server()
                 try:
                     ico = await client.get("/favicon.ico", allow_redirects=False)
-                    svg = await client.get(
-                        "/static/favicon.svg", allow_redirects=False
-                    )
+                    svg = await client.get("/static/favicon.svg", allow_redirects=False)
                     page = await client.get("/", allow_redirects=False)
 
                     self.assertEqual(ico.status, 200)
@@ -7195,7 +7693,7 @@ class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
             stream_response.close()
 
             self.assertTrue(event.startswith(b"data: "))
-            streamed_payload = json.loads(event[len(b"data: "):].decode("utf-8"))
+            streamed_payload = json.loads(event[len(b"data: ") :].decode("utf-8"))
             self.assertEqual(
                 sorted(streamed_payload.keys()),
                 sorted(state_payload.keys()),

@@ -87,7 +87,11 @@ def _number_or_none(value: Any) -> float | None:
 
 def _day_for_trade(trade: dict[str, Any], observed_at: float) -> str:
     timestamp_ms = _number_or_none(trade.get("timestamp"))
-    timestamp = timestamp_ms / 1000 if timestamp_ms and timestamp_ms > 10_000_000_000 else timestamp_ms
+    timestamp = (
+        timestamp_ms / 1000
+        if timestamp_ms and timestamp_ms > 10_000_000_000
+        else timestamp_ms
+    )
     if timestamp is None or timestamp <= 0:
         timestamp = observed_at
     return time.strftime("%Y-%m-%d", time.localtime(timestamp))
@@ -372,3 +376,55 @@ def persist_fill_pnl(
         "stored_fill_count": stored_fill_count,
         "daily": summary,
     }
+
+
+def load_fill_rows(
+    cfg: PnlStoreConfig,
+    *,
+    day: str | None = None,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    if not cfg.enabled:
+        return []
+    target_day = day or time.strftime("%Y-%m-%d", time.localtime())
+    init_fill_store(cfg.path)
+    with closing(_connect(cfg.path)) as conn:
+        rows = conn.execute(
+            """
+            select * from fills
+            where day = ?
+            order by timestamp_ms desc, observed_at desc
+            limit ?
+            """,
+            (target_day, max(1, min(int(limit), 50_000))),
+        ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["raw_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(
+            {
+                "exchange": str(row["exchange"] or ""),
+                "symbol": str(row["symbol"] or ""),
+                "id": str(row["trade_id"] or ""),
+                "order_id": str(row["order_id"] or ""),
+                "side": str(row["side"] or ""),
+                "source": str(row["source"] or "unattributed"),
+                "base_currency": str(row["base_currency"] or ""),
+                "quote_currency": str(row["quote_currency"] or ""),
+                "price": _number_or_none(row["price"]),
+                "amount": _number_or_none(row["amount"]),
+                "cost": _number_or_none(row["cost"]),
+                "notional_common": _number_or_none(row["notional_common"]),
+                "fee_common": _number_or_none(row["fee_common"]),
+                "realized_pnl_common": _number_or_none(row["realized_pnl_common"]),
+                "timestamp": _number_or_none(row["timestamp_ms"]),
+                "observed_at": _number_or_none(row["observed_at"]),
+            }
+        )
+        result.append(payload)
+    return result

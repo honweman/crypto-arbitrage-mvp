@@ -6,7 +6,11 @@ This is a dry-run scanner for two common crypto arbitrage families:
 - Spot versus futures or perpetual basis arbitrage.
 - Single-exchange triangular spot arbitrage.
 
-The arbitrage scanner does not place live orders. It estimates executable edge from order book depth, fees, and a target notional size, then prints opportunities. The market maker command defaults to dry-run planning and requires explicit live confirmation before placing orders.
+The arbitrage scanner defaults to dry-run. Its optional live spot executor is
+guarded by global, strategy, account, balance, slippage, stale-data, and order
+budget checks. Market Maker and Auto Buy/Sell also default to non-live settings
+and require explicit confirmation plus a fresh strategy preflight before they can
+place orders.
 
 ## Quick start
 
@@ -611,17 +615,66 @@ Keep `data/` and local config files out of Git. The `alerts` block is reserved f
 }
 ```
 
+## Runtime trading safeguards
+
+- Every durable web configuration change is versioned in
+  `data/config_versions.sqlite3`. The Settings page shows the actor, diff, and
+  verification state and supports optimistic-concurrency rollback. A newly
+  started live configuration is marked known-good only after healthy strategy
+  cycles; a fresh blocked/error state restores the previous known-good version.
+- Starting or changing a live MM, Auto Buy/Sell task, or cross-exchange
+  rebalance requires a short-lived preflight token bound to the exact candidate
+  parameters and current user. The check covers risk switches, order/cycle
+  budgets, private-data freshness, API and market access, minimum order size,
+  balances, quote conversion, order-book spread/depth, conflicting orders, and
+  projected open-order count.
+- Live limit submissions with client order IDs are journaled in
+  `data/order_intents.sqlite3` before the exchange call. Repeating an intent
+  replays or recovers the original order instead of submitting a duplicate.
+  Unknown outcomes survive restart, block trading, and are never removed by
+  journal compaction. Cancel operations retry and confirm that the order is no
+  longer open.
+- Spot-arbitrage execution records final fill evidence for both legs. Unknown
+  submissions or incomplete fill reconciliation block automatic repair. An
+  optional emergency hedge can neutralize a confirmed partial/one-leg fill on
+  the filled venue, but it defaults off and has independent live, quote-cap,
+  slippage, attempt, and TTL controls.
+- The Records page groups daily fills, fees, realized P/L, fill rate, average
+  fill, slippage, submission latency, MM spread capture, inventory residual,
+  Auto Buy/Sell progress, and paper-versus-live difference by strategy instance.
+
 ## Cloud deployment and per-account IPs
 
 For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.
 
-Use the deployment helper to sync code to a systemd-based VM without overwriting runtime secrets, data, or logs:
+Use the deployment helper to perform a blue/green release on a systemd-based VM
+without overwriting runtime secrets, config, data, or logs:
 
 ```bash
 CRYPTO_ARB_DEPLOY_HOST=root@example.com scripts/deploy_cloud.sh
 ```
 
-The helper excludes `.venv`, `data`, `logs`, `config.json`, `config.acs.json`, `.DS_Store`, and Mac `._*` metadata files, then creates a timestamped backup under the remote `data/` directory before restarting the service.
+The helper alternates between `/opt/crypto-arbitrage-releases/blue` on port
+`8081` and `green` on port `8082`. It installs dependencies while the current
+release stays online, starts the candidate as a read-only standby, verifies
+`/api/health`, atomically switches nginx, and then stops the old runtime. A
+shared `flock` leader lease ensures only one release can run trading loops. If
+the candidate cannot become a healthy leader, nginx and the previous service
+are restored automatically. The first migration from the legacy port `8080`
+uses a temporary guard lease so the candidate cannot trade before the legacy
+service stops.
+
+Live files remain under `/opt/crypto-arbitrage-mvp`: `config.acs.json`, `data/`,
+and `/etc/crypto-arbitrage-mvp.env`. The helper excludes those paths from the
+release archive and saves a mode-`0600` config snapshot under `data/` before
+activation. Nginx must contain exactly one local `proxy_pass` for this service;
+the helper changes only its port and runs `nginx -t` before reload. The active
+slot is recorded in `data/active_release_slot`.
+
+The health response reports the process role (`standby`, `leader_starting`,
+`leader`, or `error`), loop status, order-intent recovery counts, and
+`safe_to_replace`. Standby releases reject mutating `/api/*` calls with HTTP
+`503` until they hold the leader lease.
 
 The same helper can run from GitHub Actions: the manual `deploy` workflow
 (Actions tab → deploy → Run workflow, confirmation input `deploy`) checks out
@@ -703,6 +756,15 @@ When `registration_enabled` is true, users register with an email verification c
 Registered users can open `Security` from the dashboard header to bind Google Authenticator or another standard TOTP application. Enabling or disabling TOTP requires both the current password and a valid six-digit code, rotates the session version, and signs out every existing session. Once enabled, every username/password login also requires the current TOTP code. A verified email password reset disables TOTP and rotates its secret so a lost authenticator device cannot permanently lock the account; the user must bind it again after recovery. Setup pages containing the TOTP secret are returned with `Cache-Control: no-store`. When `credential_master_key_env` is configured, TOTP secrets are encrypted at rest with AES-GCM using the same master key as per-user exchange credentials; existing plaintext TOTP fields are migrated atomically at service startup.
 
 Each registered user gets an isolated project workspace. A user creates a project for an asset and quote currency, then adds exchange accounts with trade-only API credentials. The account form selects the exchange, market type, API region, and actual trading pair; `Load Pairs` uses public exchange metadata and shows the reported minimum order value when available. Upbit supports both Global and Indonesia (`id.Upbit`) API regions, and Bithumb user accounts use API v2.0.
+
+Platform exchange balances, orders, P/L, strategy configuration, cancellation,
+and live controls are administrator-only. Ordinary users see only their own
+project workspace, encrypted account metadata, paper strategies, backtests, and
+P/L. Even an administrator cannot test, edit, decrypt, or run another user's
+exchange account through the user workspace API; administrators can only
+approve or disable that user's project scope. Each owner also has an independent
+paper-trading switch and caps for total exposure, daily loss, open orders, and
+active strategies.
 
 New user projects remain pending until an administrator approves the asset. Save an exchange account, run its read-only `Test` action, and only then enable it. The test reads market metadata, order book, the selected pair's base/quote balances, and open-order count; it never creates or cancels an order. A successful test is valid for 24 hours. Changing credentials, exchange, API region, market type, or pair resets the account to unverified, and stale or failed checks disable it. API secrets are write-only in the browser and encrypted at rest with AES-GCM; neither state APIs nor audit records return the secret values.
 

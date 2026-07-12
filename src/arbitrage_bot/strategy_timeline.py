@@ -96,7 +96,9 @@ def _plan_orders(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _accounts_and_symbols(plan: dict[str, Any], payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _accounts_and_symbols(
+    plan: dict[str, Any], payload: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     accounts: list[str] = []
     symbols: list[str] = []
     exchange = plan.get("exchange")
@@ -134,9 +136,7 @@ def _reason_list(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
         else {}
     )
     execution = (
-        payload.get("execution")
-        if isinstance(payload.get("execution"), dict)
-        else {}
+        payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
     )
 
     reasons: list[str] = []
@@ -183,18 +183,14 @@ def _risk_triggers(reasons: list[str]) -> list[str]:
         "free ",
     )
     return [
-        reason
-        for reason in reasons
-        if any(keyword in reason for keyword in keywords)
+        reason for reason in reasons if any(keyword in reason for keyword in keywords)
     ]
 
 
 def _action_for_status(status: str, payload: dict[str, Any]) -> str:
     event_type = str(payload.get("type", ""))
     execution = (
-        payload.get("execution")
-        if isinstance(payload.get("execution"), dict)
-        else {}
+        payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
     )
     canceled_count = int(execution.get("canceled_count", 0) or 0)
     placed_count = int(execution.get("placed_count", 0) or 0)
@@ -216,7 +212,7 @@ def _action_for_status(status: str, payload: dict[str, Any]) -> str:
         return status
     if status in {"execution_error", "cancel_retry"}:
         return status
-    if placed_count > 0 or status == "placed":
+    if placed_count > 0 or status in {"placed", "execution_repaired"}:
         return "place"
     if status == "unchanged":
         return "unchanged"
@@ -226,10 +222,7 @@ def _action_for_status(status: str, payload: dict[str, Any]) -> str:
 
 
 def _max_slippage(plan: dict[str, Any]) -> float | None:
-    values = [
-        _as_float(order.get("slippage_bps"))
-        for order in _plan_orders(plan)
-    ]
+    values = [_as_float(order.get("slippage_bps")) for order in _plan_orders(plan)]
     numbers = [value for value in values if value is not None]
     return max(numbers) if numbers else None
 
@@ -288,9 +281,7 @@ def _metrics(
     if total_quote is not None:
         metrics["total_quote_notional"] = total_quote
     execution = (
-        payload.get("execution")
-        if isinstance(payload.get("execution"), dict)
-        else {}
+        payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
     )
     for key in (
         "placed_count",
@@ -368,9 +359,7 @@ def normalize_strategy_timeline_event(event: dict[str, Any]) -> StrategyTimeline
         warnings=warnings,
         risk_triggers=_strings(event.get("risk_triggers")),
         metrics=(
-            event.get("metrics")
-            if isinstance(event.get("metrics"), dict)
-            else {}
+            event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
         ),
         source=str(event.get("source", "")),
         raw=event,
@@ -477,8 +466,12 @@ def summarize_strategy_timeline_entries(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect strategy timeline events")
-    parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
-    parser.add_argument("--limit", type=int, default=None, help="Number of rows to show")
+    parser.add_argument(
+        "--config", default="config.acs.json", help="Path to JSON config"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Number of rows to show"
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON rows")
     return parser
 

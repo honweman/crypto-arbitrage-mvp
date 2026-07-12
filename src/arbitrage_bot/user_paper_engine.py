@@ -350,18 +350,20 @@ def _apply_fill(
             0.0,
             float(wallet["base_cost_quote"]) - removed_cost,
         )
-        wallet["quote_balance"] = float(wallet["quote_balance"]) + gross_quote - fee_quote
+        wallet["quote_balance"] = (
+            float(wallet["quote_balance"]) + gross_quote - fee_quote
+        )
         realized_quote = gross_quote - fee_quote - removed_cost
     rate = float(wallet["quote_rate"])
     realized_common = realized_quote * rate
     state["fill_count"] = int(state.get("fill_count") or 0) + 1
-    state["traded_quote_common"] = float(
-        state.get("traded_quote_common") or 0.0
-    ) + gross_quote * rate
+    state["traded_quote_common"] = (
+        float(state.get("traded_quote_common") or 0.0) + gross_quote * rate
+    )
     state["fees_common"] = float(state.get("fees_common") or 0.0) + fee_quote * rate
-    state["realized_pnl_common"] = float(
-        state.get("realized_pnl_common") or 0.0
-    ) + realized_common
+    state["realized_pnl_common"] = (
+        float(state.get("realized_pnl_common") or 0.0) + realized_common
+    )
     wallet["average_cost"] = (
         float(wallet["base_cost_quote"]) / float(wallet["base_balance"])
         if float(wallet["base_balance"]) > 1e-15
@@ -456,9 +458,7 @@ def _crossed_limit_fills(
         side = str(order.get("side") or "")
         price = float(order.get("price") or 0.0)
         remaining = float(order.get("amount") or 0.0)
-        crossed = (
-            side == "buy" and book.asks[0].price <= price
-        ) or (
+        crossed = (side == "buy" and book.asks[0].price <= price) or (
             side == "sell" and book.bids[0].price >= price
         )
         if not crossed or remaining <= 0:
@@ -582,10 +582,25 @@ def _simulate_market_maker(
     )
     state["open_orders"] = funded
     if not funded:
-        return fills, "blocked_balance", "paper balances cannot fund MM orders", "blocked"
+        return (
+            fills,
+            "blocked_balance",
+            "paper balances cannot fund MM orders",
+            "blocked",
+        )
     if fills:
-        return fills, "orders_active", f"filled {len(fills)} and rebuilt MM orders", "fill"
-    return fills, "orders_active", "MM paper orders rebuilt from current book", "orders_rebuilt"
+        return (
+            fills,
+            "orders_active",
+            f"filled {len(fills)} and rebuilt MM orders",
+            "fill",
+        )
+    return (
+        fills,
+        "orders_active",
+        "MM paper orders rebuilt from current book",
+        "orders_rebuilt",
+    )
 
 
 def _simulate_grid(
@@ -628,10 +643,25 @@ def _simulate_grid(
     )
     state["open_orders"] = funded
     if not funded:
-        return fills, "blocked_balance", "paper balances cannot fund grid orders", "blocked"
+        return (
+            fills,
+            "blocked_balance",
+            "paper balances cannot fund grid orders",
+            "blocked",
+        )
     if fills:
-        return fills, "orders_active", f"filled {len(fills)} and rebuilt grid orders", "fill"
-    return fills, "orders_active", "grid paper orders rebuilt from current book", "orders_rebuilt"
+        return (
+            fills,
+            "orders_active",
+            f"filled {len(fills)} and rebuilt grid orders",
+            "fill",
+        )
+    return (
+        fills,
+        "orders_active",
+        "grid paper orders rebuilt from current book",
+        "orders_rebuilt",
+    )
 
 
 def _simulate_directional(
@@ -662,7 +692,12 @@ def _simulate_directional(
             or (side == "sell" and price <= stop_price)
         ):
             state["terminal"] = True
-            return [], "stopped_by_price", "configured stop price was reached", "stopped"
+            return (
+                [],
+                "stopped_by_price",
+                "configured stop price was reached",
+                "stopped",
+            )
         start_price = float(parameters["start_price"])
         if start_price > 0 and (
             (side == "buy" and price > start_price)
@@ -673,7 +708,11 @@ def _simulate_directional(
         wallet = state["wallets"][account.id]
         average_cost = float(wallet.get("average_cost") or 0.0)
         take_profit_pct = float(parameters["take_profit_pct"])
-        if int(state.get("fill_count") or 0) > 0 and average_cost > 0 and take_profit_pct > 0:
+        if (
+            int(state.get("fill_count") or 0) > 0
+            and average_cost > 0
+            and take_profit_pct > 0
+        ):
             take_profit_reached = (
                 side == "buy"
                 and book.bids[0].price >= average_cost * (1 + take_profit_pct / 100)
@@ -683,7 +722,12 @@ def _simulate_directional(
             )
             if take_profit_reached:
                 state["terminal"] = True
-                return [], "complete", "DCA take-profit condition was reached", "complete"
+                return (
+                    [],
+                    "complete",
+                    "DCA take-profit condition was reached",
+                    "complete",
+                )
         trigger_price = float(parameters["trigger_price"])
         if trigger_price > 0 and (
             (side == "buy" and price > trigger_price)
@@ -723,7 +767,12 @@ def _simulate_directional(
         fill_kind=strategy.strategy_type,
     )
     if fill is None:
-        return [], "blocked_balance", error or "paper balance is insufficient", "blocked"
+        return (
+            [],
+            "blocked_balance",
+            error or "paper balance is insufficient",
+            "blocked",
+        )
     state["strategy_filled_quote"] = filled_quote + estimate.gross_quote
     state["remaining_quote"] = max(
         0.0,
@@ -787,7 +836,13 @@ def _simulate_spot_spread(
     }
     project_rate = quote_rates.get(project.quote_currency)
     if project_rate is None:
-        return [], "blocked_quote_rate", "project quote rate is unavailable", "blocked", {}
+        return (
+            [],
+            "blocked_quote_rate",
+            "project quote rate is unavailable",
+            "blocked",
+            {},
+        )
     opportunities = find_converted_spot_spread_opportunities(
         keyed_books,
         configs,
@@ -799,14 +854,26 @@ def _simulate_spot_spread(
         common_quote_currency=common_quote_currency,
     )
     if not opportunities:
-        return [], "waiting", "no spread exceeds the configured paper threshold", "waiting", {}
+        return (
+            [],
+            "waiting",
+            "no spread exceeds the configured paper threshold",
+            "waiting",
+            {},
+        )
     opportunity = opportunities[0]
     max_slippage = float(strategy.risk["max_slippage_bps"])
     for leg in opportunity.legs:
         account = account_by_key[leg.exchange]
         book = books[account.id]
         if _slippage_bps(book, leg.side, leg.average_price) > max_slippage:
-            return [], "blocked_slippage", "arbitrage leg exceeds max slippage", "blocked", {}
+            return (
+                [],
+                "blocked_slippage",
+                "arbitrage leg exceeds max slippage",
+                "blocked",
+                {},
+            )
 
     candidate_state = copy.deepcopy(state)
     candidate_fills: list[dict[str, Any]] = []
@@ -824,7 +891,13 @@ def _simulate_spot_spread(
             fill_kind="spot_spread",
         )
         if fill is None:
-            return [], "blocked_balance", error or "arbitrage paper balance is insufficient", "blocked", {}
+            return (
+                [],
+                "blocked_balance",
+                error or "arbitrage paper balance is insufficient",
+                "blocked",
+                {},
+            )
         candidate_fills.append(fill)
     state.clear()
     state.update(candidate_state)
@@ -1030,7 +1103,9 @@ def simulate_user_paper_cycle(
             "reason": reason,
             "last_cycle_at": cycle_at,
             "next_due_at": (
-                None if state.get("terminal") else cycle_at + _strategy_interval(strategy)
+                None
+                if state.get("terminal")
+                else cycle_at + _strategy_interval(strategy)
             ),
             "updated_at": cycle_at,
         }
@@ -1066,12 +1141,16 @@ def _nonrunning_state(
     common_quote_currency: str,
     now: float,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    state = copy.deepcopy(existing_state) if existing_state is not None else _new_state(
-        strategy,
-        project,
-        fingerprint="pending",
-        now=now,
-        common_quote_currency=common_quote_currency,
+    state = (
+        copy.deepcopy(existing_state)
+        if existing_state is not None
+        else _new_state(
+            strategy,
+            project,
+            fingerprint="pending",
+            now=now,
+            common_quote_currency=common_quote_currency,
+        )
     )
     state.update(
         {
@@ -1239,6 +1318,60 @@ class UserPaperTradingService:
                 owner_email="paper@localhost",
                 is_admin=True,
             )
+            enabled_by_owner: dict[str, list[UserStrategy]] = {}
+            for strategy in strategies:
+                if strategy.enabled:
+                    enabled_by_owner.setdefault(strategy.owner_email, []).append(
+                        strategy
+                    )
+            owner_risk_blockers: dict[str, str] = {}
+            for owner, owner_strategies in enabled_by_owner.items():
+                profile = self.workspace_store.risk_profile(owner)
+                if not profile.trading_enabled:
+                    owner_risk_blockers[owner] = "user risk trading switch is disabled"
+                    continue
+                if (
+                    profile.max_active_strategies > 0
+                    and len(owner_strategies) > profile.max_active_strategies
+                ):
+                    owner_risk_blockers[owner] = (
+                        "user max active strategies limit is exceeded"
+                    )
+                    continue
+                exposure = sum(
+                    float(item.risk.get("max_total_quote") or 0.0)
+                    for item in owner_strategies
+                )
+                if (
+                    profile.max_total_exposure_quote > 0
+                    and exposure > profile.max_total_exposure_quote
+                ):
+                    owner_risk_blockers[owner] = (
+                        "user max total exposure quote is exceeded"
+                    )
+                    continue
+                open_order_limit = sum(
+                    int(item.risk.get("max_open_orders") or 0)
+                    for item in owner_strategies
+                )
+                if (
+                    profile.max_open_orders > 0
+                    and open_order_limit > profile.max_open_orders
+                ):
+                    owner_risk_blockers[owner] = (
+                        "user max open orders limit is exceeded"
+                    )
+                    continue
+                if profile.max_daily_loss_quote > 0:
+                    paper = self.paper_store.public_payload(
+                        owner_email=owner,
+                        is_admin=False,
+                    )
+                    daily_pnl = float(
+                        (paper.get("summary") or {}).get("daily_pnl_common") or 0.0
+                    )
+                    if daily_pnl <= -profile.max_daily_loss_quote:
+                        owner_risk_blockers[owner] = "user max daily loss is reached"
             jobs: list[
                 tuple[
                     UserStrategy,
@@ -1273,6 +1406,30 @@ class UserPaperTradingService:
                                 strategy,
                                 state,
                                 paused,
+                                event=event,
+                            )
+                        except UserPaperStateConflict:
+                            conflicts += 1
+                        else:
+                            processed += 1
+                    continue
+                user_risk_reason = owner_risk_blockers.get(strategy.owner_email)
+                if user_risk_reason:
+                    if state is None or state.get("status") != "blocked_user_risk":
+                        blocked, event = _nonrunning_state(
+                            strategy,
+                            project,
+                            state,
+                            status="blocked_user_risk",
+                            reason=user_risk_reason,
+                            common_quote_currency=self.common_quote_currency,
+                            now=cycle_at,
+                        )
+                        try:
+                            self._persist_current_cycle(
+                                strategy,
+                                state,
+                                blocked,
                                 event=event,
                             )
                         except UserPaperStateConflict:
@@ -1332,9 +1489,7 @@ class UserPaperTradingService:
             ] = {}
             account_market_keys: dict[str, tuple[str, str, str, str]] = {}
             for account in (
-                account
-                for _, _, accounts, _ in jobs
-                for account in accounts
+                account for _, _, accounts, _ in jobs for account in accounts
             ):
                 market_key = (
                     account.exchange,

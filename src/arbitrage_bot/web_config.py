@@ -65,8 +65,7 @@ def market_maker_config_to_dict(cfg: MarketMakerConfig) -> dict[str, Any]:
 def market_maker_expected_instance_id(cfg: MarketMakerConfig) -> str:
     seed = f"{cfg.exchange}-{cfg.symbol}" if cfg.exchange and cfg.symbol else "default"
     normalized = "".join(
-        character.lower() if character.isalnum() else "-"
-        for character in seed
+        character.lower() if character.isalnum() else "-" for character in seed
     )
     normalized = "-".join(part for part in normalized.split("-") if part)
     return normalized or "default"
@@ -246,7 +245,9 @@ def _account_market_rows(
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
         market = lookup.get((exchange.key, symbol))
-        asset = market.asset.upper() if market and market.asset else _symbol_asset(symbol)
+        asset = (
+            market.asset.upper() if market and market.asset else _symbol_asset(symbol)
+        )
         quote = (
             market.quote_currency.upper()
             if market and market.quote_currency
@@ -283,11 +284,7 @@ def strategy_universe_to_dict(cfg: BotConfig) -> dict[str, Any]:
         derivative_symbols,
     )
     all_exchanges = [*cfg.spot_exchanges, *cfg.derivative_exchanges]
-    assets = {
-        market.asset.upper()
-        for market in cfg.spot_markets
-        if market.asset
-    }
+    assets = {market.asset.upper() for market in cfg.spot_markets if market.asset}
     for symbols in all_symbols.values():
         assets.update(_symbol_asset(symbol) for symbol in symbols if symbol)
     return {
@@ -381,9 +378,7 @@ def _slow_execution_overrides_from_payload(
     if "depth_simulation_enabled" in payload:
         if not isinstance(payload["depth_simulation_enabled"], bool):
             raise ValueError("depth_simulation_enabled must be a boolean")
-        overrides["depth_simulation_enabled"] = payload[
-            "depth_simulation_enabled"
-        ]
+        overrides["depth_simulation_enabled"] = payload["depth_simulation_enabled"]
 
     if "exchange" in payload:
         exchange = str(payload["exchange"]).strip()
@@ -528,11 +523,7 @@ def _rebalance_route_overrides_from_payload(
             else:
                 raise ValueError(f"{symbol_field} is required")
         selected_exchange = overrides.get(exchange_field)
-        if (
-            symbol
-            and selected_exchange
-            and symbols_by_exchange.get(selected_exchange)
-        ):
+        if symbol and selected_exchange and symbols_by_exchange.get(selected_exchange):
             if symbol not in symbols_by_exchange[selected_exchange]:
                 raise ValueError(f"symbol is not configured for account: {symbol}")
         if symbol:
@@ -605,9 +596,7 @@ def cross_exchange_rebalance_config_from_payload(
     if "coordination_timeout_seconds" in overrides:
         timeout = overrides["coordination_timeout_seconds"]
         if timeout < 1 or timeout > 300:
-            raise ValueError(
-                "coordination_timeout_seconds must be between 1 and 300"
-            )
+            raise ValueError("coordination_timeout_seconds must be between 1 and 300")
 
     config = replace(base_config or CrossExchangeRebalanceConfig(), **overrides)
     if config.live_enabled and not config.enabled:
@@ -999,7 +988,9 @@ def _execution_algo_overrides_from_payload(
     max_slice = overrides.get("max_slice_quote")
     if min_slice is not None and max_slice is not None and max_slice > 0:
         if min_slice > max_slice:
-            raise ValueError("min_slice_quote must be less than or equal to max_slice_quote")
+            raise ValueError(
+                "min_slice_quote must be less than or equal to max_slice_quote"
+            )
 
     return overrides
 
@@ -1329,6 +1320,10 @@ def _risk_overrides_from_payload(
         if not isinstance(payload["allow_live_trading"], bool):
             raise ValueError("allow_live_trading must be a boolean")
         overrides["allow_live_trading"] = payload["allow_live_trading"]
+    if "auto_hedge_live_enabled" in payload:
+        if not isinstance(payload["auto_hedge_live_enabled"], bool):
+            raise ValueError("auto_hedge_live_enabled must be a boolean")
+        overrides["auto_hedge_live_enabled"] = payload["auto_hedge_live_enabled"]
 
     account_enabled = _bool_map_from_payload(
         payload,
@@ -1369,6 +1364,9 @@ def _risk_overrides_from_payload(
         "max_derivative_leverage",
         "min_liquidation_buffer_pct",
         "max_margin_usage_pct",
+        "max_auto_hedge_quote",
+        "auto_hedge_slippage_bps",
+        "auto_hedge_order_ttl_seconds",
     }
     for field in float_fields:
         if field in payload:
@@ -1378,9 +1376,15 @@ def _risk_overrides_from_payload(
         "max_orders_per_cycle",
         "max_open_orders",
         "max_cancels_per_cycle",
+        "auto_hedge_max_attempts",
     }
     for field in int_fields:
         if field in payload:
             overrides[field] = _non_negative_int(payload, field)
+    if (
+        "auto_hedge_max_attempts" in overrides
+        and overrides["auto_hedge_max_attempts"] <= 0
+    ):
+        raise ValueError("auto_hedge_max_attempts must be positive")
 
     return overrides

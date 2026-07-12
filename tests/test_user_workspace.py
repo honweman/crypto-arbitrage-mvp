@@ -12,6 +12,7 @@ from arbitrage_bot.user_workspace import (
     CredentialCipher,
     UserExchangeAccount,
     UserProject,
+    UserRiskProfile,
     UserWorkspaceStore,
 )
 from arbitrage_bot.user_strategies import UserStrategy
@@ -21,10 +22,49 @@ MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_user_risk_profile_is_owner_scoped_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env=None,
+            )
+            saved = store.upsert_risk_profile(
+                UserRiskProfile.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "trading_enabled": False,
+                        "max_total_exposure_quote": 250.0,
+                        "max_daily_loss_quote": 20.0,
+                        "max_open_orders": 12,
+                        "max_active_strategies": 3,
+                    }
+                )
+            )
+            other = store.risk_profile("other@example.com")
+            payload = store.public_payload(
+                owner_email="trader@example.com",
+                is_admin=False,
+            )
+
+        self.assertFalse(saved.trading_enabled)
+        self.assertEqual(payload["risk_profile"]["max_open_orders"], 12)
+        self.assertTrue(other.trading_enabled)
+        self.assertEqual(other.max_total_exposure_quote, 0.0)
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            UserRiskProfile.from_dict(
+                {
+                    "owner_email": "trader@example.com",
+                    "max_daily_loss_quote": -1,
+                }
+            )
+
     def test_project_readiness_guides_each_onboarding_step(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             store = UserWorkspaceStore(
                 Path(tmp) / "workspace.sqlite3",
@@ -72,7 +112,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 account_row["readiness"]["next_action"]["code"],
                 "test_connection",
             )
-            self.assertEqual(account_row["readiness"]["completed_steps"], 5)
+            self.assertEqual(account_row["readiness"]["completed_steps"], 6)
 
             account = store.update_account_connection(account.id, status="healthy")
             payload = store.public_payload(
@@ -127,12 +167,14 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 UserStrategy.from_dict({**strategy.to_dict(), "enabled": True})
             )
             original_connect = store._connect
-            with patch.object(store, "_connect", side_effect=original_connect) as connect:
+            with patch.object(
+                store, "_connect", side_effect=original_connect
+            ) as connect:
                 payload = store.public_payload(
                     owner_email=project.owner_email,
                     is_admin=False,
                 )
-            self.assertLessEqual(connect.call_count, 4)
+            self.assertLessEqual(connect.call_count, 5)
 
         self.assertTrue(payload["projects"][0]["readiness"]["ready"])
         self.assertEqual(payload["summary"]["ready_project_count"], 1)
@@ -145,7 +187,9 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             "project_id": "project-acs",
             "exchange": "coinbase",
         }
-        with self.assertRaisesRegex(ValueError, "account enabled must be true or false"):
+        with self.assertRaisesRegex(
+            ValueError, "account enabled must be true or false"
+        ):
             UserExchangeAccount.from_dict({**base, "enabled": "false"})
         with self.assertRaisesRegex(
             ValueError,
@@ -156,9 +200,12 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             )
 
     def test_encrypts_credentials_and_public_payload_never_returns_values(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             path = Path(tmp) / "workspace.sqlite3"
             store = UserWorkspaceStore(
@@ -214,7 +261,9 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertNotIn(b"private-key-secret-value", database_bytes)
         self.assertNotIn(b"organizations/test/apiKeys/key-id", database_bytes)
 
-    def test_account_credentials_require_master_key_and_no_withdrawal_permission(self) -> None:
+    def test_account_credentials_require_master_key_and_no_withdrawal_permission(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = UserWorkspaceStore(
                 Path(tmp) / "workspace.sqlite3",
@@ -254,9 +303,12 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 )
 
     def test_projects_and_accounts_are_filtered_by_owner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             store = UserWorkspaceStore(
                 Path(tmp) / "workspace.sqlite3",
@@ -334,10 +386,15 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             self.assertIsNone(store.get_project(project.id))
             self.assertIsNone(store.get_account(account.id))
 
-    def test_disabling_project_disables_child_accounts_without_deleting_credentials(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+    def test_disabling_project_disables_child_accounts_without_deleting_credentials(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             store = UserWorkspaceStore(
                 Path(tmp) / "workspace.sqlite3",
@@ -377,10 +434,15 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertFalse(disabled.enabled)
         self.assertEqual(credentials, {"api_key": "key", "secret": "secret"})
 
-    def test_connection_error_disables_account_and_keeps_credentials_encrypted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+    def test_connection_error_disables_account_and_keeps_credentials_encrypted(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             store = UserWorkspaceStore(
                 Path(tmp) / "workspace.sqlite3",
@@ -463,9 +525,12 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertFalse(migrated.enabled)
 
     def test_stale_healthy_connection_is_disabled_on_read_without_restart(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_WORKSPACE_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             path = Path(tmp) / "workspace.sqlite3"
             store = UserWorkspaceStore(

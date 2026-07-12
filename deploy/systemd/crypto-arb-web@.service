@@ -1,0 +1,23 @@
+[Unit]
+Description=Crypto Arbitrage Web (%i blue/green slot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cryptoarb
+Group=cryptoarb
+WorkingDirectory=/opt/crypto-arbitrage-mvp
+EnvironmentFile=-/etc/crypto-arbitrage-mvp.env
+EnvironmentFile=/etc/crypto-arbitrage-mvp-%i.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0027
+ExecStart=/opt/crypto-arbitrage-releases/%i/.venv/bin/python -m arbitrage_bot.web --config /opt/crypto-arbitrage-mvp/config.acs.json --strategy all --host 127.0.0.1 --port ${CRYPTO_ARB_PORT}
+Restart=always
+RestartSec=3
+TimeoutStopSec=60
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

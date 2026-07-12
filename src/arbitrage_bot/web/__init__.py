@@ -25,10 +25,20 @@ from .auth_views import (
     login_html as _login_html,
     register_html as _register_html,
 )
+from .deployment import (
+    RuntimeLeaderLease,
+    RuntimeSupervisor,
+    deployment_mutation_middleware,
+    zero_downtime_enabled,
+)
 from .render_payloads import (
     STATE_VIEW_IDS,
     state_payload_for_view,
     strategy_center_payload_for_view,
+)
+from .strategy_preflight import (
+    StrategyPreflightService,
+    build_strategy_preflight,
 )
 from .users import (
     WebUser,
@@ -142,7 +152,7 @@ from ..cross_exchange_rebalancer import (
 from ..derivatives import derivative_account_summary, normalize_derivative_position
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
-from ..fill_store import load_daily_pnl_summary, persist_fill_pnl
+from ..fill_store import load_daily_pnl_summary, load_fill_rows, persist_fill_pnl
 from ..funding_basis import funding_basis_payload, funding_settings_from_strategy_center
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
 from ..jsonl_rotation import rotate_jsonl_log_if_needed
@@ -197,6 +207,7 @@ from ..solana import (
     update_holder_history,
 )
 from ..spot_arbitrage_executor import run_spot_arbitrage_execution_cycle
+from ..strategy_performance import build_strategy_performance_payload
 from ..strategy_center import (
     FundingArbitrageSettings,
     SignalBotSettings,
@@ -233,6 +244,7 @@ from ..user_strategies import UserStrategy
 from ..user_workspace import (
     UserExchangeAccount,
     UserProject,
+    UserRiskProfile,
     UserWorkspaceStore,
     account_connection_is_fresh,
 )
@@ -302,6 +314,12 @@ STRATEGY_IDS = {
     "signal_bot",
 }
 
+
+def _config_actor_email(request: web.Request) -> str:
+    user = _request_user(request)
+    return user.email if user is not None else "legacy-admin"
+
+
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
@@ -316,7 +334,9 @@ APP_JS = _read_web_asset(STATIC_DIR / "app.js")
 STYLES_CSS = _read_web_asset(STATIC_DIR / "styles.css")
 
 
-def _top_level(book: OrderBookSnapshot | None, side: str) -> tuple[float | None, float | None]:
+def _top_level(
+    book: OrderBookSnapshot | None, side: str
+) -> tuple[float | None, float | None]:
     if book is None:
         return (None, None)
     levels = book.bids if side == "bid" else book.asks
@@ -347,8 +367,12 @@ def build_market_rows(
                 "ask": ask,
                 "bid_size": bid_size,
                 "ask_size": ask_size,
-                "bid_common": bid * rate if bid is not None and rate is not None else None,
-                "ask_common": ask * rate if ask is not None and rate is not None else None,
+                "bid_common": bid * rate
+                if bid is not None and rate is not None
+                else None,
+                "ask_common": ask * rate
+                if ask is not None and rate is not None
+                else None,
                 "timestamp_ms": book.timestamp_ms if book is not None else None,
             }
         )
@@ -405,18 +429,14 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     except OSError as exc:
         recent_entries = []
         trade_log_error = str(exc)
-    compact_entries = [
-        _compact_trade_log_entry(entry) for entry in recent_entries
-    ]
+    compact_entries = [_compact_trade_log_entry(entry) for entry in recent_entries]
     trade_log_payload = asdict(cfg.trade_log)
     trade_log_payload["recent_entries"] = compact_entries
     trade_log_payload["recent_events"] = compact_entries
     trade_log_payload["summary"] = summarize_trade_entries(recent_entries)
     trade_log_payload["error"] = trade_log_error
     try:
-        timeline_entries = read_recent_strategy_timeline_entries(
-            cfg.strategy_timeline
-        )
+        timeline_entries = read_recent_strategy_timeline_entries(cfg.strategy_timeline)
         timeline_error = None
     except OSError as exc:
         timeline_entries = []
@@ -427,9 +447,7 @@ def build_operations_payload(cfg: BotConfig) -> dict[str, Any]:
     timeline_payload = asdict(cfg.strategy_timeline)
     timeline_payload["recent_entries"] = compact_timeline_entries
     timeline_payload["recent_events"] = compact_timeline_entries
-    timeline_payload["summary"] = summarize_strategy_timeline_entries(
-        timeline_entries
-    )
+    timeline_payload["summary"] = summarize_strategy_timeline_entries(timeline_entries)
     timeline_payload["error"] = timeline_error
     audit_path = default_web_audit_path(cfg)
     try:
@@ -497,7 +515,9 @@ def build_trading_console_payload(
         if exchange:
             open_counts[exchange] = open_counts.get(exchange, 0) + 1
 
-    live_base = cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+    live_base = (
+        cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+    )
     accounts = [
         {
             "key": exchange.key,
@@ -765,11 +785,15 @@ def _exchange_balance_symbols(
             symbols.setdefault(exchange.key, set()).add(pair.derivative_symbol)
 
     if cfg.market_maker.exchange and cfg.market_maker.symbol:
-        symbols.setdefault(cfg.market_maker.exchange, set()).add(cfg.market_maker.symbol)
+        symbols.setdefault(cfg.market_maker.exchange, set()).add(
+            cfg.market_maker.symbol
+        )
 
     runtime_exec_cfg = cfg.slow_execution if exec_cfg is None else exec_cfg
     if runtime_exec_cfg.exchange and runtime_exec_cfg.symbol:
-        symbols.setdefault(runtime_exec_cfg.exchange, set()).add(runtime_exec_cfg.symbol)
+        symbols.setdefault(runtime_exec_cfg.exchange, set()).add(
+            runtime_exec_cfg.symbol
+        )
 
     for exchange, symbol in (
         (
@@ -814,7 +838,9 @@ def _exchange_balance_symbols(
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
-def _account_payload_by_exchange(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+def _account_payload_by_exchange(
+    payload: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
     return {
         str(account.get("exchange") or ""): account
         for account in (payload or {}).get("accounts", []) or []
@@ -989,7 +1015,11 @@ def _readiness_strategy_reasons(
         reasons.append(f"account {account['status']}: {account_reason}")
 
     if strategy_id == "market_maker" and isinstance(market_maker, dict):
-        safety = market_maker.get("safety") if isinstance(market_maker.get("safety"), dict) else {}
+        safety = (
+            market_maker.get("safety")
+            if isinstance(market_maker.get("safety"), dict)
+            else {}
+        )
         if market_maker.get("status") == "error" and market_maker.get("error"):
             reasons.append(str(market_maker["error"]))
         for message in list(safety.get("reasons", []) or [])[:2]:
@@ -1063,12 +1093,20 @@ def build_readiness_payload(
         orders = order_by_exchange.get(exchange.key, {})
         balance_status = str(
             balance.get("status")
-            or (account_balances.get("status") if account_balances.get("accounts") else "starting")
+            or (
+                account_balances.get("status")
+                if account_balances.get("accounts")
+                else "starting"
+            )
             or "starting"
         )
         order_status = str(
             orders.get("status")
-            or (order_activity.get("status") if order_activity.get("accounts") else "starting")
+            or (
+                order_activity.get("status")
+                if order_activity.get("accounts")
+                else "starting"
+            )
             or "starting"
         )
         derivative_account = derivative_by_exchange.get(exchange.key, {})
@@ -1084,13 +1122,21 @@ def build_readiness_payload(
         if used and not risk_enabled:
             reasons.append("account disabled by risk")
         if used and balance_status == "error":
-            reasons.extend(_account_payload_messages(balance) or ["balance check failed"])
+            reasons.extend(
+                _account_payload_messages(balance) or ["balance check failed"]
+            )
         elif used and balance_status == "warning":
-            reasons.extend(_account_payload_messages(balance) or ["balance check warning"])
+            reasons.extend(
+                _account_payload_messages(balance) or ["balance check warning"]
+            )
         if used and order_status == "error":
-            reasons.extend(_account_payload_messages(orders) or ["order activity failed"])
+            reasons.extend(
+                _account_payload_messages(orders) or ["order activity failed"]
+            )
         elif used and order_status == "warning":
-            reasons.extend(_account_payload_messages(orders) or ["order activity warning"])
+            reasons.extend(
+                _account_payload_messages(orders) or ["order activity warning"]
+            )
         if used and derivative_status == "error":
             reasons.extend(
                 _derivative_account_messages(derivative_account)
@@ -1175,9 +1221,7 @@ def build_readiness_payload(
             execution_algo=execution_algo,
             backtest=backtest,
         )
-        if strategy.get("configured") and not strategy.get(
-            "strategy_allowed", True
-        ):
+        if strategy.get("configured") and not strategy.get("strategy_allowed", True):
             status = "disabled"
         elif (
             strategy.get("mode") in {"paper", "research"}
@@ -1213,7 +1257,9 @@ def build_readiness_payload(
         else {}
     )
     market_missing_count = sum(
-        1 for row in markets or [] if isinstance(row, dict) and row.get("status") != "ok"
+        1
+        for row in markets or []
+        if isinstance(row, dict) and row.get("status") != "ok"
     )
     ready_accounts = sum(1 for row in account_rows if row["status"] == "ready")
     used_accounts = sum(1 for row in account_rows if row["used"])
@@ -1264,7 +1310,9 @@ def build_readiness_payload(
         or derivative_checks_status in checking_statuses
     ):
         status = "checking"
-    elif not (cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading):
+    elif not (
+        cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+    ):
         status = "guarded"
     elif (
         blocked_accounts
@@ -1366,7 +1414,9 @@ def build_readiness_payload(
     if order_activity.get("status") in {"warning", "error"}:
         next_actions.append(
             _readiness_action(
-                priority="medium" if order_activity.get("status") == "warning" else "high",
+                priority="medium"
+                if order_activity.get("status") == "warning"
+                else "high",
                 scope="Orders",
                 action="Review order activity warnings",
                 status=str(order_activity.get("status")),
@@ -1386,7 +1436,11 @@ def build_readiness_payload(
                 ),
             )
         )
-    if protection_blocked_count or protection_warning_count or protection_manual_review_count:
+    if (
+        protection_blocked_count
+        or protection_warning_count
+        or protection_manual_review_count
+    ):
         protection_reasons = execution_protection.get("top_reasons") or []
         next_actions.append(
             _readiness_action(
@@ -1443,14 +1497,18 @@ def build_readiness_payload(
         "risk_enabled": cfg.risk.enabled,
         "trading_enabled": cfg.risk.trading_enabled,
         "live_trading": (
-            cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+            cfg.risk.enabled
+            and cfg.risk.trading_enabled
+            and cfg.risk.allow_live_trading
         ),
         "accounts": account_rows,
         "strategies": strategy_rows,
         "balance_checks": {
             "status": account_balances.get("status") or "starting",
             "checked_account_count": account_balances.get("checked_account_count", 0),
-            "total_account_count": account_balances.get("total_account_count", len(account_rows)),
+            "total_account_count": account_balances.get(
+                "total_account_count", len(account_rows)
+            ),
         },
         "order_checks": {
             "status": order_activity.get("status") or "starting",
@@ -1474,14 +1532,18 @@ def build_readiness_payload(
             "configured_strategies": configured_strategies,
             "live_strategies": live_strategies,
             "blocked_strategies": blocked_strategies,
-            "paused_strategies": sum(1 for row in strategy_rows if row["status"] == "paused"),
+            "paused_strategies": sum(
+                1 for row in strategy_rows if row["status"] == "paused"
+            ),
             "execution_protection_blocked_count": protection_blocked_count,
             "execution_protection_warning_count": protection_warning_count,
             "execution_protection_manual_review_count": protection_manual_review_count,
             "derivative_blocked_account_count": derivative_blocked_count,
             "derivative_warning_account_count": derivative_warning_count,
             "derivative_position_count": derivative_readiness["position_count"],
-            "blocked_count": blocked_accounts + blocked_strategies + protection_blocked_count,
+            "blocked_count": blocked_accounts
+            + blocked_strategies
+            + protection_blocked_count,
             "warning_count": warning_count,
             "warning_messages": list(warnings or [])[:6],
             "action_count": len(unique_actions),
@@ -1547,7 +1609,9 @@ def _open_order_price(raw: dict[str, Any]) -> float | None:
     return None
 
 
-def _add_reserve(reserves: dict[str, float], currency: str, amount: float | None) -> None:
+def _add_reserve(
+    reserves: dict[str, float], currency: str, amount: float | None
+) -> None:
     if not currency or amount is None or amount <= 0:
         return
     reserves[currency] = reserves.get(currency, 0.0) + float(amount)
@@ -1586,7 +1650,9 @@ async def _fetch_open_order_reserves(
                 _add_reserve(
                     reserves,
                     quote,
-                    remaining * price if remaining is not None and price is not None else None,
+                    remaining * price
+                    if remaining is not None and price is not None
+                    else None,
                 )
     return {
         "currencies": dict(sorted(reserves.items())),
@@ -1883,8 +1949,12 @@ async def fetch_derivatives_risk_payload(
     return {
         "status": _derivatives_status(accounts),
         "accounts": accounts,
-        "position_count": sum(len(account.get("positions", [])) for account in accounts),
-        "checked_account_count": sum(1 for account in accounts if account.get("checked")),
+        "position_count": sum(
+            len(account.get("positions", [])) for account in accounts
+        ),
+        "checked_account_count": sum(
+            1 for account in accounts if account.get("checked")
+        ),
         "total_account_count": len(accounts),
         "funding_rate_count": len(funding_rates),
         "limits": {
@@ -2331,6 +2401,7 @@ async def fetch_order_activity_payload(
             recent_trades,
             currency=cfg.common_quote_currency,
         )
+        performance_fills = load_fill_rows(cfg.pnl_store) or recent_trades
         pnl_store_warnings: list[str] = []
     except Exception as exc:  # noqa: BLE001
         pnl_store_payload = {
@@ -2351,7 +2422,15 @@ async def fetch_order_activity_payload(
             },
             "error": str(exc),
         }
+        performance_fills = recent_trades
         pnl_store_warnings = [f"fill P/L store unavailable: {exc}"]
+    strategy_performance = build_strategy_performance_payload(
+        recent_log_entries,
+        performance_fills,
+        currency=cfg.common_quote_currency,
+        market_maker_runtime=market_maker_runtime,
+        auto_buy_sell_tasks=auto_buy_sell_tasks,
+    )
     errors = [
         f"{account['exchange']}: {error}"
         for account in accounts
@@ -2380,6 +2459,7 @@ async def fetch_order_activity_payload(
         "pnl_summary": pnl_summary,
         "pnl_store": pnl_store_payload,
         "daily_pnl": pnl_store_payload.get("daily"),
+        "strategy_performance": strategy_performance,
         "open_order_count": len(open_orders),
         "closed_order_count": len(closed_orders),
         "recent_trade_count": len(recent_trades),
@@ -2388,6 +2468,11 @@ async def fetch_order_activity_payload(
         "last_finished": time.time(),
         "errors": errors,
         "warnings": warnings,
+        "reliability": (
+            manager.order_reliability_summary()
+            if callable(getattr(manager, "order_reliability_summary", None))
+            else {"enabled": False, "pending_count": 0, "total_count": 0}
+        ),
     }
     base_payload["reconciliation"] = build_order_reconciliation_payload(
         base_payload,
@@ -2423,7 +2508,9 @@ async def cancel_order_payload(
         raise ValueError("order_id is required")
 
     exchange = _find_exchange_by_key(cfg, exchange_key)
-    allowed_symbols = set(_exchange_balance_symbols(cfg, exec_cfg).get(exchange.key, []))
+    allowed_symbols = set(
+        _exchange_balance_symbols(cfg, exec_cfg).get(exchange.key, [])
+    )
     if symbol not in allowed_symbols:
         raise ValueError(f"symbol is not configured for account: {symbol}")
     auth = _auth_env_status(exchange)
@@ -2500,7 +2587,9 @@ async def cancel_bulk_orders_payload(
         raise ValueError("exchange is required for account scope")
 
     allowed_symbols = _exchange_balance_symbols(cfg, exec_cfg)
-    exchanges_by_key = {exchange.key: exchange for exchange in _all_account_exchanges(cfg)}
+    exchanges_by_key = {
+        exchange.key: exchange for exchange in _all_account_exchanges(cfg)
+    }
     if exchange_key and exchange_key not in exchanges_by_key:
         raise ValueError(f"unknown exchange account: {exchange_key}")
 
@@ -2524,7 +2613,9 @@ async def cancel_bulk_orders_payload(
             errors.append({"order": order, "error": "order id is missing"})
             continue
         if symbol not in allowed_symbols.get(order_exchange, []):
-            errors.append({"order": order, "error": f"symbol is not configured: {symbol}"})
+            errors.append(
+                {"order": order, "error": f"symbol is not configured: {symbol}"}
+            )
             continue
         try:
             exchange = exchanges_by_key[order_exchange]
@@ -2657,9 +2748,7 @@ def default_user_workspace_path(cfg: BotConfig) -> str:
 
 def default_user_paper_trading_path(cfg: BotConfig) -> str:
     return str(
-        Path(default_user_workspace_path(cfg)).with_name(
-            "user_paper_trading.sqlite3"
-        )
+        Path(default_user_workspace_path(cfg)).with_name("user_paper_trading.sqlite3")
     )
 
 
@@ -2736,7 +2825,7 @@ def build_user_workspace_payload(
     try:
         payload = store.public_payload(
             owner_email=user.email,
-            is_admin=user.role == "admin",
+            is_admin=False,
         )
         if paper_store is None:
             paper = empty_paper
@@ -2744,7 +2833,7 @@ def build_user_workspace_payload(
             try:
                 paper = paper_store.public_payload(
                     owner_email=user.email,
-                    is_admin=user.role == "admin",
+                    is_admin=False,
                 )
             except (OSError, sqlite3.Error, ValueError) as exc:
                 paper = {**empty_paper, "status": "error", "error": str(exc)}
@@ -2775,6 +2864,15 @@ def build_user_workspace_payload(
                 {"state_count": 0, "fill_count": 0, "event_count": 0},
             )
         payload["paper"] = paper
+        payload["platform_projects"] = (
+            [
+                project
+                for project in store.platform_projects()
+                if project.get("owner_email") != user.email
+            ]
+            if user.role == "admin"
+            else []
+        )
         payload["summary"]["paper_running_count"] = int(
             paper.get("summary", {}).get("running_count") or 0
         )
@@ -3063,9 +3161,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 cfg.contract_strategies
             ),
             "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
-            "derivative_exchanges": exchange_configs_to_list(
-                cfg.derivative_exchanges
-            ),
+            "derivative_exchanges": exchange_configs_to_list(cfg.derivative_exchanges),
             "strategy_universe": strategy_universe_to_dict(cfg),
         },
         "scan": {
@@ -3086,6 +3182,13 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
             "total_account_count": len(_all_account_exchanges(cfg)),
             "last_finished": None,
             "errors": [],
+        },
+        "order_reliability": {
+            "enabled": bool(os.environ.get("CRYPTO_ARB_ORDER_JOURNAL_PATH")),
+            "status": "starting",
+            "pending_count": 0,
+            "unresolved_count": 0,
+            "recovered_count": 0,
         },
         "derivatives": {
             "status": "disabled" if not cfg.derivative_exchanges else "starting",
@@ -3231,6 +3334,20 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
                 "total_fees": 0.0,
                 "total_notional": 0.0,
                 "sources": {},
+                "updated_at": None,
+            },
+            "strategy_performance": {
+                "status": "starting",
+                "currency": cfg.common_quote_currency,
+                "window": "daily",
+                "row_count": 0,
+                "rows": [],
+                "summary": {
+                    "realized_pnl": 0.0,
+                    "fees_common": 0.0,
+                    "fill_count": 0,
+                    "submitted_order_count": 0,
+                },
                 "updated_at": None,
             },
             "open_order_count": 0,
@@ -3513,6 +3630,7 @@ def _build_initial_payload(cfg: BotConfig, poll_seconds: float) -> dict[str, Any
 
 from .state import MonitorState
 
+
 def _missing_market_warnings(rows: Iterable[dict[str, Any]]) -> list[str]:
     return [
         f"Missing {row['exchange']} {row['symbol']}"
@@ -3565,9 +3683,7 @@ def build_market_maker_safety_payload(
 
     quote_rate = conversion.get("quote_to_common_rate")
     quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
-    quote_values = [
-        order.quote_notional * quote_rate_for_risk for order in plan.orders
-    ]
+    quote_values = [order.quote_notional * quote_rate_for_risk for order in plan.orders]
     risk_orders = [
         RiskOrder(
             strategy="market_maker",
@@ -3917,9 +4033,7 @@ def build_spot_grid_safety_payload(
 
     quote_rate = conversion.get("quote_to_common_rate")
     quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
-    quote_values = [
-        order.quote_notional * quote_rate_for_risk for order in plan.orders
-    ]
+    quote_values = [order.quote_notional * quote_rate_for_risk for order in plan.orders]
     risk_orders = [
         RiskOrder(
             strategy="spot_grid",
@@ -4026,17 +4140,21 @@ def build_dca_safety_payload(
     quote_rate = conversion.get("quote_to_common_rate")
     quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
     order = plan.next_order
-    risk_orders = [
-        RiskOrder(
-            strategy="dca",
-            exchange=plan.exchange,
-            symbol=plan.symbol,
-            side=order.side,
-            amount=order.amount,
-            price=order.price * quote_rate_for_risk,
-            quote_notional=order.quote_notional * quote_rate_for_risk,
-        )
-    ] if order is not None else []
+    risk_orders = (
+        [
+            RiskOrder(
+                strategy="dca",
+                exchange=plan.exchange,
+                symbol=plan.symbol,
+                side=order.side,
+                amount=order.amount,
+                price=order.price * quote_rate_for_risk,
+                quote_notional=order.quote_notional * quote_rate_for_risk,
+            )
+        ]
+        if order is not None
+        else []
+    )
     risk = evaluate_order_batch(
         cfg.risk,
         risk_orders,
@@ -4088,10 +4206,13 @@ def build_dca_safety_payload(
     if cfg.dca.max_loss_quote > 0 and cfg.dca.average_entry_price > 0:
         base_asset = _base_currency_from_symbol(plan.symbol)
         current_base = portfolio_positions_base(cfg.portfolio).get(base_asset, 0.0)
-        unrealized_loss = max(
-            0.0,
-            (cfg.dca.average_entry_price - plan.mid_price) * current_base,
-        ) * quote_rate_for_risk
+        unrealized_loss = (
+            max(
+                0.0,
+                (cfg.dca.average_entry_price - plan.mid_price) * current_base,
+            )
+            * quote_rate_for_risk
+        )
         if unrealized_loss > cfg.dca.max_loss_quote:
             reasons.append(
                 f"DCA unrealized loss {unrealized_loss:.8f} exceeds "
@@ -4099,16 +4220,19 @@ def build_dca_safety_payload(
             )
     approved = len(reasons) == 0
     quote_values = [
-        row["quote_notional"] * quote_rate_for_risk
-        for row in plan.order_schedule
+        row["quote_notional"] * quote_rate_for_risk for row in plan.order_schedule
     ]
     return {
         **base_payload,
         "approved": approved,
         "level": "ok" if approved else "blocked",
         "order_count": len(risk_orders),
-        "buy_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "buy"),
-        "sell_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "sell"),
+        "buy_order_count": sum(
+            1 for risk_order in risk_orders if risk_order.side == "buy"
+        ),
+        "sell_order_count": sum(
+            1 for risk_order in risk_orders if risk_order.side == "sell"
+        ),
         "total_quote_notional": sum(quote_values),
         "max_order_quote_notional": max(quote_values) if quote_values else 0.0,
         "min_order_quote_notional": min(quote_values) if quote_values else 0.0,
@@ -4147,17 +4271,21 @@ def build_execution_algo_safety_payload(
     quote_rate = conversion.get("quote_to_common_rate")
     quote_rate_for_risk = float(quote_rate) if quote_rate is not None else 1.0
     next_slice = plan.next_slice
-    risk_orders = [
-        RiskOrder(
-            strategy="execution_algo",
-            exchange=plan.exchange,
-            symbol=plan.symbol,
-            side=next_slice.side,
-            amount=next_slice.amount,
-            price=next_slice.price * quote_rate_for_risk,
-            quote_notional=next_slice.quote_notional * quote_rate_for_risk,
-        )
-    ] if next_slice is not None else []
+    risk_orders = (
+        [
+            RiskOrder(
+                strategy="execution_algo",
+                exchange=plan.exchange,
+                symbol=plan.symbol,
+                side=next_slice.side,
+                amount=next_slice.amount,
+                price=next_slice.price * quote_rate_for_risk,
+                quote_notional=next_slice.quote_notional * quote_rate_for_risk,
+            )
+        ]
+        if next_slice is not None
+        else []
+    )
     risk = evaluate_order_batch(
         cfg.risk,
         risk_orders,
@@ -4199,16 +4327,18 @@ def build_execution_algo_safety_payload(
             f"risk.max_slippage_bps {cfg.risk.max_slippage_bps:.4f}"
         )
     approved = len(reasons) == 0
-    quote_values = [
-        item.quote_notional * quote_rate_for_risk for item in plan.schedule
-    ]
+    quote_values = [item.quote_notional * quote_rate_for_risk for item in plan.schedule]
     return {
         **base_payload,
         "approved": approved,
         "level": "ok" if approved else "blocked",
         "order_count": len(risk_orders),
-        "buy_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "buy"),
-        "sell_order_count": sum(1 for risk_order in risk_orders if risk_order.side == "sell"),
+        "buy_order_count": sum(
+            1 for risk_order in risk_orders if risk_order.side == "buy"
+        ),
+        "sell_order_count": sum(
+            1 for risk_order in risk_orders if risk_order.side == "sell"
+        ),
         "total_quote_notional": sum(quote_values),
         "max_order_quote_notional": max(quote_values) if quote_values else 0.0,
         "min_order_quote_notional": min(quote_values) if quote_values else 0.0,
@@ -4267,7 +4397,9 @@ def build_spot_grid_payload(
             "config": config_payload,
             "accounts": accounts,
             "quote_conversion": conversion,
-            "safety": build_spot_grid_safety_payload(cfg, None, conversion, error=error),
+            "safety": build_spot_grid_safety_payload(
+                cfg, None, conversion, error=error
+            ),
             "error": error,
         }
 
@@ -4728,8 +4860,7 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         item.strip() for item in str(sections or "").split(",") if item.strip()
     }
     if view in (None, "settings") or (
-        view == "quant"
-        and (sections is None or "backtest-points" in quant_sections)
+        view == "quant" and (sections is None or "backtest-points" in quant_sections)
     ):
         payload["user_workspace"] = build_user_workspace_payload(
             _user_workspace_store(request),
@@ -4836,7 +4967,9 @@ async def api_profile(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "ok": True,
-            "profile": updated.public_dict(available_assets=_configured_assets(runtime_cfg)),
+            "profile": updated.public_dict(
+                available_assets=_configured_assets(runtime_cfg)
+            ),
         }
     )
 
@@ -4986,10 +5119,401 @@ async def api_control(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def _preflight_candidate_from_payload(
+    state: MonitorState,
+    cfg: BotConfig,
+    *,
+    strategy_id: str,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    runtime_cfg = await state.runtime_config(cfg)
+    if strategy_id == "market_maker":
+        symbols_by_exchange = market_maker_symbols_for_accounts(
+            runtime_cfg,
+            base_cfg=cfg,
+        )
+        current_instances = market_maker_configs_for_runtime(runtime_cfg)
+        target_id = str(payload.get("id") or "").strip()
+        base_config = next(
+            (instance for instance in current_instances if instance.id == target_id),
+            current_instances[0] if current_instances else None,
+        )
+        candidate = market_maker_config_from_payload(
+            payload,
+            base_config=base_config,
+            allowed_exchanges={
+                exchange.key for exchange in _all_account_exchanges(runtime_cfg)
+            },
+            symbols_by_exchange=symbols_by_exchange,
+            repair_stale_identity_id=True,
+        )
+        row = market_maker_config_to_dict(candidate)
+        return row, [_base_asset_from_symbol(candidate.symbol)]
+    if strategy_id == "slow_execution":
+        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
+        )
+        overrides = _slow_execution_overrides_from_payload(
+            payload,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        base = await state.slow_execution_config(runtime_cfg.slow_execution)
+        candidate = replace(base, **{**overrides, "enabled": True})
+        validate_task_config(candidate)
+        return slow_execution_config_to_dict(candidate), [
+            _base_asset_from_symbol(candidate.symbol)
+        ]
+    if strategy_id == "cross_exchange_rebalance":
+        symbols_by_exchange = _rebalance_symbols_by_exchange(runtime_cfg)
+        accounts = slow_execution_accounts(
+            runtime_cfg.spot_exchanges,
+            symbols_by_exchange,
+            spot_markets=runtime_cfg.spot_markets,
+        )
+        candidate = cross_exchange_rebalance_config_from_payload(
+            payload,
+            base_config=runtime_cfg.cross_exchange_rebalance,
+            allowed_exchanges={account["key"] for account in accounts},
+            symbols_by_exchange=symbols_by_exchange,
+        )
+        return cross_exchange_rebalance_config_to_dict(candidate), [
+            _base_asset_from_symbol(candidate.buy_symbol),
+            _base_asset_from_symbol(candidate.sell_symbol),
+        ]
+    if strategy_id == "spot_spread":
+        return {
+            "notional_quote": float(
+                payload.get("notional_quote") or runtime_cfg.notional_quote
+            )
+        }, [market.asset for market in runtime_cfg.spot_markets]
+    raise ValueError(f"preflight is not supported for strategy: {strategy_id}")
+
+
+def _consume_strategy_preflight(
+    request: web.Request,
+    *,
+    strategy_id: str,
+    candidate: dict[str, Any],
+    token: str,
+) -> None:
+    service = request.app.get("strategy_preflight_service")
+    if not isinstance(service, StrategyPreflightService):
+        raise ValueError("strategy preflight service is unavailable")
+    service.consume(
+        token,
+        owner_email=_config_actor_email(request),
+        strategy_id=strategy_id,
+        candidate=candidate,
+    )
+
+
+async def _watch_started_config(
+    app: web.Application,
+    *,
+    strategy_id: str,
+    instance_id: str,
+    previous_version_id: int | None,
+    expected_current_hash: str,
+    timeout_seconds: float = 35.0,
+) -> None:
+    if previous_version_id is None or not expected_current_hash:
+        return
+    state: MonitorState = app["monitor_state"]
+    cfg: BotConfig = app["config"]
+    guard_started_at = time.time()
+    deadline = time.monotonic() + max(5.0, timeout_seconds)
+    last_row: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+        versions = await state.config_versions(limit=1)
+        if versions.get("current_hash") != expected_current_hash:
+            return
+        lifecycle = await state.strategy_lifecycle()
+        rows = [
+            row
+            for row in lifecycle.get("instances", [])
+            if isinstance(row, dict)
+            and row.get("strategy_id") == strategy_id
+            and (not instance_id or str(row.get("instance_id") or "") == instance_id)
+        ]
+        last_row = rows[0] if rows else None
+        runtime_updated_at = float((last_row or {}).get("updated_at") or 0.0)
+        if (
+            last_row
+            and runtime_updated_at >= guard_started_at
+            and last_row.get("converged")
+            and last_row.get("actual_state") in {"running", "waiting"}
+        ):
+            await state.mark_current_config_known_good(
+                expected_current_hash=expected_current_hash,
+            )
+            return
+        if last_row and last_row.get("convergence_state") in {"blocked", "error"}:
+            break
+
+    versions = await state.config_versions(limit=1)
+    if versions.get("current_hash") != expected_current_hash:
+        return
+    try:
+        result = await state.rollback_config_version(
+            previous_version_id,
+            expected_current_hash=expected_current_hash,
+            actor_email="automatic-start-guard",
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        write_system_web_audit_event(
+            cfg,
+            action="config_auto_rollback",
+            status="error",
+            target=strategy_id,
+            detail="automatic rollback failed",
+            error=str(exc),
+        )
+        return
+    if strategy_id == "slow_execution" and instance_id:
+        try:
+            task_service: AutoBuySellTaskService = app["auto_buy_sell_tasks"]
+            await task_service.set_paused(instance_id, True)
+            await state.set_auto_buy_sell_tasks(await task_service.snapshot())
+        except (KeyError, ValueError):
+            pass
+    reason = str((last_row or {}).get("reason") or "strategy did not become healthy")
+    write_system_web_audit_event(
+        cfg,
+        action="config_auto_rollback",
+        status="ok",
+        target=strategy_id,
+        detail=f"restored version {previous_version_id}: {reason}",
+        payload={
+            "strategy_id": strategy_id,
+            "instance_id": instance_id,
+            "restored_version_id": previous_version_id,
+            "result_version_id": result.get("current_version_id"),
+        },
+    )
+
+
+async def _watch_startup_configuration(
+    app: web.Application,
+    *,
+    timeout_seconds: float = 60.0,
+) -> None:
+    state: MonitorState = app["monitor_state"]
+    cfg: BotConfig = app["config"]
+    candidate = await state.startup_config_guard_candidate()
+    if candidate is None:
+        return
+
+    expected_hash = str(candidate["hash"])
+    previous_version_id = int(candidate["previous_known_good_id"])
+    guard_started_at = time.time()
+    deadline = time.monotonic() + max(10.0, timeout_seconds)
+    healthy_cycles = 0
+    rollback_reason = "startup health checks timed out"
+
+    while time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+        versions = await state.config_versions(limit=1)
+        if versions.get("current_hash") != expected_hash:
+            return
+        payload = await state.get(view="status")
+        if not bool(payload.get("program", {}).get("running")):
+            healthy_cycles += 1
+            if healthy_cycles >= 2:
+                await state.mark_current_config_known_good(
+                    expected_current_hash=expected_hash,
+                )
+                return
+            continue
+        scan_finished = float(payload.get("scan", {}).get("last_finished") or 0.0)
+        if scan_finished < guard_started_at:
+            continue
+
+        lifecycle = payload.get("strategy_lifecycle", {})
+        desired_rows = [
+            row
+            for row in lifecycle.get("instances", [])
+            if isinstance(row, dict) and row.get("desired_state") == "running"
+        ]
+        stale_rows = [
+            row
+            for row in desired_rows
+            if float(row.get("updated_at") or 0.0) > 0.0
+            and float(row.get("updated_at") or 0.0) < guard_started_at
+        ]
+        if stale_rows:
+            continue
+        failed_rows = [
+            row
+            for row in desired_rows
+            if row.get("convergence_state") in {"blocked", "error"}
+        ]
+        if failed_rows:
+            failed = failed_rows[0]
+            rollback_reason = str(
+                failed.get("reason")
+                or f"{failed.get('strategy_id')} became {failed.get('actual_state')}"
+            )
+            break
+
+        all_healthy = all(
+            bool(row.get("converged"))
+            and row.get("actual_state") in {"running", "waiting", "complete"}
+            for row in desired_rows
+        )
+        if payload.get("status") in {"running", "degraded"} and all_healthy:
+            healthy_cycles += 1
+            if healthy_cycles >= 2:
+                marked = await state.mark_current_config_known_good(
+                    expected_current_hash=expected_hash,
+                )
+                if marked is not None:
+                    write_system_web_audit_event(
+                        cfg,
+                        action="startup_config_verified",
+                        status="ok",
+                        target="runtime_config",
+                        detail=f"verified configuration version {candidate['version_id']}",
+                    )
+                return
+        else:
+            healthy_cycles = 0
+
+    versions = await state.config_versions(limit=1)
+    if versions.get("current_hash") != expected_hash:
+        return
+    try:
+        result = await state.rollback_config_version(
+            previous_version_id,
+            expected_current_hash=expected_hash,
+            actor_email="automatic-startup-guard",
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        write_system_web_audit_event(
+            cfg,
+            action="startup_config_auto_rollback",
+            status="error",
+            target="runtime_config",
+            detail="startup configuration rollback failed",
+            error=str(exc),
+        )
+        return
+    write_system_web_audit_event(
+        cfg,
+        action="startup_config_auto_rollback",
+        status="ok",
+        target="runtime_config",
+        detail=f"restored version {previous_version_id}: {rollback_reason}",
+        payload={
+            "failed_version_id": candidate["version_id"],
+            "restored_version_id": previous_version_id,
+            "result_version_id": result.get("current_version_id"),
+        },
+    )
+
+
+def _schedule_started_config_guard(
+    request: web.Request,
+    *,
+    strategy_id: str,
+    instance_id: str,
+    previous_version_id: int | None,
+    expected_current_hash: str,
+) -> None:
+    tasks = request.app.get("config_guard_tasks")
+    if not isinstance(tasks, set):
+        return
+    task = asyncio.create_task(
+        _watch_started_config(
+            request.app,
+            strategy_id=strategy_id,
+            instance_id=instance_id,
+            previous_version_id=previous_version_id,
+            expected_current_hash=expected_current_hash,
+        )
+    )
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+async def api_strategy_preflight(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        user = _request_user(request)
+        _require_admin_user(user)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        strategy_id = str(payload.get("strategy_id") or "").strip()
+        candidate_payload = (
+            dict(payload["candidate"])
+            if isinstance(payload.get("candidate"), dict)
+            else dict(payload)
+        )
+        candidate_payload.pop("strategy_id", None)
+        candidate, assets = await _preflight_candidate_from_payload(
+            state,
+            cfg,
+            strategy_id=strategy_id,
+            payload=candidate_payload,
+        )
+        _require_user_assets(user, assets)
+        runtime_cfg = await state.runtime_config(cfg)
+        state_payload = await state.get()
+        result = build_strategy_preflight(
+            runtime_cfg,
+            strategy_id=strategy_id,
+            candidate=candidate,
+            state_payload=state_payload,
+        )
+        if result["ready"]:
+            service: StrategyPreflightService = request.app[
+                "strategy_preflight_service"
+            ]
+            grant = service.issue(
+                owner_email=_config_actor_email(request),
+                strategy_id=strategy_id,
+                candidate=candidate,
+            )
+            result["token"] = grant.token
+            result["expires_at"] = grant.expires_at
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="strategy_preflight",
+        target=strategy_id,
+        status="ok" if result["ready"] else "blocked",
+        detail=(
+            "strategy preflight passed"
+            if result["ready"]
+            else result["blockers"][0]
+            if result["blockers"]
+            else "strategy preflight blocked"
+        ),
+        payload={
+            "strategy_id": strategy_id,
+            "candidate_hash": result["candidate_hash"],
+            "ready": result["ready"],
+            "blockers": result["blockers"],
+        },
+    )
+    return web.json_response({"ok": True, "preflight": result})
+
+
 async def api_slow_execution(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
@@ -5006,15 +5530,20 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         )
         base_config = await state.slow_execution_config(runtime_cfg.slow_execution)
         target_symbol = str(overrides.get("symbol") or base_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
+        _require_user_assets(
+            _request_user(request), [_base_asset_from_symbol(target_symbol)]
+        )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    await state.set_slow_execution_overrides(overrides, cfg=cfg)
+    await state.set_slow_execution_overrides(
+        overrides,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="auto_buy_sell_defaults_update",
+    )
     current_config = await state.slow_execution_config(cfg.slow_execution)
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
@@ -5041,7 +5570,9 @@ async def api_slow_execution(request: web.Request) -> web.Response:
 async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
+    guard_baseline: dict[str, Any] | None = None
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -5093,6 +5624,14 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
             raise ValueError(
                 "saving live config requires confirm_live=ENABLE LIVE REBALANCE"
             )
+        if updated_config.enabled and updated_config.live_enabled:
+            _consume_strategy_preflight(
+                request,
+                strategy_id="cross_exchange_rebalance",
+                candidate=cross_exchange_rebalance_config_to_dict(updated_config),
+                token=str(payload.get("preflight_token") or ""),
+            )
+            guard_baseline = await state.config_versions(limit=1)
         _require_user_assets(
             _request_user(request),
             [
@@ -5109,7 +5648,21 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
     update = await state.set_cross_exchange_rebalance_overrides(
         overrides,
         cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="cross_exchange_rebalance_update",
     )
+    if guard_baseline is not None:
+        current_version = await state.config_versions(limit=1)
+        if current_version.get("current_version_id") != guard_baseline.get(
+            "current_version_id"
+        ):
+            _schedule_started_config_guard(
+                request,
+                strategy_id="cross_exchange_rebalance",
+                instance_id="default",
+                previous_version_id=guard_baseline.get("current_version_id"),
+                expected_current_hash=str(current_version.get("current_hash") or ""),
+            )
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
         runtime_cfg,
@@ -5146,6 +5699,7 @@ async def api_spot_grid(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _grid_symbols_by_exchange(runtime_cfg)
@@ -5161,15 +5715,20 @@ async def api_spot_grid(request: web.Request) -> web.Response:
         )
         current_config = await state.spot_grid_config(runtime_cfg.spot_grid)
         target_symbol = str(overrides.get("symbol") or current_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
+        _require_user_assets(
+            _request_user(request), [_base_asset_from_symbol(target_symbol)]
+        )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_spot_grid_overrides(overrides, cfg=cfg)
+    update = await state.set_spot_grid_overrides(
+        overrides,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="spot_grid_update",
+    )
     current_config = await state.spot_grid_config(cfg.spot_grid)
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
@@ -5198,6 +5757,7 @@ async def api_dca(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _grid_symbols_by_exchange(runtime_cfg)
@@ -5213,15 +5773,20 @@ async def api_dca(request: web.Request) -> web.Response:
         )
         current_config = await state.dca_config(runtime_cfg.dca)
         target_symbol = str(overrides.get("symbol") or current_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
+        _require_user_assets(
+            _request_user(request), [_base_asset_from_symbol(target_symbol)]
+        )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_dca_overrides(overrides, cfg=cfg)
+    update = await state.set_dca_overrides(
+        overrides,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="dca_update",
+    )
     current_config = await state.dca_config(cfg.dca)
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
@@ -5250,6 +5815,7 @@ async def api_execution_algo(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _execution_symbols_by_exchange(runtime_cfg)
@@ -5263,19 +5829,22 @@ async def api_execution_algo(request: web.Request) -> web.Response:
             allowed_exchanges={account["key"] for account in accounts},
             symbols_by_exchange=symbols_by_exchange,
         )
-        current_config = await state.execution_algo_config(
-            runtime_cfg.execution_algo
-        )
+        current_config = await state.execution_algo_config(runtime_cfg.execution_algo)
         target_symbol = str(overrides.get("symbol") or current_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
+        _require_user_assets(
+            _request_user(request), [_base_asset_from_symbol(target_symbol)]
+        )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_execution_algo_overrides(overrides, cfg=cfg)
+    update = await state.set_execution_algo_overrides(
+        overrides,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="execution_algo_update",
+    )
     current_config = await state.execution_algo_config(cfg.execution_algo)
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
@@ -5304,6 +5873,7 @@ async def api_backtest(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = _execution_symbols_by_exchange(runtime_cfg)
@@ -5319,15 +5889,20 @@ async def api_backtest(request: web.Request) -> web.Response:
         )
         current_config = await state.backtest_config(runtime_cfg.backtest)
         target_symbol = str(overrides.get("symbol") or current_config.symbol)
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(target_symbol)
-        ])
+        _require_user_assets(
+            _request_user(request), [_base_asset_from_symbol(target_symbol)]
+        )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_backtest_overrides(overrides, cfg=cfg)
+    update = await state.set_backtest_overrides(
+        overrides,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="backtest_update",
+    )
     current_config = await state.backtest_config(cfg.backtest)
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
@@ -5392,11 +5967,17 @@ def _strategy_payload_from_request(
     existing: dict[str, Any] | None = None,
 ) -> StrategyInstance:
     raw = dict(existing or {})
-    raw.update(payload.get("strategy") if isinstance(payload.get("strategy"), dict) else payload)
+    raw.update(
+        payload.get("strategy")
+        if isinstance(payload.get("strategy"), dict)
+        else payload
+    )
     raw["owner_email"] = _owner_email_from_payload(raw, user)
     strategy = StrategyInstance.from_dict(raw)
     _require_owner_or_admin(user, strategy.owner_email)
-    _require_user_assets(user, [strategy.asset or _base_asset_from_symbol(strategy.symbol)])
+    _require_user_assets(
+        user, [strategy.asset or _base_asset_from_symbol(strategy.symbol)]
+    )
     return strategy
 
 
@@ -5407,7 +5988,9 @@ def _api_account_payload_from_request(
     existing: dict[str, Any] | None = None,
 ) -> UserApiAccount:
     raw = dict(existing or {})
-    raw.update(payload.get("account") if isinstance(payload.get("account"), dict) else payload)
+    raw.update(
+        payload.get("account") if isinstance(payload.get("account"), dict) else payload
+    )
     raw["owner_email"] = _owner_email_from_payload(raw, user)
     account = UserApiAccount.from_dict(raw)
     _require_owner_or_admin(user, account.owner_email)
@@ -5431,14 +6014,17 @@ def _workspace_owner(
     user: WebUser,
     existing_owner: str = "",
 ) -> str:
-    if existing_owner:
-        owner = existing_owner
-    elif user.role == "admin":
-        owner = str(raw.get("owner_email") or user.email).strip().lower()
-    else:
-        owner = user.email
-    _require_owner_or_admin(user, owner)
+    owner = existing_owner or str(raw.get("owner_email") or user.email).strip().lower()
+    if owner != user.email:
+        raise PermissionError(
+            "users, including administrators, can only own their own funds"
+        )
     return owner
+
+
+def _require_workspace_owner(user: WebUser, owner_email: str) -> None:
+    if str(owner_email or "").strip().lower() != user.email:
+        raise PermissionError("this trading resource belongs to another user")
 
 
 async def api_user_workspace(request: web.Request) -> web.Response:
@@ -5467,7 +6053,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             project_id = str(raw.get("id") or "").strip()
             existing = store.get_project(project_id) if project_id else None
             if existing is not None:
-                _require_owner_or_admin(user, existing.owner_email)
+                _require_workspace_owner(user, existing.owner_email)
                 base = existing.to_dict()
                 base.update(raw)
                 raw = base
@@ -5483,9 +6069,9 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 existing is not None
                 and (
                     str(raw.get("asset") or "").strip().upper() != existing.asset
-                    or str(
-                        raw.get("quote_currency") or raw.get("quote") or ""
-                    ).strip().upper()
+                    or str(raw.get("quote_currency") or raw.get("quote") or "")
+                    .strip()
+                    .upper()
                     != existing.quote_currency
                 )
             )
@@ -5510,7 +6096,9 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_payload = project.to_dict()
         elif action == "approve_project":
             _require_admin_user(user)
-            project_id = str(payload.get("project_id") or payload.get("id") or "").strip()
+            project_id = str(
+                payload.get("project_id") or payload.get("id") or ""
+            ).strip()
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
@@ -5523,7 +6111,9 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_detail = f"approved user project {project.name}"
             audit_payload = project.to_dict()
         elif action == "disable_project":
-            project_id = str(payload.get("project_id") or payload.get("id") or "").strip()
+            project_id = str(
+                payload.get("project_id") or payload.get("id") or ""
+            ).strip()
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
@@ -5533,11 +6123,13 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_detail = f"disabled user project {project.name}"
             audit_payload = project.to_dict()
         elif action == "delete_project":
-            project_id = str(payload.get("project_id") or payload.get("id") or "").strip()
+            project_id = str(
+                payload.get("project_id") or payload.get("id") or ""
+            ).strip()
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
-            _require_owner_or_admin(user, project.owner_email)
+            _require_workspace_owner(user, project.owner_email)
             store.delete_project(project.id)
             audit_target = project.id
             audit_detail = f"deleted user project {project.name}"
@@ -5552,7 +6144,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             account_id = str(raw.get("id") or "").strip()
             existing = store.get_account(account_id) if account_id else None
             if existing is not None:
-                _require_owner_or_admin(user, existing.owner_email)
+                _require_workspace_owner(user, existing.owner_email)
                 base = existing.to_dict()
                 base.update(raw)
                 raw = base
@@ -5560,11 +6152,13 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
-            _require_owner_or_admin(user, project.owner_email)
+            _require_workspace_owner(user, project.owner_email)
             owner = _workspace_owner(
                 raw,
                 user=user,
-                existing_owner=existing.owner_email if existing else project.owner_email,
+                existing_owner=existing.owner_email
+                if existing
+                else project.owner_email,
             )
             if owner != project.owner_email:
                 raise ValueError("project and exchange account owners must match")
@@ -5608,9 +6202,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if exchange_changed:
                 required = {"api_key", "secret"}
                 supplied_fields = {
-                    key
-                    for key, value in supplied.items()
-                    if str(value or "").strip()
+                    key for key, value in supplied.items() if str(value or "").strip()
                 }
                 missing = sorted(required.difference(supplied_fields))
                 if missing:
@@ -5619,19 +6211,25 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     )
             if account.enabled:
                 if project.status != "active":
-                    raise PermissionError("project approval is required before enabling account")
+                    raise PermissionError(
+                        "project approval is required before enabling account"
+                    )
                 _require_user_assets(user, [project.asset])
                 if not account.withdrawal_disabled_confirmed:
                     raise ValueError(
                         "confirm that API withdrawal permission is disabled"
                     )
+                if not account.trade_permission_confirmed:
+                    raise ValueError("confirm that the API key has trading permission")
                 current_auth = store.credential_status(account.id)
                 has_required = current_auth["configured"] or (
                     bool(str(supplied.get("api_key") or "").strip())
                     and bool(str(supplied.get("secret") or "").strip())
                 )
                 if not has_required:
-                    raise ValueError("configure API key and secret before enabling account")
+                    raise ValueError(
+                        "configure API key and secret before enabling account"
+                    )
                 if not current_auth["vault_available"]:
                     raise RuntimeError("credential encryption is not configured")
                 if not account_connection_is_fresh(account):
@@ -5652,7 +6250,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
-            _require_owner_or_admin(user, project.owner_email)
+            _require_workspace_owner(user, project.owner_email)
             exchange = str(payload.get("exchange") or "").strip().lower()
             market_type = str(payload.get("market_type") or "spot").strip().lower()
             api_variant = str(payload.get("api_variant") or "").strip().lower()
@@ -5696,7 +6294,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             account = store.get_account(account_id)
             if account is None:
                 raise ValueError(f"exchange account not found: {account_id}")
-            _require_owner_or_admin(user, account.owner_email)
+            _require_workspace_owner(user, account.owner_email)
             project = store.get_project(account.project_id)
             if project is None:
                 raise ValueError(f"project not found: {account.project_id}")
@@ -5756,7 +6354,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             strategy_id = str(raw.get("id") or "").strip()
             existing = store.get_strategy(strategy_id) if strategy_id else None
             if existing is not None:
-                _require_owner_or_admin(user, existing.owner_email)
+                _require_workspace_owner(user, existing.owner_email)
                 base = existing.to_dict()
                 base.update(raw)
                 raw = base
@@ -5764,7 +6362,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
-            _require_owner_or_admin(user, project.owner_email)
+            _require_workspace_owner(user, project.owner_email)
             owner = _workspace_owner(
                 raw,
                 user=user,
@@ -5796,7 +6394,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             strategy = store.get_strategy(strategy_id)
             if strategy is None:
                 raise ValueError(f"strategy not found: {strategy_id}")
-            _require_owner_or_admin(user, strategy.owner_email)
+            _require_workspace_owner(user, strategy.owner_email)
             enabled = payload.get("enabled")
             if not isinstance(enabled, bool):
                 raise ValueError("enabled must be true or false")
@@ -5811,14 +6409,37 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             strategy = store.upsert_strategy(updated)
             audit_target = strategy.id
             audit_detail = (
-                f"{'resumed' if enabled else 'paused'} paper strategy "
-                f"{strategy.name}"
+                f"{'resumed' if enabled else 'paused'} paper strategy {strategy.name}"
             )
             audit_payload = {
                 "strategy_id": strategy.id,
                 "enabled": strategy.enabled,
                 "mode": "paper",
             }
+        elif action == "clone_strategy":
+            strategy_id = str(
+                payload.get("strategy_id") or payload.get("id") or ""
+            ).strip()
+            strategy = store.get_strategy(strategy_id)
+            if strategy is None:
+                raise ValueError(f"strategy not found: {strategy_id}")
+            _require_workspace_owner(user, strategy.owner_email)
+            raw = strategy.to_dict()
+            raw.pop("id", None)
+            raw.pop("created_at", None)
+            raw.pop("updated_at", None)
+            raw["name"] = str(payload.get("name") or f"{strategy.name} Copy").strip()[
+                :80
+            ]
+            raw["enabled"] = False
+            copied = store.upsert_strategy(UserStrategy.from_dict(raw))
+            audit_target = copied.id
+            audit_detail = f"copied paper strategy {strategy.id} to {copied.id}"
+            audit_payload = {
+                "source_strategy_id": strategy.id,
+                "strategy": copied.to_dict(),
+            }
+            response_extra = {"copied_strategy_id": copied.id}
         elif action == "delete_strategy":
             strategy_id = str(
                 payload.get("strategy_id") or payload.get("id") or ""
@@ -5826,7 +6447,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             strategy = store.get_strategy(strategy_id)
             if strategy is None:
                 raise ValueError(f"strategy not found: {strategy_id}")
-            _require_owner_or_admin(user, strategy.owner_email)
+            _require_workspace_owner(user, strategy.owner_email)
             store.delete_strategy(strategy.id)
             _user_paper_store(request).delete_strategy(strategy.id)
             audit_target = strategy.id
@@ -5839,7 +6460,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             strategy = store.get_strategy(strategy_id)
             if strategy is None:
                 raise ValueError(f"strategy not found: {strategy_id}")
-            _require_owner_or_admin(user, strategy.owner_email)
+            _require_workspace_owner(user, strategy.owner_email)
             reset_counts = _user_paper_store(request).reset_strategy(strategy)
             audit_target = strategy.id
             audit_detail = f"reset paper simulation {strategy.name}"
@@ -5850,15 +6471,28 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             }
             response_extra = {"paper_reset": reset_counts}
         elif action == "delete_account":
-            account_id = str(payload.get("account_id") or payload.get("id") or "").strip()
+            account_id = str(
+                payload.get("account_id") or payload.get("id") or ""
+            ).strip()
             account = store.get_account(account_id)
             if account is None:
                 raise ValueError(f"exchange account not found: {account_id}")
-            _require_owner_or_admin(user, account.owner_email)
+            _require_workspace_owner(user, account.owner_email)
             store.delete_account(account.id)
             audit_target = account.id
             audit_detail = f"deleted encrypted {account.exchange} account"
             audit_payload = {"account_id": account.id}
+        elif action == "update_risk_profile":
+            raw_profile = dict(
+                payload.get("risk_profile")
+                if isinstance(payload.get("risk_profile"), dict)
+                else payload
+            )
+            raw_profile["owner_email"] = user.email
+            profile = store.upsert_risk_profile(UserRiskProfile.from_dict(raw_profile))
+            audit_target = user.email
+            audit_detail = "updated user risk profile"
+            audit_payload = profile.to_dict()
         else:
             raise ValueError(f"unsupported workspace action: {action}")
 
@@ -5894,7 +6528,7 @@ async def api_user_backtests_get(request: web.Request) -> web.Response:
         run_id = str(request.query.get("run_id") or "").strip()
         payload = _user_backtest_service(request).public_payload(
             owner_email=user.email,
-            is_admin=user.role == "admin",
+            is_admin=False,
             run_id=run_id,
         )
         return web.json_response(payload)
@@ -5919,7 +6553,7 @@ async def api_user_backtests_post(request: web.Request) -> web.Response:
             project = _user_workspace_store(request).get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
-            _require_owner_or_admin(user, project.owner_email)
+            _require_workspace_owner(user, project.owner_email)
             _require_user_assets(user, [project.asset])
             run = await service.create_run(
                 owner_email=project.owner_email,
@@ -5956,7 +6590,7 @@ async def api_user_backtests_post(request: web.Request) -> web.Response:
                     "run": run,
                     "backtests": service.public_payload(
                         owner_email=user.email,
-                        is_admin=user.role == "admin",
+                        is_admin=False,
                         run_id=run["id"],
                     ),
                 }
@@ -5969,7 +6603,7 @@ async def api_user_backtests_post(request: web.Request) -> web.Response:
             service.delete_run(
                 run_id,
                 owner_email=user.email,
-                is_admin=user.role == "admin",
+                is_admin=False,
             )
             write_web_audit_event(
                 cfg,
@@ -5984,7 +6618,7 @@ async def api_user_backtests_post(request: web.Request) -> web.Response:
                     "ok": True,
                     "backtests": service.public_payload(
                         owner_email=user.email,
-                        is_admin=user.role == "admin",
+                        is_admin=False,
                     ),
                 }
             )
@@ -6004,6 +6638,7 @@ async def api_strategy_center(request: web.Request) -> web.Response:
     store = _strategy_center_store(request)
     user = _request_user(request)
     try:
+        _require_admin_user(user)
         if not cfg.strategy_center.enabled:
             raise ValueError("strategy center is disabled")
         payload = await request.json()
@@ -6017,7 +6652,9 @@ async def api_strategy_center(request: web.Request) -> web.Response:
 
         if action in {"create_strategy", "update_strategy", "upsert_strategy"}:
             existing = None
-            strategy_id = str(payload.get("id") or payload.get("strategy_id") or "").strip()
+            strategy_id = str(
+                payload.get("id") or payload.get("strategy_id") or ""
+            ).strip()
             strategy_raw = payload.get("strategy")
             if isinstance(strategy_raw, dict):
                 strategy_id = str(strategy_raw.get("id") or strategy_id).strip()
@@ -6046,7 +6683,9 @@ async def api_strategy_center(request: web.Request) -> web.Response:
             detail = f"{action} {strategy.name}"
             audit_payload = strategy.summary()
         elif action == "delete_strategy":
-            strategy_id = str(payload.get("id") or payload.get("strategy_id") or "").strip()
+            strategy_id = str(
+                payload.get("id") or payload.get("strategy_id") or ""
+            ).strip()
             if not strategy_id:
                 raise ValueError("strategy_id is required")
             existing = _strategy_center_existing_row(
@@ -6057,7 +6696,12 @@ async def api_strategy_center(request: web.Request) -> web.Response:
             _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
             _require_user_assets(
                 user,
-                [str(existing.get("asset") or _base_asset_from_symbol(str(existing.get("symbol") or "")))],
+                [
+                    str(
+                        existing.get("asset")
+                        or _base_asset_from_symbol(str(existing.get("symbol") or ""))
+                    )
+                ],
             )
             store_payload = store.delete_strategy(strategy_id)
             audit_action = "strategy_center_strategy_delete"
@@ -6066,7 +6710,9 @@ async def api_strategy_center(request: web.Request) -> web.Response:
             audit_payload = {"strategy_id": strategy_id}
         elif action in {"create_account", "update_account", "upsert_account"}:
             existing = None
-            account_id = str(payload.get("id") or payload.get("account_id") or "").strip()
+            account_id = str(
+                payload.get("id") or payload.get("account_id") or ""
+            ).strip()
             account_raw = payload.get("account")
             if isinstance(account_raw, dict):
                 account_id = str(account_raw.get("id") or account_id).strip()
@@ -6095,7 +6741,9 @@ async def api_strategy_center(request: web.Request) -> web.Response:
             detail = f"{action} {account.label}"
             audit_payload = account.public_dict()
         elif action == "delete_account":
-            account_id = str(payload.get("id") or payload.get("account_id") or "").strip()
+            account_id = str(
+                payload.get("id") or payload.get("account_id") or ""
+            ).strip()
             if not account_id:
                 raise ValueError("account_id is required")
             existing = _strategy_center_existing_row(
@@ -6231,16 +6879,16 @@ async def api_signal_webhook(request: web.Request) -> web.Response:
             else None
         )
         if not expected_secret:
-            raise PermissionError("signal webhook secret environment variable is not set")
+            raise PermissionError(
+                "signal webhook secret environment variable is not set"
+            )
         supplied_secret = _signal_secret_from_request(request, payload)
         if not hmac.compare_digest(supplied_secret, expected_secret):
             raise PermissionError("invalid signal webhook secret")
 
         clean_payload = _signal_payload_without_secret(payload)
         strategy_id = str(
-            clean_payload.get("strategy_id")
-            or signal_bot.default_strategy_id
-            or ""
+            clean_payload.get("strategy_id") or signal_bot.default_strategy_id or ""
         ).strip()
         strategies = {
             str(item.get("id")): item
@@ -6314,7 +6962,10 @@ async def api_signal_webhook(request: web.Request) -> web.Response:
 async def api_market_maker(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
+    guard_baseline: dict[str, Any] | None = None
+    guard_instance_id = ""
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = market_maker_symbols_for_accounts(
@@ -6335,12 +6986,31 @@ async def api_market_maker(request: web.Request) -> web.Response:
                 repair_stale_identity_id=True,
             )
             action = "replace"
+        elif isinstance(payload, dict) and payload.get("copy_id"):
+            copy_id = str(payload["copy_id"]).strip()
+            source = next(
+                (instance for instance in current_instances if instance.id == copy_id),
+                None,
+            )
+            if source is None:
+                raise ValueError(f"market maker instance not found: {copy_id}")
+            new_id = str(
+                payload.get("new_id") or f"{source.id[:52]}-copy-{int(time.time())}"
+            ).strip()
+            if any(instance.id == new_id for instance in current_instances):
+                raise ValueError(f"market maker instance already exists: {new_id}")
+            copied = replace(
+                source,
+                id=new_id,
+                enabled=False,
+                live_enabled=False,
+            )
+            updated_instances = [*current_instances, copied]
+            action = "copy"
         elif isinstance(payload, dict) and payload.get("delete_id"):
             delete_id = str(payload["delete_id"]).strip()
             updated_instances = [
-                instance
-                for instance in current_instances
-                if instance.id != delete_id
+                instance for instance in current_instances if instance.id != delete_id
             ]
             action = "delete"
         else:
@@ -6387,17 +7057,27 @@ async def api_market_maker(request: web.Request) -> web.Response:
                 and current_by_id[instance.id] == instance
             )
         ]
-        if (
-            live_changes_requiring_confirmation
-            and (
-                not isinstance(payload, dict)
-                or payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION
-            )
+        if live_changes_requiring_confirmation and (
+            not isinstance(payload, dict)
+            or payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION
         ):
             raise ValueError(
                 "starting or changing live Market Maker requires "
                 f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
             )
+        if len(live_changes_requiring_confirmation) > 1:
+            raise ValueError("start one live Market Maker instance at a time")
+        if live_changes_requiring_confirmation:
+            _consume_strategy_preflight(
+                request,
+                strategy_id="market_maker",
+                candidate=market_maker_config_to_dict(
+                    live_changes_requiring_confirmation[0]
+                ),
+                token=str(payload.get("preflight_token") or ""),
+            )
+            guard_baseline = await state.config_versions(limit=1)
+            guard_instance_id = live_changes_requiring_confirmation[0].id
         _require_user_assets(
             _request_user(request),
             [
@@ -6411,10 +7091,29 @@ async def api_market_maker(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_market_maker_instances(updated_instances, cfg=cfg)
+    update = await state.set_market_maker_instances(
+        updated_instances,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action=f"market_maker_{action}",
+    )
+    if guard_baseline is not None:
+        current_version = await state.config_versions(limit=1)
+        if current_version.get("current_version_id") != guard_baseline.get(
+            "current_version_id"
+        ):
+            _schedule_started_config_guard(
+                request,
+                strategy_id="market_maker",
+                instance_id=guard_instance_id,
+                previous_version_id=guard_baseline.get("current_version_id"),
+                expected_current_hash=str(current_version.get("current_hash") or ""),
+            )
     runtime_cfg = await state.runtime_config(cfg)
     current_instances = market_maker_configs_for_runtime(runtime_cfg)
-    current_config = current_instances[0] if current_instances else runtime_cfg.market_maker
+    current_config = (
+        current_instances[0] if current_instances else runtime_cfg.market_maker
+    )
     write_web_audit_event(
         runtime_cfg,
         request,
@@ -6455,7 +7154,12 @@ async def api_markets(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    result = await state.set_spot_markets(markets, cfg=cfg)
+    result = await state.set_spot_markets(
+        markets,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="spot_markets_update",
+    )
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
         runtime_cfg,
@@ -6484,7 +7188,12 @@ async def api_cash_and_carry_pairs(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    result = await state.set_cash_and_carry_pairs(pairs, cfg=cfg)
+    result = await state.set_cash_and_carry_pairs(
+        pairs,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="cash_and_carry_pairs_update",
+    )
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
         runtime_cfg,
@@ -6501,7 +7210,9 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
+    guard_baseline: dict[str, Any] | None = None
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -6525,10 +7236,17 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         )
         base_config = await state.slow_execution_config(cfg.slow_execution)
         task_config = replace(base_config, **{**overrides, "enabled": True})
-        _require_user_assets(_request_user(request), [
-            _base_asset_from_symbol(task_config.symbol)
-        ])
+        _require_user_assets(
+            _request_user(request), [_base_asset_from_symbol(task_config.symbol)]
+        )
         validate_task_config(task_config)
+        _consume_strategy_preflight(
+            request,
+            strategy_id="slow_execution",
+            candidate=slow_execution_config_to_dict(task_config),
+            token=str(payload.get("preflight_token") or ""),
+        )
+        guard_baseline = await state.config_versions(limit=1)
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -6544,7 +7262,21 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             "enabled": True,
         },
         cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="auto_buy_sell_task_create",
     )
+    if guard_baseline is not None:
+        current_version = await state.config_versions(limit=1)
+        if current_version.get("current_version_id") != guard_baseline.get(
+            "current_version_id"
+        ):
+            _schedule_started_config_guard(
+                request,
+                strategy_id="slow_execution",
+                instance_id=str(task.get("id") or ""),
+                previous_version_id=guard_baseline.get("current_version_id"),
+                expected_current_hash=str(current_version.get("current_hash") or ""),
+            )
     snapshot = await tasks.snapshot()
     await state.set_auto_buy_sell_tasks(snapshot)
     runtime_cfg = await state.runtime_config(cfg)
@@ -6554,7 +7286,10 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         action="auto_buy_sell_task_create",
         target=f"{task_config.exchange} {task_config.symbol}",
         detail=f"created task {task.get('id', '')}",
-        payload={"task_id": task.get("id"), "config": slow_execution_config_to_dict(task_config)},
+        payload={
+            "task_id": task.get("id"),
+            "config": slow_execution_config_to_dict(task_config),
+        },
     )
     return web.json_response(
         {
@@ -6572,6 +7307,7 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     task_id = request.match_info.get("task_id", "")
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         action = str(payload.get("action", "")).strip().lower()
         if action not in {"pause", "resume", "stop"}:
@@ -6683,12 +7419,42 @@ async def api_risk(request: web.Request) -> web.Response:
             allowed_accounts=allowed_accounts,
             allowed_strategies=STRATEGY_IDS,
         )
+        enabling_live = bool(
+            overrides.get("allow_live_trading") is True
+            and not runtime_cfg.risk.allow_live_trading
+        )
+        enabling_auto_hedge = bool(
+            overrides.get("auto_hedge_live_enabled") is True
+            and not runtime_cfg.risk.auto_hedge_live_enabled
+        )
+        if (enabling_live or enabling_auto_hedge) and payload.get(
+            "confirm_live_risk"
+        ) is not True:
+            raise ValueError(
+                "enabling live trading or automatic hedge requires "
+                "confirm_live_risk=true"
+            )
+        effective_risk = replace(runtime_cfg.risk, **overrides)
+        if effective_risk.auto_hedge_live_enabled:
+            if effective_risk.max_auto_hedge_quote <= 0:
+                raise ValueError(
+                    "max_auto_hedge_quote must be positive when auto hedge is live"
+                )
+            if effective_risk.auto_hedge_max_attempts <= 0:
+                raise ValueError(
+                    "auto_hedge_max_attempts must be positive when auto hedge is live"
+                )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    update = await state.set_risk_overrides(overrides, cfg=cfg)
+    update = await state.set_risk_overrides(
+        overrides,
+        cfg=cfg,
+        actor_email=_config_actor_email(request),
+        action="risk_update",
+    )
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
         runtime_cfg,
@@ -6701,10 +7467,65 @@ async def api_risk(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, **update})
 
 
+async def api_config_versions_get(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    try:
+        _require_admin_user(_request_user(request))
+        limit = int(request.query.get("limit", "30"))
+        payload = await state.config_versions(limit=limit)
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"ok": True, **payload})
+
+
+async def api_config_versions_post(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    cfg: BotConfig = request.app["config"]
+    try:
+        user = _request_user(request)
+        _require_admin_user(user)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        action = str(payload.get("action") or "").strip().lower()
+        if action != "rollback":
+            raise ValueError("action must be rollback")
+        if payload.get("confirm") is not True:
+            raise ValueError("rollback requires confirm=true")
+        version_id = int(payload.get("version_id") or 0)
+        if version_id <= 0:
+            raise ValueError("version_id must be positive")
+        result = await state.rollback_config_version(
+            version_id,
+            expected_current_hash=str(payload.get("current_hash") or ""),
+            actor_email=user.email if user is not None else "legacy-admin",
+        )
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    runtime_cfg = await state.runtime_config(cfg)
+    write_web_audit_event(
+        runtime_cfg,
+        request,
+        action="config_rollback",
+        target=str(result["rolled_back_to"]),
+        detail=f"rolled back runtime configuration to version {result['rolled_back_to']}",
+        payload={
+            "version_id": result["rolled_back_to"],
+            "current_hash": result["current_hash"],
+        },
+    )
+    return web.json_response(result)
+
+
 async def api_cancel_order(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
+        _require_admin_user(_request_user(request))
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -6806,6 +7627,8 @@ async def api_strategy_control(request: web.Request) -> web.Response:
             strategy_id,
             paused,
             cfg=cfg,
+            actor_email=_config_actor_email(request),
+            action="strategy_pause" if paused else "strategy_resume",
         )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
@@ -6833,8 +7656,57 @@ async def api_strategy_control(request: web.Request) -> web.Response:
     )
 
 
-async def api_health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True})
+async def api_health(request: web.Request) -> web.Response:
+    state: MonitorState = request.app["monitor_state"]
+    payload = await state.get(view="status")
+    supervisor = request.app.get("runtime_supervisor")
+    deployment = (
+        supervisor.status()
+        if isinstance(supervisor, RuntimeSupervisor)
+        else {
+            "process_ready": True,
+            "deployment_ready": True,
+            "role": "legacy",
+            "leader_ready": True,
+            "mutation_allowed": True,
+            "error": None,
+        }
+    )
+    order_activity = payload.get("order_activity", {})
+    reliability = payload.get("order_reliability") or order_activity.get(
+        "reliability", {}
+    )
+    pending_intents = max(
+        int(reliability.get("pending_count") or 0),
+        int(reliability.get("unresolved_count") or 0),
+    )
+    safe_to_replace = bool(
+        deployment.get("deployment_ready")
+        and not deployment.get("error")
+        and pending_intents == 0
+    )
+    health = {
+        "ok": bool(deployment.get("process_ready") and not deployment.get("error")),
+        "deployment": deployment,
+        "runtime": {
+            "status": payload.get("status"),
+            "program_running": bool(payload.get("program", {}).get("running")),
+            "lifecycle": payload.get("strategy_lifecycle", {}).get("summary", {}),
+            "open_order_count": int(order_activity.get("open_order_count") or 0),
+            "active_market_makers": int(
+                payload.get("market_maker", {}).get("active_instance_count") or 0
+            ),
+            "active_auto_tasks": int(
+                payload.get("slow_execution", {})
+                .get("tasks", {})
+                .get("active_count", 0)
+                or 0
+            ),
+            "pending_order_intents": pending_intents,
+        },
+        "safe_to_replace": safe_to_replace,
+    }
+    return web.json_response(health, status=200 if health["ok"] else 503)
 
 
 async def favicon(_: web.Request) -> web.FileResponse:
@@ -6862,8 +7734,16 @@ def create_app(
     poll_seconds: float | None,
 ) -> web.Application:
     interval = cfg.poll_seconds if poll_seconds is None else poll_seconds
+    os.environ.setdefault(
+        "CRYPTO_ARB_ORDER_JOURNAL_PATH",
+        str(Path(cfg.trade_log.path).with_name("order_intents.sqlite3")),
+    )
     app = web.Application(
-        middlewares=[build_security_middleware(cfg), performance_middleware]
+        middlewares=[
+            build_security_middleware(cfg),
+            deployment_mutation_middleware,
+            performance_middleware,
+        ]
     )
     state = MonitorState(
         cfg,
@@ -6895,6 +7775,7 @@ def create_app(
     )
     workspace_market_discovery = WorkspaceMarketDiscoveryService()
     workspace_account_checker = WorkspaceAccountCheckService()
+    strategy_preflight_service = StrategyPreflightService()
     strategy_center_store = StrategyCenterStore(
         default_strategy_center_path(cfg),
         max_recent_signals=cfg.strategy_center.max_recent_signals,
@@ -6910,6 +7791,8 @@ def create_app(
     app["user_backtest_service"] = user_backtest_service
     app["workspace_market_discovery"] = workspace_market_discovery
     app["workspace_account_checker"] = workspace_account_checker
+    app["strategy_preflight_service"] = strategy_preflight_service
+    app["config_guard_tasks"] = set()
     app["strategy_center_store"] = strategy_center_store
     app["login_rate_limiter"] = LoginRateLimiter()
     app["email_verification_manager"] = EmailVerificationManager(
@@ -6919,58 +7802,90 @@ def create_app(
     )
     app["verification_email_sender"] = VerificationEmailSender(cfg.alerts)
 
-    async def monitor_context(app_: web.Application) -> Any:
-        monitor_task = asyncio.create_task(
-            monitor_loop(
+    leader_lock_path = os.environ.get("CRYPTO_ARB_LEADER_LOCK_PATH") or str(
+        Path(cfg.trade_log.path).with_name("runtime_leader.lock")
+    )
+    leader_lease = RuntimeLeaderLease(leader_lock_path)
+
+    async def recover_startup_orders() -> dict[str, Any]:
+        startup_manager = ExchangeManager()
+        try:
+            startup_cfg = await state.runtime_config(cfg)
+            startup_recovery = await startup_manager.recover_pending_order_intents(
+                _all_account_exchanges(startup_cfg)
+            )
+            await state.set_order_reliability(startup_recovery)
+            unresolved_count = int(startup_recovery.get("unresolved_count") or 0)
+            if unresolved_count > 0:
+                await state.set_auto_stopped(
+                    reason=(
+                        f"{unresolved_count} uncertain order intent(s) "
+                        "require reconciliation"
+                    )
+                )
+            return startup_recovery
+        finally:
+            await startup_manager.close()
+
+    async def handle_runtime_failure(reason: str) -> None:
+        await state.set_auto_stopped(reason=reason)
+        write_system_web_audit_event(
+            cfg,
+            action="runtime_supervisor_auto_stop",
+            status="error",
+            target="program",
+            detail=reason,
+        )
+
+    supervisor = RuntimeSupervisor(
+        leader_lease,
+        task_factories={
+            "monitor": lambda: monitor_loop(
                 cfg,
                 strategy,
                 state,
                 interval,
                 strategy_center_store=strategy_center_store,
-            )
-        )
-        mm_task = asyncio.create_task(market_maker_task_loop(cfg, state))
-        rebalance_task = asyncio.create_task(
-            cross_exchange_rebalance_task_loop(cfg, state)
-        )
-        grid_task = asyncio.create_task(spot_grid_task_loop(cfg, state))
-        auto_task = asyncio.create_task(
-            auto_buy_sell_task_loop(cfg, state, auto_buy_sell_tasks)
-        )
-        user_paper_task = asyncio.create_task(
-            user_paper_trading_task_loop(
+            ),
+            "market_maker": lambda: market_maker_task_loop(cfg, state),
+            "cross_exchange_rebalance": lambda: cross_exchange_rebalance_task_loop(
+                cfg, state
+            ),
+            "spot_grid": lambda: spot_grid_task_loop(cfg, state),
+            "auto_buy_sell": lambda: auto_buy_sell_task_loop(
+                cfg,
+                state,
+                auto_buy_sell_tasks,
+            ),
+            "user_paper": lambda: user_paper_trading_task_loop(
                 user_paper_service,
                 running_check=state.is_running,
                 quote_rates_provider=state.quote_rates,
-            )
+            ),
+        },
+        recover_orders=recover_startup_orders,
+        on_failure=handle_runtime_failure,
+        startup_guard=lambda: _watch_startup_configuration(app),
+        enforce_leader_writes=zero_downtime_enabled(),
+    )
+    app["runtime_supervisor"] = supervisor
+
+    async def monitor_context(app_: web.Application) -> Any:
+        supervisor_task = asyncio.create_task(
+            supervisor.run(),
+            name="runtime-supervisor",
         )
-        app_["monitor_task"] = monitor_task
-        app_["market_maker_task"] = mm_task
-        app_["cross_exchange_rebalance_task"] = rebalance_task
-        app_["spot_grid_task"] = grid_task
-        app_["auto_buy_sell_task"] = auto_task
-        app_["user_paper_task"] = user_paper_task
         try:
             yield
         finally:
-            monitor_task.cancel()
-            mm_task.cancel()
-            rebalance_task.cancel()
-            grid_task.cancel()
-            auto_task.cancel()
-            user_paper_task.cancel()
+            guard_tasks: set[asyncio.Task[Any]] = app_["config_guard_tasks"]
+            for guard_task in list(guard_tasks):
+                guard_task.cancel()
+            supervisor_task.cancel()
+            if guard_tasks:
+                await asyncio.gather(*guard_tasks, return_exceptions=True)
             with contextlib.suppress(asyncio.CancelledError):
-                await monitor_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await mm_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await rebalance_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await grid_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await auto_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await user_paper_task
+                await supervisor_task
             await user_backtest_service.close()
             await user_paper_service.close()
 
@@ -6984,7 +7899,9 @@ def create_app(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Crypto arbitrage monitor web UI")
-    parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
+    parser.add_argument(
+        "--config", default="config.acs.json", help="Path to JSON config"
+    )
     parser.add_argument(
         "--strategy",
         choices=[

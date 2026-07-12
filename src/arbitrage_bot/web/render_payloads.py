@@ -32,7 +32,9 @@ def _copy_payload_keys(
     return {key: payload[key] for key in keys if key in payload}
 
 
-def _compact_config_payload(config: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+def _compact_config_payload(
+    config: dict[str, Any], *, full: bool = False
+) -> dict[str, Any]:
     if full:
         return config
     return _copy_payload_keys(
@@ -328,6 +330,8 @@ def _compact_order_activity_payload(
             "pnl_summary",
             "daily_pnl",
             "reconciliation",
+            "reliability",
+            "strategy_performance",
             "checked_account_count",
             "total_account_count",
             "last_finished",
@@ -358,7 +362,9 @@ def _compact_account_balances_payload(
     )
 
 
-def _compact_market_limits_payload(account_balances: dict[str, Any]) -> list[dict[str, Any]]:
+def _compact_market_limits_payload(
+    account_balances: dict[str, Any],
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for account in account_balances.get("accounts", []) or []:
         if not isinstance(account, dict):
@@ -378,8 +384,12 @@ def _compact_market_limits_payload(account_balances: dict[str, Any]) -> list[dic
                     "symbol": str(item.get("symbol") or market.get("symbol") or ""),
                     "status": str(item.get("status") or "unknown"),
                     "limits": market.get("limits") if isinstance(market, dict) else {},
-                    "precision": market.get("precision") if isinstance(market, dict) else {},
-                    "active": market.get("active") if isinstance(market, dict) else None,
+                    "precision": market.get("precision")
+                    if isinstance(market, dict)
+                    else {},
+                    "active": market.get("active")
+                    if isinstance(market, dict)
+                    else None,
                     "error": item.get("error"),
                 }
             )
@@ -601,11 +611,9 @@ def state_payload_for_view(
     )
 
     config_full = (
-        is_trading and _section_open(section_ids, "markets-config")
-    ) or (
-        is_quant and _section_open(section_ids, "carry-config")
-    ) or (
-        is_settings and _section_open(section_ids, "strategy-instances")
+        (is_trading and _section_open(section_ids, "markets-config"))
+        or (is_quant and _section_open(section_ids, "carry-config"))
+        or (is_settings and _section_open(section_ids, "strategy-instances"))
     )
     market_maker_full = is_trading and _section_open(section_ids, "mm-orders")
     slow_execution_full = is_trading and _section_open(section_ids, "slow-orders")
@@ -618,11 +626,9 @@ def state_payload_for_view(
     execution_algo_full = is_quant and _section_open(section_ids, "exec-schedule")
     backtest_full = is_quant and _section_open(section_ids, "backtest-points")
     strategy_center_full = (
-        is_settings
-        and _section_open(section_ids, "strategy-instances", "api-accounts")
+        is_settings and _section_open(section_ids, "strategy-instances", "api-accounts")
     ) or (
-        is_quant
-        and _section_open(section_ids, "funding-arb-form", "signal-bot-form")
+        is_quant and _section_open(section_ids, "funding-arb-form", "signal-bot-form")
     )
     operations_full = is_records and _section_open(
         section_ids,

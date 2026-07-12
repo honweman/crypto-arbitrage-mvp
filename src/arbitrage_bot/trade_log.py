@@ -19,6 +19,7 @@ class TradeLogEntry:
     logged_at: float | None
     event_type: str
     strategy: str
+    strategy_instance_id: str
     mode: str
     status: str
     exchange: str
@@ -40,6 +41,7 @@ class TradeLogEntry:
             "logged_at": self.logged_at,
             "event_type": self.event_type,
             "strategy": self.strategy,
+            "strategy_instance_id": self.strategy_instance_id,
             "mode": self.mode,
             "status": self.status,
             "exchange": self.exchange,
@@ -131,9 +133,7 @@ def normalize_trade_event(event: dict[str, Any]) -> TradeLogEntry:
     plan = event.get("plan") if isinstance(event.get("plan"), dict) else {}
     risk = event.get("risk") if isinstance(event.get("risk"), dict) else {}
     execution = (
-        event.get("execution")
-        if isinstance(event.get("execution"), dict)
-        else {}
+        event.get("execution") if isinstance(event.get("execution"), dict) else {}
     )
     reasons = risk.get("reasons") if isinstance(risk.get("reasons"), list) else []
     warnings = risk.get("warnings") if isinstance(risk.get("warnings"), list) else []
@@ -144,6 +144,17 @@ def normalize_trade_event(event: dict[str, Any]) -> TradeLogEntry:
 
     event_type = str(event.get("type", ""))
     strategy = str(event.get("strategy") or event_type)
+    config = event.get("config") if isinstance(event.get("config"), dict) else {}
+    strategy_instance_id = str(
+        event.get("strategy_instance_id")
+        or event.get("task_id")
+        or config.get("id")
+        or ""
+    )
+    if not strategy_instance_id and strategy == "market_maker":
+        exchange = str(plan.get("exchange") or "")
+        symbol = str(plan.get("symbol") or "")
+        strategy_instance_id = ":".join(item for item in (exchange, symbol) if item)
     return TradeLogEntry(
         event_id=_event_id(event),
         logged_at=(
@@ -153,6 +164,7 @@ def normalize_trade_event(event: dict[str, Any]) -> TradeLogEntry:
         ),
         event_type=event_type,
         strategy=strategy,
+        strategy_instance_id=strategy_instance_id or "default",
         mode=str(event.get("mode", "")),
         status=str(event.get("status", "")),
         exchange=str(plan.get("exchange", "")),
@@ -217,8 +229,12 @@ def summarize_trade_entries(entries: list[TradeLogEntry]) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect normalized trade log events")
-    parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
-    parser.add_argument("--limit", type=int, default=None, help="Number of rows to show")
+    parser.add_argument(
+        "--config", default="config.acs.json", help="Path to JSON config"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Number of rows to show"
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON rows")
     return parser
 

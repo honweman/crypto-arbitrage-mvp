@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .config_versions import (
+    ConfigVersionStore,
+    configuration_hash,
+)
 from .render_payloads import state_payload_for_view
 from .strategy_lifecycle import build_strategy_lifecycle_payload
 
@@ -50,6 +55,7 @@ from ..web_config import (
     market_maker_config_with_id,
     market_maker_symbols_for_accounts,
     risk_config_to_dict,
+    slow_execution_config_to_dict,
     slow_execution_accounts,
     spot_markets_to_list,
     spot_grid_config_to_dict,
@@ -75,13 +81,7 @@ def _state_view_cache_key(
 ) -> tuple[str, str]:
     section_text = str(sections or "")
     normalized_sections = ",".join(
-        sorted(
-            {
-                item.strip()
-                for item in section_text.split(",")
-                if item.strip()
-            }
-        )
+        sorted({item.strip() for item in section_text.split(",") if item.strip()})
     )
     return (str(view or ""), normalized_sections)
 
@@ -196,9 +196,7 @@ def _market_maker_payload_reason(instance: dict[str, Any]) -> str | None:
 
     safety = instance.get("safety")
     if isinstance(safety, dict):
-        text = _first_text(safety.get("reasons")) or _first_text(
-            safety.get("warnings")
-        )
+        text = _first_text(safety.get("reasons")) or _first_text(safety.get("warnings"))
         if text:
             return text
 
@@ -265,7 +263,18 @@ class MonitorState:
         self._auto_stopped = False
         self._auto_stop_reason: str | None = None
         self._auto_stopped_at: float | None = None
-        self._runtime_store_path = Path(runtime_store_path) if runtime_store_path else None
+        self._runtime_store_path = (
+            Path(runtime_store_path) if runtime_store_path else None
+        )
+        self._config_version_store = (
+            ConfigVersionStore(
+                self._runtime_store_path.with_suffix(
+                    self._runtime_store_path.suffix + ".versions.sqlite3"
+                )
+            )
+            if self._runtime_store_path is not None
+            else None
+        )
         self._runtime_store_loaded = False
         self._runtime_store_updated_at: float | None = None
         self._runtime_store_saved_at: float | None = None
@@ -314,9 +323,7 @@ class MonitorState:
                     )
                 )
             except ValueError as exc:
-                self._runtime_store_error = (
-                    f"invalid market_maker_instances: {exc}"
-                )
+                self._runtime_store_error = f"invalid market_maker_instances: {exc}"
         self._slow_execution_overrides: dict[str, Any] = dict(
             store_data.get("slow_execution_overrides", {})
         )
@@ -326,9 +333,7 @@ class MonitorState:
         self._spot_grid_overrides: dict[str, Any] = dict(
             store_data.get("spot_grid_overrides", {})
         )
-        self._dca_overrides: dict[str, Any] = dict(
-            store_data.get("dca_overrides", {})
-        )
+        self._dca_overrides: dict[str, Any] = dict(store_data.get("dca_overrides", {}))
         self._execution_algo_overrides: dict[str, Any] = dict(
             store_data.get("execution_algo_overrides", {})
         )
@@ -394,6 +399,17 @@ class MonitorState:
         self._recent_opportunities: deque[dict[str, Any]] = deque(maxlen=100)
         self._state_view_cache: dict[tuple[str, str], tuple[float, str]] = {}
         self._refresh_strategy_lifecycle_unlocked(runtime_cfg)
+        if self._config_version_store is not None:
+            try:
+                existing_version = self._config_version_store.latest()
+                self._config_version_store.record(
+                    self._runtime_store_payload_unlocked(),
+                    actor_email="system",
+                    action="service_start",
+                    known_good=existing_version is None,
+                )
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                self._runtime_store_error = f"config version store: {exc}"
 
     def _runtime_store_status_unlocked(self) -> dict[str, Any]:
         return {
@@ -450,16 +466,20 @@ class MonitorState:
                 self._market_maker_instances_override
             )
         if self._spot_markets_override is not None:
-            payload["spot_markets"] = spot_markets_to_list(
-                self._spot_markets_override
-            )
+            payload["spot_markets"] = spot_markets_to_list(self._spot_markets_override)
         if self._cash_and_carry_pairs_override is not None:
             payload["cash_and_carry_pairs"] = cash_and_carry_pairs_to_list(
                 self._cash_and_carry_pairs_override
             )
         return payload
 
-    def _save_runtime_store_unlocked(self) -> None:
+    def _save_runtime_store_unlocked(
+        self,
+        *,
+        actor_email: str = "system",
+        action: str = "runtime_update",
+        known_good: bool = False,
+    ) -> None:
         if self._runtime_store_path is None:
             return
         payload = self._runtime_store_payload_unlocked()
@@ -469,9 +489,308 @@ class MonitorState:
             self._runtime_store_loaded = True
             self._runtime_store_updated_at = float(payload["updated_at"])
             self._runtime_store_saved_at = time.time()
+            if self._config_version_store is not None:
+                try:
+                    self._config_version_store.record(
+                        payload,
+                        actor_email=actor_email,
+                        action=action,
+                        known_good=known_good,
+                    )
+                except (OSError, sqlite3.Error, ValueError) as exc:
+                    self._runtime_store_error = f"config version store: {exc}"
         if "runtime_store" in self._payload:
             self._payload["runtime_store"] = self._runtime_store_status_unlocked()
         self._clear_state_view_cache_unlocked()
+
+    def _refresh_config_payloads_unlocked(self, runtime_cfg: BotConfig) -> None:
+        if "config" in self._payload:
+            self._payload["config"]["spot_markets"] = spot_markets_to_list(
+                runtime_cfg.spot_markets
+            )
+            self._payload["config"]["spot_exchanges"] = exchange_configs_to_list(
+                runtime_cfg.spot_exchanges
+            )
+            self._payload["config"]["cash_and_carry_pairs"] = (
+                cash_and_carry_pairs_to_list(runtime_cfg.cash_and_carry_pairs)
+            )
+            self._payload["config"]["strategy_universe"] = strategy_universe_to_dict(
+                runtime_cfg
+            )
+        if "market_maker" in self._payload:
+            self._payload["market_maker"]["config"] = market_maker_config_to_dict(
+                runtime_cfg.market_maker
+            )
+            self._payload["market_maker"]["instances"] = market_maker_configs_to_list(
+                market_maker_configs_for_runtime(runtime_cfg)
+            )
+            self._payload["market_maker"]["accounts"] = slow_execution_accounts(
+                _all_account_exchanges(runtime_cfg),
+                market_maker_symbols_for_accounts(
+                    runtime_cfg,
+                    base_cfg=self._base_cfg,
+                ),
+                spot_markets=runtime_cfg.spot_markets,
+            )
+        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+        if "slow_execution" in self._payload:
+            self._payload["slow_execution"]["config"] = slow_execution_config_to_dict(
+                runtime_cfg.slow_execution
+            )
+            self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                symbols_by_exchange,
+                spot_markets=runtime_cfg.spot_markets,
+            )
+        if "cross_exchange_rebalance" in self._payload:
+            self._payload["cross_exchange_rebalance"]["config"] = (
+                cross_exchange_rebalance_config_to_dict(
+                    runtime_cfg.cross_exchange_rebalance
+                )
+            )
+            self._payload["cross_exchange_rebalance"]["accounts"] = (
+                slow_execution_accounts(
+                    runtime_cfg.spot_exchanges,
+                    _rebalance_symbols_by_exchange(runtime_cfg),
+                    spot_markets=runtime_cfg.spot_markets,
+                )
+            )
+        section_configs = (
+            ("spot_grid", spot_grid_config_to_dict(runtime_cfg.spot_grid)),
+            ("dca", dca_config_to_dict(runtime_cfg.dca)),
+            (
+                "execution_algo",
+                execution_algo_config_to_dict(runtime_cfg.execution_algo),
+            ),
+            ("backtest", backtest_config_to_dict(runtime_cfg.backtest)),
+        )
+        for section, config in section_configs:
+            if section not in self._payload:
+                continue
+            self._payload[section]["config"] = config
+            self._payload[section]["accounts"] = slow_execution_accounts(
+                runtime_cfg.spot_exchanges,
+                (
+                    _grid_symbols_by_exchange(runtime_cfg)
+                    if section in {"spot_grid", "dca"}
+                    else _execution_symbols_by_exchange(runtime_cfg)
+                ),
+                spot_markets=runtime_cfg.spot_markets,
+            )
+        self._payload["operations"] = build_operations_payload(runtime_cfg)
+        self._payload["trading_console"] = build_trading_console_payload(
+            runtime_cfg,
+            strategy_paused=self._strategy_paused,
+            order_activity=self._payload.get("order_activity", {}),
+            auto_buy_sell_tasks=self._auto_buy_sell_tasks,
+        )
+        self._refresh_strategy_lifecycle_unlocked(runtime_cfg)
+
+    async def config_versions(self, *, limit: int = 30) -> dict[str, Any]:
+        async with self._lock:
+            current = self._runtime_store_payload_unlocked()
+            if self._config_version_store is None:
+                return {
+                    "enabled": False,
+                    "current_hash": configuration_hash(current),
+                    "versions": [],
+                }
+            versions = self._config_version_store.list(limit=limit)
+            return {
+                "enabled": True,
+                "path": str(self._config_version_store.path),
+                "current_hash": configuration_hash(current),
+                "current_version_id": versions[0]["id"] if versions else None,
+                "versions": versions,
+            }
+
+    async def startup_config_guard_candidate(self) -> dict[str, Any] | None:
+        async with self._lock:
+            if self._config_version_store is None:
+                return None
+            current_hash = configuration_hash(self._runtime_store_payload_unlocked())
+            latest = self._config_version_store.latest()
+            if latest is None or latest["hash"] != current_hash or latest["known_good"]:
+                return None
+            previous = self._config_version_store.latest_known_good(
+                before_id=int(latest["id"]),
+            )
+            if previous is None:
+                return None
+            return {
+                "version_id": int(latest["id"]),
+                "hash": current_hash,
+                "previous_known_good_id": int(previous["id"]),
+            }
+
+    async def mark_current_config_known_good(
+        self,
+        *,
+        expected_current_hash: str = "",
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            if self._config_version_store is None:
+                return None
+            current = self._runtime_store_payload_unlocked()
+            current_hash = configuration_hash(current)
+            if expected_current_hash and expected_current_hash != current_hash:
+                return None
+            version = self._config_version_store.record(
+                current,
+                actor_email="system",
+                action="preflight_passed",
+                known_good=True,
+            )
+            return version
+
+    async def rollback_config_version(
+        self,
+        version_id: int,
+        *,
+        expected_current_hash: str,
+        actor_email: str,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            if self._config_version_store is None:
+                raise ValueError("configuration versioning is not enabled")
+            current_payload = self._runtime_store_payload_unlocked()
+            current_hash = configuration_hash(current_payload)
+            if not expected_current_hash or expected_current_hash != current_hash:
+                raise ValueError(
+                    "configuration changed after this page loaded; refresh before rollback"
+                )
+            target = self._config_version_store.get(
+                int(version_id),
+                include_payload=True,
+            )
+            if target is None:
+                raise ValueError(f"configuration version not found: {version_id}")
+            data = target["payload"]
+            snapshot = {
+                "risk": self._risk_overrides,
+                "market_maker": self._market_maker_overrides,
+                "market_maker_instances": self._market_maker_instances_override,
+                "slow_execution": self._slow_execution_overrides,
+                "rebalance": self._cross_exchange_rebalance_overrides,
+                "spot_grid": self._spot_grid_overrides,
+                "dca": self._dca_overrides,
+                "execution_algo": self._execution_algo_overrides,
+                "backtest": self._backtest_overrides,
+                "spot_markets": self._spot_markets_override,
+                "cash_and_carry": self._cash_and_carry_pairs_override,
+                "strategy_paused": self._strategy_paused,
+            }
+            try:
+                self._risk_overrides = dict(data.get("risk_overrides", {}))
+                self._market_maker_overrides = dict(
+                    data.get("market_maker_overrides", {})
+                )
+                mm_raw = data.get("market_maker_instances")
+                self._market_maker_instances_override = (
+                    market_maker_configs_from_payload(
+                        mm_raw,
+                        base_configs=market_maker_configs_for_runtime(self._base_cfg),
+                    )
+                    if isinstance(mm_raw, list)
+                    else None
+                )
+                self._slow_execution_overrides = dict(
+                    data.get("slow_execution_overrides", {})
+                )
+                self._cross_exchange_rebalance_overrides = dict(
+                    data.get("cross_exchange_rebalance_overrides", {})
+                )
+                self._spot_grid_overrides = dict(data.get("spot_grid_overrides", {}))
+                self._dca_overrides = dict(data.get("dca_overrides", {}))
+                self._execution_algo_overrides = dict(
+                    data.get("execution_algo_overrides", {})
+                )
+                self._backtest_overrides = dict(data.get("backtest_overrides", {}))
+                self._spot_markets_override = (
+                    _spot_markets_from_payload(
+                        {"spot_markets": data["spot_markets"]},
+                        allowed_exchanges={
+                            exchange.key for exchange in self._base_cfg.spot_exchanges
+                        },
+                    )
+                    if isinstance(data.get("spot_markets"), list)
+                    else None
+                )
+                self._cash_and_carry_pairs_override = (
+                    _cash_and_carry_pairs_from_payload(
+                        {"cash_and_carry_pairs": data["cash_and_carry_pairs"]}
+                    )
+                    if isinstance(data.get("cash_and_carry_pairs"), list)
+                    else None
+                )
+                pauses = {
+                    strategy_id: bool(value)
+                    for strategy_id, value in dict(
+                        data.get("strategy_paused", {})
+                    ).items()
+                    if strategy_id in STRATEGY_IDS
+                }
+                self._strategy_paused = {
+                    strategy_id: pauses.get(strategy_id, False)
+                    for strategy_id in STRATEGY_IDS
+                }
+                runtime_cfg = self._runtime_config_unlocked(self._base_cfg)
+                target_live_enabled = bool(
+                    runtime_cfg.risk.allow_live_trading
+                    or any(
+                        item.enabled and item.live_enabled
+                        for item in market_maker_configs_for_runtime(runtime_cfg)
+                    )
+                    or (
+                        runtime_cfg.cross_exchange_rebalance.enabled
+                        and runtime_cfg.cross_exchange_rebalance.live_enabled
+                    )
+                    or (
+                        runtime_cfg.spot_grid.enabled
+                        and runtime_cfg.spot_grid.live_enabled
+                    )
+                    or (runtime_cfg.dca.enabled and runtime_cfg.dca.live_enabled)
+                    or (
+                        runtime_cfg.execution_algo.enabled
+                        and runtime_cfg.execution_algo.live_enabled
+                    )
+                )
+                if target_live_enabled and not bool(target.get("known_good")):
+                    raise ValueError(
+                        "an unverified configuration version cannot enable live trading"
+                    )
+            except (KeyError, TypeError, ValueError):
+                self._risk_overrides = snapshot["risk"]
+                self._market_maker_overrides = snapshot["market_maker"]
+                self._market_maker_instances_override = snapshot[
+                    "market_maker_instances"
+                ]
+                self._slow_execution_overrides = snapshot["slow_execution"]
+                self._cross_exchange_rebalance_overrides = snapshot["rebalance"]
+                self._spot_grid_overrides = snapshot["spot_grid"]
+                self._dca_overrides = snapshot["dca"]
+                self._execution_algo_overrides = snapshot["execution_algo"]
+                self._backtest_overrides = snapshot["backtest"]
+                self._spot_markets_override = snapshot["spot_markets"]
+                self._cash_and_carry_pairs_override = snapshot["cash_and_carry"]
+                self._strategy_paused = snapshot["strategy_paused"]
+                raise
+            self._refresh_config_payloads_unlocked(runtime_cfg)
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=f"rollback_to_version_{version_id}",
+                known_good=bool(target.get("known_good")),
+            )
+            versions = self._config_version_store.list(limit=30)
+            return {
+                "ok": True,
+                "rolled_back_to": int(version_id),
+                "current_hash": configuration_hash(
+                    self._runtime_store_payload_unlocked()
+                ),
+                "current_version_id": versions[0]["id"] if versions else None,
+                "versions": versions,
+            }
 
     def _program_payload_unlocked(self) -> dict[str, Any]:
         return {
@@ -496,9 +815,7 @@ class MonitorState:
         else:
             market_maker_instances = market_maker_configs_for_runtime(cfg)
         primary_market_maker = (
-            market_maker_instances[0]
-            if market_maker_instances
-            else legacy_market_maker
+            market_maker_instances[0] if market_maker_instances else legacy_market_maker
         )
         return replace(
             cfg,
@@ -550,10 +867,7 @@ class MonitorState:
         now = time.monotonic()
         async with self._lock:
             cached = self._state_view_cache.get(cache_key)
-            if (
-                cached is not None
-                and now - cached[0] <= _STATE_VIEW_CACHE_TTL_SECONDS
-            ):
+            if cached is not None and now - cached[0] <= _STATE_VIEW_CACHE_TTL_SECONDS:
                 payload_text = cached[1]
             else:
                 self._refresh_strategy_lifecycle_unlocked()
@@ -669,6 +983,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "market_maker_update",
     ) -> dict[str, Any]:
         async with self._lock:
             if self._market_maker_instances_override is not None:
@@ -680,9 +996,7 @@ class MonitorState:
                 for instance in instances:
                     if instance.id == target_id:
                         updated.append(
-                            market_maker_config_with_id(
-                                replace(instance, **overrides)
-                            )
+                            market_maker_config_with_id(replace(instance, **overrides))
                         )
                         replaced_target = True
                     else:
@@ -693,16 +1007,16 @@ class MonitorState:
                             replace(MarketMakerConfig(), **overrides)
                         )
                     )
-                self._market_maker_instances_override = (
-                    market_maker_configs_with_ids(updated)
+                self._market_maker_instances_override = market_maker_configs_with_ids(
+                    updated
                 )
                 self._market_maker_overrides = {}
             else:
                 self._market_maker_overrides.update(overrides)
             runtime_cfg = self._runtime_config_unlocked(cfg)
             if "market_maker" in self._payload:
-                self._payload["market_maker"]["config"] = (
-                    market_maker_config_to_dict(runtime_cfg.market_maker)
+                self._payload["market_maker"]["config"] = market_maker_config_to_dict(
+                    runtime_cfg.market_maker
                 )
                 self._payload["market_maker"]["instances"] = (
                     market_maker_configs_to_list(
@@ -714,8 +1028,8 @@ class MonitorState:
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["config"]["strategy_universe"] = (
-                strategy_universe_to_dict(runtime_cfg)
+            self._payload["config"]["strategy_universe"] = strategy_universe_to_dict(
+                runtime_cfg
             )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -724,13 +1038,14 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
-                        "config": market_maker_config_to_dict(
-                            runtime_cfg.market_maker
-                        ),
+                        "config": market_maker_config_to_dict(runtime_cfg.market_maker),
                         "instances": market_maker_configs_to_list(
                             market_maker_configs_for_runtime(runtime_cfg)
                         ),
@@ -745,6 +1060,8 @@ class MonitorState:
         instances: list[MarketMakerConfig],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "market_maker_instances_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._market_maker_instances_override = market_maker_configs_with_ids(
@@ -753,8 +1070,8 @@ class MonitorState:
             self._market_maker_overrides = {}
             runtime_cfg = self._runtime_config_unlocked(cfg)
             if "market_maker" in self._payload:
-                self._payload["market_maker"]["config"] = (
-                    market_maker_config_to_dict(runtime_cfg.market_maker)
+                self._payload["market_maker"]["config"] = market_maker_config_to_dict(
+                    runtime_cfg.market_maker
                 )
                 self._payload["market_maker"]["instances"] = (
                     market_maker_configs_to_list(
@@ -766,8 +1083,8 @@ class MonitorState:
                     market_maker_symbols_for_accounts(runtime_cfg, base_cfg=cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["config"]["strategy_universe"] = (
-                strategy_universe_to_dict(runtime_cfg)
+            self._payload["config"]["strategy_universe"] = strategy_universe_to_dict(
+                runtime_cfg
             )
             self._payload["operations"] = build_operations_payload(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
@@ -776,13 +1093,14 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
-                        "config": market_maker_config_to_dict(
-                            runtime_cfg.market_maker
-                        ),
+                        "config": market_maker_config_to_dict(runtime_cfg.market_maker),
                         "instances": market_maker_configs_to_list(
                             market_maker_configs_for_runtime(runtime_cfg)
                         ),
@@ -797,6 +1115,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "cross_exchange_rebalance_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._cross_exchange_rebalance_overrides.update(overrides)
@@ -818,7 +1138,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -839,6 +1162,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "spot_grid_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._spot_grid_overrides.update(overrides)
@@ -859,7 +1184,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -875,6 +1203,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "dca_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._dca_overrides.update(overrides)
@@ -895,7 +1225,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -911,6 +1244,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "execution_algo_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._execution_algo_overrides.update(overrides)
@@ -931,7 +1266,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -949,6 +1287,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "backtest_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._backtest_overrides.update(overrides)
@@ -969,7 +1309,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -996,6 +1339,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig | None = None,
+        actor_email: str = "system",
+        action: str = "auto_buy_sell_update",
     ) -> None:
         async with self._lock:
             self._slow_execution_overrides.update(overrides)
@@ -1005,18 +1350,25 @@ class MonitorState:
                 current_config.update(overrides)
                 self._payload["slow_execution"]["config"] = current_config
                 if runtime_cfg is not None:
-                    self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
-                        runtime_cfg.spot_exchanges,
-                        _spot_symbols_by_exchange(runtime_cfg),
-                        spot_markets=runtime_cfg.spot_markets,
+                    self._payload["slow_execution"]["accounts"] = (
+                        slow_execution_accounts(
+                            runtime_cfg.spot_exchanges,
+                            _spot_symbols_by_exchange(runtime_cfg),
+                            spot_markets=runtime_cfg.spot_markets,
+                        )
                     )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
 
     async def set_spot_markets(
         self,
         markets: list[SpotMarketConfig],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "spot_markets_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._spot_markets_override = markets
@@ -1082,7 +1434,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -1104,6 +1459,8 @@ class MonitorState:
         pairs: list[CashAndCarryPair],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "cash_and_carry_update",
     ) -> dict[str, Any]:
         async with self._lock:
             self._cash_and_carry_pairs_override = pairs
@@ -1130,7 +1487,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -1148,6 +1508,8 @@ class MonitorState:
         overrides: dict[str, Any],
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "risk_update",
     ) -> dict[str, Any]:
         async with self._lock:
             current_risk = self._runtime_config_unlocked(cfg).risk
@@ -1165,7 +1527,10 @@ class MonitorState:
                 order_activity=self._payload.get("order_activity", {}),
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(
                 json.dumps(
                     {
@@ -1271,6 +1636,8 @@ class MonitorState:
         paused: bool,
         *,
         cfg: BotConfig,
+        actor_email: str = "system",
+        action: str = "strategy_pause_update",
     ) -> dict[str, Any]:
         if strategy_id not in STRATEGY_IDS:
             raise ValueError(f"unknown strategy: {strategy_id}")
@@ -1284,7 +1651,10 @@ class MonitorState:
                 auto_buy_sell_tasks=self._auto_buy_sell_tasks,
             )
             self._refresh_strategy_lifecycle_unlocked(runtime_cfg)
-            self._save_runtime_store_unlocked()
+            self._save_runtime_store_unlocked(
+                actor_email=actor_email,
+                action=action,
+            )
             return json.loads(json.dumps(self._payload["trading_console"]))
 
     async def set_running(self, running: bool) -> dict[str, Any]:
@@ -1347,6 +1717,21 @@ class MonitorState:
     async def set_order_activity(self, order_activity: dict[str, Any]) -> None:
         async with self._lock:
             self._payload["order_activity"] = order_activity
+            reliability = order_activity.get("reliability")
+            if isinstance(reliability, dict):
+                existing = self._payload.get("order_reliability")
+                self._payload["order_reliability"] = {
+                    **(existing if isinstance(existing, dict) else {}),
+                    **reliability,
+                }
+            self._clear_state_view_cache_unlocked()
+
+    async def set_order_reliability(self, payload: dict[str, Any]) -> None:
+        async with self._lock:
+            self._payload["order_reliability"] = json.loads(json.dumps(payload))
+            order_activity = self._payload.get("order_activity")
+            if isinstance(order_activity, dict):
+                order_activity["reliability"] = json.loads(json.dumps(payload))
             self._clear_state_view_cache_unlocked()
 
     async def set_readonly_health(
@@ -1378,17 +1763,15 @@ class MonitorState:
                 self._payload["funding_basis"] = funding_basis
             if options_arbitrage is not None:
                 self._payload["options_arbitrage"] = options_arbitrage
-            self._payload["execution_protection"] = (
-                _execution_protection_from_payloads(self._payload)
+            self._payload["execution_protection"] = _execution_protection_from_payloads(
+                self._payload
             )
-            self._payload["contract_strategies"] = (
-                build_contract_strategies_payload(
-                    cfg,
-                    funding_basis=self._payload.get("funding_basis", {}),
-                    derivatives=self._payload.get("derivatives", {}),
-                    market_maker=self._payload.get("market_maker", {}),
-                    order_activity=order_activity,
-                )
+            self._payload["contract_strategies"] = build_contract_strategies_payload(
+                cfg,
+                funding_basis=self._payload.get("funding_basis", {}),
+                derivatives=self._payload.get("derivatives", {}),
+                market_maker=self._payload.get("market_maker", {}),
+                order_activity=order_activity,
             )
             self._payload["trading_console"] = trading_console
             self._payload["readiness"] = build_readiness_payload(
@@ -1473,7 +1856,9 @@ class MonitorState:
         ]
         return {
             "status": aggregate_status,
-            "mode": "live" if any(item.get("mode") == "live" for item in instances) else selected.get("mode", "dry_run"),
+            "mode": "live"
+            if any(item.get("mode") == "live" for item in instances)
+            else selected.get("mode", "dry_run"),
             "instances": instances,
             "instance_count": len(instances),
             "active_instance_count": len(active_instances),
@@ -1529,7 +1914,11 @@ class MonitorState:
             for instance in instances:
                 if not isinstance(instance, dict):
                     continue
-                config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
+                config = (
+                    instance.get("config")
+                    if isinstance(instance.get("config"), dict)
+                    else {}
+                )
                 instance_id = str(config.get("id") or instance.get("id") or "")
                 instance_runtime = runtime_by_id.get(instance_id)
                 if instance_runtime is not None:
@@ -1540,9 +1929,7 @@ class MonitorState:
                         )
                     )
                 else:
-                    updated_instances.append(
-                        _annotate_market_maker_instance(instance)
-                    )
+                    updated_instances.append(_annotate_market_maker_instance(instance))
             market_maker["instances"] = updated_instances
 
     async def set_market_maker_instance_runtime(
@@ -1677,10 +2064,9 @@ class MonitorState:
             market_maker["status_reason"] = self._market_maker_runtime.get(
                 "status_reason"
             )
-            if (
-                self._market_maker_runtime.get("last_error")
-                or self._market_maker_runtime.get("status_reason")
-            ):
+            if self._market_maker_runtime.get(
+                "last_error"
+            ) or self._market_maker_runtime.get("status_reason"):
                 market_maker["error"] = self._market_maker_runtime.get(
                     "last_error"
                 ) or self._market_maker_runtime.get("status_reason")
@@ -1766,9 +2152,7 @@ class MonitorState:
                     "contract_strategies": contract_strategies_config_to_dict(
                         cfg.contract_strategies
                     ),
-                        "spot_exchanges": exchange_configs_to_list(
-                            cfg.spot_exchanges
-                        ),
+                    "spot_exchanges": exchange_configs_to_list(cfg.spot_exchanges),
                     "derivative_exchanges": exchange_configs_to_list(
                         cfg.derivative_exchanges
                     ),

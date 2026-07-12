@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <script src="/static/theme.js?v=20260712-rebalance7"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260712-lifecycle2">
+  <script src="/static/theme.js?v=20260712-safety2"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260712-safety2">
 
 </head>
 <body>
@@ -347,6 +347,33 @@
       </div>
     </section>
 
+    <section data-page="records" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Strategy Performance</h2>
+        <span id="strategy-performance-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="mobile-card-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Instance</th>
+              <th>Account / Symbol</th>
+              <th class="num">Fills / Submitted</th>
+              <th class="num">Fill Rate</th>
+              <th class="num">Average Fill</th>
+              <th class="num">Fees</th>
+              <th class="num">P/L</th>
+              <th class="num">Slippage</th>
+              <th class="num">Latency</th>
+              <th class="num">Paper vs Live</th>
+            </tr>
+          </thead>
+          <tbody id="strategy-performance"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section id="spot-arbitrage-section" data-page="trading" class="compact-section" data-ui-feature="market_config">
       <div class="section-title">
         <h2>Spot Arbitrage</h2>
@@ -426,6 +453,30 @@
       </div>
       <div class="form-divider">Setup Progress</div>
       <div id="user-setup-readiness" class="workspace-readiness" aria-live="polite"></div>
+      <div class="form-divider">User Risk Profile</div>
+      <form id="user-risk-profile-form" class="control-panel">
+        <label class="check-field">
+          <input id="user-risk-trading-enabled" type="checkbox">
+          Paper Trading Enabled
+        </label>
+        <div class="field">
+          <label for="user-risk-max-exposure">Max Total Exposure</label>
+          <input id="user-risk-max-exposure" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="user-risk-max-loss">Max Daily Loss</label>
+          <input id="user-risk-max-loss" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="user-risk-max-orders">Max Open Orders</label>
+          <input id="user-risk-max-orders" type="number" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="user-risk-max-strategies">Max Active Strategies</label>
+          <input id="user-risk-max-strategies" type="number" min="0" step="1">
+        </div>
+        <button id="user-risk-profile-save" class="control-button" type="submit">Save Risk Profile</button>
+      </form>
       <div class="form-divider">Projects</div>
       <form id="user-project-form" class="control-panel">
         <input id="user-project-id" type="hidden">
@@ -506,6 +557,10 @@
         <label class="check-field wide-field workspace-safety-confirm">
           <input id="user-exchange-no-withdraw" type="checkbox">
           I confirm withdrawal permission is disabled for this API key
+        </label>
+        <label class="check-field wide-field workspace-safety-confirm">
+          <input id="user-exchange-trade-permission" type="checkbox">
+          I confirm this API key has spot trading permission
         </label>
         <div class="subtle wide-field">Use a trade-only API key. Save it, test the connection, then enable the account. Credentials are encrypted and never shown again.</div>
         <button id="user-exchange-save" class="control-button" type="submit">Save Account</button>
@@ -810,6 +865,27 @@
           <label for="risk-max-price-jump">Max Jump Bps</label>
           <input id="risk-max-price-jump" type="number" min="0" step="any">
         </div>
+        <div class="form-divider">Emergency Hedge</div>
+        <label class="check-field">
+          <input id="risk-auto-hedge-live" type="checkbox">
+          Auto Hedge Live
+        </label>
+        <div class="field">
+          <label for="risk-auto-hedge-max-quote">Max Hedge Quote (Common)</label>
+          <input id="risk-auto-hedge-max-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-auto-hedge-slippage">Hedge Slippage Bps</label>
+          <input id="risk-auto-hedge-slippage" type="number" min="0" step="any">
+        </div>
+        <div class="field">
+          <label for="risk-auto-hedge-attempts">Hedge Attempts</label>
+          <input id="risk-auto-hedge-attempts" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="risk-auto-hedge-ttl">Hedge TTL Sec</label>
+          <input id="risk-auto-hedge-ttl" type="number" min="0" step="any">
+        </div>
         <div class="form-divider" data-ui-feature="derivatives">Derivatives</div>
         <div class="field" data-ui-feature="derivatives">
           <label for="risk-max-derivative-leverage">Max Leverage</label>
@@ -825,6 +901,29 @@
         </div>
         <button id="risk-apply" class="control-button" type="submit">Apply</button>
       </form>
+    </section>
+
+    <section id="config-version-section" data-page="settings" class="compact-section">
+      <div class="section-title">
+        <h2>Configuration History</h2>
+        <span id="config-version-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="mobile-card-table">
+          <thead>
+            <tr>
+              <th>Version</th>
+              <th>Time</th>
+              <th>Changed By</th>
+              <th>Action</th>
+              <th>Changes</th>
+              <th>Difference</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="config-versions"></tbody>
+        </table>
+      </div>
     </section>
 
     <section data-page="settings" class="compact-section" data-ui-feature="strategy_center" data-ui-hidden-default="true">
@@ -2086,6 +2185,7 @@
           <select id="mm-instance"></select>
         </div>
         <button id="mm-add" class="ghost-button" type="button">Add</button>
+        <button id="mm-copy" class="ghost-button" type="button">Copy</button>
         <button id="mm-delete" class="ghost-button danger" type="button">Delete</button>
         <label class="check-field strategy-internal-state" hidden>
           <input id="mm-enabled" type="checkbox">
@@ -2316,8 +2416,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260712-lifecycle2" defer></script>
-  <script src="/static/app.js?v=20260712-lifecycle2" defer></script>
+  <script src="/static/i18n.js?v=20260712-safety2" defer></script>
+  <script src="/static/app.js?v=20260712-safety2" defer></script>
 
 </body>
 </html>

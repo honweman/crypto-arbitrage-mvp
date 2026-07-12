@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig
+from .emergency_hedge import (
+    apply_emergency_hedge_to_fill_status,
+    execute_emergency_hedge,
+)
 from .exchanges import ExchangeManager
 from .models import BookLevel, Opportunity, OpportunityLeg, OrderBookSnapshot
 from .risk import (
@@ -141,7 +145,9 @@ def build_spot_arbitrage_orders(
         quote_rate = _leg_quote_rate(leg, quote_rates)
         if quote_rate is None:
             quote = leg.quote_currency or _quote_currency(leg.symbol)
-            errors.append(f"missing quote rate for {quote} -> {cfg.common_quote_currency}")
+            errors.append(
+                f"missing quote rate for {quote} -> {cfg.common_quote_currency}"
+            )
             continue
         local_notional = price * leg.quantity_base
         orders.append(
@@ -205,13 +211,14 @@ def _protection_payload(
     evaluated_at: float,
 ) -> dict[str, Any]:
     max_slippage = max((order.slippage_bps for order in orders), default=0.0)
-    opportunity_to_decision_ms = max(0.0, (evaluated_at - opportunity.observed_at) * 1000)
+    opportunity_to_decision_ms = max(
+        0.0, (evaluated_at - opportunity.observed_at) * 1000
+    )
     return {
         "max_allowed_slippage_bps": cfg.risk.max_slippage_bps,
         "max_slippage_bps": max_slippage,
         "slippage_ok": (
-            cfg.risk.max_slippage_bps <= 0
-            or max_slippage <= cfg.risk.max_slippage_bps
+            cfg.risk.max_slippage_bps <= 0 or max_slippage <= cfg.risk.max_slippage_bps
         ),
         "max_plan_age_seconds": cfg.risk.max_plan_age_seconds,
         "opportunity_to_decision_ms": opportunity_to_decision_ms,
@@ -257,6 +264,7 @@ async def _fetch_orders_by_id(
     manager: ExchangeManager,
     order: ExecutableArbitrageOrder,
     *,
+    target_order_id: str,
     limit: int = 50,
 ) -> dict[str, dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
@@ -271,7 +279,7 @@ async def _fetch_orders_by_id(
         if isinstance(raw, dict):
             order_id = _raw_order_id(raw)
             if order_id:
-                rows[order_id] = raw
+                rows[order_id] = {**raw, "_evidence_source": "open"}
     fetch_closed = getattr(manager, "fetch_closed_orders", None)
     if callable(fetch_closed):
         try:
@@ -286,7 +294,19 @@ async def _fetch_orders_by_id(
             if isinstance(raw, dict):
                 order_id = _raw_order_id(raw)
                 if order_id:
-                    rows[order_id] = raw
+                    rows[order_id] = {**raw, "_evidence_source": "closed"}
+    fetch_order = getattr(manager, "fetch_order", None)
+    if callable(fetch_order) and target_order_id:
+        try:
+            raw = await fetch_order(
+                order.exchange,
+                symbol=order.leg.symbol,
+                order_id=target_order_id,
+            )
+        except Exception:  # noqa: BLE001
+            raw = None
+        if isinstance(raw, dict):
+            rows[target_order_id] = {**raw, "_evidence_source": "order"}
     return rows
 
 
@@ -298,18 +318,43 @@ async def _execution_fill_status(
     order_rows: list[dict[str, Any]] = []
     buy_filled_base = 0.0
     sell_filled_base = 0.0
+    fill_evidence_complete = True
+    terminal_statuses = {
+        "closed",
+        "canceled",
+        "cancelled",
+        "filled",
+        "rejected",
+        "expired",
+    }
     for order, raw in zip(orders, results):
         if not isinstance(raw, dict):
+            fill_evidence_complete = False
             continue
         order_id = _raw_order_id(raw)
         fetched = {}
         if order_id:
-            fetched = (await _fetch_orders_by_id(manager, order)).get(order_id, {})
+            fetched = (
+                await _fetch_orders_by_id(
+                    manager,
+                    order,
+                    target_order_id=order_id,
+                )
+            ).get(order_id, {})
         filled_base = max(
             _raw_order_filled_base(raw),
             _raw_order_filled_base(fetched),
         )
         filled_quote = max(_raw_order_cost(raw), _raw_order_cost(fetched))
+        raw_status = str(raw.get("status") or "").lower()
+        fetched_status = str(fetched.get("status") or "").lower()
+        evidence_source = str(fetched.get("_evidence_source") or "")
+        evidence_complete = bool(
+            raw_status in terminal_statuses
+            or fetched_status in terminal_statuses
+            or evidence_source == "closed"
+        )
+        fill_evidence_complete = fill_evidence_complete and evidence_complete
         if order.leg.side == "buy":
             buy_filled_base += filled_base
         else:
@@ -324,6 +369,8 @@ async def _execution_fill_status(
                 "filled_base": filled_base,
                 "remaining_base": max(0.0, order.leg.quantity_base - filled_base),
                 "filled_quote": filled_quote,
+                "fill_evidence_complete": evidence_complete,
+                "evidence_source": evidence_source or "submission",
                 "fill_ratio": (
                     filled_base / order.leg.quantity_base
                     if order.leg.quantity_base > 0
@@ -342,10 +389,16 @@ async def _execution_fill_status(
         "hedge_required": hedge_required,
         "hedge_side": hedge_side,
         "hedge_base": abs(imbalance_base),
+        "fill_evidence_complete": fill_evidence_complete,
+        "reconciliation_required": not fill_evidence_complete,
         "status": (
-            "hedge_required"
+            "fill_reconciliation_required"
+            if not fill_evidence_complete
+            else "hedge_required"
             if hedge_required
-            else "balanced" if order_rows else "no_fills_detected"
+            else "balanced"
+            if order_rows
+            else "no_fills_detected"
         ),
     }
 
@@ -363,16 +416,26 @@ def _paper_vs_live_payload(
         if isinstance(fill_status, dict)
         else False
     )
+    reconciliation_required = (
+        bool(fill_status.get("reconciliation_required"))
+        if isinstance(fill_status, dict)
+        else False
+    )
     return {
         "paper_profit_quote": opportunity.profit_quote,
         "paper_profit_bps": opportunity.profit_bps,
         "live_placed_count": execution.get("placed_count", 0),
         "live_error_count": error_count,
         "hedge_required": hedge_required,
+        "fill_reconciliation_required": reconciliation_required,
         "comparison_status": (
-            "hedge_required"
+            "fill_reconciliation_required"
+            if reconciliation_required
+            else "hedge_required"
             if hedge_required
-            else "execution_error" if error_count else "orders_submitted"
+            else "execution_error"
+            if error_count
+            else "orders_submitted"
         ),
         "actual_fill_profit_quote": None,
     }
@@ -414,7 +477,9 @@ async def _balance_errors(
             )
         balance = balance_by_exchange[order.exchange.key]
         if order.leg.side == "buy":
-            currency = (order.leg.quote_currency or _quote_currency(order.leg.symbol)).upper()
+            currency = (
+                order.leg.quote_currency or _quote_currency(order.leg.symbol)
+            ).upper()
             required = float(order.leg.net_quote or order.quote_notional_local)
         else:
             currency = _base_currency(order.leg.symbol)
@@ -475,20 +540,30 @@ async def _place_orders(
     client_order_prefix: str = "crypto-arb-spot",
 ) -> dict[str, Any]:
     timestamp = int(time.time() * 1000)
+    client_order_ids = [
+        f"{client_order_prefix}-{timestamp}-{index}"
+        for index in range(1, len(orders) + 1)
+    ]
 
-    async def place_one(index: int, order: ExecutableArbitrageOrder) -> Any:
+    async def place_one(
+        order: ExecutableArbitrageOrder,
+        client_order_id: str,
+    ) -> Any:
         return await manager.create_prepared_limit_order(
             order.exchange,
             symbol=order.leg.symbol,
             side=order.leg.side,
             prepared=order.prepared or {},
             post_only=False,
-            client_order_id=f"{client_order_prefix}-{timestamp}-{index}",
+            client_order_id=client_order_id,
         )
 
     submit_started_at = time.time()
     results = await asyncio.gather(
-        *[place_one(index, order) for index, order in enumerate(orders, start=1)],
+        *[
+            place_one(order, client_order_id)
+            for order, client_order_id in zip(orders, client_order_ids)
+        ],
         return_exceptions=True,
     )
     submitted_at = time.time()
@@ -507,6 +582,33 @@ async def _place_orders(
         elif isinstance(result, dict):
             placed.append(result)
 
+    reliability: dict[str, Any] = {}
+    reliability_summary = getattr(manager, "order_reliability_summary", None)
+    if callable(reliability_summary):
+        try:
+            reliability = dict(reliability_summary())
+        except Exception:  # noqa: BLE001
+            reliability = {}
+    intent_getter = getattr(manager, "order_reliability_intent", None)
+    relevant_intents: list[dict[str, Any] | None] = []
+    if callable(intent_getter):
+        for client_order_id in client_order_ids:
+            try:
+                relevant_intents.append(intent_getter(client_order_id))
+            except Exception:  # noqa: BLE001
+                relevant_intents.append(None)
+    else:
+        relevant_intents = [None] * len(client_order_ids)
+    relevant_statuses = [
+        str(intent.get("status") or "") if isinstance(intent, dict) else ""
+        for intent in relevant_intents
+    ]
+    uncertain_outcome = any(
+        isinstance(result, Exception) and status not in {"failed"}
+        for result, status in zip(results, relevant_statuses)
+    )
+    reliability["current_intent_statuses"] = relevant_statuses
+
     cancel_errors: list[dict[str, Any]] = []
     canceled: list[dict[str, Any]] = []
     emergency_cancel = bool(create_errors and placed)
@@ -520,19 +622,13 @@ async def _place_orders(
             if not order_id:
                 continue
             try:
-                open_orders = await manager.fetch_open_orders(
-                    order.exchange,
-                    symbol=order.leg.symbol,
-                )
-                still_open = any(str(item.get("id") or "") == order_id for item in open_orders)
-                if still_open:
-                    canceled.append(
-                        await manager.cancel_order(
-                            order.exchange,
-                            symbol=order.leg.symbol,
-                            order_id=order_id,
-                        )
+                canceled.append(
+                    await manager.cancel_order(
+                        order.exchange,
+                        symbol=order.leg.symbol,
+                        order_id=order_id,
                     )
+                )
             except Exception as exc:  # noqa: BLE001
                 cancel_errors.append(
                     {
@@ -543,20 +639,40 @@ async def _place_orders(
                     }
                 )
 
-    fill_status = await _execution_fill_status(manager, orders, results)
+    fill_results = [
+        (
+            {
+                "status": "rejected",
+                "clientOrderId": client_order_id,
+                "submission_error": f"{result.__class__.__name__}: {result}",
+            }
+            if isinstance(result, Exception) and intent_status == "failed"
+            else result
+        )
+        for result, intent_status, client_order_id in zip(
+            results,
+            relevant_statuses,
+            client_order_ids,
+        )
+    ]
+    fill_status = await _execution_fill_status(manager, orders, fill_results)
     manual_intervention_required = bool(
         cancel_errors
+        or uncertain_outcome
         or (
-            isinstance(fill_status, dict)
-            and fill_status.get("hedge_required")
+            isinstance(fill_status, dict) and fill_status.get("reconciliation_required")
         )
+        or (isinstance(fill_status, dict) and fill_status.get("hedge_required"))
         or (emergency_cancel and len(canceled) < len(placed))
     )
     return {
         "placed_count": len(placed),
         "placed_order_ids": [str(order.get("id") or "") for order in placed],
         "placed_orders": placed,
+        "client_order_ids": client_order_ids,
         "create_errors": create_errors,
+        "order_reliability": reliability,
+        "uncertain_outcome": uncertain_outcome,
         "canceled_count": len(canceled),
         "canceled_order_ids": [str(order.get("id") or "") for order in canceled],
         "cancel_errors": cancel_errors,
@@ -680,9 +796,7 @@ async def run_spot_arbitrage_execution_cycle(
         **payload.get("timing", {}),
         "validation_started_at": validation_started_at,
         "validation_finished_at": validation_finished_at,
-        "validation_latency_ms": (
-            validation_finished_at - validation_started_at
-        )
+        "validation_latency_ms": (validation_finished_at - validation_started_at)
         * 1000,
     }
     payload["order_validation"] = {
@@ -722,11 +836,62 @@ async def run_spot_arbitrage_execution_cycle(
             opportunity_observed_at=opportunity.observed_at,
             client_order_prefix=client_order_prefix,
         )
+        fill_status = execution.get("fill_status")
+        if (
+            isinstance(fill_status, dict)
+            and fill_status.get("hedge_required")
+            and fill_status.get("fill_evidence_complete")
+            and not execution.get("uncertain_outcome")
+        ):
+            emergency_hedge = await execute_emergency_hedge(
+                cfg,
+                manager,
+                orders=prepared_orders,
+                fill_status=fill_status,
+                books=books,
+                quote_rates=quote_rates,
+                strategy_id=strategy_id,
+                client_order_prefix=client_order_prefix,
+            )
+            execution["fill_status"] = apply_emergency_hedge_to_fill_status(
+                fill_status,
+                emergency_hedge,
+            )
+            execution["emergency_hedge"] = emergency_hedge
+            execution["manual_intervention_required"] = bool(
+                execution.get("cancel_errors")
+                or execution["fill_status"].get("hedge_required")
+            )
+        elif isinstance(fill_status, dict) and fill_status.get("hedge_required"):
+            blocked_reason = (
+                "an order submission outcome is uncertain"
+                if execution.get("uncertain_outcome")
+                else "final fill quantities have not been reconciled"
+            )
+            execution["emergency_hedge"] = {
+                "enabled": bool(cfg.risk.auto_hedge_live_enabled),
+                "status": "blocked",
+                "reason": f"automatic hedge is blocked because {blocked_reason}",
+            }
+            execution["manual_intervention_required"] = True
         payload["execution"] = execution
         payload["paper_vs_live"] = _paper_vs_live_payload(opportunity, execution)
+        auto_hedge = execution.get("emergency_hedge")
+        repaired = (
+            isinstance(auto_hedge, dict)
+            and auto_hedge.get("status") == "completed"
+            and not execution.get("cancel_errors")
+        )
         payload["status"] = (
-            "execution_error"
-            if execution["create_errors"] or execution["cancel_errors"]
+            "execution_repaired"
+            if repaired
+            else "execution_error"
+            if execution["create_errors"]
+            or execution["cancel_errors"]
+            or (
+                isinstance(execution.get("fill_status"), dict)
+                and execution["fill_status"].get("reconciliation_required")
+            )
             else "placed"
         )
         fill_status = execution.get("fill_status")

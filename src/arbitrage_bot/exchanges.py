@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from .config import ExchangeConfig
 from .models import OrderBookSnapshot, Side
+from .order_reliability import OrderIntentStore
 from .order_validation import validate_prepared_limit_order
 from .orderbook import normalize_levels
 
@@ -26,6 +27,7 @@ from .orderbook import normalize_levels
 LOGGER = logging.getLogger(__name__)
 
 BITHUMB_KRW_MIN_ORDER_COST = 5_000.0
+CLIENT_ORDER_ID_MAX_LENGTH = 36
 
 
 REST_PROXY_ENV_OPTIONS = (
@@ -103,6 +105,22 @@ LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
         recover_by_client_order_id=True,
     ),
 }
+
+
+def normalize_client_order_id(value: str) -> str:
+    raw = str(value or "").strip()
+    safe = "".join(
+        character
+        if character.isascii() and (character.isalnum() or character in "-_")
+        else "-"
+        for character in raw
+    )
+    if len(safe) <= CLIENT_ORDER_ID_MAX_LENGTH:
+        return safe
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    prefix_length = CLIENT_ORDER_ID_MAX_LENGTH - len(digest) - 1
+    prefix = safe[:prefix_length].rstrip("-_") or "order"
+    return f"{prefix}-{digest}"[:CLIENT_ORDER_ID_MAX_LENGTH]
 
 
 def limit_order_features(cfg: ExchangeConfig) -> LimitOrderFeatures:
@@ -373,7 +391,9 @@ def _bithumb_status(state: Any) -> str:
     return raw
 
 
-def _normalize_bithumb_v2_order(raw: dict[str, Any], fallback_symbol: str) -> dict[str, Any]:
+def _normalize_bithumb_v2_order(
+    raw: dict[str, Any], fallback_symbol: str
+) -> dict[str, Any]:
     market = str(raw.get("market") or "")
     symbol = _symbol_from_bithumb_market(market, fallback_symbol)
     price = _number_or_none(raw.get("price"))
@@ -435,7 +455,9 @@ class BithumbV2Client:
         self.public_client = public_client
         self.apiKey = api_key
         self.secret = secret
-        self.base_url = str(cfg.options.get("api_url") or "https://api.bithumb.com").rstrip("/")
+        self.base_url = str(
+            cfg.options.get("api_url") or "https://api.bithumb.com"
+        ).rstrip("/")
         self.has = dict(getattr(public_client, "has", {}) or {})
         self.has.update(
             {
@@ -500,7 +522,9 @@ class BithumbV2Client:
             headers["Content-Type"] = "application/json; charset=utf-8"
 
         session = await self._http_session()
-        async with session.request(method, url, headers=headers, json=json_body) as response:
+        async with session.request(
+            method, url, headers=headers, json=json_body
+        ) as response:
             text = await response.text()
             try:
                 payload = json.loads(text) if text else None
@@ -632,9 +656,17 @@ class BithumbV2Client:
         payload = await self._request("POST", "/v2/orders", json_body=body)
         if isinstance(payload, dict):
             return _normalize_bithumb_v2_order(payload, symbol)
-        return {"id": "", "symbol": symbol, "side": side, "type": order_type, "info": payload}
+        return {
+            "id": "",
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "info": payload,
+        }
 
-    async def cancel_order(self, order_id: str, symbol: str | None = None) -> dict[str, Any]:
+    async def cancel_order(
+        self, order_id: str, symbol: str | None = None
+    ) -> dict[str, Any]:
         fallback_symbol = symbol or ""
         payload = await self._request(
             "DELETE",
@@ -643,7 +675,12 @@ class BithumbV2Client:
         )
         if isinstance(payload, dict):
             return _normalize_bithumb_v2_order(payload, fallback_symbol)
-        return {"id": order_id, "symbol": fallback_symbol, "status": "canceled", "info": payload}
+        return {
+            "id": order_id,
+            "symbol": fallback_symbol,
+            "status": "canceled",
+            "info": payload,
+        }
 
 
 class ExchangeManager:
@@ -651,6 +688,7 @@ class ExchangeManager:
         self,
         *,
         credentials_by_key: dict[str, dict[str, str]] | None = None,
+        order_journal_path: str | None = None,
     ) -> None:
         self._clients: dict[str, Any] = {}
         self._credentials_by_key = {
@@ -661,6 +699,18 @@ class ExchangeManager:
             }
             for key, credentials in (credentials_by_key or {}).items()
         }
+        journal_path = (
+            order_journal_path
+            if order_journal_path is not None
+            else os.environ.get("CRYPTO_ARB_ORDER_JOURNAL_PATH", "")
+        )
+        self._order_intents = (
+            OrderIntentStore(journal_path) if str(journal_path or "").strip() else None
+        )
+        self._cancel_retry_attempts = max(
+            1,
+            int(os.environ.get("CRYPTO_ARB_CANCEL_RETRY_ATTEMPTS", "3")),
+        )
 
     def _build_client(self, cfg: ExchangeConfig) -> Any:
         ccxt = importlib.import_module("ccxt.async_support")
@@ -877,22 +927,183 @@ class ExchangeManager:
         )
         if prepared["errors"]:
             raise ValueError("; ".join(prepared["errors"]))
+        return await self.create_prepared_limit_order(
+            cfg,
+            symbol=symbol,
+            side=side,
+            prepared=prepared,
+            post_only=post_only,
+            client_order_id=client_order_id,
+        )
+
+    @staticmethod
+    def _raw_client_order_id(raw: dict[str, Any]) -> str:
+        info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+        return str(
+            raw.get("clientOrderId")
+            or raw.get("clientOrderID")
+            or raw.get("client_order_id")
+            or info.get("clientOrderId")
+            or info.get("clientOrderID")
+            or info.get("client_order_id")
+            or info.get("client_oid")
+            or info.get("identifier")
+            or ""
+        )
+
+    async def _recover_order_by_client_id(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        client_order_id: str,
+    ) -> dict[str, Any] | None:
+        if (
+            not client_order_id
+            or not limit_order_features(cfg).recover_by_client_order_id
+        ):
+            return None
         client = self.client(cfg)
-        order_amount = prepared["amount"]
-        order_price = prepared["price"]
+        direct = getattr(client, "fetch_order_by_client_order_id", None)
+        if callable(direct):
+            try:
+                raw = await direct(client_order_id, symbol)
+                if isinstance(raw, dict) and raw.get("id"):
+                    return raw
+            except Exception:  # noqa: BLE001
+                pass
+        fetchers = (
+            (getattr(client, "fetch_open_orders", None), (symbol,)),
+            (getattr(client, "fetch_closed_orders", None), (symbol, None, 100)),
+        )
+        for fetcher, args in fetchers:
+            if not callable(fetcher):
+                continue
+            try:
+                rows = await fetcher(*args)
+            except Exception:  # noqa: BLE001
+                continue
+            for raw in rows or []:
+                if (
+                    isinstance(raw, dict)
+                    and self._raw_client_order_id(raw) == client_order_id
+                ):
+                    return raw
+        return None
+
+    @staticmethod
+    def _terminal_create_error(exc: Exception) -> bool:
+        name = exc.__class__.__name__.lower()
+        return any(
+            token in name
+            for token in (
+                "invalidorder",
+                "insufficientfunds",
+                "authentication",
+                "permissiondenied",
+                "badrequest",
+            )
+        ) or isinstance(exc, ValueError)
+
+    async def _create_order_idempotently(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        side: Side,
+        prepared: dict[str, Any],
+        post_only: bool,
+        client_order_id: str,
+    ) -> dict[str, Any]:
+        store = self._order_intents
+        if store is None:
+            raise RuntimeError("order intent store is unavailable")
+        intent = {
+            "exchange": cfg.key,
+            "symbol": symbol,
+            "side": side,
+            "amount": float(prepared["amount"]),
+            "price": float(prepared["price"]),
+            "post_only": bool(post_only),
+        }
+        reservation = store.reserve(client_order_id, intent)
+        if reservation["action"] == "return_existing":
+            response = reservation.get("response")
+            if isinstance(response, dict) and response:
+                return {**response, "idempotent_replay": True}
+            raise RuntimeError(
+                f"submitted order has no recoverable response for {client_order_id}"
+            )
+        if reservation["action"] == "failed":
+            raise RuntimeError(
+                reservation.get("last_error")
+                or f"previous submission failed for {client_order_id}"
+            )
+        if reservation["action"] == "recover_only":
+            recovered = await self._recover_order_by_client_id(
+                cfg,
+                symbol=symbol,
+                client_order_id=client_order_id,
+            )
+            if recovered is None:
+                raise RuntimeError(
+                    f"submission outcome is still uncertain for {client_order_id}; "
+                    "waiting for exchange reconciliation"
+                )
+            store.mark_submitted(client_order_id, recovered, recovered=True)
+            return {**recovered, "idempotent_recovery": True}
+
+        client = self.client(cfg)
         params: dict[str, Any] = {}
         if post_only:
             params["postOnly"] = True
-        if client_order_id and limit_order_features(cfg).client_order_id:
+        if limit_order_features(cfg).client_order_id:
             params["clientOrderId"] = client_order_id
-        return await client.create_order(
-            symbol,
-            "limit",
-            side,
-            order_amount,
-            order_price,
-            params,
-        )
+        try:
+            response = await client.create_order(
+                symbol,
+                "limit",
+                side,
+                float(prepared["amount"]),
+                float(prepared["price"]),
+                params,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self._terminal_create_error(exc):
+                store.mark_failed(client_order_id, f"{exc.__class__.__name__}: {exc}")
+                raise
+            store.mark_unknown(client_order_id, f"{exc.__class__.__name__}: {exc}")
+            await asyncio.sleep(0.25)
+            recovered = await self._recover_order_by_client_id(
+                cfg,
+                symbol=symbol,
+                client_order_id=client_order_id,
+            )
+            if recovered is None:
+                raise
+            store.mark_submitted(client_order_id, recovered, recovered=True)
+            return {**recovered, "idempotent_recovery": True}
+        if not isinstance(response, dict):
+            response = {"id": "", "info": response}
+        if not str(response.get("id") or response.get("order") or ""):
+            store.mark_unknown(
+                client_order_id,
+                "exchange accepted the request without returning an order id",
+            )
+            recovered = await self._recover_order_by_client_id(
+                cfg,
+                symbol=symbol,
+                client_order_id=client_order_id,
+            )
+            if recovered is None:
+                raise RuntimeError(
+                    f"submission outcome is uncertain for {client_order_id}: "
+                    "exchange returned no order id"
+                )
+            store.mark_submitted(client_order_id, recovered, recovered=True)
+            return {**recovered, "idempotent_recovery": True}
+        store.mark_submitted(client_order_id, response)
+        return response
 
     async def create_prepared_limit_order(
         self,
@@ -913,12 +1124,29 @@ class ExchangeManager:
         if prepared.get("errors"):
             raise ValueError("; ".join(str(error) for error in prepared["errors"]))
 
+        normalized_client_order_id = (
+            normalize_client_order_id(client_order_id) if client_order_id else None
+        )
+
+        if (
+            self._order_intents is not None
+            and normalized_client_order_id
+            and limit_order_features(cfg).client_order_id
+        ):
+            return await self._create_order_idempotently(
+                cfg,
+                symbol=symbol,
+                side=side,
+                prepared=prepared,
+                post_only=post_only,
+                client_order_id=normalized_client_order_id,
+            )
         client = self.client(cfg)
         params: dict[str, Any] = {}
         if post_only:
             params["postOnly"] = True
-        if client_order_id and limit_order_features(cfg).client_order_id:
-            params["clientOrderId"] = client_order_id
+        if normalized_client_order_id and limit_order_features(cfg).client_order_id:
+            params["clientOrderId"] = normalized_client_order_id
         return await client.create_order(
             symbol,
             "limit",
@@ -950,6 +1178,26 @@ class ExchangeManager:
         if len(sides) != len(prepared_orders):
             raise ValueError("sides and prepared_orders length mismatch")
 
+        if self._order_intents is not None and any(client_order_ids or []):
+            results = await asyncio.gather(
+                *[
+                    self.create_prepared_limit_order(
+                        cfg,
+                        symbol=symbol,
+                        side=side,
+                        prepared=prepared,
+                        post_only=post_only,
+                        client_order_id=client_order_id,
+                    )
+                    for side, prepared, client_order_id in zip(
+                        sides,
+                        prepared_orders,
+                        client_order_ids or [None] * len(prepared_orders),
+                    )
+                ]
+            )
+            return results
+
         client = self.client(cfg)
         create_many = getattr(client, "create_orders", None)
         if create_many is None or client.has.get("createOrders") is not True:
@@ -967,8 +1215,11 @@ class ExchangeManager:
             params: dict[str, Any] = {}
             if post_only:
                 params["postOnly"] = True
-            if client_order_id and features.client_order_id:
-                params["clientOrderId"] = client_order_id
+            normalized_client_order_id = (
+                normalize_client_order_id(client_order_id) if client_order_id else None
+            )
+            if normalized_client_order_id and features.client_order_id:
+                params["clientOrderId"] = normalized_client_order_id
             order_requests.append(
                 {
                     "symbol": symbol,
@@ -1066,15 +1317,41 @@ class ExchangeManager:
         symbol: str,
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
+        open_orders = await client.fetch_open_orders(symbol)
         cancel_all = getattr(client, "cancel_all_orders", None)
         if cancel_all is not None:
-            result = await cancel_all(symbol)
-            return result if isinstance(result, list) else [result]
+            try:
+                result = await cancel_all(symbol)
+                canceled = result if isinstance(result, list) else [result]
+            except Exception:  # noqa: BLE001
+                canceled = []
+            remaining = await client.fetch_open_orders(symbol)
+            remaining_ids = {
+                str(row.get("id") or row.get("order") or "")
+                for row in remaining or []
+                if isinstance(row, dict)
+            }
+            for order in open_orders:
+                order_id = str(order.get("id") or order.get("order") or "")
+                if order_id and order_id in remaining_ids:
+                    canceled.append(
+                        await self.cancel_order(
+                            cfg,
+                            symbol=symbol,
+                            order_id=order_id,
+                        )
+                    )
+            return canceled
 
-        open_orders = await client.fetch_open_orders(symbol)
-        canceled = []
+        canceled: list[dict[str, Any]] = []
         for order in open_orders:
-            canceled.append(await client.cancel_order(order["id"], symbol))
+            canceled.append(
+                await self.cancel_order(
+                    cfg,
+                    symbol=symbol,
+                    order_id=str(order["id"]),
+                )
+            )
         return canceled
 
     async def fetch_open_orders(
@@ -1085,6 +1362,21 @@ class ExchangeManager:
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
         return await client.fetch_open_orders(symbol)
+
+    async def fetch_order(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        order_id: str,
+    ) -> dict[str, Any] | None:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        fetcher = getattr(client, "fetch_order", None)
+        if capabilities.get("fetchOrder") is False or fetcher is None:
+            return None
+        result = await fetcher(order_id, symbol)
+        return result if isinstance(result, dict) else None
 
     async def fetch_closed_orders(
         self,
@@ -1214,7 +1506,140 @@ class ExchangeManager:
         order_id: str,
     ) -> dict[str, Any]:
         client = self.client(cfg)
-        return await client.cancel_order(order_id, symbol)
+        last_error: Exception | None = None
+        for attempt in range(1, self._cancel_retry_attempts + 1):
+            try:
+                response = await client.cancel_order(order_id, symbol)
+                if not isinstance(response, dict):
+                    response = {"id": order_id, "status": "canceled", "info": response}
+                open_orders = await client.fetch_open_orders(symbol)
+                still_open = any(
+                    str(row.get("id") or row.get("order") or "") == order_id
+                    for row in open_orders or []
+                    if isinstance(row, dict)
+                )
+                if still_open:
+                    raise RuntimeError(
+                        f"cancel was not confirmed for {cfg.key} {symbol} {order_id}"
+                    )
+                response["cancel_confirmed_absent"] = True
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                try:
+                    open_orders = await client.fetch_open_orders(symbol)
+                    still_open = any(
+                        str(row.get("id") or row.get("order") or "") == order_id
+                        for row in open_orders or []
+                        if isinstance(row, dict)
+                    )
+                except Exception:  # noqa: BLE001
+                    still_open = True
+                if not still_open:
+                    response = {
+                        "id": order_id,
+                        "status": "canceled",
+                        "cancel_confirmed_absent": True,
+                    }
+                    if self._order_intents is not None:
+                        self._order_intents.mark_canceled_by_order_id(
+                            exchange=cfg.key,
+                            symbol=symbol,
+                            order_id=order_id,
+                            response=response,
+                        )
+                    return response
+                if attempt < self._cancel_retry_attempts:
+                    await asyncio.sleep(min(2.0, 0.25 * (2 ** (attempt - 1))))
+                continue
+            if self._order_intents is not None:
+                self._order_intents.mark_canceled_by_order_id(
+                    exchange=cfg.key,
+                    symbol=symbol,
+                    order_id=order_id,
+                    response=response,
+                )
+            return response
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"cancel failed for {cfg.key} {symbol} {order_id}")
+
+    def order_reliability_summary(self) -> dict[str, Any]:
+        if self._order_intents is None:
+            return {"enabled": False, "pending_count": 0, "total_count": 0}
+        return {"enabled": True, **self._order_intents.summary()}
+
+    def order_reliability_intent(
+        self,
+        client_order_id: str,
+    ) -> dict[str, Any] | None:
+        if self._order_intents is None or not client_order_id:
+            return None
+        return self._order_intents.get(normalize_client_order_id(client_order_id))
+
+    async def recover_pending_order_intents(
+        self,
+        configs: Iterable[ExchangeConfig],
+    ) -> dict[str, Any]:
+        if self._order_intents is None:
+            return {
+                "enabled": False,
+                "status": "disabled",
+                "recovered": [],
+                "unresolved": [],
+                "pending_count": 0,
+            }
+        configs_by_key = {cfg.key: cfg for cfg in configs}
+        recovered_rows: list[dict[str, Any]] = []
+        unresolved_rows: list[dict[str, Any]] = []
+        for intent in self._order_intents.pending(limit=1000):
+            cfg = configs_by_key.get(str(intent.get("exchange") or ""))
+            if cfg is None:
+                unresolved_rows.append(
+                    {**intent, "recovery_error": "exchange account is not configured"}
+                )
+                continue
+            try:
+                raw = await self._recover_order_by_client_id(
+                    cfg,
+                    symbol=str(intent["symbol"]),
+                    client_order_id=str(intent["client_order_id"]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                unresolved_rows.append(
+                    {
+                        **intent,
+                        "recovery_error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
+                continue
+            if raw is None:
+                unresolved_rows.append(
+                    {**intent, "recovery_error": "order was not found on the exchange"}
+                )
+                continue
+            self._order_intents.mark_submitted(
+                str(intent["client_order_id"]),
+                raw,
+                recovered=True,
+            )
+            recovered_rows.append(
+                {
+                    "client_order_id": intent["client_order_id"],
+                    "exchange": intent["exchange"],
+                    "symbol": intent["symbol"],
+                    "order_id": str(raw.get("id") or raw.get("order") or ""),
+                }
+            )
+        summary = self.order_reliability_summary()
+        return {
+            **summary,
+            "status": "blocked" if unresolved_rows else "ok",
+            "recovered": recovered_rows,
+            "recovered_count": len(recovered_rows),
+            "unresolved": unresolved_rows,
+            "unresolved_count": len(unresolved_rows),
+            "checked_at": time.time(),
+        }
 
     async def cancel_orders(
         self,

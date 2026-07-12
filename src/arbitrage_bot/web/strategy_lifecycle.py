@@ -277,7 +277,11 @@ def _market_maker_rows(
         raw_status = _text(
             runtime.get("status")
             or fallback_payload.get("status")
-            or ("starting" if maker_cfg.enabled and maker_cfg.live_enabled else "disabled")
+            or (
+                "starting"
+                if maker_cfg.enabled and maker_cfg.live_enabled
+                else "disabled"
+            )
         )
         desired = _effective_desired_state(
             enabled=maker_cfg.enabled and maker_cfg.live_enabled,
@@ -349,7 +353,9 @@ def _auto_rows(
     strategy_paused: bool,
     tasks_payload: Mapping[str, Any],
 ) -> list[StrategyLifecycle]:
-    tasks = [item for item in tasks_payload.get("tasks", []) if isinstance(item, Mapping)]
+    tasks = [
+        item for item in tasks_payload.get("tasks", []) if isinstance(item, Mapping)
+    ]
     if not tasks:
         exec_cfg = cfg.slow_execution
         return [
@@ -425,7 +431,7 @@ def _rebalance_actual(raw_status: str, desired: str) -> str:
         "no_fill",
     }:
         return "waiting"
-    if status in {"progress", "placed"}:
+    if status in {"progress", "placed", "execution_repaired"}:
         return "running"
     if status in {
         "blocked_by_plan",
@@ -503,7 +509,7 @@ def _spot_actual(raw_status: str, desired: str) -> str:
         return "starting" if desired == "running" else "stopped"
     if status in {"no_opportunity", "live_disabled", "cooldown", "planned"}:
         return "waiting"
-    if status == "placed":
+    if status in {"placed", "execution_repaired"}:
         return "running"
     if status in {
         "blocked_by_plan",
@@ -531,9 +537,13 @@ def _spot_row(
         program_running=program_running,
         strategy_paused=strategy_paused,
     )
-    raw_status = _text(payload.get("status") or ("starting" if configured else "disabled"))
+    raw_status = _text(
+        payload.get("status") or ("starting" if configured else "disabled")
+    )
     actual = _spot_actual(raw_status, desired)
-    assets = sorted({market.asset.upper() for market in cfg.spot_markets if market.asset})
+    assets = sorted(
+        {market.asset.upper() for market in cfg.spot_markets if market.asset}
+    )
     actions = (
         ["resume"]
         if actual == "paused"

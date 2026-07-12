@@ -84,6 +84,11 @@ def build_order_attribution_map(entries: Iterable[Any]) -> dict[str, dict[str, A
             "source": source,
             "source_label": PNL_SOURCE_LABELS.get(source, source),
             "strategy": getattr(entry, "strategy", ""),
+            "strategy_instance_id": getattr(
+                entry,
+                "strategy_instance_id",
+                "default",
+            ),
             "event_type": getattr(entry, "event_type", ""),
             "event_id": getattr(entry, "event_id", ""),
             "mode": getattr(entry, "mode", ""),
@@ -145,9 +150,7 @@ def _mark_prices_by_asset(
             continue
         marks.setdefault(market.asset.upper(), []).append((bid + ask) / 2 * rate)
     return {
-        asset: sum(values) / len(values)
-        for asset, values in marks.items()
-        if values
+        asset: sum(values) / len(values) for asset, values in marks.items() if values
     }
 
 
@@ -208,9 +211,7 @@ def enrich_recent_trades_with_pnl(
         if quote and quote_rate is None:
             missing_quote_rates.add(quote)
         notional_common = (
-            cost * quote_rate
-            if cost is not None and quote_rate is not None
-            else None
+            cost * quote_rate if cost is not None and quote_rate is not None else None
         )
         fee_common, missing_fee_currency = _fee_common_value(
             row.get("fee"),
@@ -253,6 +254,11 @@ def enrich_recent_trades_with_pnl(
                 "source": source,
                 "source_label": PNL_SOURCE_LABELS.get(source, source),
                 "attribution": match,
+                "strategy_instance_id": (
+                    match.get("strategy_instance_id", "default")
+                    if isinstance(match, dict)
+                    else "default"
+                ),
                 "base_currency": base,
                 "quote_currency": quote,
                 "notional_common": notional_common,
@@ -308,7 +314,9 @@ def _portfolio_position_for_symbol(
     if not base:
         return None
     payload = portfolio_payload or {}
-    positions = payload.get("positions") if isinstance(payload.get("positions"), list) else []
+    positions = (
+        payload.get("positions") if isinstance(payload.get("positions"), list) else []
+    )
     for position in positions:
         if not isinstance(position, dict):
             continue
@@ -437,14 +445,10 @@ def build_market_maker_quality_payload(
     activity = order_activity or {}
     maker = market_maker or {}
     daily_pnl = (
-        activity.get("daily_pnl")
-        if isinstance(activity.get("daily_pnl"), dict)
-        else {}
+        activity.get("daily_pnl") if isinstance(activity.get("daily_pnl"), dict) else {}
     )
     daily_sources = (
-        daily_pnl.get("sources")
-        if isinstance(daily_pnl.get("sources"), dict)
-        else {}
+        daily_pnl.get("sources") if isinstance(daily_pnl.get("sources"), dict) else {}
     )
     daily_source = (
         daily_sources.get("market_maker")
@@ -483,16 +487,16 @@ def build_market_maker_quality_payload(
     for side in by_side.values():
         base_amount = side["base_amount"]
         side["average_price"] = (
-            side["quote_notional"] / base_amount
-            if base_amount > 0
-            else None
+            side["quote_notional"] / base_amount if base_amount > 0 else None
         )
     buy_avg = by_side["buy"]["average_price"]
     sell_avg = by_side["sell"]["average_price"]
     plan = maker.get("plan") if isinstance(maker.get("plan"), dict) else {}
     if not plan and isinstance((maker.get("runtime") or {}).get("last_plan"), dict):
         plan = maker["runtime"]["last_plan"]
-    mid_price = _number_or_none(plan.get("mid_price")) if isinstance(plan, dict) else None
+    mid_price = (
+        _number_or_none(plan.get("mid_price")) if isinstance(plan, dict) else None
+    )
     if buy_avg is not None and sell_avg is not None:
         spread_mid = mid_price or (buy_avg + sell_avg) / 2
         realized_spread_bps = (
@@ -504,12 +508,24 @@ def build_market_maker_quality_payload(
         realized_spread_bps = None
 
     inventory = {
-        "base": _number_or_none(plan.get("inventory_base")) if isinstance(plan, dict) else None,
-        "target_base": _number_or_none(plan.get("inventory_target_base")) if isinstance(plan, dict) else None,
-        "deviation_base": _number_or_none(plan.get("inventory_deviation_base")) if isinstance(plan, dict) else None,
-        "buy_multiplier": _number_or_none(plan.get("inventory_buy_multiplier")) if isinstance(plan, dict) else None,
-        "sell_multiplier": _number_or_none(plan.get("inventory_sell_multiplier")) if isinstance(plan, dict) else None,
-        "active": bool(plan.get("inventory_control_active")) if isinstance(plan, dict) else False,
+        "base": _number_or_none(plan.get("inventory_base"))
+        if isinstance(plan, dict)
+        else None,
+        "target_base": _number_or_none(plan.get("inventory_target_base"))
+        if isinstance(plan, dict)
+        else None,
+        "deviation_base": _number_or_none(plan.get("inventory_deviation_base"))
+        if isinstance(plan, dict)
+        else None,
+        "buy_multiplier": _number_or_none(plan.get("inventory_buy_multiplier"))
+        if isinstance(plan, dict)
+        else None,
+        "sell_multiplier": _number_or_none(plan.get("inventory_sell_multiplier"))
+        if isinstance(plan, dict)
+        else None,
+        "active": bool(plan.get("inventory_control_active"))
+        if isinstance(plan, dict)
+        else False,
     }
     if inventory["base"] is None and isinstance(portfolio, dict):
         inventory["base"] = _portfolio_position_for_symbol(
@@ -531,10 +547,14 @@ def build_market_maker_quality_payload(
     return {
         "window": "daily_pnl" if use_daily_fallback else "recent_fills",
         "recent_trade_count": recent_trade_count,
-        "trade_count": daily["trade_count"] if use_daily_fallback else recent_trade_count,
+        "trade_count": daily["trade_count"]
+        if use_daily_fallback
+        else recent_trade_count,
         "buy": by_side["buy"],
         "sell": by_side["sell"],
-        "total_notional": daily["total_notional"] if use_daily_fallback else total_notional,
+        "total_notional": daily["total_notional"]
+        if use_daily_fallback
+        else total_notional,
         "total_fees": daily["total_fees"] if use_daily_fallback else total_fees,
         "realized_pnl": daily["realized_pnl"] if use_daily_fallback else total_pnl,
         "realized_spread_bps": realized_spread_bps,

@@ -24,6 +24,7 @@ from arbitrage_bot.user_strategies import UserStrategy
 from arbitrage_bot.user_workspace import (
     UserExchangeAccount,
     UserProject,
+    UserRiskProfile,
     UserWorkspaceStore,
 )
 
@@ -196,7 +197,9 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
             counts = store.counts(first.id)
             reset_counts = store.reset_strategy(first)
 
-            self.assertEqual([row["strategy_id"] for row in first_payload["states"]], [first.id])
+            self.assertEqual(
+                [row["strategy_id"] for row in first_payload["states"]], [first.id]
+            )
             self.assertEqual(len(admin_payload["states"]), 2)
             self.assertEqual(counts["fill_count"], 1)
             self.assertEqual(counts["event_count"], 1)
@@ -545,7 +548,9 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        first_book = paper_book(account_row.id, account_row.symbol, 99.0, 101.0, now=now)
+        first_book = paper_book(
+            account_row.id, account_row.symbol, 99.0, 101.0, now=now
+        )
         first_state, first_fills, _ = simulate_user_paper_cycle(
             strategy,
             project_row,
@@ -654,7 +659,9 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stopped_state["open_order_count"], 0)
         self.assertEqual(fills, [])
 
-    def test_market_order_is_blocked_when_visible_depth_exceeds_slippage_limit(self) -> None:
+    def test_market_order_is_blocked_when_visible_depth_exceeds_slippage_limit(
+        self,
+    ) -> None:
         now = time.time()
         project_row = project()
         account_row = account(
@@ -738,7 +745,9 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        first_book = paper_book(account_row.id, account_row.symbol, 99.0, 101.0, now=now)
+        first_book = paper_book(
+            account_row.id, account_row.symbol, 99.0, 101.0, now=now
+        )
         first_state, _, _ = simulate_user_paper_cycle(
             strategy,
             project_row,
@@ -875,11 +884,16 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
             buy_quote_before,
         )
 
-    async def test_service_uses_public_books_once_and_recovers_persisted_state(self) -> None:
+    async def test_service_uses_public_books_once_and_recovers_persisted_state(
+        self,
+    ) -> None:
         FakePaperManager.instances.clear()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             root = Path(tmp)
             workspace = UserWorkspaceStore(
@@ -965,9 +979,12 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_many_strategies_share_one_public_order_book_fetch(self) -> None:
         FakePaperManager.instances.clear()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             root = Path(tmp)
             workspace = UserWorkspaceStore(
@@ -1010,9 +1027,7 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
                 status="healthy",
             )
             secondary = workspace.upsert_account(
-                UserExchangeAccount.from_dict(
-                    {**secondary.to_dict(), "enabled": True}
-                )
+                UserExchangeAccount.from_dict({**secondary.to_dict(), "enabled": True})
             )
             for index in range(25):
                 workspace.upsert_strategy(
@@ -1022,9 +1037,7 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
                             "owner_email": project_row.owner_email,
                             "project_id": project_row.id,
                             "strategy_type": "auto_buy_sell",
-                            "account_ids": [
-                                saved.id if index % 2 else secondary.id
-                            ],
+                            "account_ids": [saved.id if index % 2 else secondary.id],
                             "enabled": True,
                             "parameters": {
                                 "side": "buy",
@@ -1057,10 +1070,80 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload["states"]), 25)
         self.assertEqual(payload["summary"]["fill_count"], 25)
 
+    async def test_user_risk_switch_blocks_all_owner_strategies(self) -> None:
+        FakePaperManager.instances.clear()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+            ),
+        ):
+            root = Path(tmp)
+            workspace = UserWorkspaceStore(
+                root / "workspace.sqlite3",
+                master_key_env="TEST_PAPER_MASTER_KEY",
+            )
+            project_row = workspace.upsert_project(project())
+            saved = workspace.upsert_account(
+                UserExchangeAccount.from_dict(
+                    {
+                        "id": "coinbase-risk-off",
+                        "owner_email": project_row.owner_email,
+                        "project_id": project_row.id,
+                        "exchange": "coinbase",
+                        "symbol": "ACS/USDC",
+                        "withdrawal_disabled_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key", "secret": "secret"},
+            )
+            saved = workspace.update_account_connection(saved.id, status="healthy")
+            saved = workspace.upsert_account(
+                UserExchangeAccount.from_dict({**saved.to_dict(), "enabled": True})
+            )
+            strategy = workspace.upsert_strategy(
+                UserStrategy.from_dict(
+                    {
+                        "id": "paper-mm-risk-off",
+                        "owner_email": project_row.owner_email,
+                        "project_id": project_row.id,
+                        "strategy_type": "market_maker",
+                        "account_ids": [saved.id],
+                        "enabled": True,
+                    }
+                )
+            )
+            workspace.upsert_risk_profile(
+                UserRiskProfile(
+                    owner_email=project_row.owner_email,
+                    trading_enabled=False,
+                )
+            )
+            paper_store = UserPaperTradingStore(root / "paper.sqlite3")
+            service = UserPaperTradingService(
+                workspace,
+                paper_store,
+                quote_rates={"USDC": 1.0},
+                common_quote_currency="USD",
+                manager_factory=FakePaperManager,
+            )
+
+            result = await service.run_once()
+            blocked = paper_store.get_state(strategy.id)
+            await service.close()
+
+        self.assertEqual(result["fetched"], 0)
+        self.assertEqual(blocked["status"], "blocked_user_risk")
+        self.assertIn("switch is disabled", blocked["reason"])
+
     async def test_global_pause_clears_virtual_orders_and_is_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             root = Path(tmp)
             workspace = UserWorkspaceStore(
@@ -1135,9 +1218,12 @@ class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_terminal_state_survives_strategy_pause_and_resume(self) -> None:
         FakePaperManager.instances.clear()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_PAPER_MASTER_KEY": MASTER_KEY},
+            ),
         ):
             root = Path(tmp)
             workspace = UserWorkspaceStore(

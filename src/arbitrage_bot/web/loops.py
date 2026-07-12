@@ -205,10 +205,7 @@ async def monitor_loop(
         else None
     )
     initial_payload = _build_initial_payload(cfg, poll_seconds)
-    onchain_payload = (
-        _cached_onchain_payload(cfg)
-        or initial_payload["onchain"]
-    )
+    onchain_payload = _cached_onchain_payload(cfg) or initial_payload["onchain"]
     account_balances_payload = initial_payload["account_balances"]
     derivatives_payload = initial_payload["derivatives"]
     funding_basis_payload = initial_payload["funding_basis"]
@@ -249,10 +246,12 @@ async def monitor_loop(
                     readonly_warnings: list[str] = []
                     if now >= next_balance_scan:
                         try:
-                            account_balances_payload = await fetch_account_balances_payload(
-                                runtime_cfg,
-                                manager,
-                                runtime_slow_execution,
+                            account_balances_payload = (
+                                await fetch_account_balances_payload(
+                                    runtime_cfg,
+                                    manager,
+                                    runtime_slow_execution,
+                                )
                             )
                         except Exception as exc:  # noqa: BLE001
                             account_balances_payload = {
@@ -365,11 +364,11 @@ async def monitor_loop(
                                 ],
                                 "checked_at": time.time(),
                             }
-                        next_order_activity_scan = (
-                            now + ORDER_ACTIVITY_POLL_SECONDS
-                        )
+                        next_order_activity_scan = now + ORDER_ACTIVITY_POLL_SECONDS
                     if account_balances_payload.get("status") == "error":
-                        errors = account_balances_payload.get("errors") or ["unavailable"]
+                        errors = account_balances_payload.get("errors") or [
+                            "unavailable"
+                        ]
                         readonly_warnings.append(f"Account balances: {errors[0]}")
                     if derivatives_payload.get("status") == "error":
                         errors = derivatives_payload.get("errors") or ["unavailable"]
@@ -769,33 +768,33 @@ async def monitor_loop(
                                 "cooldown_remaining_seconds": cooldown_remaining,
                             }
                         else:
-                            spot_arbitrage_payload = await run_spot_arbitrage_execution_cycle(
-                                runtime_cfg,
-                                manager,
-                                opportunities=opportunities,
-                                books=books,
-                                quote_rates=quote_rates,
-                                live=True,
+                            spot_arbitrage_payload = (
+                                await run_spot_arbitrage_execution_cycle(
+                                    runtime_cfg,
+                                    manager,
+                                    opportunities=opportunities,
+                                    books=books,
+                                    quote_rates=quote_rates,
+                                    live=True,
+                                )
                             )
-                            write_trade_event(runtime_cfg.trade_log, spot_arbitrage_payload)
+                            write_trade_event(
+                                runtime_cfg.trade_log, spot_arbitrage_payload
+                            )
                             if spot_arbitrage_payload.get("status") != "no_opportunity":
                                 last_spot_arbitrage_execution_at = time.monotonic()
                     timeline_event = strategy_timeline_event_from_payload(
                         spot_arbitrage_payload,
                         source="monitor",
                     )
-                    timeline_fingerprint = strategy_timeline_fingerprint(
-                        timeline_event
-                    )
+                    timeline_fingerprint = strategy_timeline_fingerprint(timeline_event)
                     if timeline_fingerprint != last_spot_arbitrage_timeline_fingerprint:
                         write_strategy_timeline_from_payload(
                             runtime_cfg.strategy_timeline,
                             spot_arbitrage_payload,
                             source="monitor",
                         )
-                        last_spot_arbitrage_timeline_fingerprint = (
-                            timeline_fingerprint
-                        )
+                        last_spot_arbitrage_timeline_fingerprint = timeline_fingerprint
                 else:
                     opportunities = await scan_with_manager(
                         runtime_cfg,
@@ -814,9 +813,7 @@ async def monitor_loop(
                         "status": "disabled",
                         "mode": "dry_run",
                         "plan": None,
-                        "config": slow_execution_config_to_dict(
-                            runtime_slow_execution
-                        ),
+                        "config": slow_execution_config_to_dict(runtime_slow_execution),
                         "accounts": slow_execution_accounts(
                             runtime_cfg.spot_exchanges,
                             _spot_symbols_by_exchange(runtime_cfg),
@@ -953,7 +950,9 @@ async def monitor_loop(
                 if now >= next_order_activity_scan:
                     try:
                         auto_tasks_snapshot = await state.auto_buy_sell_tasks()
-                        market_maker_runtime_snapshot = await state.market_maker_runtime()
+                        market_maker_runtime_snapshot = (
+                            await state.market_maker_runtime()
+                        )
                         order_activity_payload = await fetch_order_activity_payload(
                             runtime_cfg,
                             manager,
@@ -1075,8 +1074,8 @@ async def monitor_loop(
                             onchain_payload,
                             exc,
                         )
-                    next_onchain_scan = (
-                        now + max(1.0, runtime_cfg.onchain_monitor.poll_seconds)
+                    next_onchain_scan = now + max(
+                        1.0, runtime_cfg.onchain_monitor.poll_seconds
                     )
 
                 warnings = [
@@ -1282,7 +1281,9 @@ async def monitor_loop(
                         message="\n".join(warnings[:6]),
                         key="monitor:warnings:" + "|".join(warnings[:3]),
                         payload={
-                            "status": "auto_stopped" if auto_stop_triggered else "degraded",
+                            "status": "auto_stopped"
+                            if auto_stop_triggered
+                            else "degraded",
                             "scan_count": scan_count,
                             "warnings": warnings,
                         },
@@ -1523,11 +1524,7 @@ async def _spot_grid_open_order_snapshot(
             "error": None,
         }
     exchange = next(
-        (
-            item
-            for item in _all_account_exchanges(cfg)
-            if item.key == grid_cfg.exchange
-        ),
+        (item for item in _all_account_exchanges(cfg) if item.key == grid_cfg.exchange),
         None,
     )
     if exchange is None:
@@ -1572,11 +1569,7 @@ async def _spot_grid_closed_order_snapshot(
     if not grid_cfg.exchange or not grid_cfg.symbol:
         return [], None
     exchange = next(
-        (
-            item
-            for item in _all_account_exchanges(cfg)
-            if item.key == grid_cfg.exchange
-        ),
+        (item for item in _all_account_exchanges(cfg) if item.key == grid_cfg.exchange),
         None,
     )
     if exchange is None:
@@ -1748,7 +1741,9 @@ def _market_maker_order_sync_delta(
     }
     source = str(open_order_snapshot.get("source") or "memory")
     exchange_confirmed = source == "exchange" and not open_order_snapshot.get("error")
-    missing_tracked_ids = sorted(previous_ids - snapshot_ids) if exchange_confirmed else []
+    missing_tracked_ids = (
+        sorted(previous_ids - snapshot_ids) if exchange_confirmed else []
+    )
     new_exchange_ids = sorted(snapshot_ids - previous_ids) if exchange_confirmed else []
     changed = bool(
         exchange_confirmed
@@ -1781,7 +1776,9 @@ def _market_maker_force_replace_reason(
     if not isinstance(previous_orders, list):
         return None
     if len(open_order_ids) != len(previous_orders):
-        return "open order count differs from previous MM plan; assuming fill/cancel drift"
+        return (
+            "open order count differs from previous MM plan; assuming fill/cancel drift"
+        )
     return None
 
 
@@ -1799,7 +1796,6 @@ def _market_maker_should_force_replace(
         )
         is not None
     )
-
 
 
 def _market_maker_gate_status(
@@ -1935,7 +1931,10 @@ async def spot_grid_task_loop(
                             symbol=open_order_symbol,
                         ),
                     )
-                    cancel_payload, remaining_orders = await _cancel_tracked_spot_grid_orders(
+                    (
+                        cancel_payload,
+                        remaining_orders,
+                    ) = await _cancel_tracked_spot_grid_orders(
                         cancel_cfg,
                         manager,
                         tracked_orders,
@@ -2041,9 +2040,10 @@ async def spot_grid_task_loop(
                         if sleep_for > 0:
                             await asyncio.sleep(sleep_for)
                         continue
-                    closed_orders, closed_order_error = (
-                        await _spot_grid_closed_order_snapshot(runtime_cfg, manager)
-                    )
+                    (
+                        closed_orders,
+                        closed_order_error,
+                    ) = await _spot_grid_closed_order_snapshot(runtime_cfg, manager)
                     if closed_order_error:
                         order_sync = {
                             "tracked_before_count": len(tracked_orders),
@@ -2086,12 +2086,13 @@ async def spot_grid_task_loop(
                                     symbol=open_order_symbol,
                                 ),
                             )
-                        cancel_payload, tracked_orders = (
-                            await _cancel_tracked_spot_grid_orders(
-                                cancel_cfg,
-                                manager,
-                                tracked_orders,
-                            )
+                        (
+                            cancel_payload,
+                            tracked_orders,
+                        ) = await _cancel_tracked_spot_grid_orders(
+                            cancel_cfg,
+                            manager,
+                            tracked_orders,
                         )
                         canceled_count += int(
                             cancel_payload.get("canceled_count", 0) or 0
@@ -2120,9 +2121,7 @@ async def spot_grid_task_loop(
                             else reason
                         ),
                         "config": spot_grid_config_to_dict(grid_cfg),
-                        "open_order_ids": _tracked_spot_grid_order_ids(
-                            tracked_orders
-                        ),
+                        "open_order_ids": _tracked_spot_grid_order_ids(tracked_orders),
                         "open_order_exchange": open_order_exchange,
                         "open_order_symbol": open_order_symbol,
                         "open_order_count": len(tracked_orders),
@@ -2209,12 +2208,13 @@ async def spot_grid_task_loop(
                         "unchanged",
                     }:
                         if tracked_orders:
-                            cancel_payload, tracked_orders = (
-                                await _cancel_tracked_spot_grid_orders(
-                                    runtime_cfg,
-                                    manager,
-                                    tracked_orders,
-                                )
+                            (
+                                cancel_payload,
+                                tracked_orders,
+                            ) = await _cancel_tracked_spot_grid_orders(
+                                runtime_cfg,
+                                manager,
+                                tracked_orders,
                             )
                             canceled_count += int(
                                 cancel_payload.get("canceled_count", 0) or 0
@@ -2233,12 +2233,13 @@ async def spot_grid_task_loop(
                         action = "cancel_out_of_range"
                     elif missing_unconfirmed:
                         if not grid_cfg.auto_rebuild:
-                            cancel_payload, tracked_orders = (
-                                await _cancel_tracked_spot_grid_orders(
-                                    runtime_cfg,
-                                    manager,
-                                    tracked_orders,
-                                )
+                            (
+                                cancel_payload,
+                                tracked_orders,
+                            ) = await _cancel_tracked_spot_grid_orders(
+                                runtime_cfg,
+                                manager,
+                                tracked_orders,
                             )
                             canceled_count += int(
                                 cancel_payload.get("canceled_count", 0) or 0
@@ -2317,8 +2318,12 @@ async def spot_grid_task_loop(
                                 tracked_orders = [*tracked_orders, *placed_orders]
                             else:
                                 tracked_orders = placed_orders
-                            open_order_exchange = grid_cfg.exchange if tracked_orders else ""
-                            open_order_symbol = grid_cfg.symbol if tracked_orders else ""
+                            open_order_exchange = (
+                                grid_cfg.exchange if tracked_orders else ""
+                            )
+                            open_order_symbol = (
+                                grid_cfg.symbol if tracked_orders else ""
+                            )
                         elif payload.get("status") == "cancel_retry":
                             remaining_ids = [
                                 str(order_id)
@@ -2379,9 +2384,7 @@ async def spot_grid_task_loop(
                         "reason": status_payload.get("reason"),
                         "action": action,
                         "config": spot_grid_config_to_dict(grid_cfg),
-                        "open_order_ids": _tracked_spot_grid_order_ids(
-                            tracked_orders
-                        ),
+                        "open_order_ids": _tracked_spot_grid_order_ids(tracked_orders),
                         "open_order_exchange": open_order_exchange,
                         "open_order_symbol": open_order_symbol,
                         "open_order_count": len(tracked_orders),
@@ -2679,9 +2682,7 @@ async def cross_exchange_rebalance_task_loop(
                             coordination["status"] = "ready"
                             payload["coordination"] = coordination
                             if rebalance_coordination_hold_required(payload):
-                                payload["coordination"]["status"] = (
-                                    "held_for_safety"
-                                )
+                                payload["coordination"]["status"] = "held_for_safety"
                             else:
                                 await state.release_coordination_hold(
                                     coordination_owner
@@ -3042,12 +3043,10 @@ async def _market_maker_instance_task_loop(
                             cancel_payload,
                             source="market_maker_task",
                         )
-                        open_order_snapshot = (
-                            await _market_maker_open_order_snapshot(
-                                runtime_cfg,
-                                manager,
-                                ids_before_cancel,
-                            )
+                        open_order_snapshot = await _market_maker_open_order_snapshot(
+                            runtime_cfg,
+                            manager,
+                            ids_before_cancel,
                         )
                         open_order_ids = [
                             str(order_id)
@@ -3127,17 +3126,20 @@ async def _market_maker_instance_task_loop(
                             "coordination_hold": None,
                             "updated_at": time.time(),
                         }
-                        await state.set_market_maker_instance_runtime(instance_id, runtime)
+                        await state.set_market_maker_instance_runtime(
+                            instance_id, runtime
+                        )
                         sleep_for = max(0.0, interval - (time.monotonic() - started))
                         if sleep_for > 0:
                             await asyncio.sleep(sleep_for)
                         continue
                     cycle_count += 1
-                    order_book, market_data_status = (
-                        await _cached_market_maker_order_book(
-                            runtime_cfg,
-                            orderbook_cache,
-                        )
+                    (
+                        order_book,
+                        market_data_status,
+                    ) = await _cached_market_maker_order_book(
+                        runtime_cfg,
+                        orderbook_cache,
                     )
                     previous_plan_for_cycle = previous_plan
                     force_replace_reason = _market_maker_force_replace_reason(
@@ -3160,23 +3162,26 @@ async def _market_maker_instance_task_loop(
                     # the reprice-threshold check into returning "unchanged" and
                     # skipping the full-grid rebuild we explicitly want.
                     existing_open_orders_for_cycle = (
-                        None if force_replace else open_order_snapshot.get("open_orders")
+                        None
+                        if force_replace
+                        else open_order_snapshot.get("open_orders")
                     )
-                    payload, shutdown_requested = (
-                        await _complete_market_maker_cycle_on_shutdown(
-                            run_market_maker_cycle(
-                                runtime_cfg,
-                                manager,
-                                live=True,
-                                replace_existing=False,
-                                replace_order_ids=open_order_ids,
-                                previous_plan=previous_plan_for_cycle,
-                                existing_open_orders=existing_open_orders_for_cycle,
-                                previous_mid_price=previous_mid_price,
-                                last_cancel_at=last_cancel_at,
-                                order_book=order_book,
-                                inventory_base=inventory_base,
-                            )
+                    (
+                        payload,
+                        shutdown_requested,
+                    ) = await _complete_market_maker_cycle_on_shutdown(
+                        run_market_maker_cycle(
+                            runtime_cfg,
+                            manager,
+                            live=True,
+                            replace_existing=False,
+                            replace_order_ids=open_order_ids,
+                            previous_plan=previous_plan_for_cycle,
+                            existing_open_orders=existing_open_orders_for_cycle,
+                            previous_mid_price=previous_mid_price,
+                            last_cancel_at=last_cancel_at,
+                            order_book=order_book,
+                            inventory_base=inventory_base,
                         )
                     )
                     if force_replace:
@@ -3193,6 +3198,7 @@ async def _market_maker_instance_task_loop(
                         }
                     payload["market_data"] = market_data
                     payload["runtime_strategy"] = "market_maker"
+                    payload["strategy_instance_id"] = instance_id
                     write_trade_event(runtime_cfg.trade_log, payload)
                     write_strategy_timeline_from_payload(
                         runtime_cfg.strategy_timeline,
@@ -3204,10 +3210,14 @@ async def _market_maker_instance_task_loop(
                         if isinstance(payload.get("plan"), dict)
                         else None
                     )
-                    if plan_payload and isinstance(
-                        plan_payload.get("mid_price"),
-                        (int, float),
-                    ) and payload.get("status") in {"placed", "unchanged"}:
+                    if (
+                        plan_payload
+                        and isinstance(
+                            plan_payload.get("mid_price"),
+                            (int, float),
+                        )
+                        and payload.get("status") in {"placed", "unchanged"}
+                    ):
                         previous_plan = plan_payload
                         previous_mid_price = float(plan_payload["mid_price"])
                     execution = (
@@ -3219,15 +3229,21 @@ async def _market_maker_instance_task_loop(
                     canceled_count += int(execution.get("canceled_count", 0) or 0)
                     if int(execution.get("canceled_count", 0) or 0) > 0:
                         last_cancel_at = time.time()
-                    open_order_ids = [
-                        str(order_id)
-                        for order_id in execution.get("placed_order_ids", [])
-                        if order_id
-                    ] or [
-                        str(order_id)
-                        for order_id in execution.get("remaining_open_order_ids", [])
-                        if order_id
-                    ] or open_order_ids
+                    open_order_ids = (
+                        [
+                            str(order_id)
+                            for order_id in execution.get("placed_order_ids", [])
+                            if order_id
+                        ]
+                        or [
+                            str(order_id)
+                            for order_id in execution.get(
+                                "remaining_open_order_ids", []
+                            )
+                            if order_id
+                        ]
+                        or open_order_ids
+                    )
                     if open_order_ids:
                         open_order_exchange = maker_cfg.exchange
                         open_order_symbol = maker_cfg.symbol

@@ -2109,9 +2109,12 @@ tbody tr:last-child td {
     display: grid;
     grid-template-columns: minmax(88px, 38%) minmax(0, 1fr);
     gap: 10px;
+    min-width: 0;
     padding: 5px 0;
     border-bottom: 0;
+    overflow-wrap: anywhere;
     white-space: normal;
+    word-break: break-word;
     text-align: left;
   }
   .mobile-card-table td::before {

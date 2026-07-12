@@ -12,6 +12,8 @@ def register_routes(app: web.Application) -> None:
         api_cash_and_carry_pairs,
         api_cleanup_auto_buy_sell_tasks,
         api_control,
+        api_config_versions_get,
+        api_config_versions_post,
         api_control_auto_buy_sell_task,
         api_cross_exchange_rebalance,
         api_create_auto_buy_sell_task,
@@ -31,6 +33,7 @@ def register_routes(app: web.Application) -> None:
         api_signal_webhook,
         api_strategy_center,
         api_strategy_control,
+        api_strategy_preflight,
         api_user_workspace,
         api_user_backtests_get,
         api_user_backtests_post,
@@ -67,6 +70,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/state/stream", api_state_stream)
     app.router.add_post("/api/profile", api_profile)
     app.router.add_post("/api/control", api_control)
+    app.router.add_get("/api/config-versions", api_config_versions_get)
+    app.router.add_post("/api/config-versions", api_config_versions_post)
     app.router.add_post("/api/markets", api_markets)
     app.router.add_post("/api/cash-and-carry-pairs", api_cash_and_carry_pairs)
     app.router.add_post("/api/risk", api_risk)
@@ -99,6 +104,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/orders/cancel", api_cancel_order)
     app.router.add_post("/api/orders/cancel-bulk", api_cancel_bulk_orders)
     app.router.add_post("/api/strategies/control", api_strategy_control)
+    app.router.add_post("/api/strategies/preflight", api_strategy_preflight)
     app.router.add_post("/api/admin/users", api_admin_users)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/metrics", api_metrics)

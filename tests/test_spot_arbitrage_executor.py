@@ -12,7 +12,12 @@ from arbitrage_bot.config import (
     SlowExecutionConfig,
     SpotMarketConfig,
 )
-from arbitrage_bot.models import BookLevel, Opportunity, OpportunityLeg, OrderBookSnapshot
+from arbitrage_bot.models import (
+    BookLevel,
+    Opportunity,
+    OpportunityLeg,
+    OrderBookSnapshot,
+)
 from arbitrage_bot.spot_arbitrage_executor import (
     build_spot_arbitrage_orders,
     run_spot_arbitrage_execution_cycle,
@@ -139,7 +144,9 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
             async def prepare_limit_order(self, *_: object, **__: object) -> None:
                 raise AssertionError("risk-blocked arbitrage must not validate orders")
 
-            async def create_prepared_limit_order(self, *_: object, **__: object) -> None:
+            async def create_prepared_limit_order(
+                self, *_: object, **__: object
+            ) -> None:
                 raise AssertionError("risk-blocked arbitrage must not place orders")
 
         payload = await run_spot_arbitrage_execution_cycle(
@@ -173,7 +180,9 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
             ) -> list[object]:
                 return list(self.open_orders.get((exchange.key, symbol), []))
 
-            async def fetch_balance(self, exchange: ExchangeConfig) -> dict[str, object]:
+            async def fetch_balance(
+                self, exchange: ExchangeConfig
+            ) -> dict[str, object]:
                 if exchange.key == "coinbase-spot":
                     return {"USDC": {"free": 100.0}}
                 return {"ACS": {"free": 100.0}}
@@ -257,7 +266,8 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execution["placed_order_ids"], ["coinbase-buy-1"])
         self.assertEqual(len(execution["create_errors"]), 1)
         self.assertTrue(execution["emergency_cancel"])
-        self.assertFalse(execution["manual_intervention_required"])
+        self.assertTrue(execution["manual_intervention_required"])
+        self.assertTrue(execution["fill_status"]["reconciliation_required"])
         self.assertEqual(execution["cancel_reason"], "create_error")
         self.assertEqual(execution["canceled_order_ids"], ["coinbase-buy-1"])
         self.assertIn("create_latency_ms", execution)
@@ -270,12 +280,16 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
             [("coinbase-spot", "ACS/USDC", "coinbase-buy-1")],
         )
 
-    async def test_live_cycle_marks_hedge_required_when_fills_are_imbalanced(self) -> None:
+    async def test_live_cycle_marks_hedge_required_when_fills_are_imbalanced(
+        self,
+    ) -> None:
         class FakeManager:
             async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
                 return []
 
-            async def fetch_balance(self, exchange: ExchangeConfig) -> dict[str, object]:
+            async def fetch_balance(
+                self, exchange: ExchangeConfig
+            ) -> dict[str, object]:
                 if exchange.key == "coinbase-spot":
                     return {"USDC": {"free": 100.0}}
                 return {"ACS": {"free": 100.0}}
@@ -315,6 +329,7 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
                         "id": "buy-filled",
                         "symbol": symbol,
                         "side": side,
+                        "status": "closed",
                         "filled": 10.0,
                         "cost": 1.1,
                     }
@@ -322,6 +337,7 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
                     "id": "sell-open",
                     "symbol": symbol,
                     "side": side,
+                    "status": "closed",
                     "filled": 0.0,
                     "cost": 0.0,
                 }
@@ -352,3 +368,223 @@ class SpotArbitrageExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(fill_status["hedge_base"], 10.0)
         self.assertTrue(payload["execution"]["manual_intervention_required"])
         self.assertTrue(payload["paper_vs_live"]["hedge_required"])
+
+    async def test_live_cycle_repairs_one_leg_fill_when_auto_hedge_is_enabled(
+        self,
+    ) -> None:
+        class FakeManager:
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def fetch_balance(
+                self, exchange: ExchangeConfig
+            ) -> dict[str, object]:
+                if exchange.key == "coinbase-spot":
+                    return {
+                        "ACS": {"free": 100.0},
+                        "USDC": {"free": 100.0},
+                    }
+                return {"ACS": {"free": 100.0}}
+
+            async def prepare_limit_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+                side: str,
+                amount: float,
+                price: float,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": exchange.key,
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": amount,
+                    "price": price,
+                    "cost": amount * price,
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_prepared_limit_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+                side: str,
+                prepared: dict[str, object],
+                post_only: bool,
+                client_order_id: str,
+            ) -> dict[str, object]:
+                if "-hedge-" in client_order_id:
+                    return {
+                        "id": "hedge-filled",
+                        "symbol": symbol,
+                        "side": side,
+                        "status": "closed",
+                        "filled": prepared["amount"],
+                        "cost": float(prepared["amount"]) * float(prepared["price"]),
+                    }
+                if side == "buy":
+                    return {
+                        "id": "buy-filled",
+                        "symbol": symbol,
+                        "side": side,
+                        "status": "closed",
+                        "filled": 10.0,
+                        "cost": 1.1,
+                    }
+                return {
+                    "id": "sell-unfilled",
+                    "symbol": symbol,
+                    "side": side,
+                    "status": "closed",
+                    "filled": 0.0,
+                    "cost": 0.0,
+                }
+
+        payload = await run_spot_arbitrage_execution_cycle(
+            make_config(
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_order_quote=10.0,
+                    max_cycle_quote=30.0,
+                    max_open_orders=10,
+                    max_slippage_bps=2_000.0,
+                    require_post_only=False,
+                    auto_hedge_live_enabled=True,
+                    max_auto_hedge_quote=2.0,
+                    auto_hedge_slippage_bps=50.0,
+                    auto_hedge_max_attempts=1,
+                    auto_hedge_order_ttl_seconds=0.0,
+                )
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            opportunities=[make_opportunity()],
+            books=make_books(),
+            quote_rates={"USDC": 1.0, "USDT": 1.0},
+            live=True,
+            order_ttl_seconds=0.0,
+        )
+
+        self.assertEqual(payload["status"], "execution_repaired")
+        execution = payload["execution"]
+        self.assertEqual(execution["emergency_hedge"]["status"], "completed")
+        self.assertAlmostEqual(execution["emergency_hedge"]["filled_base"], 10.0)
+        self.assertFalse(execution["fill_status"]["hedge_required"])
+        self.assertEqual(
+            execution["fill_status"]["status"],
+            "balanced_after_auto_hedge",
+        )
+        self.assertFalse(execution["manual_intervention_required"])
+
+    async def test_live_cycle_repairs_confirmed_terminal_failure_on_other_leg(
+        self,
+    ) -> None:
+        class FakeManager:
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def fetch_balance(
+                self, exchange: ExchangeConfig
+            ) -> dict[str, object]:
+                if exchange.key == "coinbase-spot":
+                    return {
+                        "ACS": {"free": 100.0},
+                        "USDC": {"free": 100.0},
+                    }
+                return {"ACS": {"free": 100.0}}
+
+            async def prepare_limit_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+                side: str,
+                amount: float,
+                price: float,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": exchange.key,
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": amount,
+                    "price": price,
+                    "cost": amount * price,
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_prepared_limit_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                symbol: str,
+                side: str,
+                prepared: dict[str, object],
+                post_only: bool,
+                client_order_id: str,
+            ) -> dict[str, object]:
+                if "-hedge-" in client_order_id:
+                    return {
+                        "id": "hedge-filled",
+                        "status": "closed",
+                        "filled": prepared["amount"],
+                        "cost": float(prepared["amount"]) * float(prepared["price"]),
+                    }
+                if side == "sell":
+                    raise ValueError("exchange rejected sell order")
+                return {
+                    "id": "buy-filled",
+                    "status": "closed",
+                    "filled": 10.0,
+                    "cost": 1.1,
+                }
+
+            def order_reliability_summary(self) -> dict[str, object]:
+                return {"enabled": True, "pending_count": 0}
+
+            async def cancel_order(self, *_: object, **__: object) -> dict[str, object]:
+                return {"id": "buy-filled", "status": "canceled"}
+
+            def order_reliability_intent(
+                self,
+                client_order_id: str,
+            ) -> dict[str, object]:
+                return {
+                    "status": "failed"
+                    if client_order_id.endswith("-2")
+                    else "submitted"
+                }
+
+        payload = await run_spot_arbitrage_execution_cycle(
+            make_config(
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    max_order_quote=10.0,
+                    max_cycle_quote=30.0,
+                    max_open_orders=10,
+                    max_slippage_bps=2_000.0,
+                    require_post_only=False,
+                    auto_hedge_live_enabled=True,
+                    max_auto_hedge_quote=2.0,
+                    auto_hedge_slippage_bps=50.0,
+                    auto_hedge_max_attempts=1,
+                    auto_hedge_order_ttl_seconds=0.0,
+                )
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            opportunities=[make_opportunity()],
+            books=make_books(),
+            quote_rates={"USDC": 1.0, "USDT": 1.0},
+            live=True,
+            order_ttl_seconds=0.0,
+        )
+
+        self.assertEqual(payload["status"], "execution_repaired")
+        self.assertEqual(len(payload["execution"]["create_errors"]), 1)
+        self.assertFalse(payload["execution"]["uncertain_outcome"])
+        self.assertEqual(
+            payload["execution"]["emergency_hedge"]["status"],
+            "completed",
+        )

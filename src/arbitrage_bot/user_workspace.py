@@ -27,6 +27,7 @@ PROJECT_STATUSES = {"pending", "active", "disabled"}
 MARKET_TYPES = {"spot", "swap", "future"}
 CONNECTION_STATUSES = {"unverified", "healthy", "error"}
 CONNECTION_MAX_AGE_SECONDS = 86_400.0
+CREDENTIAL_ROTATION_SECONDS = 90 * 86_400.0
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 ASSET_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{1,19}$")
 SYMBOL_RE = re.compile(
@@ -127,7 +128,9 @@ def _clean_asset(value: Any, *, label: str) -> str:
 def _clean_symbol(value: Any) -> str:
     result = str(value or "").strip().upper()
     if result and not SYMBOL_RE.fullmatch(result):
-        raise ValueError("account symbol must use BASE/QUOTE or BASE/QUOTE:SETTLE format")
+        raise ValueError(
+            "account symbol must use BASE/QUOTE or BASE/QUOTE:SETTLE format"
+        )
     return result
 
 
@@ -200,6 +203,7 @@ class UserExchangeAccount:
     symbol: str = ""
     enabled: bool = False
     withdrawal_disabled_confirmed: bool = False
+    trade_permission_confirmed: bool = False
     connection_status: str = "unverified"
     connection_checked_at: float | None = None
     connection_error: str = ""
@@ -215,21 +219,30 @@ class UserExchangeAccount:
         if exchange_row is None:
             raise ValueError(f"unsupported exchange: {exchange}")
         market_type = str(raw.get("market_type") or "spot").strip().lower()
-        if market_type not in MARKET_TYPES or market_type not in exchange_row["market_types"]:
+        if (
+            market_type not in MARKET_TYPES
+            or market_type not in exchange_row["market_types"]
+        ):
             raise ValueError(f"{exchange} does not support {market_type} accounts")
         variants = {
             str(item.get("id") or "")
             for item in exchange_row.get("variants", [])
             if isinstance(item, dict)
         }
-        api_variant = str(
-            raw.get("api_variant") or exchange_row.get("default_variant") or "default"
-        ).strip().lower()
+        api_variant = (
+            str(
+                raw.get("api_variant")
+                or exchange_row.get("default_variant")
+                or "default"
+            )
+            .strip()
+            .lower()
+        )
         if api_variant not in variants:
             raise ValueError(f"{exchange} does not support API variant {api_variant}")
-        connection_status = str(
-            raw.get("connection_status") or "unverified"
-        ).strip().lower()
+        connection_status = (
+            str(raw.get("connection_status") or "unverified").strip().lower()
+        )
         if connection_status not in CONNECTION_STATUSES:
             connection_status = "unverified"
         project_id = _clean_id(raw.get("project_id"), prefix="project")
@@ -252,6 +265,11 @@ class UserExchangeAccount:
                 raw.get("withdrawal_disabled_confirmed"),
                 label="withdrawal-disabled confirmation",
                 default=False,
+            ),
+            trade_permission_confirmed=_strict_bool(
+                raw.get("trade_permission_confirmed"),
+                label="trade permission confirmation",
+                default=bool(raw.get("withdrawal_disabled_confirmed", False)),
             ),
             connection_status=connection_status,
             connection_checked_at=(
@@ -279,6 +297,7 @@ class UserExchangeAccount:
             "symbol": self.symbol,
             "enabled": self.enabled,
             "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
+            "trade_permission_confirmed": self.trade_permission_confirmed,
             "connection_status": self.connection_status,
             "connection_checked_at": self.connection_checked_at,
             "connection_error": self.connection_error,
@@ -298,6 +317,72 @@ def account_connection_is_fresh(
         return False
     age = (now if now is not None else _now()) - account.connection_checked_at
     return 0.0 <= age <= CONNECTION_MAX_AGE_SECONDS
+
+
+@dataclass(frozen=True)
+class UserRiskProfile:
+    owner_email: str
+    trading_enabled: bool = True
+    max_total_exposure_quote: float = 0.0
+    max_daily_loss_quote: float = 0.0
+    max_open_orders: int = 0
+    max_active_strategies: int = 0
+    updated_at: float = field(default_factory=_now)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "UserRiskProfile":
+        if not isinstance(raw, dict):
+            raise ValueError("user risk profile must be an object")
+
+        def non_negative_float(key: str, default: float) -> float:
+            try:
+                value = float(raw.get(key, default))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be a number") from exc
+            if value < 0:
+                raise ValueError(f"{key} must be non-negative")
+            return value
+
+        def non_negative_int(key: str, default: int) -> int:
+            value = non_negative_float(key, float(default))
+            if not value.is_integer():
+                raise ValueError(f"{key} must be an integer")
+            return int(value)
+
+        return cls(
+            owner_email=_clean_email(raw.get("owner_email")),
+            trading_enabled=_strict_bool(
+                raw.get("trading_enabled"),
+                label="user trading enabled",
+                default=True,
+            ),
+            max_total_exposure_quote=non_negative_float(
+                "max_total_exposure_quote",
+                0.0,
+            ),
+            max_daily_loss_quote=non_negative_float(
+                "max_daily_loss_quote",
+                0.0,
+            ),
+            max_open_orders=non_negative_int("max_open_orders", 0),
+            max_active_strategies=non_negative_int(
+                "max_active_strategies",
+                0,
+            ),
+            updated_at=float(raw.get("updated_at") or _now()),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "owner_email": self.owner_email,
+            "trading_enabled": self.trading_enabled,
+            "max_total_exposure_quote": self.max_total_exposure_quote,
+            "max_daily_loss_quote": self.max_daily_loss_quote,
+            "max_open_orders": self.max_open_orders,
+            "max_active_strategies": self.max_active_strategies,
+            "live_submit_allowed": False,
+            "updated_at": self.updated_at,
+        }
 
 
 class CredentialCipher:
@@ -440,6 +525,11 @@ class UserWorkspaceStore:
                     fields TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS user_risk_profiles (
+                    owner_email TEXT PRIMARY KEY,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL
+                );
                 """
             )
             self._migrate_legacy_accounts(connection)
@@ -521,6 +611,54 @@ class UserWorkspaceStore:
                 params,
             ).fetchall()
         return [UserProject.from_dict(json.loads(row["payload"])) for row in rows]
+
+    def platform_projects(self) -> list[dict[str, Any]]:
+        """Return project approval metadata only; never account or credential data."""
+        self._ensure()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM user_projects ORDER BY updated_at DESC, id ASC"
+            ).fetchall()
+        return [
+            {
+                **UserProject.from_dict(json.loads(row["payload"])).to_dict(),
+                "platform_only": True,
+            }
+            for row in rows
+        ]
+
+    def risk_profile(self, owner_email: str) -> UserRiskProfile:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_risk_profiles WHERE owner_email = ?",
+                (owner,),
+            ).fetchone()
+        if row is None:
+            return UserRiskProfile(owner_email=owner)
+        return UserRiskProfile.from_dict(json.loads(row["payload"]))
+
+    def upsert_risk_profile(self, profile: UserRiskProfile) -> UserRiskProfile:
+        self._ensure()
+        updated = replace(profile, updated_at=_now())
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_risk_profiles(owner_email, updated_at, payload)
+                VALUES(?, ?, ?)
+                ON CONFLICT(owner_email) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    payload = excluded.payload
+                """,
+                (
+                    updated.owner_email,
+                    updated.updated_at,
+                    self._dump(updated.to_dict()),
+                ),
+            )
+            connection.commit()
+        return updated
 
     def list_accounts(
         self,
@@ -638,7 +776,9 @@ class UserWorkspaceStore:
         )
         updated = replace(
             project,
-            created_at=existing.created_at if existing is not None else project.created_at,
+            created_at=existing.created_at
+            if existing is not None
+            else project.created_at,
             updated_at=_now(),
         )
         with self._connect() as connection:
@@ -859,7 +999,9 @@ class UserWorkspaceStore:
         )
         updated = replace(
             account,
-            created_at=existing.created_at if existing is not None else account.created_at,
+            created_at=existing.created_at
+            if existing is not None
+            else account.created_at,
             updated_at=_now(),
         )
         if connection_changed:
@@ -884,7 +1026,9 @@ class UserWorkspaceStore:
             merged_credentials: dict[str, str] = {}
             if supplied:
                 if not updated.withdrawal_disabled_confirmed:
-                    raise ValueError("confirm that API withdrawal permission is disabled")
+                    raise ValueError(
+                        "confirm that API withdrawal permission is disabled"
+                    )
                 if existing_credential is not None and not replace_credentials:
                     merged_credentials = self.cipher.decrypt(
                         account_id=account.id,
@@ -893,7 +1037,9 @@ class UserWorkspaceStore:
                         ciphertext=existing_credential["ciphertext"],
                     )
                 merged_credentials.update(supplied)
-                required = set(EXCHANGES_BY_ID[account.exchange]["required_credentials"])
+                required = set(
+                    EXCHANGES_BY_ID[account.exchange]["required_credentials"]
+                )
                 missing = sorted(required.difference(merged_credentials))
                 if missing:
                     raise ValueError(
@@ -931,6 +1077,8 @@ class UserWorkspaceStore:
                     raise ValueError(
                         "confirm that API withdrawal permission is disabled"
                     )
+                if not updated.trade_permission_confirmed:
+                    raise ValueError("confirm that the API key has trading permission")
                 if not self.cipher.available:
                     raise RuntimeError("credential encryption is not configured")
                 required = set(
@@ -1007,7 +1155,9 @@ class UserWorkspaceStore:
             if account.owner_email != strategy.owner_email:
                 raise ValueError("strategy and exchange account owners must match")
             if account.project_id != strategy.project_id:
-                raise ValueError("strategy accounts must belong to the selected project")
+                raise ValueError(
+                    "strategy accounts must belong to the selected project"
+                )
         updated = replace(
             strategy,
             created_at=(
@@ -1019,9 +1169,43 @@ class UserWorkspaceStore:
             readiness = self.strategy_readiness(updated)
             if not readiness["ready"]:
                 raise ValueError(
-                    "strategy cannot be enabled: "
-                    + "; ".join(readiness["blockers"])
+                    "strategy cannot be enabled: " + "; ".join(readiness["blockers"])
                 )
+            profile = self.risk_profile(updated.owner_email)
+            existing_strategies = [
+                row
+                for row in self.list_strategies(
+                    owner_email=updated.owner_email,
+                    is_admin=False,
+                )
+                if row.id != updated.id and row.enabled
+            ]
+            if (
+                profile.max_active_strategies > 0
+                and len(existing_strategies) + 1 > profile.max_active_strategies
+            ):
+                raise ValueError("user max active strategies limit would be exceeded")
+            projected_exposure = float(
+                updated.risk.get("max_total_quote") or 0.0
+            ) + sum(
+                float(row.risk.get("max_total_quote") or 0.0)
+                for row in existing_strategies
+            )
+            if (
+                profile.max_total_exposure_quote > 0
+                and projected_exposure > profile.max_total_exposure_quote
+            ):
+                raise ValueError(
+                    "user max total exposure quote limit would be exceeded"
+                )
+            projected_open_orders = int(updated.risk.get("max_open_orders") or 0) + sum(
+                int(row.risk.get("max_open_orders") or 0) for row in existing_strategies
+            )
+            if (
+                profile.max_open_orders > 0
+                and projected_open_orders > profile.max_open_orders
+            ):
+                raise ValueError("user max open orders limit would be exceeded")
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1053,6 +1237,7 @@ class UserWorkspaceStore:
         vault_available = bool(credential_status.get("vault_available"))
         credentials_configured = bool(credential_status.get("configured"))
         withdrawal_disabled = account.withdrawal_disabled_confirmed
+        trade_permission_confirmed = account.trade_permission_confirmed
         symbol_selected = bool(account.symbol)
         connection_fresh = account_connection_is_fresh(account, now=now)
         account_enabled = account.enabled
@@ -1071,6 +1256,11 @@ class UserWorkspaceStore:
                 "id": "withdrawal_disabled",
                 "label": "Withdrawal permission disabled",
                 "complete": withdrawal_disabled,
+            },
+            {
+                "id": "trade_permission_confirmed",
+                "label": "Trading permission confirmed",
+                "complete": trade_permission_confirmed,
             },
             {
                 "id": "credentials_saved",
@@ -1102,6 +1292,8 @@ class UserWorkspaceStore:
             blockers.append("credential vault is unavailable")
         if not withdrawal_disabled:
             blockers.append("withdrawal-disabled confirmation is missing")
+        if not trade_permission_confirmed:
+            blockers.append("trading permission confirmation is missing")
         if not credentials_configured:
             blockers.append("account credentials are missing")
         if not symbol_selected:
@@ -1129,6 +1321,11 @@ class UserWorkspaceStore:
             next_action = {
                 "code": "confirm_withdrawal_disabled",
                 "label": "Confirm withdrawal permission is disabled",
+            }
+        elif not trade_permission_confirmed:
+            next_action = {
+                "code": "confirm_trade_permission",
+                "label": "Confirm the API key has trading permission",
             }
         elif not credentials_configured:
             next_action = {
@@ -1207,6 +1404,7 @@ class UserWorkspaceStore:
         accounts_by_id: dict[str, UserExchangeAccount],
         credential_statuses: dict[str, dict[str, Any]],
         now: float,
+        risk_profile: UserRiskProfile | None = None,
     ) -> dict[str, Any]:
         blockers = list(strategy_parameter_blockers(strategy))
         warnings = ["paper mode only; live order submission is disabled"]
@@ -1245,7 +1443,9 @@ class UserWorkspaceStore:
                 blockers.append(f"spot account required: {account.label}")
             if not account.symbol:
                 blockers.append(f"account symbol is missing: {account.label}")
-            elif project is not None and account.symbol.split("/", 1)[0] != project.asset:
+            elif (
+                project is not None and account.symbol.split("/", 1)[0] != project.asset
+            ):
                 blockers.append(f"account symbol asset mismatch: {account.label}")
             elif (
                 project is not None
@@ -1260,6 +1460,10 @@ class UserWorkspaceStore:
                 blockers.append(
                     f"withdrawal-disabled confirmation is missing: {account.label}"
                 )
+            if not account.trade_permission_confirmed:
+                blockers.append(
+                    f"trading permission confirmation is missing: {account.label}"
+                )
             if not account_connection_is_fresh(account, now=now):
                 blockers.append(f"account connection test is stale: {account.label}")
             credential_status = credential_statuses.get(account.id, {})
@@ -1272,6 +1476,10 @@ class UserWorkspaceStore:
             exchanges = {account.exchange for account in accounts}
             if len(exchanges) < 2:
                 blockers.append("spot arbitrage requires two different exchanges")
+
+        profile = risk_profile or self.risk_profile(strategy.owner_email)
+        if not profile.trading_enabled:
+            blockers.append("user risk profile trading switch is disabled")
 
         unique_blockers = list(dict.fromkeys(blockers))
         return {
@@ -1295,6 +1503,7 @@ class UserWorkspaceStore:
             accounts_by_id=accounts,
             credential_statuses=self.credential_statuses(strategy.account_ids),
             now=_now(),
+            risk_profile=self.risk_profile(strategy.owner_email),
         )
 
     def _project_readiness(
@@ -1374,7 +1583,9 @@ class UserWorkspaceStore:
             )
             next_action = {
                 "code": str(account_action.get("code") or "configure_account"),
-                "label": str(account_action.get("label") or "Configure the exchange account"),
+                "label": str(
+                    account_action.get("label") or "Configure the exchange account"
+                ),
                 "account_id": account.id,
             }
         elif not strategies:
@@ -1455,6 +1666,7 @@ class UserWorkspaceStore:
                 accounts_by_id=account_map,
                 credential_statuses=credentials,
                 now=now,
+                risk_profile=self.risk_profile(project.owner_email),
             )
             for strategy in strategies
         }
@@ -1469,7 +1681,9 @@ class UserWorkspaceStore:
     def delete_strategy(self, strategy_id: str) -> None:
         self._ensure()
         with self._connect() as connection:
-            connection.execute("DELETE FROM user_strategies WHERE id = ?", (strategy_id,))
+            connection.execute(
+                "DELETE FROM user_strategies WHERE id = ?", (strategy_id,)
+            )
             connection.commit()
 
     def credential_statuses(
@@ -1484,6 +1698,9 @@ class UserWorkspaceStore:
             "fields": [],
             "updated_at": None,
             "vault_available": self.cipher.available,
+            "rotation_due_at": None,
+            "rotation_remaining_seconds": None,
+            "rotation_required": False,
         }
         result = {account_id: dict(default_status) for account_id in unique_ids}
         if not unique_ids:
@@ -1504,6 +1721,15 @@ class UserWorkspaceStore:
                 "fields": fields,
                 "updated_at": float(row["updated_at"]),
                 "vault_available": self.cipher.available,
+                "rotation_due_at": float(row["updated_at"])
+                + CREDENTIAL_ROTATION_SECONDS,
+                "rotation_remaining_seconds": max(
+                    0.0,
+                    float(row["updated_at"]) + CREDENTIAL_ROTATION_SECONDS - _now(),
+                ),
+                "rotation_required": (
+                    _now() >= float(row["updated_at"]) + CREDENTIAL_ROTATION_SECONDS
+                ),
             }
         return result
 
@@ -1555,6 +1781,7 @@ class UserWorkspaceStore:
         accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)
         strategies = self.list_strategies(owner_email=owner_email, is_admin=is_admin)
         now = _now()
+        risk_profile = self.risk_profile(owner_email)
         project_map = {project.id: project for project in projects}
         account_map = {account.id: account for account in accounts}
         credentials = self.credential_statuses([account.id for account in accounts])
@@ -1574,6 +1801,7 @@ class UserWorkspaceStore:
                 accounts_by_id=account_map,
                 credential_statuses=credentials,
                 now=now,
+                risk_profile=risk_profile,
             )
             for strategy in strategies
         }
@@ -1639,6 +1867,7 @@ class UserWorkspaceStore:
         )
         return {
             "status": "ok",
+            "risk_profile": risk_profile.to_dict(),
             "projects": project_rows,
             "accounts": account_rows,
             "strategies": strategy_rows,

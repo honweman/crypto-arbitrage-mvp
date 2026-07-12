@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, RiskConfig, load_config
@@ -169,9 +171,7 @@ def _plan_reprice_bps(
         if abs(float(previous_quote) - current_quote) > 1e-12:
             return None
         price_change_bps = (
-            abs(current_price - float(previous_price))
-            / current_plan.mid_price
-            * 10_000
+            abs(current_price - float(previous_price)) / current_plan.mid_price * 10_000
         )
         max_change_bps = max(max_change_bps, price_change_bps)
     return max_change_bps
@@ -277,11 +277,7 @@ def _raw_order_id(raw: Any) -> str:
     if not isinstance(raw, dict):
         return ""
     return str(
-        raw.get("id")
-        or raw.get("order")
-        or raw.get("orderId")
-        or raw.get("uuid")
-        or ""
+        raw.get("id") or raw.get("order") or raw.get("orderId") or raw.get("uuid") or ""
     )
 
 
@@ -326,9 +322,7 @@ async def load_plan_order_book(
         max(cfg.order_book_depth, maker_cfg.levels),
     )
     if book is None:
-        raise ValueError(
-            f"no order book for {maker_cfg.exchange} {maker_cfg.symbol}"
-        )
+        raise ValueError(f"no order book for {maker_cfg.exchange} {maker_cfg.symbol}")
     return book
 
 
@@ -373,7 +367,10 @@ async def place_plan(
             )
         except Exception as exc:  # noqa: BLE001
             cancel_errors.append(
-                {"order_id": "all_open_orders", "error": f"{exc.__class__.__name__}: {exc}"}
+                {
+                    "order_id": "all_open_orders",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
             )
 
     if cancel_attempted:
@@ -397,8 +394,7 @@ async def place_plan(
             if isinstance(order, dict) and (order.get("id") or order.get("order"))
         ]
         confirmation_failed = any(
-            item.get("order_id") == "open_order_confirmation"
-            for item in cancel_errors
+            item.get("order_id") == "open_order_confirmation" for item in cancel_errors
         )
         if confirmation_failed or remaining_open_order_ids:
             return {
@@ -462,7 +458,8 @@ async def place_plan(
                 remaining_open_order_ids = [
                     str(order.get("id") or order.get("order") or "")
                     for order in remaining_open_orders
-                    if isinstance(order, dict) and (order.get("id") or order.get("order"))
+                    if isinstance(order, dict)
+                    and (order.get("id") or order.get("order"))
                 ]
             except Exception as confirm_exc:  # noqa: BLE001
                 confirmation_errors.append(
@@ -494,11 +491,7 @@ async def place_plan(
     prepared_creator = getattr(manager, "create_prepared_limit_order", None)
     for index, order in enumerate(plan.orders, start=1):
         client_order_id = client_order_ids[index - 1]
-        prepared = (
-            prepared_orders[index - 1]
-            if index <= len(prepared_orders)
-            else None
-        )
+        prepared = prepared_orders[index - 1] if index <= len(prepared_orders) else None
         try:
             if prepared is not None and prepared_creator is not None:
                 raw = await prepared_creator(
@@ -583,15 +576,15 @@ async def place_plan(
         "canceled_count": len(canceled) + len(emergency_canceled),
         "cancel_errors": cancel_errors,
         "placed_count": len(placed),
-        "placed_order_ids": [_raw_order_id(item) for item in placed if _raw_order_id(item)],
+        "placed_order_ids": [
+            _raw_order_id(item) for item in placed if _raw_order_id(item)
+        ],
         "create_errors": create_errors,
         "partial_create": partial_create,
         "emergency_cancel": partial_create,
         "emergency_canceled_count": len(emergency_canceled),
         "emergency_canceled_order_ids": [
-            _raw_order_id(item)
-            for item in emergency_canceled
-            if _raw_order_id(item)
+            _raw_order_id(item) for item in emergency_canceled if _raw_order_id(item)
         ],
         "emergency_cancel_errors": emergency_cancel_errors,
         "remaining_open_order_ids": remaining_open_order_ids,
@@ -801,9 +794,7 @@ async def run_cycle(
     existing_open_order_count: int | None = None
     open_order_error: str | None = None
     replace_order_ids = [order_id for order_id in (replace_order_ids or []) if order_id]
-    should_cancel_existing = (
-        replace_existing or cfg.market_maker.cancel_existing_orders
-    )
+    should_cancel_existing = replace_existing or cfg.market_maker.cancel_existing_orders
     should_cancel_tracked = bool(replace_order_ids)
     if live and (
         risk_cfg.max_open_orders > 0
@@ -951,12 +942,12 @@ async def run_loop(
     poll_seconds: float | None,
     replace_existing: bool,
 ) -> None:
-    interval = (
-        cfg.market_maker.poll_seconds
-        if poll_seconds is None
-        else poll_seconds
-    )
+    interval = cfg.market_maker.poll_seconds if poll_seconds is None else poll_seconds
     interval = max(1.0, interval)
+    os.environ.setdefault(
+        "CRYPTO_ARB_ORDER_JOURNAL_PATH",
+        str(Path(cfg.trade_log.path).with_name("order_intents.sqlite3")),
+    )
     manager = ExchangeManager()
     previous_mid_price: float | None = None
     previous_plan: dict[str, Any] | None = None
@@ -1008,7 +999,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Market maker order-plan generator and guarded live placer"
     )
-    parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
+    parser.add_argument(
+        "--config", default="config.acs.json", help="Path to JSON config"
+    )
     parser.add_argument(
         "--loop",
         action="store_true",

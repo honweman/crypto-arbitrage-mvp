@@ -14,9 +14,7 @@ def _base_asset_from_symbol(symbol: str) -> str:
 def _configured_assets(cfg: BotConfig) -> list[str]:
     assets = {market.asset.upper() for market in cfg.spot_markets if market.asset}
     assets.update(
-        position.asset.upper()
-        for position in cfg.portfolio.positions
-        if position.asset
+        position.asset.upper() for position in cfg.portfolio.positions if position.asset
     )
     if cfg.portfolio.asset:
         assets.add(cfg.portfolio.asset.upper())
@@ -25,13 +23,9 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
     if cfg.slow_execution.symbol:
         assets.add(_base_asset_from_symbol(cfg.slow_execution.symbol))
     if cfg.cross_exchange_rebalance.buy_symbol:
-        assets.add(
-            _base_asset_from_symbol(cfg.cross_exchange_rebalance.buy_symbol)
-        )
+        assets.add(_base_asset_from_symbol(cfg.cross_exchange_rebalance.buy_symbol))
     if cfg.cross_exchange_rebalance.sell_symbol:
-        assets.add(
-            _base_asset_from_symbol(cfg.cross_exchange_rebalance.sell_symbol)
-        )
+        assets.add(_base_asset_from_symbol(cfg.cross_exchange_rebalance.sell_symbol))
     if cfg.spot_grid.symbol:
         assets.add(_base_asset_from_symbol(cfg.spot_grid.symbol))
     if cfg.dca.symbol:
@@ -41,7 +35,9 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
     if cfg.backtest.symbol:
         assets.add(_base_asset_from_symbol(cfg.backtest.symbol))
     for combo in cfg.option_combos:
-        assets.add(combo.underlying.upper() or _base_asset_from_symbol(combo.spot_symbol))
+        assets.add(
+            combo.underlying.upper() or _base_asset_from_symbol(combo.spot_symbol)
+        )
     return sorted(asset for asset in assets if asset)
 
 
@@ -342,7 +338,9 @@ def _filter_state_payload_for_user(
         if not isinstance(section, dict):
             return
         section["accounts"] = filter_accounts(section.get("accounts"))
-        config = section.get("config") if isinstance(section.get("config"), dict) else {}
+        config = (
+            section.get("config") if isinstance(section.get("config"), dict) else {}
+        )
         plan = section.get("plan") if isinstance(section.get("plan"), dict) else {}
         symbols = [
             str(config.get("symbol") or plan.get("symbol") or ""),
@@ -454,9 +452,7 @@ def _filter_state_payload_for_user(
         lifecycle["summary"] = {
             "instance_count": len(instances),
             "converged_count": sum(bool(row.get("converged")) for row in instances),
-            "attention_count": sum(
-                not bool(row.get("converged")) for row in instances
-            ),
+            "attention_count": sum(not bool(row.get("converged")) for row in instances),
             "blocked_count": sum(
                 row.get("convergence_state") == "blocked" for row in instances
             ),
@@ -464,8 +460,7 @@ def _filter_state_payload_for_user(
                 row.get("convergence_state") == "error" for row in instances
             ),
             "transitioning_count": sum(
-                row.get("convergence_state") == "transitioning"
-                for row in instances
+                row.get("convergence_state") == "transitioning" for row in instances
             ),
         }
         lifecycle["status"] = (
@@ -503,16 +498,27 @@ def _filter_state_payload_for_user(
         for row in center.get("strategy_instances", []) or []:
             if not isinstance(row, dict):
                 continue
-            if user.role != "admin" and str(row.get("owner_email") or "").lower() != owner:
+            if (
+                user.role != "admin"
+                and str(row.get("owner_email") or "").lower() != owner
+            ):
                 continue
-            if not in_scope(str(row.get("asset") or _base_asset_from_symbol(str(row.get("symbol") or "")))):
+            if not in_scope(
+                str(
+                    row.get("asset")
+                    or _base_asset_from_symbol(str(row.get("symbol") or ""))
+                )
+            ):
                 continue
             strategies.append(row)
         accounts = []
         for row in center.get("user_api_accounts", []) or []:
             if not isinstance(row, dict):
                 continue
-            if user.role != "admin" and str(row.get("owner_email") or "").lower() != owner:
+            if (
+                user.role != "admin"
+                and str(row.get("owner_email") or "").lower() != owner
+            ):
                 continue
             scope = [
                 str(asset or "").strip().upper()
@@ -532,8 +538,12 @@ def _filter_state_payload_for_user(
         summary = center.get("summary")
         if isinstance(summary, dict):
             summary["strategy_count"] = len(strategies)
-            summary["enabled_count"] = sum(1 for row in strategies if row.get("enabled"))
-            summary["live_count"] = sum(1 for row in strategies if row.get("live_enabled"))
+            summary["enabled_count"] = sum(
+                1 for row in strategies if row.get("enabled")
+            )
+            summary["live_count"] = sum(
+                1 for row in strategies if row.get("live_enabled")
+            )
             summary["api_account_count"] = len(accounts)
             summary["recent_signal_count"] = len(signals)
             summary["pnl_quote"] = sum(
@@ -596,6 +606,81 @@ def _filter_state_payload_for_user(
     filter_strategy_lifecycle(payload.get("strategy_lifecycle"))
     filter_readiness(payload.get("readiness"))
     filter_strategy_center(payload.get("strategy_center"))
+    if user.role != "admin":
+        # Platform live accounts belong to the platform operator. User-owned
+        # accounts, strategies, orders and P/L are exposed only via user_workspace.
+        payload["portfolio"] = {
+            "status": "private",
+            "positions": [],
+            "cash_balances": {},
+            "sources": {},
+        }
+        payload["account_balances"] = {
+            "status": "private",
+            "accounts": [],
+            "totals": [],
+            "checked_account_count": 0,
+            "total_account_count": 0,
+        }
+        payload["order_activity"] = {
+            "status": "private",
+            "accounts": [],
+            "open_orders": [],
+            "closed_orders": [],
+            "recent_trades": [],
+            "open_order_count": 0,
+            "closed_order_count": 0,
+            "recent_trade_count": 0,
+            "pnl_summary": {},
+            "daily_pnl": None,
+            "strategy_performance": {
+                "status": "private",
+                "rows": [],
+                "row_count": 0,
+                "summary": {},
+            },
+            "reconciliation": {"status": "private", "issues": []},
+        }
+        payload["trading_console"] = {
+            "status": "private",
+            "accounts": [],
+            "strategies": [],
+            "open_orders": [],
+            "recent_trades": [],
+            "open_order_count": 0,
+        }
+        payload["strategy_lifecycle"] = {
+            "status": "private",
+            "instances": [],
+            "summary": {"instance_count": 0},
+        }
+        payload["readiness"] = {
+            "status": "private",
+            "accounts": [],
+            "strategies": [],
+            "summary": {},
+        }
+        payload["operations"] = {}
+        if isinstance(config_payload, dict):
+            config_payload["risk"] = {}
+        for key in (
+            "market_maker",
+            "slow_execution",
+            "cross_exchange_rebalance",
+            "spot_grid",
+            "dca",
+            "execution_algo",
+            "backtest",
+        ):
+            payload[key] = {
+                "status": "platform_managed",
+                "mode": "private",
+                "config": {},
+                "accounts": [],
+                "instances": [],
+                "runtime": {},
+                "plan": None,
+            }
     payload["auth"] = user.public_dict(available_assets=available_assets)
     payload["auth"]["mode"] = "user"
     payload["auth"]["asset_scope"] = sorted(asset_scope)

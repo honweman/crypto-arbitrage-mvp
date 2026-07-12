@@ -55,6 +55,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	      settings: [
 	        "user-workspace-section",
 	        "risk-form",
+	        "config-versions",
 	        "strategy-instances",
 	        "api-accounts",
 	      ],
@@ -103,6 +104,9 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	      ],
 	    };
 	    const lastVisibleRenderAt = { status: 0, trading: 0, quant: 0, settings: 0, records: 0 };
+    let configVersionPayload = null;
+    let configVersionLoadAt = 0;
+    let configVersionLoading = false;
 
     function uiFeatureNamesFor(el) {
       return String(el?.dataset?.uiFeature || "")
@@ -515,6 +519,28 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         accountsReady,
         detail,
       };
+    }
+
+    async function runStrategyPreflight(strategyId, candidate) {
+      const response = await fetch("/api/strategies/preflight", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId, candidate }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "strategy preflight failed");
+      }
+      const preflight = result.preflight || {};
+      if (!preflight.ready || !preflight.token) {
+        const blockers = Array.isArray(preflight.blockers) ? preflight.blockers : [];
+        throw new Error(
+          blockers.length
+            ? `${uiText("Preflight blocked")}: ${blockers.slice(0, 3).join("; ")}`
+            : uiText("Strategy preflight did not approve this start."),
+        );
+      }
+      return preflight;
     }
 
     function setStrategyFeedback(id, message = "", level = "") {
@@ -1283,6 +1309,48 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderStrategyPerformance(orderActivity) {
+      const body = document.getElementById("strategy-performance");
+      if (!body) return;
+      body.innerHTML = "";
+      const performance = orderActivity?.strategy_performance || {};
+      const rows = performance.rows || [];
+      const summary = performance.summary || {};
+      text(
+        "strategy-performance-meta",
+        `${performance.window || "daily"} · fills ${summary.fill_count || 0} · submitted ${summary.submitted_order_count || 0} · fees ${formatPnlValue(summary.fees_common || 0)} · P/L ${formatPnlValue(summary.realized_pnl || 0)}`
+      );
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="11">No strategy performance yet.</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const row of rows) {
+        const mmDetail = row.strategy === "market_maker"
+          ? `spread ${formatPnlValue(row.spread_capture_estimate || 0)} · inventory ${formatPnlValue(row.inventory_pnl_residual || 0)}`
+          : row.strategy === "slow_execution" && row.progress_pct != null
+            ? `progress ${Number(row.progress_pct).toFixed(1)}%`
+            : "";
+        const avgFill = row.task_average_fill_price ?? row.average_fill_price;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td data-label="${uiText("Strategy")}">${escapeHtml(displayStrategy(row.strategy))}</td>
+          <td data-label="${uiText("Instance")}" title="${escapeHtml(row.instance_id || "")}">${escapeHtml(shortId(row.instance_id || "default"))}</td>
+          <td data-label="${uiText("Account / Symbol")}">${escapeHtml(row.account || "--")}<br><span class="subtle">${escapeHtml(row.symbol || "--")}</span></td>
+          <td data-label="${uiText("Fills / Submitted")}" class="num">${Number(row.filled_order_count || 0)} / ${Number(row.submitted_order_count || 0)}</td>
+          <td data-label="${uiText("Fill Rate")}" class="num">${row.fill_rate_pct == null ? "--" : `${Number(row.fill_rate_pct).toFixed(1)}%`}</td>
+          <td data-label="${uiText("Average Fill")}" class="num">${avgFill == null ? "--" : fmt.format(avgFill)}</td>
+          <td data-label="${uiText("Fees")}" class="num">${formatPnlValue(row.fees_common || 0)}</td>
+          <td data-label="${uiText("P/L")}" class="num ${pnlClass(row.realized_pnl)}">${formatPnlValue(row.realized_pnl || 0)}${mmDetail ? `<br><span class="subtle">${escapeHtml(mmDetail)}</span>` : ""}</td>
+          <td data-label="${uiText("Slippage")}" class="num">${row.average_slippage_bps == null ? "--" : `${Number(row.average_slippage_bps).toFixed(2)} bps`}</td>
+          <td data-label="${uiText("Latency")}" class="num">${row.average_submit_latency_ms == null ? "--" : `${Number(row.average_submit_latency_ms).toFixed(0)} ms`}</td>
+          <td data-label="${uiText("Paper vs Live")}" class="num ${pnlClass(row.paper_vs_live_delta)}">${formatPnlValue(row.paper_vs_live_delta)}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
     function renderOrderActivity(orderActivity) {
       const recentPnl = orderActivity?.pnl_summary?.total_realized_pnl;
       const dailyPnl = orderActivity?.daily_pnl?.enabled
@@ -1316,6 +1384,7 @@ function balanceStatusClass(status) {
       renderOpenOrders(orderActivity);
       renderRecentFills(orderActivity);
       renderOrderReconciliation(orderActivity);
+      renderStrategyPerformance(orderActivity);
     }
 
     let consoleActionBusy = false;
@@ -3587,7 +3656,13 @@ function balanceStatusClass(status) {
       const body = document.getElementById("user-projects");
       if (!body) return;
       body.innerHTML = "";
-      const projects = workspace?.projects || [];
+      const ownProjects = workspace?.projects || [];
+      const projects = [
+        ...ownProjects,
+        ...(workspace?.platform_projects || []).filter(
+          (project) => !ownProjects.some((own) => own.id === project.id)
+        ),
+      ];
       if (projects.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="5">${escapeHtml(uiText("No projects yet. Create one before adding an exchange account."))}</td>`;
@@ -3596,11 +3671,14 @@ function balanceStatusClass(status) {
       }
       const isAdmin = lastState?.auth?.role === "admin";
       for (const project of projects) {
+        const platformOnly = Boolean(project.platform_only);
         const tr = document.createElement("tr");
         tr.dataset.workspaceProjectId = project.id || "";
         const statusClass = project.status === "active" ? "ok" : project.status === "pending" ? "risk-blocked" : "subtle";
         const setup = project.readiness || {};
-        const setupText = `${setup.completed_steps || 0}/${setup.total_steps || 0} ${uiText("setup steps")}`;
+        const setupText = platformOnly
+          ? uiText("Platform approval only")
+          : `${setup.completed_steps || 0}/${setup.total_steps || 0} ${uiText("setup steps")}`;
         tr.innerHTML = `
           <td title="${escapeHtml(project.id || "")}">${escapeHtml(project.name || project.id)}</td>
           <td>${escapeHtml(project.owner_email || "--")}</td>
@@ -3609,12 +3687,14 @@ function balanceStatusClass(status) {
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");
-        const editButton = document.createElement("button");
-        editButton.className = "control-button";
-        editButton.type = "button";
-        editButton.textContent = "Edit";
-        editButton.addEventListener("click", () => fillUserProjectForm(project));
-        actions.appendChild(editButton);
+        if (!platformOnly) {
+          const editButton = document.createElement("button");
+          editButton.className = "control-button";
+          editButton.type = "button";
+          editButton.textContent = "Edit";
+          editButton.addEventListener("click", () => fillUserProjectForm(project));
+          actions.appendChild(editButton);
+        }
         if (isAdmin && project.status !== "active") {
           const approveButton = document.createElement("button");
           approveButton.className = "control-button";
@@ -3631,12 +3711,14 @@ function balanceStatusClass(status) {
           disableButton.addEventListener("click", () => disableUserProject(project, disableButton));
           actions.appendChild(disableButton);
         }
-        const deleteButton = document.createElement("button");
-        deleteButton.className = "danger-button";
-        deleteButton.type = "button";
-        deleteButton.textContent = "Delete";
-        deleteButton.addEventListener("click", () => deleteUserProject(project, deleteButton));
-        actions.appendChild(deleteButton);
+        if (!platformOnly) {
+          const deleteButton = document.createElement("button");
+          deleteButton.className = "danger-button";
+          deleteButton.type = "button";
+          deleteButton.textContent = "Delete";
+          deleteButton.addEventListener("click", () => deleteUserProject(project, deleteButton));
+          actions.appendChild(deleteButton);
+        }
         body.appendChild(tr);
       }
     }
@@ -3682,6 +3764,7 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-passphrase", "");
       setCheckedValue("user-exchange-enabled", false);
       setCheckedValue("user-exchange-no-withdraw", false);
+      setCheckedValue("user-exchange-trade-permission", false);
       const projects = currentUserWorkspace?.projects || [];
       const defaultProject = projects.find((project) => project.status === "active") || projects[0];
       const defaultExchange = currentUserWorkspace?.exchange_catalog?.[0];
@@ -3704,6 +3787,10 @@ function balanceStatusClass(status) {
       setCheckedValue(
         "user-exchange-no-withdraw",
         account?.withdrawal_disabled_confirmed
+      );
+      setCheckedValue(
+        "user-exchange-trade-permission",
+        account?.trade_permission_confirmed
       );
       syncUserExchangeMarketTypes(
         account?.market_type || "spot",
@@ -3858,9 +3945,16 @@ function balanceStatusClass(status) {
           "user-exchange-no-withdraw",
           selected.withdrawal_disabled_confirmed
         );
+        setCheckedValue(
+          "user-exchange-trade-permission",
+          selected.trade_permission_confirmed
+        );
       } else {
         selectedUserExchangeAccountId = "";
         setFieldValue("user-exchange-account-id", "");
+        setCheckedValue("user-exchange-enabled", false);
+        setCheckedValue("user-exchange-no-withdraw", false);
+        setCheckedValue("user-exchange-trade-permission", false);
       }
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
@@ -3890,7 +3984,14 @@ function balanceStatusClass(status) {
         const project = projectMap.get(account.project_id);
         const credentials = account.credentials || {};
         const readiness = account.readiness || {};
-        const credentialText = credentials.configured ? "Encrypted / configured" : "Missing";
+        const rotationText = credentials.rotation_required
+          ? " · rotation due"
+          : credentials.rotation_remaining_seconds != null
+            ? ` · rotate in ${formatDurationSeconds(credentials.rotation_remaining_seconds)}`
+            : "";
+        const credentialText = credentials.configured
+          ? `Encrypted / configured${rotationText}`
+          : "Missing";
         const connectionFresh = workspaceConnectionFresh(account);
         const accountStatus = account.enabled
           ? "Enabled"
@@ -3965,6 +4066,43 @@ function balanceStatusClass(status) {
       text("user-workspace-notice", userWorkspaceNoticeText);
     }
 
+    function renderUserRiskProfile(workspace) {
+      if (userRiskProfileDirty || userRiskProfileBusy) return;
+      const profile = workspace?.risk_profile || {};
+      setCheckedValue("user-risk-trading-enabled", profile.trading_enabled !== false);
+      setNumericField("user-risk-max-exposure", profile.max_total_exposure_quote || 0);
+      setNumericField("user-risk-max-loss", profile.max_daily_loss_quote || 0);
+      setNumericField("user-risk-max-orders", profile.max_open_orders || 0);
+      setNumericField("user-risk-max-strategies", profile.max_active_strategies || 0);
+    }
+
+    async function applyUserRiskProfile(event) {
+      event.preventDefault();
+      if (userRiskProfileBusy) return;
+      userRiskProfileBusy = true;
+      const button = document.getElementById("user-risk-profile-save");
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "update_risk_profile",
+          risk_profile: {
+            trading_enabled: document.getElementById("user-risk-trading-enabled").checked,
+            max_total_exposure_quote: numericValue("user-risk-max-exposure"),
+            max_daily_loss_quote: numericValue("user-risk-max-loss"),
+            max_open_orders: numericValue("user-risk-max-orders"),
+            max_active_strategies: numericValue("user-risk-max-strategies"),
+          },
+        });
+        userRiskProfileDirty = false;
+        renderUserRiskProfile(currentUserWorkspace);
+      } catch (error) {
+        setUserWorkspaceNotice(`risk profile update failed: ${error.message || error}`);
+      } finally {
+        userRiskProfileBusy = false;
+        button.disabled = false;
+      }
+    }
+
     function renderUserWorkspace(workspace) {
       currentUserWorkspace = workspace || null;
       const summary = workspace?.summary || {};
@@ -3986,10 +4124,11 @@ function balanceStatusClass(status) {
       text("user-workspace-meta", statusText);
       text("user-workspace-notice", userWorkspaceNoticeText);
       const formsDisabled = workspace?.status === "user_account_required" || workspace?.status === "error";
-      document.querySelectorAll("#user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button, #user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
+      document.querySelectorAll("#user-risk-profile-form input, #user-risk-profile-form button, #user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button, #user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
         control.disabled = formsDisabled;
       });
       renderUserSetupReadiness(workspace);
+      renderUserRiskProfile(workspace);
       renderUserProjectForm(workspace);
       renderUserProjects(workspace);
       renderUserExchangeAccountForm(workspace);
@@ -4168,6 +4307,7 @@ function balanceStatusClass(status) {
         symbol: document.getElementById("user-exchange-symbol").value,
         enabled: document.getElementById("user-exchange-enabled").checked,
         withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
+        trade_permission_confirmed: document.getElementById("user-exchange-trade-permission").checked,
       };
       if (id) account.id = id;
       if (Object.keys(credentials).length) account.credentials = credentials;
@@ -4566,6 +4706,12 @@ function balanceStatusClass(status) {
         editButton.textContent = uiText("Edit");
         editButton.addEventListener("click", () => openUserStrategyForm(strategy));
         actions.appendChild(editButton);
+        const copyButton = document.createElement("button");
+        copyButton.className = "ghost-button";
+        copyButton.type = "button";
+        copyButton.textContent = uiText("Copy");
+        copyButton.addEventListener("click", () => copyUserStrategy(strategy, copyButton));
+        actions.appendChild(copyButton);
         const toggleButton = document.createElement("button");
         toggleButton.className = "ghost-button";
         toggleButton.type = "button";
@@ -4626,6 +4772,21 @@ function balanceStatusClass(status) {
         );
       } catch (error) {
         setUserWorkspaceNotice(`strategy control failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function copyUserStrategy(strategy, button) {
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "clone_strategy",
+          strategy_id: strategy.id,
+        });
+        setUserWorkspaceNotice(uiText("Strategy copy created in paused paper mode."));
+      } catch (error) {
+        setUserWorkspaceNotice(`strategy copy failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -5220,6 +5381,8 @@ function balanceStatusClass(status) {
     let fundingArbFormBusy = false;
     let signalBotFormDirty = false;
     let signalBotFormBusy = false;
+    let userRiskProfileDirty = false;
+    let userRiskProfileBusy = false;
     let userProjectFormDirty = false;
     let userProjectFormBusy = false;
     let selectedUserProjectId = "";
@@ -5332,6 +5495,11 @@ function balanceStatusClass(status) {
       setNumericField("risk-max-book-age", risk.max_order_book_age_seconds || 0);
       setNumericField("risk-max-book-gap", risk.max_order_book_gap_bps || 0);
       setNumericField("risk-max-price-jump", risk.max_price_jump_bps || 0);
+      document.getElementById("risk-auto-hedge-live").checked = Boolean(risk.auto_hedge_live_enabled);
+      setNumericField("risk-auto-hedge-max-quote", risk.max_auto_hedge_quote || 0);
+      setNumericField("risk-auto-hedge-slippage", risk.auto_hedge_slippage_bps ?? 50);
+      setNumericField("risk-auto-hedge-attempts", risk.auto_hedge_max_attempts || 1);
+      setNumericField("risk-auto-hedge-ttl", risk.auto_hedge_order_ttl_seconds ?? 2);
       setNumericField("risk-max-derivative-leverage", risk.max_derivative_leverage || 0);
       setNumericField("risk-min-liquidation-buffer", risk.min_liquidation_buffer_pct || 0);
       setNumericField("risk-max-margin-usage", risk.max_margin_usage_pct || 0);
@@ -5372,9 +5540,6 @@ function balanceStatusClass(status) {
     async function applyRiskConfig(event) {
       event.preventDefault();
       if (riskFormBusy) return;
-      riskFormBusy = true;
-      const button = document.getElementById("risk-apply");
-      updateCoreFormStates();
       const payload = {
         allow_live_trading: document.getElementById("risk-allow-live").checked,
         account_enabled: checkboxMap("risk-account"),
@@ -5392,22 +5557,143 @@ function balanceStatusClass(status) {
         max_order_book_age_seconds: numericValue("risk-max-book-age"),
         max_order_book_gap_bps: numericValue("risk-max-book-gap"),
         max_price_jump_bps: numericValue("risk-max-price-jump"),
+        auto_hedge_live_enabled: document.getElementById("risk-auto-hedge-live").checked,
+        max_auto_hedge_quote: numericValue("risk-auto-hedge-max-quote"),
+        auto_hedge_slippage_bps: numericValue("risk-auto-hedge-slippage"),
+        auto_hedge_max_attempts: numericValue("risk-auto-hedge-attempts"),
+        auto_hedge_order_ttl_seconds: numericValue("risk-auto-hedge-ttl"),
         max_derivative_leverage: numericValue("risk-max-derivative-leverage"),
         min_liquidation_buffer_pct: numericValue("risk-min-liquidation-buffer"),
         max_margin_usage_pct: numericValue("risk-max-margin-usage"),
       };
+      const currentRisk = lastState?.operations?.risk || lastState?.config?.risk || {};
+      const enablingLive = payload.allow_live_trading && !currentRisk.allow_live_trading;
+      const enablingAutoHedge = payload.auto_hedge_live_enabled && !currentRisk.auto_hedge_live_enabled;
+      if (enablingLive || enablingAutoHedge) {
+        const enabledControls = [
+          enablingLive ? uiText("Global live trading") : "",
+          enablingAutoHedge ? uiText("Automatic emergency hedge") : "",
+        ].filter(Boolean).join(" · ");
+        if (!dangerConfirm(
+          "Enable live risk controls?",
+          `${enabledControls}\n${uiText("Live orders can use real account balances.")}`,
+        )) return;
+        payload.confirm_live_risk = true;
+      }
+      riskFormBusy = true;
+      updateCoreFormStates();
       try {
         const res = await fetch("/api/risk", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error("risk update failed");
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "risk update failed");
         riskFormDirty = false;
         await refresh();
       } finally {
         riskFormBusy = false;
         updateCoreFormStates();
+      }
+    }
+
+    function configDiffText(diff) {
+      const rows = Array.isArray(diff) ? diff : [];
+      if (!rows.length) return "Initial snapshot";
+      return rows.slice(0, 4).map((row) => {
+        const before = row.before == null ? "--" : JSON.stringify(row.before);
+        const after = row.after == null ? "--" : JSON.stringify(row.after);
+        return `${row.path}: ${before} -> ${after}`;
+      }).join(" · ");
+    }
+
+    function renderConfigVersions(payload) {
+      const body = document.getElementById("config-versions");
+      if (!body) return;
+      configVersionPayload = payload;
+      const versions = Array.isArray(payload?.versions) ? payload.versions : [];
+      text(
+        "config-version-meta",
+        payload?.enabled
+          ? `${versions.length} ${uiText("versions")} · ${String(payload.current_hash || "").slice(0, 10)}`
+          : uiText("Configuration history is unavailable"),
+      );
+      body.innerHTML = "";
+      if (!versions.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7">${escapeHtml(uiText("No configuration versions yet."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const version of versions) {
+        const isCurrent = version.hash === payload.current_hash;
+        const diffText = configDiffText(version.diff);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>#${Number(version.id || 0)}${version.known_good ? `<br><span class="risk-ok">${escapeHtml(uiText("Verified"))}</span>` : ""}</td>
+          <td>${formatTimestamp(Number(version.created_at || 0) * 1000)}</td>
+          <td>${escapeHtml(version.actor_email || "system")}</td>
+          <td>${escapeHtml(version.action || "--")}</td>
+          <td class="num">${Number(version.change_count || 0)}</td>
+          <td title="${escapeHtml(diffText)}">${escapeHtml(diffText)}</td>
+          <td><button class="ghost-button" type="button" ${isCurrent ? "disabled" : ""}>${escapeHtml(uiText(isCurrent ? "Current" : "Rollback"))}</button></td>
+        `;
+        const button = tr.querySelector("button");
+        if (!isCurrent) button.addEventListener("click", () => rollbackConfigVersion(version, button));
+        body.appendChild(tr);
+      }
+      applyMobileTableLabels();
+    }
+
+    async function loadConfigVersions(force = false) {
+      if (configVersionLoading) return;
+      if (!force && Date.now() - configVersionLoadAt < 5000 && configVersionPayload) {
+        renderConfigVersions(configVersionPayload);
+        return;
+      }
+      configVersionLoading = true;
+      try {
+        const res = await fetch("/api/config-versions?limit=30", { cache: "no-store" });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "configuration history request failed");
+        configVersionLoadAt = Date.now();
+        renderConfigVersions(result);
+      } catch (error) {
+        text("config-version-meta", error.message || String(error));
+      } finally {
+        configVersionLoading = false;
+      }
+    }
+
+    async function rollbackConfigVersion(version, button) {
+      const detail = [
+        `#${version.id} · ${version.action || "--"}`,
+        configDiffText(version.diff),
+        uiText("Running strategies may adopt the restored settings on their next cycle."),
+      ].join("\n");
+      if (!dangerConfirm("Rollback to this configuration version?", detail)) return;
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/config-versions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "rollback",
+            version_id: version.id,
+            current_hash: configVersionPayload?.current_hash || "",
+            confirm: true,
+          }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "configuration rollback failed");
+        configVersionLoadAt = 0;
+        await refresh({ force: true });
+        await loadConfigVersions(true);
+      } catch (error) {
+        text("config-version-meta", error.message || String(error));
+      } finally {
+        button.disabled = false;
       }
     }
 
@@ -5760,6 +6046,8 @@ function balanceStatusClass(status) {
         select.appendChild(option);
       }
       select.value = selectedMarketMakerInstanceId;
+      const copyButton = document.getElementById("mm-copy");
+      if (copyButton) copyButton.disabled = !instances.length || mmFormBusy;
       document.getElementById("mm-delete").disabled = instances.length <= 1 || mmFormBusy;
     }
 
@@ -6028,6 +6316,32 @@ function balanceStatusClass(status) {
       }
     }
 
+    async function copyMarketMakerInstance() {
+      if (mmFormBusy || !selectedMarketMakerInstanceId) return;
+      const sourceId = selectedMarketMakerInstanceId;
+      const suffix = Date.now().toString(36);
+      const newId = `${sourceId.slice(0, 52)}-copy-${suffix}`;
+      mmFormBusy = true;
+      updateCoreFormStates();
+      try {
+        selectedMarketMakerInstanceId = newId;
+        await postMarketMakerConfig({ copy_id: sourceId, new_id: newId });
+        mmFormDirty = false;
+        setStrategyFeedback(
+          "mm-feedback",
+          "Strategy copy created in stopped mode.",
+          "ok",
+        );
+        await refresh({ force: true });
+      } catch (error) {
+        selectedMarketMakerInstanceId = sourceId;
+        setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+      } finally {
+        mmFormBusy = false;
+        updateCoreFormStates();
+      }
+    }
+
     async function deleteMarketMakerInstance() {
       if (mmFormBusy || !selectedMarketMakerInstanceId) return;
       const marketMaker = lastState?.market_maker || {};
@@ -6069,6 +6383,14 @@ function balanceStatusClass(status) {
           marketMakerConfirmationDetail(payload),
         )) return;
         payload.confirm_live = LIVE_MARKET_MAKER_CONFIRMATION;
+        try {
+          setStrategyFeedback("mm-feedback", "Running live preflight...");
+          const preflight = await runStrategyPreflight("market_maker", payload);
+          payload.preflight_token = preflight.token;
+        } catch (error) {
+          setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+          return;
+        }
       }
       mmFormBusy = true;
       setStrategyFeedback("mm-feedback");
@@ -6107,10 +6429,19 @@ function balanceStatusClass(status) {
         renderMarketMakerWorkflow(lastState?.market_maker);
         return;
       }
+      let preflight;
+      try {
+        setStrategyFeedback("mm-feedback", "Running live preflight...");
+        preflight = await runStrategyPreflight("market_maker", payload);
+      } catch (error) {
+        setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+        return;
+      }
       if (!dangerConfirm(
         "Start live Market Maker with these settings?",
-        marketMakerConfirmationDetail(payload),
+        `${marketMakerConfirmationDetail(payload)}\n${uiText("Preflight")}: ${preflight.checks?.length || 0} ${uiText("checks passed")}`,
       )) return;
+      payload.preflight_token = preflight.token;
       mmFormBusy = true;
       setStrategyFeedback("mm-feedback");
       document.getElementById("mm-enabled").checked = true;
@@ -6641,12 +6972,21 @@ function balanceStatusClass(status) {
         renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
         return;
       }
+      let preflight;
+      try {
+        setRebalanceFeedback("Running live preflight...");
+        preflight = await runStrategyPreflight("cross_exchange_rebalance", payload);
+      } catch (error) {
+        setRebalanceFeedback(error.message || String(error), "error");
+        return;
+      }
       if (!dangerConfirm(
         "Confirm live rebalance with these settings?",
-        liveRebalanceConfirmationDetail(payload),
+        `${liveRebalanceConfirmationDetail(payload)}\n${uiText("Preflight")}: ${preflight.checks?.length || 0} ${uiText("checks passed")}`,
       )) return;
       rebalanceLiveConfirmed = true;
       payload.confirm_live = LIVE_REBALANCE_CONFIRMATION;
+      payload.preflight_token = preflight.token;
       document.getElementById("rebalance-enabled").checked = true;
       document.getElementById("rebalance-live-enabled").checked = true;
       await submitCrossExchangeRebalance(
@@ -6806,12 +7146,21 @@ function balanceStatusClass(status) {
           renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
           return;
         }
+        let preflight;
+        try {
+          setRebalanceFeedback("Running live preflight...");
+          preflight = await runStrategyPreflight("cross_exchange_rebalance", payload);
+        } catch (error) {
+          setRebalanceFeedback(error.message || String(error), "error");
+          return;
+        }
         if (!dangerConfirm(
           "Apply these changes to the running live rebalance?",
           liveRebalanceConfirmationDetail(payload),
         )) return;
         rebalanceLiveConfirmed = true;
         payload.confirm_live = LIVE_REBALANCE_CONFIRMATION;
+        payload.preflight_token = preflight.token;
       }
       await submitCrossExchangeRebalance(payload, "Rebalance settings saved.");
     }
@@ -7239,10 +7588,19 @@ function balanceStatusClass(status) {
         renderSlowExecutionWorkflow(lastState?.slow_execution);
         return;
       }
+      let preflight;
+      try {
+        setStrategyFeedback("slow-feedback", "Running live preflight...");
+        preflight = await runStrategyPreflight("slow_execution", payload);
+      } catch (error) {
+        setStrategyFeedback("slow-feedback", error.message || String(error), "error");
+        return;
+      }
       if (!dangerConfirm(
         "Create and start this live Auto Buy/Sell task?",
-        slowExecutionConfirmationDetail(payload),
+        `${slowExecutionConfirmationDetail(payload)}\n${uiText("Preflight")}: ${preflight.checks?.length || 0} ${uiText("checks passed")}`,
       )) return;
+      payload.preflight_token = preflight.token;
       slowFormBusy = true;
       const button = document.getElementById("slow-create-task");
       button.disabled = true;
@@ -7566,6 +7924,7 @@ function balanceStatusClass(status) {
       if (activePage === "settings") {
 		        renderOpenSection("user-workspace-section", () => renderUserWorkspace(data.user_workspace));
         renderOpenSection("risk-form", () => renderRiskControls(data.operations || { risk: data.config?.risk }, data.trading_console));
+        renderOpenSection("config-version-section", () => loadConfigVersions());
         renderOpenSection("strategy-instances", () => renderStrategyCenter(data.strategy_center));
         renderOpenSection("api-accounts", () => renderApiAccountsPanel(data.strategy_center));
         finishVisiblePageRender();
@@ -7737,6 +8096,10 @@ function balanceStatusClass(status) {
     });
     document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
 	    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
+	    document.getElementById("user-risk-profile-form").addEventListener("input", () => {
+	      userRiskProfileDirty = true;
+	    });
+	    document.getElementById("user-risk-profile-form").addEventListener("submit", applyUserRiskProfile);
 	    document.getElementById("user-project-form").addEventListener("input", () => {
 	      userProjectFormDirty = true;
 	    });
@@ -7808,6 +8171,7 @@ function balanceStatusClass(status) {
       renderMarketMakerConfig(lastState?.market_maker);
     });
     document.getElementById("mm-add").addEventListener("click", addMarketMakerInstance);
+    document.getElementById("mm-copy").addEventListener("click", copyMarketMakerInstance);
     document.getElementById("mm-delete").addEventListener("click", deleteMarketMakerInstance);
     document.getElementById("mm-form").addEventListener("submit", applyMarketMakerConfig);
     document.getElementById("mm-start").addEventListener("click", startMarketMaker);

@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, load_config
@@ -119,9 +121,8 @@ def _market_maker_self_trade_guard(
             "conflicting_open_orders": [],
         }
 
-    same_config_target = (
-        maker_cfg.exchange == exec_cfg.exchange
-        and _symbol_matches(maker_cfg.symbol, exec_cfg.symbol)
+    same_config_target = maker_cfg.exchange == exec_cfg.exchange and _symbol_matches(
+        maker_cfg.symbol, exec_cfg.symbol
     )
     reasons: list[str] = []
     if (
@@ -239,7 +240,9 @@ async def place_plan(
     exchange_cfg = _find_exchange(cfg, exec_cfg.exchange)
     canceled: list[dict[str, Any]] = []
     if replace_existing or exec_cfg.cancel_existing_orders:
-        canceled = await manager.cancel_open_orders(exchange_cfg, symbol=exec_cfg.symbol)
+        canceled = await manager.cancel_open_orders(
+            exchange_cfg, symbol=exec_cfg.symbol
+        )
 
     if plan.order is None:
         return {
@@ -409,7 +412,9 @@ async def run_cycle(
     existing_open_orders: list[Any] | None = None
     existing_open_order_count: int | None = None
     open_order_error: str | None = None
-    should_cancel_existing = replace_existing or cfg.slow_execution.cancel_existing_orders
+    should_cancel_existing = (
+        replace_existing or cfg.slow_execution.cancel_existing_orders
+    )
     needs_open_orders = live and (
         cfg.slow_execution.block_conflicting_market_maker
         or cfg.risk.max_open_orders > 0
@@ -522,6 +527,10 @@ async def run_loop(
         else interval_seconds
     )
     interval = max(1.0, interval)
+    os.environ.setdefault(
+        "CRYPTO_ARB_ORDER_JOURNAL_PATH",
+        str(Path(cfg.trade_log.path).with_name("order_intents.sqlite3")),
+    )
     manager = ExchangeManager()
     submitted_base = 0.0
     submitted_quote = 0.0
@@ -551,7 +560,10 @@ async def run_loop(
             )
             sys.stdout.flush()
             plan_payload = payload.get("plan", {})
-            if cfg.slow_execution.start_price > 0 and payload.get("status") != "waiting_for_start_price":
+            if (
+                cfg.slow_execution.start_price > 0
+                and payload.get("status") != "waiting_for_start_price"
+            ):
                 start_price_triggered = True
             if isinstance(plan_payload, dict):
                 mid_price = plan_payload.get("mid_price")
@@ -612,7 +624,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Auto Buy/Sell top-of-book executor with guarded live order placement"
     )
-    parser.add_argument("--config", default="config.acs.json", help="Path to JSON config")
+    parser.add_argument(
+        "--config", default="config.acs.json", help="Path to JSON config"
+    )
     parser.add_argument(
         "--loop",
         action="store_true",

@@ -8,6 +8,7 @@ from typing import Any
 RECONCILIATION_AUTO_STOP_WARMUP_SECONDS = 15.0
 RECONCILIATION_AUTO_STOP_TYPES = {
     "order_activity_error",
+    "uncertain_order_intent",
 }
 
 
@@ -232,6 +233,22 @@ def build_order_reconciliation_payload(
     matched_open_count = 0
     matched_fill_count = 0
 
+    reliability = order_activity.get("reliability")
+    if isinstance(reliability, dict):
+        pending_count = int(reliability.get("pending_count") or 0)
+        unresolved_count = int(reliability.get("unresolved_count") or 0)
+        if pending_count > 0 or unresolved_count > 0:
+            issues.append(
+                _reconciliation_issue(
+                    level="critical",
+                    issue_type="uncertain_order_intent",
+                    message=(
+                        f"{max(pending_count, unresolved_count)} order intent(s) "
+                        "have an uncertain exchange outcome"
+                    ),
+                )
+            )
+
     for tracked in tracked_orders:
         order_id = tracked["order_id"]
         tracked_ids.add(order_id)
@@ -306,7 +323,9 @@ def build_order_reconciliation_payload(
         issues.append(
             _reconciliation_issue(
                 level="warning" if attribution else "info",
-                issue_type="unmanaged_strategy_order" if attribution else "untracked_open_order",
+                issue_type="unmanaged_strategy_order"
+                if attribution
+                else "untracked_open_order",
                 strategy=str((attribution or {}).get("strategy") or ""),
                 exchange=str(order.get("exchange") or ""),
                 symbol=str(order.get("symbol") or ""),

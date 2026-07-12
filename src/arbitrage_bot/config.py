@@ -350,9 +350,7 @@ class RiskConfig:
     allow_market_maker: bool = True
     allow_slow_execution: bool = True
     strategy_enabled: dict[str, bool] = field(default_factory=dict)
-    strategy_overrides: dict[str, dict[str, float | int]] = field(
-        default_factory=dict
-    )
+    strategy_overrides: dict[str, dict[str, float | int]] = field(default_factory=dict)
     account_enabled: dict[str, bool] = field(default_factory=dict)
     require_post_only: bool = True
     max_order_quote: float = 5.0
@@ -375,6 +373,11 @@ class RiskConfig:
     max_plan_age_seconds: float = 5.0
     max_order_book_age_seconds: float = 10.0
     require_order_book_timestamp: bool = False
+    auto_hedge_live_enabled: bool = False
+    max_auto_hedge_quote: float = 0.0
+    auto_hedge_slippage_bps: float = 50.0
+    auto_hedge_max_attempts: int = 1
+    auto_hedge_order_ttl_seconds: float = 2.0
     max_derivative_leverage: float = 0.0
     min_liquidation_buffer_pct: float = 0.0
     max_margin_usage_pct: float = 0.0
@@ -560,16 +563,12 @@ def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
         max_cancels_per_cycle=int(raw.get("max_cancels_per_cycle", 0)),
         max_slippage_bps=float(raw.get("max_slippage_bps", 0.0)),
         max_order_book_gap_bps=float(raw.get("max_order_book_gap_bps", 0.0)),
-        max_order_book_age_seconds=float(
-            raw.get("max_order_book_age_seconds", 0.0)
-        ),
+        max_order_book_age_seconds=float(raw.get("max_order_book_age_seconds", 0.0)),
         poll_seconds=float(raw.get("poll_seconds", 1.0)),
         post_only=bool(raw.get("post_only", True)),
         cancel_existing_orders=bool(raw.get("cancel_existing_orders", False)),
         client_order_prefix=raw.get("client_order_prefix", "crypto-arb-mm"),
-        inventory_control_enabled=bool(
-            raw.get("inventory_control_enabled", False)
-        ),
+        inventory_control_enabled=bool(raw.get("inventory_control_enabled", False)),
         inventory_target_base=float(raw.get("inventory_target_base", 0.0)),
         inventory_band_base=float(raw.get("inventory_band_base", 0.0)),
         inventory_max_deviation_base=float(
@@ -593,7 +592,11 @@ def _portfolio_positions_from_dict(raw: dict[str, Any]) -> list[AssetPosition]:
         return [_asset_position_from_dict(item) for item in positions_raw]
 
     legacy_asset = str(raw.get("asset", "")).upper()
-    if not legacy_asset and "position_base" not in raw and "average_entry_price" not in raw:
+    if (
+        not legacy_asset
+        and "position_base" not in raw
+        and "average_entry_price" not in raw
+    ):
         return []
 
     return [
@@ -800,15 +803,9 @@ def load_config(path: str | Path) -> BotConfig:
             slice_base_min=float(slow_execution_raw.get("slice_base_min", 0.0)),
             slice_base_max=float(slow_execution_raw.get("slice_base_max", 0.0)),
             slice_quote=float(slow_execution_raw.get("slice_quote", 0.0)),
-            randomize_slice=bool(
-                slow_execution_raw.get("randomize_slice", False)
-            ),
-            interval_seconds=float(
-                slow_execution_raw.get("interval_seconds", 60.0)
-            ),
-            order_ttl_seconds=float(
-                slow_execution_raw.get("order_ttl_seconds", 0.0)
-            ),
+            randomize_slice=bool(slow_execution_raw.get("randomize_slice", False)),
+            interval_seconds=float(slow_execution_raw.get("interval_seconds", 60.0)),
+            order_ttl_seconds=float(slow_execution_raw.get("order_ttl_seconds", 0.0)),
             start_price=float(slow_execution_raw.get("start_price", 0.0)),
             stop_price=float(slow_execution_raw.get("stop_price", 0.0)),
             price_mode=slow_execution_raw.get("price_mode", "taker").lower(),
@@ -906,9 +903,7 @@ def load_config(path: str | Path) -> BotConfig:
             max_position_base=float(spot_grid_raw.get("max_position_base", 0.0)),
             max_open_orders=int(spot_grid_raw.get("max_open_orders", 20)),
             min_grid_step_bps=float(spot_grid_raw.get("min_grid_step_bps", 10.0)),
-            cancel_retry_attempts=int(
-                spot_grid_raw.get("cancel_retry_attempts", 3)
-            ),
+            cancel_retry_attempts=int(spot_grid_raw.get("cancel_retry_attempts", 3)),
             post_only=bool(spot_grid_raw.get("post_only", True)),
             client_order_prefix=spot_grid_raw.get(
                 "client_order_prefix",
@@ -949,34 +944,22 @@ def load_config(path: str | Path) -> BotConfig:
             algo=str(execution_algo_raw.get("algo", "twap")).lower(),
             total_base=float(execution_algo_raw.get("total_base", 0.0)),
             total_quote=float(execution_algo_raw.get("total_quote", 0.0)),
-            duration_seconds=float(
-                execution_algo_raw.get("duration_seconds", 3600.0)
-            ),
+            duration_seconds=float(execution_algo_raw.get("duration_seconds", 3600.0)),
             slice_count=int(execution_algo_raw.get("slice_count", 12)),
-            interval_seconds=float(
-                execution_algo_raw.get("interval_seconds", 300.0)
-            ),
+            interval_seconds=float(execution_algo_raw.get("interval_seconds", 300.0)),
             participation_rate=float(
                 execution_algo_raw.get("participation_rate", 0.05)
             ),
             volume_lookback_seconds=float(
                 execution_algo_raw.get("volume_lookback_seconds", 300.0)
             ),
-            min_slice_quote=float(
-                execution_algo_raw.get("min_slice_quote", 0.0)
-            ),
-            max_slice_quote=float(
-                execution_algo_raw.get("max_slice_quote", 0.0)
-            ),
+            min_slice_quote=float(execution_algo_raw.get("min_slice_quote", 0.0)),
+            max_slice_quote=float(execution_algo_raw.get("max_slice_quote", 0.0)),
             price_mode=str(execution_algo_raw.get("price_mode", "taker")).lower(),
-            price_offset_bps=float(
-                execution_algo_raw.get("price_offset_bps", 0.0)
-            ),
+            price_offset_bps=float(execution_algo_raw.get("price_offset_bps", 0.0)),
             start_price=float(execution_algo_raw.get("start_price", 0.0)),
             stop_price=float(execution_algo_raw.get("stop_price", 0.0)),
-            max_slippage_bps=float(
-                execution_algo_raw.get("max_slippage_bps", 50.0)
-            ),
+            max_slippage_bps=float(execution_algo_raw.get("max_slippage_bps", 50.0)),
             client_order_prefix=execution_algo_raw.get(
                 "client_order_prefix",
                 "crypto-arb-exec",
@@ -1002,9 +985,7 @@ def load_config(path: str | Path) -> BotConfig:
             depth_simulation_enabled=bool(
                 backtest_raw.get("depth_simulation_enabled", False)
             ),
-            depth_quote_per_level=float(
-                backtest_raw.get("depth_quote_per_level", 0.0)
-            ),
+            depth_quote_per_level=float(backtest_raw.get("depth_quote_per_level", 0.0)),
             depth_step_bps=float(backtest_raw.get("depth_step_bps", 5.0)),
             depth_levels=int(backtest_raw.get("depth_levels", 5)),
             latency_steps=int(backtest_raw.get("latency_steps", 0)),
@@ -1012,17 +993,13 @@ def load_config(path: str | Path) -> BotConfig:
         strategy_center=StrategyCenterConfig(
             enabled=bool(strategy_center_raw.get("enabled", True)),
             path=str(strategy_center_raw.get("path", "data/strategy_center.sqlite3")),
-            max_recent_signals=int(
-                strategy_center_raw.get("max_recent_signals", 100)
-            ),
+            max_recent_signals=int(strategy_center_raw.get("max_recent_signals", 100)),
         ),
         portfolio=PortfolioConfig(
             enabled=bool(portfolio_raw.get("enabled", False)),
             asset=portfolio_raw.get("asset", "").upper(),
             position_base=float(portfolio_raw.get("position_base", 0.0)),
-            average_entry_price=float(
-                portfolio_raw.get("average_entry_price", 0.0)
-            ),
+            average_entry_price=float(portfolio_raw.get("average_entry_price", 0.0)),
             positions=_portfolio_positions_from_dict(portfolio_raw),
             cash_balances={
                 str(currency).upper(): float(value)
@@ -1054,8 +1031,7 @@ def load_config(path: str | Path) -> BotConfig:
             for item in raw.get("cash_and_carry_pairs", [])
         ],
         option_combos=[
-            _option_combo_from_dict(item)
-            for item in raw.get("option_combos", [])
+            _option_combo_from_dict(item) for item in raw.get("option_combos", [])
         ],
         spot_exchanges=[
             _exchange_from_dict(item) for item in raw.get("spot_exchanges", [])
@@ -1085,9 +1061,7 @@ def load_config(path: str | Path) -> BotConfig:
             risk_free_rate_bps=float(
                 options_arbitrage_raw.get("risk_free_rate_bps", 0.0)
             ),
-            borrow_rate_bps=float(
-                options_arbitrage_raw.get("borrow_rate_bps", 0.0)
-            ),
+            borrow_rate_bps=float(options_arbitrage_raw.get("borrow_rate_bps", 0.0)),
             min_option_depth_quote=float(
                 options_arbitrage_raw.get("min_option_depth_quote", 0.0)
             ),
@@ -1121,27 +1095,21 @@ def load_config(path: str | Path) -> BotConfig:
             derivative_exchange=str(
                 contract_strategies_raw.get("derivative_exchange", "")
             ),
-            derivative_symbol=str(
-                contract_strategies_raw.get("derivative_symbol", "")
-            ),
+            derivative_symbol=str(contract_strategies_raw.get("derivative_symbol", "")),
             notional_quote=float(
                 contract_strategies_raw.get(
                     "notional_quote",
                     raw.get("notional_quote", 100.0),
                 )
             ),
-            funding_min_bps=float(
-                contract_strategies_raw.get("funding_min_bps", 0.0)
-            ),
+            funding_min_bps=float(contract_strategies_raw.get("funding_min_bps", 0.0)),
             basis_entry_bps=float(
                 contract_strategies_raw.get(
                     "basis_entry_bps",
                     raw.get("min_basis_bps", 0.0),
                 )
             ),
-            basis_exit_bps=float(
-                contract_strategies_raw.get("basis_exit_bps", 0.0)
-            ),
+            basis_exit_bps=float(contract_strategies_raw.get("basis_exit_bps", 0.0)),
             futures_grid_levels=int(
                 contract_strategies_raw.get("futures_grid_levels", 6)
             ),
@@ -1157,9 +1125,7 @@ def load_config(path: str | Path) -> BotConfig:
             hedge_threshold_base=float(
                 contract_strategies_raw.get("hedge_threshold_base", 0.0)
             ),
-            hedge_max_quote=float(
-                contract_strategies_raw.get("hedge_max_quote", 0.0)
-            ),
+            hedge_max_quote=float(contract_strategies_raw.get("hedge_max_quote", 0.0)),
             post_only=bool(contract_strategies_raw.get("post_only", True)),
             client_order_prefix=str(
                 contract_strategies_raw.get(
@@ -1243,9 +1209,18 @@ def load_config(path: str | Path) -> BotConfig:
             require_order_book_timestamp=bool(
                 risk_raw.get("require_order_book_timestamp", False)
             ),
-            max_derivative_leverage=float(
-                risk_raw.get("max_derivative_leverage", 0.0)
+            auto_hedge_live_enabled=bool(
+                risk_raw.get("auto_hedge_live_enabled", False)
             ),
+            max_auto_hedge_quote=float(risk_raw.get("max_auto_hedge_quote", 0.0)),
+            auto_hedge_slippage_bps=float(
+                risk_raw.get("auto_hedge_slippage_bps", 50.0)
+            ),
+            auto_hedge_max_attempts=int(risk_raw.get("auto_hedge_max_attempts", 1)),
+            auto_hedge_order_ttl_seconds=float(
+                risk_raw.get("auto_hedge_order_ttl_seconds", 2.0)
+            ),
+            max_derivative_leverage=float(risk_raw.get("max_derivative_leverage", 0.0)),
             min_liquidation_buffer_pct=float(
                 risk_raw.get("min_liquidation_buffer_pct", 0.0)
             ),
@@ -1273,18 +1248,12 @@ def load_config(path: str | Path) -> BotConfig:
                     "data/strategy_timeline.jsonl",
                 )
             ),
-            max_recent_events=int(
-                strategy_timeline_raw.get("max_recent_events", 100)
-            ),
+            max_recent_events=int(strategy_timeline_raw.get("max_recent_events", 100)),
             rotate_max_bytes=int(
                 strategy_timeline_raw.get("rotate_max_bytes", 64 * 1024 * 1024)
             ),
-            rotate_keep_files=int(
-                strategy_timeline_raw.get("rotate_keep_files", 8)
-            ),
-            rotate_compress=bool(
-                strategy_timeline_raw.get("rotate_compress", True)
-            ),
+            rotate_keep_files=int(strategy_timeline_raw.get("rotate_keep_files", 8)),
+            rotate_compress=bool(strategy_timeline_raw.get("rotate_compress", True)),
         ),
         pnl_store=PnlStoreConfig(
             enabled=bool(pnl_store_raw.get("enabled", False)),
@@ -1323,9 +1292,7 @@ def load_config(path: str | Path) -> BotConfig:
                 "allowed_ips_env",
                 "CRYPTO_ARB_WEB_ALLOWED_IPS",
             ),
-            trust_proxy_headers=bool(
-                web_security_raw.get("trust_proxy_headers", True)
-            ),
+            trust_proxy_headers=bool(web_security_raw.get("trust_proxy_headers", True)),
             cookie_secure=bool(web_security_raw.get("cookie_secure", True)),
             user_store_path=web_security_raw.get(
                 "user_store_path",

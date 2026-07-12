@@ -40,7 +40,9 @@ def workspace_exchange_config(
     elif exchange_id == "upbit" and variant == "indonesia":
         options["hostname"] = "id-api.upbit.com"
 
-    ccxt_id = "binanceusdm" if exchange_id == "binance" and market == "swap" else exchange_id
+    ccxt_id = (
+        "binanceusdm" if exchange_id == "binance" and market == "swap" else exchange_id
+    )
     return ExchangeConfig(
         id=ccxt_id,
         label=f"workspace:{runtime_key}",
@@ -71,9 +73,7 @@ def _market_row(market: dict[str, Any]) -> dict[str, Any]:
     amount = limits.get("amount") if isinstance(limits.get("amount"), dict) else {}
     cost = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
     precision = (
-        market.get("precision")
-        if isinstance(market.get("precision"), dict)
-        else {}
+        market.get("precision") if isinstance(market.get("precision"), dict) else {}
     )
     symbol = str(market.get("symbol") or "")
     return {
@@ -147,7 +147,9 @@ def _balance_value(balance: dict[str, Any], currency: str, field: str) -> float 
     return None
 
 
-def _balance_rows(balance: dict[str, Any], currencies: set[str]) -> list[dict[str, Any]]:
+def _balance_rows(
+    balance: dict[str, Any], currencies: set[str]
+) -> list[dict[str, Any]]:
     rows = []
     for currency in sorted(currencies):
         row = {
@@ -156,7 +158,11 @@ def _balance_rows(balance: dict[str, Any], currencies: set[str]) -> list[dict[st
             "used": _balance_value(balance, currency, "used"),
             "total": _balance_value(balance, currency, "total"),
         }
-        if any(value not in {None, 0.0} for value in row.values() if not isinstance(value, str)):
+        if any(
+            value not in {None, 0.0}
+            for value in row.values()
+            if not isinstance(value, str)
+        ):
             rows.append(row)
     return rows
 
@@ -252,6 +258,29 @@ async def check_workspace_account(
             "order_book": book_summary,
             "balances": _balance_rows(balance, currencies),
             "open_order_count": len(open_orders or []),
+            "permissions": {
+                "private_account_read": "verified",
+                "open_order_read": "verified",
+                "trade_endpoint": "supported_not_exercised",
+                "trade_permission": (
+                    "user_confirmed"
+                    if account.trade_permission_confirmed
+                    else "not_confirmed"
+                ),
+                "withdrawal_disabled": (
+                    "user_confirmed"
+                    if account.withdrawal_disabled_confirmed
+                    else "not_confirmed"
+                ),
+                "safe_for_strategy_setup": bool(
+                    account.trade_permission_confirmed
+                    and account.withdrawal_disabled_confirmed
+                ),
+                "note": (
+                    "The connection test never places an order, so exchange-side "
+                    "trade permission is user-confirmed rather than exercised."
+                ),
+            },
         }
     except Exception as exc:
         return {
@@ -262,6 +291,22 @@ async def check_workspace_account(
             "market_type": account.market_type,
             "api_variant": account.api_variant,
             "symbol": account.symbol,
+            "permissions": {
+                "private_account_read": "failed",
+                "open_order_read": "failed_or_not_reached",
+                "trade_endpoint": "not_checked",
+                "trade_permission": (
+                    "user_confirmed"
+                    if account.trade_permission_confirmed
+                    else "not_confirmed"
+                ),
+                "withdrawal_disabled": (
+                    "user_confirmed"
+                    if account.withdrawal_disabled_confirmed
+                    else "not_confirmed"
+                ),
+                "safe_for_strategy_setup": False,
+            },
             "error": _safe_error(exc, credentials),
         }
     finally:
@@ -269,9 +314,13 @@ async def check_workspace_account(
 
 
 class WorkspaceMarketDiscoveryService:
-    def __init__(self, *, cache_seconds: float = DEFAULT_DISCOVERY_CACHE_SECONDS) -> None:
+    def __init__(
+        self, *, cache_seconds: float = DEFAULT_DISCOVERY_CACHE_SECONDS
+    ) -> None:
         self.cache_seconds = max(1.0, float(cache_seconds))
-        self._cache: dict[tuple[str, str, str, str], tuple[float, list[dict[str, Any]]]] = {}
+        self._cache: dict[
+            tuple[str, str, str, str], tuple[float, list[dict[str, Any]]]
+        ] = {}
         self._lock = asyncio.Lock()
 
     async def discover(
