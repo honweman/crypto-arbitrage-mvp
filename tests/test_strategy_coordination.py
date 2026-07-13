@@ -28,6 +28,7 @@ from arbitrage_bot.web.loops import (
     RebalanceMarketDataTimeout,
     _fetch_rebalance_books,
     _market_maker_instance_task_loop,
+    _refresh_rebalance_runtime_from_state,
     _sleep_for_rebalance_config_change,
     cross_exchange_rebalance_task_loop,
 )
@@ -73,6 +74,39 @@ def make_config():
 
 
 class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rebalance_loop_uses_newer_runtime_published_by_api(self) -> None:
+        cfg = make_config()
+        stale = new_rebalance_runtime(
+            cfg.cross_exchange_rebalance,
+            common_quote_currency=cfg.common_quote_currency,
+        )
+        stale.update(
+            {
+                "status": "halted",
+                "halted": True,
+                "halt_reason": "hedge_required",
+                "updated_at": 10.0,
+            }
+        )
+        reset = new_rebalance_runtime(
+            cfg.cross_exchange_rebalance,
+            common_quote_currency=cfg.common_quote_currency,
+        )
+        reset.update({"status": "starting", "updated_at": 20.0})
+
+        class FakeState:
+            async def cross_exchange_rebalance_runtime(self):
+                return reset
+
+        refreshed = await _refresh_rebalance_runtime_from_state(
+            FakeState(),  # type: ignore[arg-type]
+            stale,
+            config_fingerprint=stale["config_fingerprint"],
+        )
+
+        self.assertFalse(refreshed["halted"])
+        self.assertEqual(refreshed["status"], "starting")
+
     async def test_rebalance_interval_wait_wakes_for_a_config_change(self) -> None:
         cfg = make_config()
         changed_cfg = replace(

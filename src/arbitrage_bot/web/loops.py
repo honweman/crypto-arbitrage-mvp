@@ -2537,6 +2537,29 @@ def _cross_exchange_rebalance_live_gate(
     return (not reasons), "blocked_by_risk" if reasons else "live", reasons
 
 
+async def _refresh_rebalance_runtime_from_state(
+    state: MonitorState,
+    runtime: dict[str, Any],
+    *,
+    config_fingerprint: str,
+) -> dict[str, Any]:
+    """Honor an API reset or acknowledgement before a stale loop rewrites it."""
+    reader = getattr(state, "cross_exchange_rebalance_runtime", None)
+    if not callable(reader):
+        return runtime
+    published = await reader()
+    if not isinstance(published, dict):
+        return runtime
+    if published.get("config_fingerprint") != config_fingerprint:
+        return runtime
+    try:
+        published_at = float(published.get("updated_at") or 0.0)
+        runtime_at = float(runtime.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        return runtime
+    return published if published_at > runtime_at else runtime
+
+
 async def cross_exchange_rebalance_task_loop(
     cfg: BotConfig,
     state: MonitorState,
@@ -2569,6 +2592,11 @@ async def cross_exchange_rebalance_task_loop(
                     rebalance,
                     common_quote_currency=runtime_cfg.common_quote_currency,
                 )
+            runtime = await _refresh_rebalance_runtime_from_state(
+                state,
+                runtime,
+                config_fingerprint=fingerprint,
+            )
 
             # Releases before residual tracking did not persist the imbalance. Recover
             # that audit-only detail once so the operator can acknowledge it explicitly.
