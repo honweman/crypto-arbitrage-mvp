@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig
@@ -694,6 +694,226 @@ async def _place_orders(
     }
 
 
+def _scaled_order(
+    order: ExecutableArbitrageOrder,
+    *,
+    quantity_base: float,
+) -> ExecutableArbitrageOrder:
+    """Return a fresh second-leg order sized to the confirmed first-leg fill."""
+    requested = max(0.0, float(order.leg.quantity_base))
+    quantity = max(0.0, min(float(quantity_base), requested))
+    ratio = quantity / requested if requested > 0 else 0.0
+    leg = replace(
+        order.leg,
+        quantity_base=quantity,
+        fee_quote=order.leg.fee_quote * ratio,
+        gross_quote=(
+            order.leg.gross_quote * ratio
+            if order.leg.gross_quote is not None
+            else None
+        ),
+        net_quote=(
+            order.leg.net_quote * ratio
+            if order.leg.net_quote is not None
+            else None
+        ),
+    )
+    return replace(
+        order,
+        leg=leg,
+        quote_notional_common=order.quote_notional_common * ratio,
+        quote_notional_local=order.quote_notional_local * ratio,
+        prepared=None,
+    )
+
+
+def _submission_result(execution: dict[str, Any]) -> dict[str, Any]:
+    placed = execution.get("placed_orders")
+    if isinstance(placed, list) and placed and isinstance(placed[0], dict):
+        return placed[0]
+    errors = execution.get("create_errors")
+    message = "order was not submitted"
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        message = str(errors[0].get("error") or message)
+    return {"status": "rejected", "submission_error": message}
+
+
+async def _place_buy_then_sell(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    orders: list[ExecutableArbitrageOrder],
+    *,
+    order_ttl_seconds: float,
+    opportunity_observed_at: float,
+    client_order_prefix: str,
+) -> dict[str, Any]:
+    """Execute a cross-exchange inventory transfer without selling ahead of buys.
+
+    The buy is reconciled first.  Only its confirmed fill is offered on the sell
+    venue, which prevents a faster sell venue from creating a short base-asset
+    exposure when the buy limit order only fills partially.
+    """
+    buy_orders = [order for order in orders if order.leg.side == "buy"]
+    sell_orders = [order for order in orders if order.leg.side == "sell"]
+    if len(buy_orders) != 1 or len(sell_orders) != 1 or len(orders) != 2:
+        raise ValueError("buy_then_sell requires exactly one buy and one sell order")
+
+    buy_order, sell_order = buy_orders[0], sell_orders[0]
+    first = await _place_orders(
+        cfg,
+        manager,
+        [buy_order],
+        order_ttl_seconds=order_ttl_seconds,
+        opportunity_observed_at=opportunity_observed_at,
+        client_order_prefix=f"{client_order_prefix}-buy",
+    )
+    first_fill = first.get("fill_status")
+    first_sequence = {
+        "leg": "buy",
+        "requested_base": buy_order.leg.quantity_base,
+        "filled_base": (
+            float(first_fill.get("buy_filled_base") or 0.0)
+            if isinstance(first_fill, dict)
+            else 0.0
+        ),
+        "status": first_fill.get("status") if isinstance(first_fill, dict) else "unknown",
+    }
+    sequence: list[dict[str, Any]] = [first_sequence]
+    if not isinstance(first_fill, dict) or not first_fill.get("fill_evidence_complete"):
+        first.update(
+            {
+                "execution_mode": "buy_then_sell",
+                "sequence": sequence,
+                "manual_intervention_required": True,
+            }
+        )
+        return first
+
+    filled_buy = max(0.0, float(first_fill.get("buy_filled_base") or 0.0))
+    if filled_buy <= 1e-12:
+        first.update({"execution_mode": "buy_then_sell", "sequence": sequence})
+        return first
+
+    sized_sell = _scaled_order(sell_order, quantity_base=filled_buy)
+    prepared_sell, validation_errors, validation_warnings = await _prepare_orders(
+        manager,
+        [sized_sell],
+    )
+    if validation_errors or not prepared_sell:
+        first["create_errors"] = [
+            *first.get("create_errors", []),
+            *[
+                {
+                    "exchange": sell_order.exchange.key,
+                    "symbol": sell_order.leg.symbol,
+                    "side": "sell",
+                    "error": f"second-leg validation: {error}",
+                }
+                for error in validation_errors
+            ],
+        ]
+        first.update(
+            {
+                "execution_mode": "buy_then_sell",
+                "sequence": [
+                    *sequence,
+                    {
+                        "leg": "sell",
+                        "requested_base": filled_buy,
+                        "status": "validation_error",
+                        "warnings": validation_warnings,
+                    },
+                ],
+                "manual_intervention_required": True,
+            }
+        )
+        return first
+
+    second_order = prepared_sell[0]
+    second = await _place_orders(
+        cfg,
+        manager,
+        [second_order],
+        order_ttl_seconds=order_ttl_seconds,
+        opportunity_observed_at=opportunity_observed_at,
+        client_order_prefix=f"{client_order_prefix}-sell",
+    )
+    combined_orders = [buy_order, second_order]
+    combined_fill = await _execution_fill_status(
+        manager,
+        combined_orders,
+        [_submission_result(first), _submission_result(second)],
+    )
+    sequence.append(
+        {
+            "leg": "sell",
+            "requested_base": second_order.leg.quantity_base,
+            "filled_base": float(combined_fill.get("sell_filled_base") or 0.0),
+            "status": combined_fill.get("status"),
+            "warnings": validation_warnings,
+        }
+    )
+    create_errors = [
+        *first.get("create_errors", []),
+        *second.get("create_errors", []),
+    ]
+    cancel_errors = [
+        *first.get("cancel_errors", []),
+        *second.get("cancel_errors", []),
+    ]
+    uncertain_outcome = bool(
+        first.get("uncertain_outcome") or second.get("uncertain_outcome")
+    )
+    return {
+        "placed_count": int(first.get("placed_count", 0))
+        + int(second.get("placed_count", 0)),
+        "placed_order_ids": [
+            *first.get("placed_order_ids", []),
+            *second.get("placed_order_ids", []),
+        ],
+        "placed_orders": [
+            *first.get("placed_orders", []),
+            *second.get("placed_orders", []),
+        ],
+        "client_order_ids": [
+            *first.get("client_order_ids", []),
+            *second.get("client_order_ids", []),
+        ],
+        "create_errors": create_errors,
+        "order_reliability": {
+            "buy": first.get("order_reliability", {}),
+            "sell": second.get("order_reliability", {}),
+        },
+        "uncertain_outcome": uncertain_outcome,
+        "canceled_count": int(first.get("canceled_count", 0))
+        + int(second.get("canceled_count", 0)),
+        "canceled_order_ids": [
+            *first.get("canceled_order_ids", []),
+            *second.get("canceled_order_ids", []),
+        ],
+        "cancel_errors": cancel_errors,
+        "order_ttl_seconds": order_ttl_seconds,
+        "emergency_cancel": bool(
+            first.get("emergency_cancel") or second.get("emergency_cancel")
+        ),
+        "manual_intervention_required": bool(
+            cancel_errors
+            or uncertain_outcome
+            or combined_fill.get("reconciliation_required")
+            or combined_fill.get("hedge_required")
+        ),
+        "cancel_reason": "ttl_expired",
+        "submit_started_at": first.get("submit_started_at"),
+        "submitted_at": second.get("submitted_at"),
+        "create_latency_ms": float(first.get("create_latency_ms") or 0.0)
+        + float(second.get("create_latency_ms") or 0.0),
+        "opportunity_to_submit_ms": first.get("opportunity_to_submit_ms"),
+        "fill_status": combined_fill,
+        "execution_mode": "buy_then_sell",
+        "sequence": sequence,
+    }
+
+
 async def run_spot_arbitrage_execution_cycle(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -706,6 +926,7 @@ async def run_spot_arbitrage_execution_cycle(
     strategy_id: str = "spot_spread",
     event_type: str = "spot_spread_execution",
     client_order_prefix: str = "crypto-arb-spot",
+    execution_mode: str = "parallel",
 ) -> dict[str, Any]:
     cycle_started_at = time.time()
     payload: dict[str, Any] = {
@@ -718,6 +939,10 @@ async def run_spot_arbitrage_execution_cycle(
         },
     }
     if not opportunities:
+        return payload
+    if execution_mode not in {"parallel", "buy_then_sell"}:
+        payload["status"] = "blocked_by_plan"
+        payload["errors"] = [f"unsupported execution_mode: {execution_mode}"]
         return payload
 
     opportunity = opportunities[0]
@@ -828,14 +1053,24 @@ async def run_spot_arbitrage_execution_cycle(
                 *balance_errors,
             ]
             return payload
-        execution = await _place_orders(
-            cfg,
-            manager,
-            prepared_orders,
-            order_ttl_seconds=order_ttl_seconds,
-            opportunity_observed_at=opportunity.observed_at,
-            client_order_prefix=client_order_prefix,
-        )
+        if execution_mode == "buy_then_sell":
+            execution = await _place_buy_then_sell(
+                cfg,
+                manager,
+                prepared_orders,
+                order_ttl_seconds=order_ttl_seconds,
+                opportunity_observed_at=opportunity.observed_at,
+                client_order_prefix=client_order_prefix,
+            )
+        else:
+            execution = await _place_orders(
+                cfg,
+                manager,
+                prepared_orders,
+                order_ttl_seconds=order_ttl_seconds,
+                opportunity_observed_at=opportunity.observed_at,
+                client_order_prefix=client_order_prefix,
+            )
         fill_status = execution.get("fill_status")
         if (
             isinstance(fill_status, dict)

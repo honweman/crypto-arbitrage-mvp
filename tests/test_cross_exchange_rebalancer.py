@@ -477,6 +477,166 @@ class CrossExchangeRebalancerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime["completed_quote_common"], 10.0)
         self.assertGreater(runtime["completed_destination_quote_common"], 0.0)
 
+    async def test_live_cycle_sells_only_the_confirmed_buy_fill(self) -> None:
+        cfg = make_config(
+            rebalance=CrossExchangeRebalanceConfig(
+                enabled=True,
+                live_enabled=True,
+                buy_exchange="coinbase-spot",
+                buy_symbol="ACS/USDC",
+                sell_exchange="bithumb-spot",
+                sell_symbol="ACS/KRW",
+                total_quote_common=100.0,
+                quote_per_cycle_common=10.0,
+                max_cost_bps=500.0,
+                max_slippage_bps=100.0,
+                order_ttl_seconds=0.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                require_post_only=False,
+                strategy_enabled={"cross_exchange_rebalance": True},
+                max_order_quote=100.0,
+                max_cycle_quote=250.0,
+                max_slippage_bps=100.0,
+            ),
+        )
+
+        class PartialBuyManager(PreparingManager):
+            def __init__(self) -> None:
+                self.created: list[tuple[str, float]] = []
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def fetch_closed_orders(
+                self, *_: object, **__: object
+            ) -> list[object]:
+                return []
+
+            async def fetch_balance(
+                self, exchange: ExchangeConfig
+            ) -> dict[str, dict[str, float]]:
+                if exchange.key == "coinbase-spot":
+                    return {"USDC": {"free": 1_000_000.0}}
+                return {"ACS": {"free": 1_000_000.0}}
+
+            async def create_prepared_limit_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                side: str,
+                prepared: dict[str, object],
+                **__: object,
+            ) -> dict[str, object]:
+                amount = float(prepared["amount"])
+                price = float(prepared["price"])
+                filled = amount * 0.25 if side == "buy" else amount
+                self.created.append((side, amount))
+                return {
+                    "id": f"{side}-{len(self.created)}",
+                    "exchange": exchange.key,
+                    "side": side,
+                    "filled": filled,
+                    "cost": filled * price,
+                    "average": price,
+                    "status": "closed",
+                }
+
+        manager = PartialBuyManager()
+        payload = await run_cross_exchange_rebalance_cycle(
+            cfg,
+            manager,  # type: ignore[arg-type]
+            books=make_books(),
+            quote_rates={"KRW": 0.00075, "USDC": 1.0},
+            live=True,
+        )
+
+        self.assertEqual(payload["status"], "progress")
+        self.assertEqual([side for side, _ in manager.created], ["buy", "sell"])
+        self.assertAlmostEqual(manager.created[1][1], manager.created[0][1] * 0.25)
+        self.assertFalse(payload["execution_progress"]["hedge_required"])
+        self.assertEqual(
+            payload["execution"]["execution_mode"],
+            "buy_then_sell",
+        )
+
+    async def test_live_cycle_skips_sell_when_buy_has_no_fill(self) -> None:
+        cfg = make_config(
+            rebalance=CrossExchangeRebalanceConfig(
+                enabled=True,
+                live_enabled=True,
+                buy_exchange="coinbase-spot",
+                buy_symbol="ACS/USDC",
+                sell_exchange="bithumb-spot",
+                sell_symbol="ACS/KRW",
+                total_quote_common=100.0,
+                quote_per_cycle_common=10.0,
+                max_cost_bps=500.0,
+                max_slippage_bps=100.0,
+                order_ttl_seconds=0.0,
+            ),
+            risk=RiskConfig(
+                allow_live_trading=True,
+                require_post_only=False,
+                strategy_enabled={"cross_exchange_rebalance": True},
+                max_order_quote=100.0,
+                max_cycle_quote=250.0,
+                max_slippage_bps=100.0,
+            ),
+        )
+
+        class NoBuyFillManager(PreparingManager):
+            def __init__(self) -> None:
+                self.created_sides: list[str] = []
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def fetch_closed_orders(
+                self, *_: object, **__: object
+            ) -> list[object]:
+                return []
+
+            async def fetch_balance(
+                self, exchange: ExchangeConfig
+            ) -> dict[str, dict[str, float]]:
+                if exchange.key == "coinbase-spot":
+                    return {"USDC": {"free": 1_000_000.0}}
+                return {"ACS": {"free": 1_000_000.0}}
+
+            async def create_prepared_limit_order(
+                self,
+                exchange: ExchangeConfig,
+                *,
+                side: str,
+                prepared: dict[str, object],
+                **__: object,
+            ) -> dict[str, object]:
+                self.created_sides.append(side)
+                return {
+                    "id": f"{side}-order",
+                    "exchange": exchange.key,
+                    "side": side,
+                    "filled": 0.0,
+                    "cost": 0.0,
+                    "status": "closed",
+                }
+
+        manager = NoBuyFillManager()
+        payload = await run_cross_exchange_rebalance_cycle(
+            cfg,
+            manager,  # type: ignore[arg-type]
+            books=make_books(),
+            quote_rates={"KRW": 0.00075, "USDC": 1.0},
+            live=True,
+        )
+
+        self.assertEqual(payload["status"], "no_fill")
+        self.assertEqual(manager.created_sides, ["buy"])
+        self.assertFalse(payload["halt_required"])
+        self.assertFalse(payload["execution_progress"]["hedge_required"])
+
     async def test_live_cycle_blocks_when_configured_reserve_is_unavailable(
         self,
     ) -> None:

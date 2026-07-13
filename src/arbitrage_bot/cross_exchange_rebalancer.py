@@ -732,6 +732,7 @@ async def run_cross_exchange_rebalance_cycle(
         strategy_id=STRATEGY_ID,
         event_type=EVENT_TYPE,
         client_order_prefix=cfg.cross_exchange_rebalance.client_order_prefix,
+        execution_mode="buy_then_sell",
     )
     for key in (
         "risk",
