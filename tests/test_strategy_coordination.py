@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +22,7 @@ from arbitrage_bot.web.loops import (
     RebalanceMarketDataTimeout,
     _fetch_rebalance_books,
     _market_maker_instance_task_loop,
+    _sleep_for_rebalance_config_change,
     cross_exchange_rebalance_task_loop,
 )
 from arbitrage_bot.web.state import MonitorState
@@ -64,6 +67,31 @@ def make_config():
 
 
 class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rebalance_interval_wait_wakes_for_a_config_change(self) -> None:
+        cfg = make_config()
+        changed_cfg = replace(
+            cfg,
+            cross_exchange_rebalance=replace(
+                cfg.cross_exchange_rebalance,
+                enabled=False,
+                live_enabled=False,
+            ),
+        )
+
+        class ChangedState:
+            async def runtime_config(self, *_: object):
+                return changed_cfg
+
+        started = time.monotonic()
+        await _sleep_for_rebalance_config_change(
+            cfg,
+            ChangedState(),  # type: ignore[arg-type]
+            cfg.cross_exchange_rebalance,
+            0.01,
+        )
+
+        self.assertLess(time.monotonic() - started, 0.2)
+
     async def test_rebalance_book_refresh_has_an_outer_timeout(self) -> None:
         cfg = make_config()
 
@@ -150,6 +178,72 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
                         self.fail("rebalance loop did not persist the timeout state")
                     self.assertFalse(task.done())
                     self.assertGreaterEqual(fetch_books.call_count, 1)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+    async def test_rebalance_loop_persists_disabled_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config()
+            cfg = replace(
+                cfg,
+                cross_exchange_rebalance=replace(
+                    cfg.cross_exchange_rebalance,
+                    enabled=False,
+                    live_enabled=False,
+                    runtime_path=str(Path(tmp) / "rebalance.json"),
+                ),
+            )
+
+            class FakeState:
+                def __init__(self) -> None:
+                    self.runtimes: list[dict[str, object]] = []
+
+                async def runtime_config(self, *_: object):
+                    return cfg
+
+                async def set_cross_exchange_rebalance_runtime(
+                    self, runtime: dict[str, object]
+                ) -> None:
+                    self.runtimes.append(runtime)
+
+                async def strategy_pauses(self):
+                    return {}
+
+                async def is_running(self) -> bool:
+                    return True
+
+                async def release_coordination_hold(self, *_: object) -> bool:
+                    return True
+
+            class FakeManager:
+                async def close(self) -> None:
+                    return None
+
+            state = FakeState()
+            with (
+                patch(
+                    "arbitrage_bot.web.loops.ExchangeManager",
+                    return_value=FakeManager(),
+                ),
+                patch("arbitrage_bot.web.loops.write_trade_event"),
+                patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+            ):
+                task = asyncio.create_task(
+                    cross_exchange_rebalance_task_loop(cfg, state)  # type: ignore[arg-type]
+                )
+                try:
+                    for _ in range(100):
+                        if state.runtimes:
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        self.fail("rebalance loop did not persist disabled state")
+                    persisted = json.loads(
+                        Path(cfg.cross_exchange_rebalance.runtime_path).read_text()
+                    )
+                    self.assertEqual(persisted["status"], "disabled")
                 finally:
                     task.cancel()
                     with self.assertRaises(asyncio.CancelledError):

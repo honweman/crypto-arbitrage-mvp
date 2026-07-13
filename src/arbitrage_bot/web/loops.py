@@ -2444,6 +2444,24 @@ class RebalanceMarketDataTimeout(TimeoutError):
     pass
 
 
+async def _sleep_for_rebalance_config_change(
+    cfg: BotConfig,
+    state: MonitorState,
+    current_config: Any,
+    sleep_for: float,
+) -> None:
+    """Sleep until the next cycle, but apply control-plane changes promptly."""
+    deadline = time.monotonic() + max(0.0, sleep_for)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(1.0, remaining))
+        runtime_cfg = await state.runtime_config(cfg)
+        if runtime_cfg.cross_exchange_rebalance != current_config:
+            return
+
+
 async def _fetch_rebalance_books(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -2842,8 +2860,7 @@ async def cross_exchange_rebalance_task_loop(
                 )
             runtime["config_fingerprint"] = fingerprint
             runtime["mode"] = payload.get("mode", "dry_run")
-            if rebalance.enabled:
-                save_rebalance_runtime(current_path, runtime)
+            save_rebalance_runtime(current_path, runtime)
             await state.set_cross_exchange_rebalance_runtime(runtime)
 
             status = str(payload.get("status") or "unknown")
@@ -2859,7 +2876,12 @@ async def cross_exchange_rebalance_task_loop(
                 raise asyncio.CancelledError
             sleep_for = max(0.0, interval - (time.monotonic() - started))
             if sleep_for > 0:
-                await asyncio.sleep(sleep_for)
+                await _sleep_for_rebalance_config_change(
+                    cfg,
+                    state,
+                    rebalance,
+                    sleep_for,
+                )
     finally:
         await state.release_coordination_hold(coordination_owner)
         await manager.close()

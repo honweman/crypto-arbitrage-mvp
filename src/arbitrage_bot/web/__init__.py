@@ -5423,6 +5423,7 @@ def _schedule_started_config_guard(
     instance_id: str,
     previous_version_id: int | None,
     expected_current_hash: str,
+    timeout_seconds: float = 35.0,
 ) -> None:
     tasks = request.app.get("config_guard_tasks")
     if not isinstance(tasks, set):
@@ -5434,6 +5435,7 @@ def _schedule_started_config_guard(
             instance_id=instance_id,
             previous_version_id=previous_version_id,
             expected_current_hash=expected_current_hash,
+            timeout_seconds=timeout_seconds,
         )
     )
     tasks.add(task)
@@ -5662,6 +5664,7 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
                 instance_id="default",
                 previous_version_id=guard_baseline.get("current_version_id"),
                 expected_current_hash=str(current_version.get("current_hash") or ""),
+                timeout_seconds=max(35.0, updated_config.interval_seconds + 15.0),
             )
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
