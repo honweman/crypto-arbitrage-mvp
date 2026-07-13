@@ -829,6 +829,59 @@ class CrossExchangeRebalancerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["completed_base"], 80_000.0)
         self.assertEqual(changed["completed_quote_common"], 0.0)
 
+    def test_hedge_required_runtime_records_residual_exposure(self) -> None:
+        cfg = make_config().cross_exchange_rebalance
+        runtime = apply_rebalance_cycle_to_runtime(
+            new_rebalance_runtime(cfg, common_quote_currency="USD"),
+            {
+                "mode": "live",
+                "status": "hedge_required",
+                "halt_required": True,
+                "plan": {"base_asset": "ACS"},
+                "execution_progress": {
+                    "hedge_side": "buy",
+                    "hedge_base": 123.45,
+                },
+            },
+            cfg,
+        )
+
+        self.assertTrue(runtime["halted"])
+        self.assertEqual(runtime["halt_reason"], "hedge_required")
+        self.assertEqual(runtime["residual_exposure"]["asset"], "ACS")
+        self.assertEqual(runtime["residual_exposure"]["side"], "buy")
+        self.assertEqual(runtime["residual_exposure"]["quantity_base"], 123.45)
+        self.assertFalse(runtime["residual_exposure_acknowledged"])
+
+    def test_acknowledged_residual_exposure_persists(self) -> None:
+        cfg = make_config().cross_exchange_rebalance
+        runtime = new_rebalance_runtime(cfg, common_quote_currency="USD")
+        runtime.update(
+            {
+                "status": "acknowledged_exposure",
+                "residual_exposure_acknowledged": True,
+                "residual_exposure": {
+                    "asset": "ACS",
+                    "side": "buy",
+                    "quantity_base": 123.45,
+                    "detected_at": 1.0,
+                    "acknowledged_at": 2.0,
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "runtime.json"
+            save_rebalance_runtime(path, runtime)
+            restored = load_rebalance_runtime(
+                path,
+                cfg,
+                common_quote_currency="USD",
+            )
+
+        self.assertEqual(restored["status"], "acknowledged_exposure")
+        self.assertTrue(restored["residual_exposure_acknowledged"])
+        self.assertEqual(restored["residual_exposure"]["quantity_base"], 123.45)
+
     def test_legacy_destination_progress_runtime_is_reset(self) -> None:
         cfg = make_config().cross_exchange_rebalance
         legacy = new_rebalance_runtime(cfg, common_quote_currency="USD")

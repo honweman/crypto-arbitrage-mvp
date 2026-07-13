@@ -146,6 +146,7 @@ from ..config import (
 )
 from ..contract_strategies import build_contract_strategies_payload
 from ..cross_exchange_rebalancer import (
+    load_rebalance_runtime,
     new_rebalance_runtime,
     save_rebalance_runtime,
 )
@@ -5581,6 +5582,79 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
         runtime_cfg = await state.runtime_config(cfg)
         current_config = runtime_cfg.cross_exchange_rebalance
         action = str(payload.get("action") or "update").strip().lower()
+        if action == "acknowledge_exposure":
+            if payload.get("confirm_acknowledgement") != "ACKNOWLEDGE RESIDUAL EXPOSURE":
+                raise ValueError(
+                    "acknowledgement requires "
+                    "confirm_acknowledgement=ACKNOWLEDGE RESIDUAL EXPOSURE"
+                )
+            runtime = await state.cross_exchange_rebalance_runtime()
+            if not runtime:
+                runtime = load_rebalance_runtime(
+                    current_config.runtime_path,
+                    current_config,
+                    common_quote_currency=runtime_cfg.common_quote_currency,
+                )
+            if not runtime.get("halted") or runtime.get("halt_reason") != "hedge_required":
+                raise ValueError("only a hedge_required stop can be acknowledged")
+            residual = runtime.get("residual_exposure")
+            if not isinstance(residual, dict) or float(
+                residual.get("quantity_base") or 0.0
+            ) <= 0:
+                for entry in read_recent_strategy_timeline_entries(
+                    runtime_cfg.strategy_timeline
+                ):
+                    if (
+                        entry.strategy != "cross_exchange_rebalance"
+                        or entry.status != "hedge_required"
+                    ):
+                        continue
+                    imbalance = float(entry.metrics.get("imbalance_base") or 0.0)
+                    if abs(imbalance) <= 1e-12:
+                        continue
+                    residual = {
+                        "asset": _base_asset_from_symbol(current_config.buy_symbol),
+                        "side": "sell" if imbalance > 0 else "buy",
+                        "quantity_base": abs(imbalance),
+                        "detected_at": entry.logged_at,
+                        "source": "strategy_timeline",
+                    }
+                    break
+            if not isinstance(residual, dict) or float(
+                residual.get("quantity_base") or 0.0
+            ) <= 0:
+                raise ValueError(
+                    "the residual exposure amount is unavailable; do not acknowledge it"
+                )
+            acknowledged_at = time.time()
+            residual = {
+                **residual,
+                "acknowledged_at": acknowledged_at,
+                "acknowledged_by": _config_actor_email(request),
+            }
+            runtime = {
+                **runtime,
+                "halted": False,
+                "halt_reason": None,
+                "status": "acknowledged_exposure",
+                "residual_exposure": residual,
+                "residual_exposure_acknowledged": True,
+                "updated_at": acknowledged_at,
+            }
+            save_rebalance_runtime(current_config.runtime_path, runtime)
+            await state.set_cross_exchange_rebalance_runtime(runtime)
+            await state.release_coordination_hold("cross_exchange_rebalance")
+            write_web_audit_event(
+                runtime_cfg,
+                request,
+                action="cross_exchange_rebalance_residual_acknowledged",
+                target=(
+                    f"{current_config.buy_exchange} -> {current_config.sell_exchange}"
+                ),
+                detail="acknowledged residual exposure; automatic rebalance remains blocked",
+                payload={"residual_exposure": residual},
+            )
+            return web.json_response({"ok": True, "runtime": runtime})
         if action == "reset":
             _require_admin_user(_request_user(request))
             if current_config.live_enabled:
@@ -5605,7 +5679,7 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
             )
             return web.json_response({"ok": True, "runtime": runtime})
         if action != "update":
-            raise ValueError("action must be update or reset")
+            raise ValueError("action must be update, reset, or acknowledge_exposure")
 
         symbols_by_exchange = _rebalance_symbols_by_exchange(runtime_cfg)
         accounts = slow_execution_accounts(
@@ -5619,6 +5693,16 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
             allowed_exchanges={account["key"] for account in accounts},
             symbols_by_exchange=symbols_by_exchange,
         )
+        runtime = await state.cross_exchange_rebalance_runtime()
+        if (
+            updated_config.enabled
+            and updated_config.live_enabled
+            and runtime.get("residual_exposure_acknowledged")
+        ):
+            raise ValueError(
+                "residual exposure was acknowledged; disable Live Ready, reset progress, "
+                "and complete a new live confirmation before restarting"
+            )
         if (
             updated_config.live_enabled
             and payload.get("confirm_live") != "ENABLE LIVE REBALANCE"

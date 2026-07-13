@@ -2593,6 +2593,30 @@ async def cross_exchange_rebalance_task_loop(
                     "mode": "dry_run",
                     "status": "disabled",
                 }
+            elif runtime.get("residual_exposure_acknowledged"):
+                if coordination_active:
+                    await state.release_coordination_hold(coordination_owner)
+                    coordination_active = False
+                residual = (
+                    runtime.get("residual_exposure")
+                    if isinstance(runtime.get("residual_exposure"), dict)
+                    else {}
+                )
+                payload = {
+                    "type": "cross_exchange_rebalance_execution",
+                    "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                    "mode": "live" if rebalance.live_enabled else "dry_run",
+                    "status": "acknowledged_exposure",
+                    "risk": {
+                        "approved": False,
+                        "level": "blocked",
+                        "reasons": [
+                            "residual exposure was acknowledged; reset progress and "
+                            "complete a new live confirmation before restarting"
+                        ],
+                    },
+                    "residual_exposure": residual,
+                }
             elif runtime.get("halted") and gate_status not in {
                 "paused",
                 "program_paused",
@@ -2840,10 +2864,10 @@ async def cross_exchange_rebalance_task_loop(
                     "last_error": None,
                     "updated_at": time.time(),
                 }
-            elif payload.get("status") == "halted":
+            elif payload.get("status") in {"halted", "acknowledged_exposure"}:
                 runtime = {
                     **runtime,
-                    "status": "halted",
+                    "status": str(payload["status"]),
                     "last_payload": payload,
                     "updated_at": time.time(),
                 }

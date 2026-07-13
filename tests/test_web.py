@@ -865,7 +865,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="rebalance-feedback"', HTML)
         self.assertIn('id="rebalance-open-risk"', HTML)
         self.assertIn('id="rebalance-reset"', HTML)
+        self.assertIn('id="rebalance-acknowledge-exposure"', HTML)
         self.assertIn("RESET REBALANCE", APP_JS)
+        self.assertIn("ACKNOWLEDGE RESIDUAL EXPOSURE", APP_JS)
+        self.assertIn("acknowledgeRebalanceExposure", APP_JS)
         self.assertIn("liveRebalanceValidationError", APP_JS)
         self.assertIn("confirmLiveRebalance", APP_JS)
         self.assertIn("lastState?.operations?.risk", APP_JS)
@@ -4206,6 +4209,86 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             restored_cfg.cross_exchange_rebalance.sell_symbol,
             "ACS/USDC",
         )
+
+    async def test_rebalance_api_acknowledges_residual_without_restarting_live(
+        self,
+    ) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/cross-exchange-rebalance"
+            method = "POST"
+
+            def __init__(
+                self, app: dict[str, object], payload: dict[str, object]
+            ) -> None:
+                self.app = app
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = os.path.join(tmp, "rebalance_runtime.json")
+            cfg = make_config(
+                cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    buy_exchange="bithumb-spot",
+                    buy_symbol="ACS/KRW",
+                    sell_exchange="coinbase-spot",
+                    sell_symbol="ACS/USDC",
+                    total_quote_common=100.0,
+                    quote_per_cycle_common=10.0,
+                    runtime_path=runtime_path,
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                ),
+            )
+            state = MonitorState(cfg, 1.0)
+            runtime = new_rebalance_runtime(
+                cfg.cross_exchange_rebalance,
+                common_quote_currency=cfg.common_quote_currency,
+            )
+            runtime.update(
+                {
+                    "status": "halted",
+                    "halted": True,
+                    "halt_reason": "hedge_required",
+                    "residual_exposure": {
+                        "asset": "ACS",
+                        "side": "buy",
+                        "quantity_base": 123.45,
+                        "detected_at": 1.0,
+                    },
+                }
+            )
+            save_rebalance_runtime(runtime_path, runtime)
+            await state.set_cross_exchange_rebalance_runtime(runtime)
+            app: dict[str, object] = {"monitor_state": state, "config": cfg}
+
+            response = await api_cross_exchange_rebalance(
+                FakeRequest(
+                    app,
+                    {
+                        "action": "acknowledge_exposure",
+                        "confirm_acknowledgement": "ACKNOWLEDGE RESIDUAL EXPOSURE",
+                    },
+                )  # type: ignore[arg-type]
+            )
+            updated = await state.cross_exchange_rebalance_runtime()
+
+        self.assertEqual(response.status, 200, response.text)
+        self.assertTrue(json.loads(response.text)["ok"])
+        self.assertFalse(updated["halted"])
+        self.assertEqual(updated["status"], "acknowledged_exposure")
+        self.assertTrue(updated["residual_exposure_acknowledged"])
+        self.assertIn("acknowledged_at", updated["residual_exposure"])
 
     async def test_market_maker_api_requires_confirmation_when_starting_live(
         self,

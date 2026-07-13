@@ -6973,6 +6973,15 @@ function balanceStatusClass(status) {
         stopButton.disabled = rebalanceFormBusy;
       }
       const resetButton = document.getElementById("rebalance-reset");
+      const acknowledgeButton = document.getElementById("rebalance-acknowledge-exposure");
+      if (acknowledgeButton) {
+        const residual = runtime.residual_exposure || {};
+        const canAcknowledge = runtime.halted
+          && runtime.halt_reason === "hedge_required"
+          && Number(residual.quantity_base || 0) > 0;
+        acknowledgeButton.hidden = !canAcknowledge;
+        acknowledgeButton.disabled = rebalanceFormBusy || !canAcknowledge;
+      }
       const hasProgress = Number(runtime.completed_quote_common || 0) > 0
         || Number(runtime.completed_destination_quote_common || 0) > 0
         || Number(runtime.completed_base || 0) > 0;
@@ -6983,6 +6992,9 @@ function balanceStatusClass(status) {
 
     function liveRebalanceValidationError(data, payload, requireConfirmation = true) {
       if (!payload.live_enabled) return "";
+      if (data?.runtime?.residual_exposure_acknowledged) {
+        return "Residual exposure was acknowledged. Stop Live Ready, reset progress, then complete a new live confirmation before restarting.";
+      }
       if (rebalanceProgressRequiresReset(data, payload)) {
         return "Previous task is complete. Turn off Live Ready and reset progress before starting a new task.";
       }
@@ -7273,6 +7285,47 @@ function balanceStatusClass(status) {
       }
     }
 
+    async function acknowledgeRebalanceExposure() {
+      if (rebalanceFormBusy) return;
+      const runtime = lastState?.cross_exchange_rebalance?.runtime || {};
+      const residual = runtime.residual_exposure || {};
+      const asset = residual.asset || baseCurrency(
+        lastState?.cross_exchange_rebalance?.config?.buy_symbol || "",
+      );
+      const quantity = Number(residual.quantity_base || 0);
+      if (!(quantity > 0)) {
+        setRebalanceFeedback("Residual exposure amount is unavailable.", "error");
+        return;
+      }
+      if (!dangerConfirm(
+        "Acknowledge residual exposure?",
+        `${fmt.format(quantity)} ${asset}\nNo order will be placed. MM may resume, but rebalance remains blocked until reset and a new live confirmation.`,
+      )) return;
+      const button = document.getElementById("rebalance-acknowledge-exposure");
+      rebalanceFormBusy = true;
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/cross-exchange-rebalance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "acknowledge_exposure",
+            confirm_acknowledgement: "ACKNOWLEDGE RESIDUAL EXPOSURE",
+          }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "exposure acknowledgement failed");
+        setRebalanceFeedback("Residual exposure acknowledged. Rebalance remains blocked.", "ok");
+        await refresh({ force: true });
+      } catch (error) {
+        setRebalanceFeedback(error.message || String(error), "error");
+      } finally {
+        rebalanceFormBusy = false;
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+        updateCoreFormStates();
+      }
+    }
+
     function renderCrossExchangeRebalance(data) {
       const runtime = data?.runtime || {};
       const lastPayload = runtime.last_payload || {};
@@ -7296,11 +7349,14 @@ function balanceStatusClass(status) {
         `${mode} · ${status} · ${progressPct.toFixed(1)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(2)} bps` : ""}${coordinationStatus ? ` · MM ${coordinationStatus}` : ""}${reason ? ` · ${reason}` : ""}`,
       );
       const progress = document.getElementById("rebalance-progress");
+      const residual = runtime.residual_exposure || {};
+      const acknowledgedResidual = Boolean(runtime.residual_exposure_acknowledged);
       progress.innerHTML = `
         <span class="config-chip ${runtime.halted ? "config-diff" : "config-match"}">${escapeHtml(status)}</span>
         <span>${uiText("Source spent")} ${escapeHtml(common)} ${money.format(completed)} / ${money.format(target)} · ${uiText("remaining")} ${money.format(remaining)}</span>
         <span>${uiText("Destination received")} ${escapeHtml(common)} ${money.format(destinationReceived)}</span>
         <span>${escapeHtml(baseCurrency(plan?.buy_symbol || data?.config?.buy_symbol || ""))} ${fmt.format(runtime.completed_base || 0)}</span>
+        ${Number(residual.quantity_base || 0) > 0 ? `<span>${acknowledgedResidual ? "Acknowledged" : "Residual"}: ${escapeHtml(fmt.format(residual.quantity_base))} ${escapeHtml(residual.asset || "")}</span>` : ""}
         ${coordinationStatus ? `<span>${escapeHtml(uiText("MM coordination"))}: ${escapeHtml(coordinationStatus)}</span>` : ""}
       `;
 
@@ -8271,6 +8327,10 @@ function balanceStatusClass(status) {
     document.getElementById("rebalance-reset").addEventListener(
       "click",
       resetCrossExchangeRebalanceProgress,
+    );
+    document.getElementById("rebalance-acknowledge-exposure").addEventListener(
+      "click",
+      acknowledgeRebalanceExposure,
     );
     document.getElementById("rebalance-live-confirm").addEventListener(
       "click",

@@ -804,6 +804,8 @@ def new_rebalance_runtime(
         "status": "disabled" if not cfg.enabled else "starting",
         "halted": False,
         "halt_reason": None,
+        "residual_exposure": None,
+        "residual_exposure_acknowledged": False,
         "completed_quote_common": 0.0,
         "completed_destination_quote_common": 0.0,
         "completed_base": 0.0,
@@ -851,6 +853,12 @@ def load_rebalance_runtime(
     fresh["status"] = str(raw.get("status") or fresh["status"])
     fresh["halted"] = bool(raw.get("halted", False))
     fresh["halt_reason"] = raw.get("halt_reason")
+    residual_exposure = raw.get("residual_exposure")
+    if isinstance(residual_exposure, dict):
+        fresh["residual_exposure"] = residual_exposure
+    fresh["residual_exposure_acknowledged"] = bool(
+        raw.get("residual_exposure_acknowledged", False)
+    )
     fresh["last_payload"] = (
         raw.get("last_payload") if isinstance(raw.get("last_payload"), dict) else None
     )
@@ -917,6 +925,19 @@ def apply_rebalance_cycle_to_runtime(
     if payload.get("halt_required"):
         updated["halted"] = True
         updated["halt_reason"] = payload.get("status") or "execution protection"
+        if payload.get("status") == "hedge_required":
+            plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+            updated["residual_exposure"] = {
+                "asset": str(plan.get("base_asset") or "").upper(),
+                "side": str(execution_progress.get("hedge_side") or ""),
+                "quantity_base": max(
+                    0.0,
+                    float(execution_progress.get("hedge_base") or 0.0),
+                ),
+                "detected_at": time.time(),
+                "source": "hedge_required",
+            }
+            updated["residual_exposure_acknowledged"] = False
     remaining = max(
         0.0,
         cfg.total_quote_common - updated["completed_quote_common"],
