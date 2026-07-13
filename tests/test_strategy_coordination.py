@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.config import (
@@ -14,7 +16,12 @@ from arbitrage_bot.web.coordination import (
     market_maker_coordination_status,
     rebalance_coordination_hold_required,
 )
-from arbitrage_bot.web.loops import _market_maker_instance_task_loop
+from arbitrage_bot.web.loops import (
+    RebalanceMarketDataTimeout,
+    _fetch_rebalance_books,
+    _market_maker_instance_task_loop,
+    cross_exchange_rebalance_task_loop,
+)
 from arbitrage_bot.web.state import MonitorState
 from arbitrage_bot.web_config import (
     cross_exchange_rebalance_config_from_payload,
@@ -57,6 +64,97 @@ def make_config():
 
 
 class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rebalance_book_refresh_has_an_outer_timeout(self) -> None:
+        cfg = make_config()
+
+        class HangingManager:
+            async def fetch_order_book(self, *_: object, **__: object):
+                await asyncio.Event().wait()
+
+        with self.assertRaisesRegex(
+            RebalanceMarketDataTimeout,
+            "order book refresh exceeded 0.1s",
+        ):
+            await _fetch_rebalance_books(
+                cfg,
+                HangingManager(),  # type: ignore[arg-type]
+                timeout_seconds=0.1,
+            )
+
+    async def test_rebalance_loop_records_timeout_and_keeps_retrying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config()
+            cfg = replace(
+                cfg,
+                cross_exchange_rebalance=replace(
+                    cfg.cross_exchange_rebalance,
+                    interval_seconds=1.0,
+                    runtime_path=str(Path(tmp) / "rebalance.json"),
+                ),
+            )
+
+            class FakeState:
+                def __init__(self) -> None:
+                    self.runtimes: list[dict[str, object]] = []
+
+                async def runtime_config(self, *_: object):
+                    return cfg
+
+                async def set_cross_exchange_rebalance_runtime(
+                    self, runtime: dict[str, object]
+                ) -> None:
+                    self.runtimes.append(runtime)
+
+                async def strategy_pauses(self):
+                    return {}
+
+                async def is_running(self) -> bool:
+                    return True
+
+                async def quote_rates(self):
+                    return cfg.quote_rates
+
+                async def release_coordination_hold(self, *_: object) -> bool:
+                    return True
+
+            class FakeManager:
+                async def close(self) -> None:
+                    return None
+
+            state = FakeState()
+            timeout = RebalanceMarketDataTimeout("test market data timeout")
+            with (
+                patch(
+                    "arbitrage_bot.web.loops.ExchangeManager",
+                    return_value=FakeManager(),
+                ),
+                patch(
+                    "arbitrage_bot.web.loops._fetch_rebalance_books",
+                    side_effect=timeout,
+                ) as fetch_books,
+                patch("arbitrage_bot.web.loops.write_trade_event"),
+                patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+            ):
+                task = asyncio.create_task(
+                    cross_exchange_rebalance_task_loop(cfg, state)  # type: ignore[arg-type]
+                )
+                try:
+                    for _ in range(100):
+                        if any(
+                            runtime.get("status") == "waiting_for_market_data"
+                            for runtime in state.runtimes
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        self.fail("rebalance loop did not persist the timeout state")
+                    self.assertFalse(task.done())
+                    self.assertGreaterEqual(fetch_books.call_count, 1)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
     async def test_hold_is_scoped_and_released(self) -> None:
         state = MonitorState(make_config(), 1.0)
         hold = await state.acquire_coordination_hold(
@@ -260,9 +358,7 @@ class CoordinationStatusTest(unittest.TestCase):
                         "status": "coordinating",
                         "open_order_count": 0,
                         "open_order_sync_error": None,
-                        "coordination_hold": {
-                            "owner": "cross_exchange_rebalance"
-                        },
+                        "coordination_hold": {"owner": "cross_exchange_rebalance"},
                     }
                 ]
             },
@@ -276,9 +372,7 @@ class CoordinationStatusTest(unittest.TestCase):
         self.assertTrue(ready["ready"])
 
     def test_safety_hold_only_persists_for_unresolved_execution(self) -> None:
-        self.assertFalse(
-            rebalance_coordination_hold_required({"status": "progress"})
-        )
+        self.assertFalse(rebalance_coordination_hold_required({"status": "progress"}))
         self.assertTrue(
             rebalance_coordination_hold_required({"status": "blocked_by_conflict"})
         )

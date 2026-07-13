@@ -2437,25 +2437,46 @@ async def spot_grid_task_loop(
         await manager.close()
 
 
+REBALANCE_MARKET_DATA_TIMEOUT_SECONDS = 15.0
+
+
+class RebalanceMarketDataTimeout(TimeoutError):
+    pass
+
+
 async def _fetch_rebalance_books(
     cfg: BotConfig,
     manager: ExchangeManager,
+    *,
+    timeout_seconds: float = REBALANCE_MARKET_DATA_TIMEOUT_SECONDS,
 ) -> dict[tuple[str, str], OrderBookSnapshot]:
     rebalance = cfg.cross_exchange_rebalance
     buy_exchange = _find_exchange_by_key(cfg, rebalance.buy_exchange)
     sell_exchange = _find_exchange_by_key(cfg, rebalance.sell_exchange)
-    buy_book, sell_book = await asyncio.gather(
-        manager.fetch_order_book(
-            buy_exchange,
-            rebalance.buy_symbol,
-            cfg.order_book_depth,
-        ),
-        manager.fetch_order_book(
-            sell_exchange,
-            rebalance.sell_symbol,
-            cfg.order_book_depth,
-        ),
-    )
+    timeout_seconds = max(0.1, float(timeout_seconds))
+    try:
+        buy_book, sell_book = await asyncio.wait_for(
+            asyncio.gather(
+                manager.fetch_order_book(
+                    buy_exchange,
+                    rebalance.buy_symbol,
+                    cfg.order_book_depth,
+                ),
+                manager.fetch_order_book(
+                    sell_exchange,
+                    rebalance.sell_symbol,
+                    cfg.order_book_depth,
+                ),
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RebalanceMarketDataTimeout(
+            "order book refresh exceeded "
+            f"{timeout_seconds:.1f}s for {rebalance.buy_exchange} "
+            f"{rebalance.buy_symbol} and {rebalance.sell_exchange} "
+            f"{rebalance.sell_symbol}"
+        ) from exc
     books = {}
     if buy_book is not None:
         books[(rebalance.buy_exchange, rebalance.buy_symbol)] = buy_book
@@ -2756,6 +2777,26 @@ async def cross_exchange_rebalance_task_loop(
                             "level": "blocked",
                             "reasons": gate_reasons,
                         }
+                except RebalanceMarketDataTimeout as exc:
+                    if coordination_active:
+                        await state.release_coordination_hold(coordination_owner)
+                        coordination_active = False
+                    payload = {
+                        "type": "cross_exchange_rebalance_execution",
+                        "strategy": CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                        "mode": "live" if live_allowed else "dry_run",
+                        "status": "waiting_for_market_data",
+                        "market_data": {
+                            "status": "timeout",
+                            "timeout_seconds": REBALANCE_MARKET_DATA_TIMEOUT_SECONDS,
+                        },
+                        "risk": {
+                            "approved": False,
+                            "level": "waiting",
+                            "reasons": [str(exc)],
+                        },
+                        "warnings": [str(exc)],
+                    }
                 except Exception as exc:  # noqa: BLE001
                     payload = {
                         "type": "cross_exchange_rebalance_execution",

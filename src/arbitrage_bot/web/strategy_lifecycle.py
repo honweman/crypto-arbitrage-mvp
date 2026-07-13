@@ -427,6 +427,7 @@ def _rebalance_actual(raw_status: str, desired: str) -> str:
     if status in {
         "planned",
         "waiting_for_cost",
+        "waiting_for_market_data",
         "waiting_for_coordination",
         "no_fill",
     }:

@@ -128,9 +128,7 @@ def test_auto_waiting_state_is_healthy_and_program_pause_converges() -> None:
     paused = build_strategy_lifecycle_payload(
         cfg,
         program={"running": False},
-        auto_buy_sell_tasks={
-            "tasks": [{**task, "last_status": "program_paused"}]
-        },
+        auto_buy_sell_tasks={"tasks": [{**task, "last_status": "program_paused"}]},
     )
     paused_row = _rows(paused, "slow_execution")[0]
     assert paused_row["desired_state"] == "paused"
@@ -179,9 +177,7 @@ def test_rebalance_waiting_for_cost_is_running_and_converged() -> None:
             "runtime": {
                 "status": "waiting_for_cost",
                 "mode": "live",
-                "last_payload": {
-                    "risk": {"reasons": ["expected cost exceeds limit"]}
-                },
+                "last_payload": {"risk": {"reasons": ["expected cost exceeds limit"]}},
             }
         },
     )
@@ -190,6 +186,34 @@ def test_rebalance_waiting_for_cost_is_running_and_converged() -> None:
     assert row["actual_state"] == "waiting"
     assert row["converged"] is True
     assert row["reason"] is None
+
+
+def test_rebalance_waiting_for_market_data_is_retrying_and_converged() -> None:
+    cfg = _config(
+        cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+            enabled=True,
+            live_enabled=True,
+            buy_exchange="coinbase-spot",
+            buy_symbol="ACS/USDC",
+            sell_exchange="bithumb-spot",
+            sell_symbol="ACS/KRW",
+            total_quote_common=100.0,
+        )
+    )
+    lifecycle = build_strategy_lifecycle_payload(
+        cfg,
+        cross_exchange_rebalance={
+            "runtime": {
+                "status": "waiting_for_market_data",
+                "mode": "live",
+            }
+        },
+    )
+
+    row = _rows(lifecycle, "cross_exchange_rebalance")[0]
+    assert row["desired_state"] == "running"
+    assert row["actual_state"] == "waiting"
+    assert row["converged"] is True
 
 
 def test_spot_arbitrage_dry_run_scanner_is_a_running_strategy() -> None:

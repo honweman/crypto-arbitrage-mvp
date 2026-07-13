@@ -585,6 +585,7 @@ def build_strategy_preflight(
         previous = route_sides.get(key)
         route_sides[key] = "both" if previous and previous != side else side
     owned_order_ids: set[str] = set()
+    coordinated_market_maker_order_ids: set[str] = set()
     market_maker = state_payload.get("market_maker") or {}
     mm_runtime = market_maker.get("runtime") if isinstance(market_maker, dict) else {}
     mm_instances = (
@@ -595,19 +596,23 @@ def build_strategy_preflight(
     for instance in mm_instances or []:
         if not isinstance(instance, dict):
             continue
-        if strategy_id != "market_maker":
-            continue
         key = (
             str(instance.get("open_order_exchange") or ""),
             str(instance.get("open_order_symbol") or ""),
         )
         if key not in route_sides:
             continue
-        owned_order_ids.update(
+        instance_order_ids = {
             str(order_id)
             for order_id in instance.get("open_order_ids", []) or []
             if order_id
-        )
+        }
+        if strategy_id == "market_maker":
+            owned_order_ids.update(instance_order_ids)
+        elif strategy_id == "cross_exchange_rebalance" and bool(
+            candidate.get("coordinate_market_maker", True)
+        ):
+            coordinated_market_maker_order_ids.update(instance_order_ids)
     slow_tasks = ((state_payload.get("slow_execution") or {}).get("tasks") or {}).get(
         "tasks", []
     )
@@ -632,6 +637,8 @@ def build_strategy_preflight(
             continue
         if str(order.get("id") or "") in owned_order_ids:
             continue
+        if str(order.get("id") or "") in coordinated_market_maker_order_ids:
+            continue
         owner = _order_strategy(order)
         if owner == strategy_id:
             continue
@@ -653,6 +660,18 @@ def build_strategy_preflight(
             else "No opposing strategy orders detected",
         )
     )
+    if coordinated_market_maker_order_ids:
+        checks.append(
+            _check(
+                "market_maker_coordination",
+                "Market maker coordination",
+                "warning",
+                (
+                    f"{len(coordinated_market_maker_order_ids)} tracked MM order(s) "
+                    "will be canceled and confirmed before rebalance orders are placed"
+                ),
+            )
+        )
     projected_open = non_owned_open_count + planned_orders
     open_blocked = risk.max_open_orders > 0 and projected_open > risk.max_open_orders
     checks.append(
