@@ -293,6 +293,68 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return window.CryptoArbI18n?.t?.(source) || source;
     }
 
+    // Lightweight toast notifications for action feedback. Errors stay
+    // longer than confirmations; hovering pauses auto-dismiss.
+    const TOAST_OK_MS = 3500;
+    const TOAST_ERROR_MS = 8000;
+
+    function toastContainer() {
+      let container = document.getElementById("toast-container");
+      if (!container) {
+        container = document.createElement("div");
+        container.id = "toast-container";
+        container.setAttribute("role", "status");
+        container.setAttribute("aria-live", "polite");
+        document.body.appendChild(container);
+      }
+      return container;
+    }
+
+    function showToast(message, level = "ok") {
+      const textValue = uiText(String(message || "")).trim();
+      if (!textValue) return;
+      const container = toastContainer();
+      // Collapse duplicates: refresh the timer instead of stacking copies.
+      for (const existing of container.children) {
+        if (existing.__toastText === textValue) {
+          existing.remove();
+          break;
+        }
+      }
+      const toast = document.createElement("div");
+      toast.className = `toast toast-${level === "error" ? "error" : "ok"}`;
+      toast.textContent = textValue;
+      toast.__toastText = textValue;
+      let timer = null;
+      const dismiss = () => {
+        window.clearTimeout(timer);
+        toast.classList.add("toast-leaving");
+        window.setTimeout(() => toast.remove(), 200);
+      };
+      const arm = () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(
+          dismiss,
+          level === "error" ? TOAST_ERROR_MS : TOAST_OK_MS,
+        );
+      };
+      toast.addEventListener("mouseenter", () => window.clearTimeout(timer));
+      toast.addEventListener("mouseleave", arm);
+      toast.addEventListener("click", dismiss);
+      container.appendChild(toast);
+      while (container.children.length > 4) container.firstChild.remove();
+      arm();
+    }
+
+    // Safety net: form handlers that throw without a catch used to fail
+    // silently. Surface those errors instead of losing them.
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      const message = reason?.message || String(reason || "");
+      if (!message || message === "[object Object]") return;
+      showToast(message, "error");
+    });
+
     function applyMobileTableLabels(root = document) {
       const scope = root?.querySelectorAll ? root : document;
       scope.querySelectorAll("table.mobile-card-table").forEach((table) => {
@@ -5591,7 +5653,10 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "risk update failed");
         riskFormDirty = false;
+        showToast("Risk controls saved.");
         await refresh();
+      } catch (error) {
+        showToast(error?.message || String(error), "error");
       } finally {
         riskFormBusy = false;
         updateCoreFormStates();

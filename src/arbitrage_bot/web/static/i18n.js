@@ -810,6 +810,7 @@
     "basis pairs": "基差对",
     "market_maker.live_enabled is false":
       "做市实盘开关未启用 (market_maker.live_enabled=false)",
+    "Risk controls saved.": "风控设置已保存。",
     "Strategy Performance": "策略绩效",
     "Account / Symbol": "账户 / 交易对",
     "Fills / Submitted": "成交 / 提交",
@@ -1675,6 +1676,7 @@
     "basis pairs": "베이시스 페어",
     "market_maker.live_enabled is false":
       "마켓 메이커 실거래 스위치 꺼짐 (market_maker.live_enabled=false)",
+    "Risk controls saved.": "리스크 설정이 저장되었습니다.",
     "Strategy Performance": "전략 성과",
     "Account / Symbol": "계정 / 거래 페어",
     "Fills / Submitted": "체결 / 제출",
