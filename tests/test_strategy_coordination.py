@@ -12,8 +12,14 @@ from unittest.mock import patch
 from arbitrage_bot.config import (
     CrossExchangeRebalanceConfig,
     MarketMakerConfig,
+    StrategyTimelineConfig,
     load_config,
 )
+from arbitrage_bot.cross_exchange_rebalancer import (
+    new_rebalance_runtime,
+    save_rebalance_runtime,
+)
+from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 from arbitrage_bot.web.coordination import (
     market_maker_coordination_status,
     rebalance_coordination_hold_required,
@@ -214,6 +220,9 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
                 async def is_running(self) -> bool:
                     return True
 
+                async def acquire_coordination_hold(self, *_: object, **__: object):
+                    return {"owner": "cross_exchange_rebalance"}
+
                 async def release_coordination_hold(self, *_: object) -> bool:
                     return True
 
@@ -359,6 +368,110 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
             instance["coordination_hold"]["owner"],
             "cross_exchange_rebalance",
         )
+
+    async def test_rebalance_loop_recovers_legacy_residual_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = str(Path(tmp) / "rebalance.json")
+            timeline_path = str(Path(tmp) / "strategy_timeline.jsonl")
+            cfg = make_config()
+            cfg = replace(
+                cfg,
+                cross_exchange_rebalance=replace(
+                    cfg.cross_exchange_rebalance,
+                    interval_seconds=1.0,
+                    runtime_path=runtime_path,
+                ),
+                strategy_timeline=StrategyTimelineConfig(
+                    enabled=True,
+                    path=timeline_path,
+                ),
+            )
+            runtime = new_rebalance_runtime(
+                cfg.cross_exchange_rebalance,
+                common_quote_currency=cfg.common_quote_currency,
+            )
+            runtime.update(
+                {
+                    "status": "halted",
+                    "halted": True,
+                    "halt_reason": "hedge_required",
+                }
+            )
+            save_rebalance_runtime(runtime_path, runtime)
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                {
+                    "type": "cross_exchange_rebalance_execution",
+                    "strategy": "cross_exchange_rebalance",
+                    "mode": "live",
+                    "status": "hedge_required",
+                    "execution": {"fill_status": {"imbalance_base": -42.0}},
+                },
+            )
+
+            class FakeState:
+                def __init__(self) -> None:
+                    self.runtimes: list[dict[str, object]] = []
+
+                async def runtime_config(self, *_: object):
+                    return cfg
+
+                async def set_cross_exchange_rebalance_runtime(
+                    self, value: dict[str, object]
+                ) -> None:
+                    self.runtimes.append(value)
+
+                async def strategy_pauses(self):
+                    return {}
+
+                async def is_running(self) -> bool:
+                    return True
+
+                async def acquire_coordination_hold(self, *_: object, **__: object):
+                    return {"owner": "cross_exchange_rebalance"}
+
+                async def release_coordination_hold(self, *_: object) -> bool:
+                    return True
+
+            class FakeManager:
+                async def close(self) -> None:
+                    return None
+
+            state = FakeState()
+            with (
+                patch(
+                    "arbitrage_bot.web.loops.ExchangeManager",
+                    return_value=FakeManager(),
+                ),
+                patch("arbitrage_bot.web.loops.write_trade_event"),
+                patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+            ):
+                task = asyncio.create_task(
+                    cross_exchange_rebalance_task_loop(cfg, state)  # type: ignore[arg-type]
+                )
+                try:
+                    for _ in range(100):
+                        if any(
+                            isinstance(item.get("residual_exposure"), dict)
+                            for item in state.runtimes
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        self.fail("rebalance loop did not recover legacy residual")
+                    recovered = next(
+                        item
+                        for item in reversed(state.runtimes)
+                        if isinstance(item.get("residual_exposure"), dict)
+                    )
+                    residual = recovered["residual_exposure"]
+                    self.assertEqual(residual["asset"], "ACS")
+                    self.assertEqual(residual["side"], "buy")
+                    self.assertEqual(residual["quantity_base"], 42.0)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
 
     async def test_mm_keeps_hold_when_cancellation_cannot_be_confirmed(self) -> None:
         cfg = make_config()

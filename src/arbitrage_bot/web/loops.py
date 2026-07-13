@@ -69,6 +69,7 @@ from ..spot_grid_executor import (
 )
 from ..strategy_center import StrategyCenterStore
 from ..strategy_timeline import (
+    read_recent_strategy_timeline_entries,
     strategy_timeline_event_from_payload,
     strategy_timeline_fingerprint,
     write_strategy_timeline_from_payload,
@@ -2568,6 +2569,48 @@ async def cross_exchange_rebalance_task_loop(
                     rebalance,
                     common_quote_currency=runtime_cfg.common_quote_currency,
                 )
+
+            # Releases before residual tracking did not persist the imbalance. Recover
+            # that audit-only detail once so the operator can acknowledge it explicitly.
+            if (
+                runtime.get("halted")
+                and runtime.get("halt_reason") == "hedge_required"
+                and not isinstance(runtime.get("residual_exposure"), dict)
+            ):
+                recovered_residual: dict[str, Any] | None = None
+                try:
+                    entries = read_recent_strategy_timeline_entries(
+                        runtime_cfg.strategy_timeline
+                    )
+                except OSError:
+                    entries = []
+                for entry in entries:
+                    if (
+                        entry.strategy != CROSS_EXCHANGE_REBALANCE_STRATEGY_ID
+                        or entry.status != "hedge_required"
+                    ):
+                        continue
+                    try:
+                        imbalance = float(entry.metrics.get("imbalance_base") or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if abs(imbalance) <= 1e-12:
+                        continue
+                    recovered_residual = {
+                        "asset": str(rebalance.buy_symbol).split("/", 1)[0].upper(),
+                        "side": "sell" if imbalance > 0 else "buy",
+                        "quantity_base": abs(imbalance),
+                        "detected_at": entry.logged_at,
+                        "source": "strategy_timeline",
+                    }
+                    break
+                if recovered_residual:
+                    runtime = {
+                        **runtime,
+                        "residual_exposure": recovered_residual,
+                        "updated_at": time.time(),
+                    }
+                    save_rebalance_runtime(current_path, runtime)
 
             strategy_pauses = await state.strategy_pauses()
             program_running = await state.is_running()
