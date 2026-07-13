@@ -69,7 +69,7 @@ from ..spot_grid_executor import (
 )
 from ..strategy_center import StrategyCenterStore
 from ..strategy_timeline import (
-    read_recent_strategy_timeline_entries,
+    find_latest_strategy_timeline_entry,
     strategy_timeline_event_from_payload,
     strategy_timeline_fingerprint,
     write_strategy_timeline_from_payload,
@@ -2578,32 +2578,24 @@ async def cross_exchange_rebalance_task_loop(
                 and not isinstance(runtime.get("residual_exposure"), dict)
             ):
                 recovered_residual: dict[str, Any] | None = None
-                try:
-                    entries = read_recent_strategy_timeline_entries(
-                        runtime_cfg.strategy_timeline
-                    )
-                except OSError:
-                    entries = []
-                for entry in entries:
-                    if (
-                        entry.strategy != CROSS_EXCHANGE_REBALANCE_STRATEGY_ID
-                        or entry.status != "hedge_required"
-                    ):
-                        continue
+                entry = find_latest_strategy_timeline_entry(
+                    runtime_cfg.strategy_timeline,
+                    strategy=CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
+                    status="hedge_required",
+                )
+                if entry is not None:
                     try:
                         imbalance = float(entry.metrics.get("imbalance_base") or 0.0)
                     except (TypeError, ValueError):
-                        continue
-                    if abs(imbalance) <= 1e-12:
-                        continue
-                    recovered_residual = {
-                        "asset": str(rebalance.buy_symbol).split("/", 1)[0].upper(),
-                        "side": "sell" if imbalance > 0 else "buy",
-                        "quantity_base": abs(imbalance),
-                        "detected_at": entry.logged_at,
-                        "source": "strategy_timeline",
-                    }
-                    break
+                        imbalance = 0.0
+                    if abs(imbalance) > 1e-12:
+                        recovered_residual = {
+                            "asset": str(rebalance.buy_symbol).split("/", 1)[0].upper(),
+                            "side": "sell" if imbalance > 0 else "buy",
+                            "quantity_base": abs(imbalance),
+                            "detected_at": entry.logged_at,
+                            "source": "strategy_timeline",
+                        }
                 if recovered_residual:
                     runtime = {
                         **runtime,

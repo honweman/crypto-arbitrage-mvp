@@ -219,6 +219,7 @@ from ..strategy_center import (
     build_strategy_center_public_payload,
 )
 from ..strategy_timeline import (
+    find_latest_strategy_timeline_entry,
     read_recent_strategy_timeline_entries,
     strategy_timeline_event_from_payload,
     strategy_timeline_fingerprint,
@@ -5601,25 +5602,24 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
             if not isinstance(residual, dict) or float(
                 residual.get("quantity_base") or 0.0
             ) <= 0:
-                for entry in read_recent_strategy_timeline_entries(
-                    runtime_cfg.strategy_timeline
-                ):
-                    if (
-                        entry.strategy != "cross_exchange_rebalance"
-                        or entry.status != "hedge_required"
-                    ):
-                        continue
-                    imbalance = float(entry.metrics.get("imbalance_base") or 0.0)
-                    if abs(imbalance) <= 1e-12:
-                        continue
-                    residual = {
-                        "asset": _base_asset_from_symbol(current_config.buy_symbol),
-                        "side": "sell" if imbalance > 0 else "buy",
-                        "quantity_base": abs(imbalance),
-                        "detected_at": entry.logged_at,
-                        "source": "strategy_timeline",
-                    }
-                    break
+                entry = find_latest_strategy_timeline_entry(
+                    runtime_cfg.strategy_timeline,
+                    strategy="cross_exchange_rebalance",
+                    status="hedge_required",
+                )
+                if entry is not None:
+                    try:
+                        imbalance = float(entry.metrics.get("imbalance_base") or 0.0)
+                    except (TypeError, ValueError):
+                        imbalance = 0.0
+                    if abs(imbalance) > 1e-12:
+                        residual = {
+                            "asset": _base_asset_from_symbol(current_config.buy_symbol),
+                            "side": "sell" if imbalance > 0 else "buy",
+                            "quantity_base": abs(imbalance),
+                            "detected_at": entry.logged_at,
+                            "source": "strategy_timeline",
+                        }
             if not isinstance(residual, dict) or float(
                 residual.get("quantity_base") or 0.0
             ) <= 0:

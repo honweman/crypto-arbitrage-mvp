@@ -450,6 +450,37 @@ def read_recent_strategy_timeline_entries(
     ]
 
 
+def find_latest_strategy_timeline_entry(
+    cfg: StrategyTimelineConfig,
+    *,
+    strategy: str,
+    status: str,
+) -> StrategyTimelineEntry | None:
+    """Find a historical event without being limited by the UI's recent-event window."""
+    if not cfg.enabled:
+        return None
+    path = _event_path(cfg)
+    try:
+        handle = path.open(encoding="utf-8")
+    except OSError:
+        return None
+    latest: StrategyTimelineEntry | None = None
+    with handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            entry = normalize_strategy_timeline_event(event)
+            if entry.strategy == strategy and entry.status == status:
+                latest = entry
+    return latest
+
+
 def summarize_strategy_timeline_entries(
     entries: list[StrategyTimelineEntry],
 ) -> dict[str, Any]:

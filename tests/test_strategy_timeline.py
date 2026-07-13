@@ -6,6 +6,7 @@ import unittest
 
 from arbitrage_bot.config import StrategyTimelineConfig
 from arbitrage_bot.strategy_timeline import (
+    find_latest_strategy_timeline_entry,
     read_recent_strategy_timeline_entries,
     strategy_timeline_event_from_payload,
     summarize_strategy_timeline_entries,
@@ -100,6 +101,45 @@ class StrategyTimelineTest(unittest.TestCase):
         self.assertEqual(entries[1].action, "place")
         self.assertEqual(summary["event_count"], 2)
         self.assertEqual(summary["no_order_count"], 1)
+
+    def test_finds_matching_event_outside_recent_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = StrategyTimelineConfig(
+                enabled=True,
+                path=os.path.join(tmp, "timeline.jsonl"),
+                max_recent_events=1,
+            )
+            write_strategy_timeline_from_payload(
+                cfg,
+                {
+                    "type": "cross_exchange_rebalance_execution",
+                    "strategy": "cross_exchange_rebalance",
+                    "mode": "live",
+                    "status": "hedge_required",
+                    "execution": {"fill_status": {"imbalance_base": -42.0}},
+                },
+                source="test",
+            )
+            for _ in range(3):
+                write_strategy_timeline_from_payload(
+                    cfg,
+                    {
+                        "type": "market_maker",
+                        "strategy": "market_maker",
+                        "mode": "live",
+                        "status": "placed",
+                    },
+                    source="test",
+                )
+
+            entry = find_latest_strategy_timeline_entry(
+                cfg,
+                strategy="cross_exchange_rebalance",
+                status="hedge_required",
+            )
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.metrics["imbalance_base"], -42.0)
 
     def test_strategy_timeline_rotates_large_jsonl_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
