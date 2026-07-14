@@ -686,6 +686,36 @@ without overwriting runtime secrets, config, data, or logs:
 CRYPTO_ARB_DEPLOY_HOST=root@example.com scripts/deploy_cloud.sh
 ```
 
+### Unified asset ledger and isolated account readers
+
+Private account state is written to the SQLite WAL ledger configured by
+`asset_ledger.path`. The ledger keeps immutable observations plus normalized
+balance, position, order, fill, P/L, reconciliation, and worker-heartbeat rows.
+The web monitor commits a checkpoint before publishing refreshed account data;
+if a refresh fails, the last successful rows remain visible and are marked as a
+stale fallback while the current refresh error remains active.
+
+Run one read-only reconciliation cycle for an account:
+
+```bash
+crypto-account-worker --config config.acs.json --account coinbase-spot --once
+```
+
+On a systemd deployment, account readers are independent services:
+
+```bash
+sudo systemctl enable --now crypto-arb-account-worker@coinbase-spot.service
+sudo systemctl enable --now crypto-arb-account-worker@upbit-spot.service
+sudo systemctl enable --now crypto-arb-account-worker@bithumb-spot.service
+```
+
+Each instance has its own CCXT client, rate limiter, timeout, restart lifecycle,
+and optional `/etc/crypto-arbitrage-account-<account>.env` file. Put the proxy
+environment variable referenced by that account's exchange config in this file
+to route the worker through a separate egress proxy/IP. A truly independent
+egress IP still requires a separate proxy, NAT route, container network, or VM;
+the service boundary alone does not create a new public IP.
+
 The helper alternates between `/opt/crypto-arbitrage-releases/blue` on port
 `8081` and `green` on port `8082`. It installs dependencies while the current
 release stays online, starts the candidate as a read-only standby, verifies

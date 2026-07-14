@@ -1,0 +1,28 @@
+[Unit]
+Description=Crypto Arbitrage isolated read-only account worker (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cryptoarb
+Group=cryptoarb
+WorkingDirectory=/opt/crypto-arbitrage-mvp
+EnvironmentFile=-/etc/crypto-arbitrage-mvp.env
+EnvironmentFile=-/etc/crypto-arbitrage-account-%i.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0027
+ExecStart=/bin/bash -c 'slot="$$(cat /opt/crypto-arbitrage-mvp/data/active_release_slot)"; exec /opt/crypto-arbitrage-releases/"$$slot"/.venv/bin/python -m arbitrage_bot.account_worker --config /opt/crypto-arbitrage-mvp/config.acs.json --account %i'
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/crypto-arbitrage-mvp/data
+
+[Install]
+WantedBy=multi-user.target

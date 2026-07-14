@@ -226,6 +226,9 @@ install -m 0644 \
 install -m 0644 \
   "$CANDIDATE_DIR/deploy/systemd/crypto-arb-log-compact.timer" \
   /etc/systemd/system/crypto-arb-log-compact.timer
+install -m 0644 \
+  "$CANDIDATE_DIR/deploy/systemd/crypto-arb-account-worker@.service" \
+  /etc/systemd/system/crypto-arb-account-worker@.service
 cat > "/etc/crypto-arbitrage-mvp-${CANDIDATE_SLOT}.env" <<ENV
 CRYPTO_ARB_PORT=$CANDIDATE_PORT
 CRYPTO_ARB_RELEASE_ID=$CANDIDATE_SLOT-$(date +%Y%m%d%H%M%S)
@@ -317,6 +320,13 @@ mv "${ACTIVE_SLOT_FILE}.tmp" "$ACTIVE_SLOT_FILE"
 systemctl enable "$CANDIDATE_SERVICE" >/dev/null
 systemctl disable "$OLD_SERVICE" >/dev/null 2>&1 || true
 systemctl enable --now crypto-arb-log-compact.timer >/dev/null
+mapfile -t ACCOUNT_WORKER_SERVICES < <(
+  systemctl list-units --type=service --state=running --no-legend \
+    'crypto-arb-account-worker@*.service' | awk '{print $1}'
+)
+if ((${#ACCOUNT_WORKER_SERVICES[@]} > 0)); then
+  systemctl restart "${ACCOUNT_WORKER_SERVICES[@]}"
+fi
 SUCCESS=1
 echo "active slot: $CANDIDATE_SLOT"
 echo "active port: $CANDIDATE_PORT"

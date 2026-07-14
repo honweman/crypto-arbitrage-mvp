@@ -337,6 +337,7 @@ def _compact_order_activity_payload(
             "last_finished",
             "errors",
             "warnings",
+            "ledger",
         ),
     )
 
@@ -358,6 +359,7 @@ def _compact_account_balances_payload(
             "last_finished",
             "errors",
             "warnings",
+            "ledger",
         ),
     )
 

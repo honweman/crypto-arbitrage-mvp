@@ -58,6 +58,9 @@ def _line(name: str, value: float, labels: dict[str, Any] | None = None) -> str:
 def render_prometheus_metrics(payload: dict[str, Any]) -> str:
     scan = _dict(payload.get("scan"))
     order_activity = _dict(payload.get("order_activity"))
+    ledger = _dict(order_activity.get("ledger"))
+    if not ledger:
+        ledger = _dict(_dict(payload.get("account_balances")).get("ledger"))
     market_maker = _dict(payload.get("market_maker"))
     spot_grid = _dict(payload.get("spot_grid"))
     derivatives = _dict(payload.get("derivatives"))
@@ -135,6 +138,19 @@ def render_prometheus_metrics(payload: dict[str, Any]) -> str:
             "crypto_arb_order_activity_status",
             1.0,
             {"status": order_activity.get("status", "unknown")},
+        ),
+        "# HELP crypto_arb_asset_ledger_status Current unified asset ledger status.",
+        "# TYPE crypto_arb_asset_ledger_status gauge",
+        _line(
+            "crypto_arb_asset_ledger_status",
+            _flag(ledger.get("enabled")),
+            {"status": ledger.get("status", "disabled")},
+        ),
+        "# HELP crypto_arb_asset_ledger_checkpoint_age_seconds Age of the latest asset checkpoint.",
+        "# TYPE crypto_arb_asset_ledger_checkpoint_age_seconds gauge",
+        _line(
+            "crypto_arb_asset_ledger_checkpoint_age_seconds",
+            _number(ledger.get("latest_checkpoint_age_seconds")),
         ),
         "# HELP crypto_arb_reconciliation_issue_count Actionable order reconciliation issue count.",
         "# TYPE crypto_arb_reconciliation_issue_count gauge",

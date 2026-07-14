@@ -414,6 +414,18 @@ class PnlStoreConfig:
 
 
 @dataclass(frozen=True)
+class AssetLedgerConfig:
+    enabled: bool = True
+    path: str = "data/asset_ledger.sqlite3"
+    stale_seconds: float = 120.0
+    worker_interval_seconds: float = 30.0
+    worker_timeout_seconds: float = 20.0
+    worker_stale_seconds: float = 90.0
+    balance_abs_tolerance: float = 1e-8
+    balance_rel_tolerance: float = 1e-9
+
+
+@dataclass(frozen=True)
 class AlertConfig:
     enabled: bool = False
     min_level: str = "warning"
@@ -509,6 +521,7 @@ class BotConfig:
         default_factory=StrategyTimelineConfig
     )
     pnl_store: PnlStoreConfig = field(default_factory=PnlStoreConfig)
+    asset_ledger: AssetLedgerConfig = field(default_factory=AssetLedgerConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     web_security: WebSecurityConfig = field(default_factory=WebSecurityConfig)
@@ -744,6 +757,7 @@ def load_config(path: str | Path) -> BotConfig:
     trade_log_raw = raw.get("trade_log", {})
     strategy_timeline_raw = raw.get("strategy_timeline", {})
     pnl_store_raw = raw.get("pnl_store", {})
+    asset_ledger_raw = raw.get("asset_ledger", {})
     alerts_raw = raw.get("alerts", {})
     backup_raw = raw.get("backup", {})
     web_security_raw = raw.get("web_security", {})
@@ -1272,6 +1286,26 @@ def load_config(path: str | Path) -> BotConfig:
         pnl_store=PnlStoreConfig(
             enabled=bool(pnl_store_raw.get("enabled", False)),
             path=str(pnl_store_raw.get("path", "data/fill_pnl.sqlite3")),
+        ),
+        asset_ledger=AssetLedgerConfig(
+            enabled=bool(asset_ledger_raw.get("enabled", True)),
+            path=str(asset_ledger_raw.get("path", "data/asset_ledger.sqlite3")),
+            stale_seconds=float(asset_ledger_raw.get("stale_seconds", 120.0)),
+            worker_interval_seconds=float(
+                asset_ledger_raw.get("worker_interval_seconds", 30.0)
+            ),
+            worker_timeout_seconds=float(
+                asset_ledger_raw.get("worker_timeout_seconds", 20.0)
+            ),
+            worker_stale_seconds=float(
+                asset_ledger_raw.get("worker_stale_seconds", 90.0)
+            ),
+            balance_abs_tolerance=float(
+                asset_ledger_raw.get("balance_abs_tolerance", 1e-8)
+            ),
+            balance_rel_tolerance=float(
+                asset_ledger_raw.get("balance_rel_tolerance", 1e-9)
+            ),
         ),
         alerts=AlertConfig(
             enabled=bool(alerts_raw.get("enabled", False)),

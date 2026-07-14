@@ -16,6 +16,7 @@ from .market_maker_alerts import market_maker_problem_warnings
 from .state import MonitorState
 
 from ..alerts import AlertService
+from ..asset_ledger import attach_ledger_checkpoint
 from ..auto_buy_sell_task import AutoBuySellTaskService
 from ..config import BotConfig
 from ..cross_exchange_rebalancer import (
@@ -119,6 +120,34 @@ from . import (
     fetch_order_activity_payload,
     write_system_web_audit_event,
 )
+
+
+def _checkpoint_asset_state(
+    cfg: BotConfig,
+    account_balances: dict[str, Any],
+    order_activity: dict[str, Any],
+    portfolio: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        balances, activity, _ = attach_ledger_checkpoint(
+            cfg.asset_ledger,
+            account_balances,
+            order_activity,
+            portfolio=portfolio,
+        )
+        return balances, activity
+    except Exception as exc:  # noqa: BLE001
+        ledger_error = {
+            "enabled": cfg.asset_ledger.enabled,
+            "status": "error",
+            "path": cfg.asset_ledger.path,
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "checked_at": time.time(),
+        }
+        return (
+            {**account_balances, "ledger": ledger_error},
+            {**order_activity, "ledger": ledger_error},
+        )
 
 
 def _parse_daily_report_time(value: str) -> tuple[int, int]:
@@ -386,6 +415,14 @@ async def monitor_loop(
                                 "checked_at": time.time(),
                             }
                         next_order_activity_scan = now + ORDER_ACTIVITY_POLL_SECONDS
+                    account_balances_payload, order_activity_payload = (
+                        _checkpoint_asset_state(
+                            runtime_cfg,
+                            account_balances_payload,
+                            order_activity_payload,
+                            portfolio_payload,
+                        )
+                    )
                     if account_balances_payload.get("status") == "error":
                         errors = account_balances_payload.get("errors") or [
                             "unavailable"
@@ -1079,6 +1116,14 @@ async def monitor_loop(
                         account_balances_payload,
                         order_activity_payload,
                     )
+                account_balances_payload, order_activity_payload = (
+                    _checkpoint_asset_state(
+                        runtime_cfg,
+                        account_balances_payload,
+                        order_activity_payload,
+                        portfolio_payload,
+                    )
+                )
 
                 trading_console_payload = build_trading_console_payload(
                     runtime_cfg,

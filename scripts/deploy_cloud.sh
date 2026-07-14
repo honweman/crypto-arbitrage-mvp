@@ -25,6 +25,7 @@ fi
 for required in \
   scripts/activate_blue_green.sh \
   deploy/systemd/crypto-arb-web@.service \
+  deploy/systemd/crypto-arb-account-worker@.service \
   pyproject.toml; do
   if [[ ! -f "$required" ]]; then
     echo "run this script from the repository root; missing $required" >&2

@@ -30,6 +30,9 @@ async def api_health(request: web.Request) -> web.Response:
         }
     )
     order_activity = payload.get("order_activity", {})
+    ledger = order_activity.get("ledger") or payload.get("account_balances", {}).get(
+        "ledger", {}
+    )
     reliability = payload.get("order_reliability") or order_activity.get(
         "reliability", {}
     )
@@ -60,6 +63,18 @@ async def api_health(request: web.Request) -> web.Response:
                 or 0
             ),
             "pending_order_intents": pending_intents,
+            "asset_ledger": {
+                "enabled": bool(ledger.get("enabled")),
+                "status": ledger.get("status", "disabled"),
+                "latest_checkpoint_at": ledger.get("latest_checkpoint_at"),
+                "latest_checkpoint_age_seconds": ledger.get(
+                    "latest_checkpoint_age_seconds"
+                ),
+                "worker_count": len(ledger.get("workers", []) or []),
+                "stale_worker_count": sum(
+                    1 for worker in ledger.get("workers", []) or [] if worker.get("stale")
+                ),
+            },
         },
         "safe_to_replace": safe_to_replace,
     }

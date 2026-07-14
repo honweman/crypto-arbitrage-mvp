@@ -221,6 +221,16 @@
     "enabled": false,
     "path": "data/fill_pnl.sqlite3"
   },
+  "asset_ledger": {
+    "enabled": true,
+    "path": "data/asset_ledger.sqlite3",
+    "stale_seconds": 120,
+    "worker_interval_seconds": 30,
+    "worker_timeout_seconds": 20,
+    "worker_stale_seconds": 90,
+    "balance_abs_tolerance": 1e-8,
+    "balance_rel_tolerance": 1e-9
+  },
   "strategy_timeline": {
     "enabled": true,
     "path": "data/strategy_timeline.jsonl",
