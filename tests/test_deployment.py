@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -9,6 +10,11 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
+from arbitrage_bot.deployment_guard import inspect_order_intents
+from arbitrage_bot.order_reliability import (
+    IN_FLIGHT_GRACE_SECONDS,
+    OrderIntentStore,
+)
 from arbitrage_bot.web.deployment import (
     RuntimeLeaderLease,
     RuntimeSupervisor,
@@ -36,6 +42,73 @@ class RuntimeLeaderLeaseTest(unittest.TestCase):
             first.release()
             self.assertTrue(second.try_acquire())
             second.release()
+
+
+class DeploymentOrderIntentGuardTest(unittest.TestCase):
+    @staticmethod
+    def _intent() -> dict[str, object]:
+        return {
+            "exchange": "coinbase-spot",
+            "symbol": "ACS/USDC",
+            "side": "buy",
+            "amount": 100.0,
+            "price": 0.001,
+        }
+
+    def test_missing_table_is_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty.sqlite3"
+            sqlite3.connect(path).close()
+
+            result = inspect_order_intents(path)
+
+        self.assertEqual(result["blocking_count"], 0)
+        self.assertEqual(result["in_flight_count"], 0)
+
+    def test_fresh_reservation_is_in_flight_not_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OrderIntentStore(Path(tmp) / "orders.sqlite3")
+            reserved = store.reserve("fresh-order", self._intent())
+
+            result = inspect_order_intents(
+                store.path,
+                now=float(reserved["updated_at"]) + 1.0,
+            )
+
+        self.assertEqual(result["blocking_count"], 0)
+        self.assertEqual(result["in_flight_count"], 1)
+
+    def test_stale_reservation_blocks_deployment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OrderIntentStore(Path(tmp) / "orders.sqlite3")
+            reserved = store.reserve("stale-order", self._intent())
+
+            result = inspect_order_intents(
+                store.path,
+                now=(
+                    float(reserved["updated_at"])
+                    + IN_FLIGHT_GRACE_SECONDS
+                    + 1.0
+                ),
+            )
+
+        self.assertEqual(result["blocking_count"], 1)
+        self.assertEqual(result["stale_reserved_count"], 1)
+        self.assertEqual(result["in_flight_count"], 0)
+
+    def test_unknown_blocks_and_submitted_does_not(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OrderIntentStore(Path(tmp) / "orders.sqlite3")
+            store.reserve("unknown-order", self._intent())
+            store.mark_unknown("unknown-order", "gateway timeout")
+            store.reserve("submitted-order", self._intent())
+            store.mark_submitted("submitted-order", {"id": "exchange-order"})
+
+            result = inspect_order_intents(store.path)
+
+        self.assertEqual(result["blocking_count"], 1)
+        self.assertEqual(result["unknown_count"], 1)
+        self.assertEqual(result["stale_reserved_count"], 0)
 
 
 class RuntimeSupervisorTest(unittest.IsolatedAsyncioTestCase):

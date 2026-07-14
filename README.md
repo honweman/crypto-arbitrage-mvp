@@ -674,7 +674,11 @@ slot is recorded in `data/active_release_slot`.
 The health response reports the process role (`standby`, `leader_starting`,
 `leader`, or `error`), loop status, order-intent recovery counts, and
 `safe_to_replace`. Standby releases reject mutating `/api/*` calls with HTTP
-`503` until they hold the leader lease.
+`503` until they hold the leader lease. The activation guard permits fresh
+`reserved` intents inside the 30-second in-flight grace period so the old
+leader can finish normal exchange requests during a graceful handoff. An
+`unknown` intent or a reservation older than that grace period still blocks the
+deployment and restores the previous release.
 
 The same helper can run from GitHub Actions: the manual `deploy` workflow
 (Actions tab → deploy → Run workflow, confirmation input `deploy`) checks out

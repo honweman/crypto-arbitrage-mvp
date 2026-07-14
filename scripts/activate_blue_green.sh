@@ -208,26 +208,9 @@ fi
 
 ORDER_JOURNAL="$SHARED_DIR/data/order_intents.sqlite3"
 if [[ -f "$ORDER_JOURNAL" ]]; then
-  python3 - "$ORDER_JOURNAL" <<'PY'
-import sqlite3
-import sys
-
-connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-table = connection.execute(
-    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='order_intents'"
-).fetchone()
-pending = 0
-if table:
-    pending = int(
-        connection.execute(
-            "SELECT COUNT(*) FROM order_intents "
-            "WHERE status IN ('reserved', 'unknown')"
-        ).fetchone()[0]
-    )
-if pending:
-    print(f"deployment blocked by {pending} uncertain order intent(s)", file=sys.stderr)
-    raise SystemExit(1)
-PY
+  runuser -u "$OWNER_USER" -- \
+    "$CANDIDATE_DIR/.venv/bin/python" \
+    -m arbitrage_bot.deployment_guard "$ORDER_JOURNAL"
 fi
 
 install -d -o "$OWNER_USER" -g "$OWNER_GROUP" -m 0750 "$SHARED_DIR/data"
