@@ -4,6 +4,7 @@ from aiohttp import web
 
 
 def register_routes(app: web.Application) -> None:
+    from .observability_routes import api_health, api_metrics, favicon
     from . import (
         STATIC_DIR,
         api_admin_users,
@@ -20,10 +21,8 @@ def register_routes(app: web.Application) -> None:
         api_backtest,
         api_dca,
         api_execution_algo,
-        api_health,
         api_market_maker,
         api_markets,
-        api_metrics,
         api_profile,
         api_risk,
         api_slow_execution,
@@ -37,7 +36,6 @@ def register_routes(app: web.Application) -> None:
         api_user_workspace,
         api_user_backtests_get,
         api_user_backtests_post,
-        favicon,
         forgot_password_code_post,
         forgot_password_get,
         index,

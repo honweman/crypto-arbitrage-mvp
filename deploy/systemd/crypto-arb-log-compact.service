@@ -6,5 +6,5 @@ Type=oneshot
 User=cryptoarb
 Group=cryptoarb
 WorkingDirectory=/opt/crypto-arbitrage-mvp
-Environment=PYTHONPATH=/opt/crypto-arbitrage-mvp/src
-ExecStart=/opt/crypto-arbitrage-mvp/.venv/bin/python /opt/crypto-arbitrage-mvp/scripts/compact_logs.py --config /opt/crypto-arbitrage-mvp/config.acs.json
+UMask=0027
+ExecStart=/bin/bash -Eeuo pipefail -c 'slot="$$(tr -d "[:space:]" < /opt/crypto-arbitrage-mvp/data/active_release_slot)"; [[ "$$slot" == "blue" || "$$slot" == "green" ]]; exec "/opt/crypto-arbitrage-releases/$$slot/.venv/bin/python" -m arbitrage_bot.maintenance --config /opt/crypto-arbitrage-mvp/config.acs.json --prune-backups'

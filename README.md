@@ -680,6 +680,12 @@ leader can finish normal exchange requests during a graceful handoff. An
 `unknown` intent or a reservation older than that grace period still blocks the
 deployment and restores the previous release.
 
+The deployment also installs a daily maintenance timer. It rotates JSONL logs,
+keeps the order-intent safety journal bounded to seven days or 50,000 terminal
+rows, runs SQLite query-planner optimization and a passive WAL checkpoint, and
+prunes legacy deployment archives only after retaining the newest five and a
+minimum age of 14 days. Unknown and in-flight order intents are never removed.
+
 The same helper can run from GitHub Actions: the manual `deploy` workflow
 (Actions tab → deploy → Run workflow, confirmation input `deploy`) checks out
 `main`, runs the test suite, and then executes `scripts/deploy_cloud.sh` over

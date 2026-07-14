@@ -220,6 +220,12 @@ chmod 0660 "$LEADER_LOCK"
 install -m 0644 \
   "$CANDIDATE_DIR/deploy/systemd/crypto-arb-web@.service" \
   /etc/systemd/system/crypto-arb-web@.service
+install -m 0644 \
+  "$CANDIDATE_DIR/deploy/systemd/crypto-arb-log-compact.service" \
+  /etc/systemd/system/crypto-arb-log-compact.service
+install -m 0644 \
+  "$CANDIDATE_DIR/deploy/systemd/crypto-arb-log-compact.timer" \
+  /etc/systemd/system/crypto-arb-log-compact.timer
 cat > "/etc/crypto-arbitrage-mvp-${CANDIDATE_SLOT}.env" <<ENV
 CRYPTO_ARB_PORT=$CANDIDATE_PORT
 CRYPTO_ARB_RELEASE_ID=$CANDIDATE_SLOT-$(date +%Y%m%d%H%M%S)
@@ -310,6 +316,7 @@ chmod 0640 "${ACTIVE_SLOT_FILE}.tmp"
 mv "${ACTIVE_SLOT_FILE}.tmp" "$ACTIVE_SLOT_FILE"
 systemctl enable "$CANDIDATE_SERVICE" >/dev/null
 systemctl disable "$OLD_SERVICE" >/dev/null 2>&1 || true
+systemctl enable --now crypto-arb-log-compact.timer >/dev/null
 SUCCESS=1
 echo "active slot: $CANDIDATE_SLOT"
 echo "active port: $CANDIDATE_PORT"
