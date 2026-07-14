@@ -434,6 +434,14 @@ class AlertConfig:
 
 
 @dataclass(frozen=True)
+class BackupConfig:
+    enabled: bool = False
+    interval_hours: float = 24.0
+    keep: int = 14
+    path: str = ""
+
+
+@dataclass(frozen=True)
 class WebSecurityConfig:
     password_env: str | None = "CRYPTO_ARB_WEB_PASSWORD"
     cookie_secret_env: str | None = "CRYPTO_ARB_WEB_COOKIE_SECRET"
@@ -450,6 +458,10 @@ class WebSecurityConfig:
     verification_max_attempts: int = 5
     user_workspace_path: str = "data/user_workspace.sqlite3"
     credential_master_key_env: str | None = "CRYPTO_ARB_CREDENTIAL_MASTER_KEY"
+    # Sliding-window cap on authenticated write requests (POST /api/*) per
+    # user (or per client IP for legacy password sessions). 0 disables it.
+    api_write_rate_limit: int = 120
+    api_write_rate_window_seconds: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -498,6 +510,7 @@ class BotConfig:
     )
     pnl_store: PnlStoreConfig = field(default_factory=PnlStoreConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    backup: BackupConfig = field(default_factory=BackupConfig)
     web_security: WebSecurityConfig = field(default_factory=WebSecurityConfig)
 
 
@@ -732,6 +745,7 @@ def load_config(path: str | Path) -> BotConfig:
     strategy_timeline_raw = raw.get("strategy_timeline", {})
     pnl_store_raw = raw.get("pnl_store", {})
     alerts_raw = raw.get("alerts", {})
+    backup_raw = raw.get("backup", {})
     web_security_raw = raw.get("web_security", {})
     market_maker_config = _market_maker_from_dict(market_maker_raw)
     market_maker_configs = [
@@ -1279,6 +1293,12 @@ def load_config(path: str | Path) -> BotConfig:
             daily_report_enabled=bool(alerts_raw.get("daily_report_enabled", False)),
             daily_report_time=str(alerts_raw.get("daily_report_time", "23:59")),
         ),
+        backup=BackupConfig(
+            enabled=bool(backup_raw.get("enabled", False)),
+            interval_hours=max(0.25, float(backup_raw.get("interval_hours", 24.0))),
+            keep=max(1, int(backup_raw.get("keep", 14))),
+            path=str(backup_raw.get("path", "")),
+        ),
         web_security=WebSecurityConfig(
             password_env=web_security_raw.get(
                 "password_env",
@@ -1334,6 +1354,14 @@ def load_config(path: str | Path) -> BotConfig:
             credential_master_key_env=web_security_raw.get(
                 "credential_master_key_env",
                 "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
+            ),
+            api_write_rate_limit=max(
+                0,
+                int(web_security_raw.get("api_write_rate_limit", 120)),
+            ),
+            api_write_rate_window_seconds=max(
+                1.0,
+                float(web_security_raw.get("api_write_rate_window_seconds", 60.0)),
             ),
         ),
     )

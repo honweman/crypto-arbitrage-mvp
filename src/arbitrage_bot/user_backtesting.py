@@ -496,6 +496,26 @@ class UserBacktestStore:
             connection.execute("DELETE FROM user_backtest_runs WHERE id = ?", (run_id,))
             connection.commit()
 
+    def purge_owner(self, owner_email: str) -> None:
+        """Delete all backtest runs owned by owner_email."""
+        self._ensure()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_backtest_runs WHERE owner_email = ?",
+                (owner_email.strip().lower(),),
+            )
+            connection.commit()
+
+    def reassign_owner(self, old_email: str, new_email: str) -> None:
+        """Move backtest runs to a new owner email."""
+        self._ensure()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE user_backtest_runs SET owner_email = ? WHERE owner_email = ?",
+                (new_email.strip().lower(), old_email.strip().lower()),
+            )
+            connection.commit()
+
     def compact(self, owner_email: str) -> None:
         self._ensure()
         with self._connect() as connection:

@@ -619,6 +619,51 @@ class WebUserStore:
         if admin_count <= 1 and users[email].role == "admin":
             raise ValueError("cannot remove the last remaining admin")
 
+    def delete_own_account(
+        self,
+        *,
+        email: str,
+        password: str,
+        totp: str = "",
+    ) -> None:
+        """Delete the caller's own account after re-verifying credentials."""
+        user = self.authenticate(email=email, password=password, totp=totp)
+        if user is None:
+            raise PermissionError("password confirmation failed")
+        users = self._read_users()
+        normalized_email = normalize_email(email)
+        if normalized_email not in users:
+            raise ValueError("user is not registered")
+        self._require_not_last_admin(users, normalized_email)
+        del users[normalized_email]
+        self._write_users(users)
+
+    def change_email(self, *, email: str, new_email: str) -> WebUser:
+        """Move an account to a new (verified) email address.
+
+        Bumps auth_version so existing sessions for the old identity stop
+        validating; the user signs in again with the new address.
+        """
+        users = self._read_users()
+        normalized_old = normalize_email(email)
+        normalized_new = normalize_email(new_email)
+        user = users.get(normalized_old)
+        if user is None:
+            raise ValueError("user is not registered")
+        if normalized_new == normalized_old:
+            raise ValueError("new email matches the current email")
+        if normalized_new in users:
+            raise ValueError("an account with the new email already exists")
+        moved = replace(
+            user,
+            email=normalized_new,
+            auth_version=max(1, int(user.auth_version or 1)) + 1,
+        )
+        del users[normalized_old]
+        users[normalized_new] = moved
+        self._write_users(users)
+        return moved
+
     def admin_update_user(
         self,
         *,

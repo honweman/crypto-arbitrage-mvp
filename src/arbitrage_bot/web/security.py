@@ -126,6 +126,34 @@ class LoginRateLimiter:
         self._locked_until.pop(key, None)
 
 
+class ApiWriteRateLimiter:
+    """Sliding-window cap on authenticated write requests.
+
+    Keyed by user email (or client IP for legacy password sessions) so one
+    misbehaving script cannot saturate the SQLite-backed write path for
+    everyone else. Read traffic is unaffected.
+    """
+
+    def __init__(self, *, max_requests: int, window_seconds: float) -> None:
+        self.max_requests = max(0, int(max_requests))
+        self.window_seconds = max(1.0, float(window_seconds))
+        self._requests: dict[str, deque[float]] = {}
+
+    def retry_after(self, key: str, *, now: float | None = None) -> float:
+        """Record one request; return 0.0 if allowed, else seconds to wait."""
+        if self.max_requests <= 0:
+            return 0.0
+        now = time.time() if now is None else now
+        bucket = self._requests.setdefault(key, deque())
+        cutoff = now - self.window_seconds
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= self.max_requests:
+            return max(0.0, bucket[0] + self.window_seconds - now)
+        bucket.append(now)
+        return 0.0
+
+
 def default_web_audit_path(cfg: BotConfig) -> str:
     return str(Path(cfg.trade_log.path).with_name("web_audit_events.jsonl"))
 
@@ -675,6 +703,20 @@ async def login_post(request: web.Request) -> web.Response:
     raise response
 
 
+def _purge_user_data(request: web.Request, email: str) -> None:
+    """Remove all per-user records after an account is deleted."""
+    _user_workspace_store(request).purge_owner(email)
+    request.app["user_paper_store"].purge_owner(email)
+    request.app["user_backtest_service"].store.purge_owner(email)
+
+
+def _reassign_user_data(request: web.Request, old_email: str, new_email: str) -> None:
+    """Move per-user records to a new owner email after an email change."""
+    _user_workspace_store(request).reassign_owner(old_email, new_email)
+    request.app["user_paper_store"].reassign_owner(old_email, new_email)
+    request.app["user_backtest_service"].store.reassign_owner(old_email, new_email)
+
+
 def _security_page_response(
     request: web.Request,
     user: WebUser,
@@ -682,6 +724,7 @@ def _security_page_response(
     error: str = "",
     notice: str = "",
     signed_out: bool = False,
+    pending_new_email: str = "",
     status: int = 200,
 ) -> web.Response:
     cfg: BotConfig = request.app["config"]
@@ -702,6 +745,7 @@ def _security_page_response(
             error=error,
             notice=notice,
             signed_out=signed_out,
+            pending_new_email=pending_new_email,
         ),
         content_type="text/html",
         status=status,
@@ -728,6 +772,8 @@ async def security_post(request: web.Request) -> web.Response:
         raise web.HTTPNotFound(text="User account security is unavailable")
     form = await request.post()
     action = str(form.get("action") or "").strip().lower()
+    if action in {"request_email_change", "confirm_email_change", "delete_account"}:
+        return await _account_management_post(request, cfg, user, form, action)
     try:
         if action not in {"enable", "disable"}:
             raise ValueError("action must be enable or disable")
@@ -765,6 +811,127 @@ async def security_post(request: web.Request) -> web.Response:
         notice=notice,
         signed_out=True,
     )
+
+
+async def _account_management_post(
+    request: web.Request,
+    cfg: BotConfig,
+    user: WebUser,
+    form: Any,
+    action: str,
+) -> web.Response:
+    store = _user_store(request)
+    try:
+        if action == "request_email_change":
+            new_email = normalize_email(str(form.get("new_email") or ""))
+            if store.authenticate(
+                email=user.email,
+                password=str(form.get("password") or ""),
+                totp=str(form.get("totp") or ""),
+            ) is None:
+                raise PermissionError("password confirmation failed")
+            if store.get_user(new_email) is not None:
+                raise ValueError("an account with the new email already exists")
+            sender = _verification_email_sender(request)
+            if not sender.configured():
+                raise RuntimeError("email verification service is not configured")
+            code = _verification_manager(request).issue(
+                email=new_email,
+                purpose="change_email",
+                client_key=_client_ip(request, cfg) or "unknown",
+            )
+            try:
+                await sender.send_code(
+                    email=new_email,
+                    code=code,
+                    purpose="change_email",
+                )
+            except Exception:
+                _verification_manager(request).discard(
+                    email=new_email,
+                    purpose="change_email",
+                )
+                raise RuntimeError("verification email could not be sent") from None
+            write_web_audit_event(
+                cfg,
+                request,
+                action="account_email_change_requested",
+                target=user.email,
+                detail=f"verification code sent to {new_email}",
+            )
+            return _security_page_response(
+                request,
+                user,
+                notice=(
+                    "验证码已发送至新邮箱，请在下方输入完成更换 / "
+                    "A verification code was sent to the new email"
+                ),
+                pending_new_email=new_email,
+            )
+        if action == "confirm_email_change":
+            new_email = normalize_email(str(form.get("new_email") or ""))
+            if not _verification_manager(request).verify(
+                email=new_email,
+                purpose="change_email",
+                code=str(form.get("code") or ""),
+            ):
+                raise PermissionError("verification code is invalid or expired")
+            old_email = user.email
+            moved = store.change_email(email=old_email, new_email=new_email)
+            _reassign_user_data(request, old_email, new_email)
+            write_web_audit_event(
+                cfg,
+                request,
+                action="account_email_changed",
+                target=moved.email,
+                detail=f"email changed from {old_email}",
+            )
+            return _security_page_response(
+                request,
+                moved,
+                notice=(
+                    "登录邮箱已更换，交易所 API 凭证需重新录入 / Email changed; "
+                    "re-enter your exchange API credentials"
+                ),
+                signed_out=True,
+            )
+        # delete_account
+        if str(form.get("confirm_delete") or "") != "on":
+            raise ValueError("confirm account deletion by ticking the checkbox")
+        store.delete_own_account(
+            email=user.email,
+            password=str(form.get("password") or ""),
+            totp=str(form.get("totp") or ""),
+        )
+        _purge_user_data(request, user.email)
+        write_web_audit_event(
+            cfg,
+            request,
+            action="account_deleted",
+            target=user.email,
+            detail="user deleted their own account",
+        )
+        return _security_page_response(
+            request,
+            user,
+            notice="账户及全部数据已删除 / Account and all data deleted",
+            signed_out=True,
+        )
+    except VerificationRateLimited as exc:
+        response = _security_page_response(
+            request,
+            user,
+            error=str(exc),
+            status=429,
+        )
+        response.headers["Retry-After"] = str(int(exc.retry_after + 0.999))
+        return response
+    except PermissionError as exc:
+        return _security_page_response(request, user, error=str(exc), status=403)
+    except RuntimeError as exc:
+        return _security_page_response(request, user, error=str(exc), status=503)
+    except ValueError as exc:
+        return _security_page_response(request, user, error=str(exc), status=400)
 
 
 async def register_get(request: web.Request) -> web.Response:
@@ -1049,6 +1216,28 @@ async def logout(request: web.Request) -> web.Response:
 
 
 def build_security_middleware(cfg: BotConfig) -> web.middleware:
+    write_limiter = ApiWriteRateLimiter(
+        max_requests=cfg.web_security.api_write_rate_limit,
+        window_seconds=cfg.web_security.api_write_rate_window_seconds,
+    )
+
+    def _write_rate_limited(request: web.Request, identity: str) -> web.Response | None:
+        if request.method != "POST" or not request.path.startswith("/api/"):
+            return None
+        # Signal webhooks authenticate with their own shared secret and may
+        # legitimately arrive in bursts from external systems.
+        if request.path == "/api/signal" or request.path.startswith("/api/signal/"):
+            return None
+        retry_after = write_limiter.retry_after(identity or "unknown")
+        if retry_after <= 0:
+            return None
+        response = web.json_response(
+            {"error": "too many requests; slow down"},
+            status=429,
+        )
+        response.headers["Retry-After"] = str(max(1, int(retry_after + 0.999)))
+        return _add_security_headers(response)
+
     @web.middleware
     async def security_middleware(
         request: web.Request,
@@ -1136,6 +1325,9 @@ def build_security_middleware(cfg: BotConfig) -> web.middleware:
                 _add_security_headers(redirect)
                 raise redirect
             request["user_email"] = session_email
+        limited = _write_rate_limited(request, session_email or client_ip)
+        if limited is not None:
+            return limited
         return await call_handler()
 
     return security_middleware

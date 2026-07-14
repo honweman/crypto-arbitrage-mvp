@@ -643,6 +643,38 @@ Keep `data/` and local config files out of Git. The `alerts` block is reserved f
   fill, slippage, submission latency, MM spread capture, inventory residual,
   Auto Buy/Sell progress, and paper-versus-live difference by strategy instance.
 
+## Production readiness for multi-user deployments
+
+Before opening the dashboard to other users, four safeguards are built in:
+
+- **Startup preflight.** `python -m arbitrage_bot.web` validates the
+  deployment before binding: with registration enabled it requires the SMTP
+  sender, the bootstrap admin email (while the user store is empty), and the
+  credential master key, refusing to start when they are missing (use
+  `--skip-preflight` to boot anyway while debugging). Softer gaps — no cookie
+  secret, `cookie_secure` disabled, a completely unsecured local instance —
+  are logged as warnings.
+- **Scheduled backups.** Enable with `"backup": {"enabled": true,
+  "interval_hours": 24, "keep": 14}`. A background task snapshots the whole
+  data directory into `data/backups/data_backup_<timestamp>.tar.gz` (SQLite
+  files are copied through the sqlite3 backup API so in-flight writes cannot
+  corrupt the archive) and prunes archives beyond `keep`. Copy the archives
+  off the machine on your own schedule; `path` overrides the target
+  directory.
+- **Write rate limiting.** Authenticated `POST /api/*` requests are capped
+  per user (per client IP for legacy password sessions) with a sliding
+  window — `web_security.api_write_rate_limit` requests (default 120) per
+  `api_write_rate_window_seconds` (default 60); excess requests get 429 with
+  Retry-After. Signal webhooks are exempt; reads are unaffected. Set the
+  limit to 0 to disable.
+- **Self-service accounts.** The `/security` page lets a signed-in user
+  change their login email (password + verification code sent to the new
+  address; stored exchange API credentials must be re-entered because their
+  encryption is bound to the account email) and permanently delete their
+  account, which also purges their projects, exchange accounts, strategies,
+  paper trading, and backtest data. The same flows exist as JSON actions on
+  `POST /api/account`, and admin deletions now purge the same per-user data.
+
 ## Cloud deployment and per-account IPs
 
 For production, the cleaner setup is one exchange account per runner, container, or VM, with that runtime bound to its own static outbound IP at the cloud network layer. For example, run `bybit-mm-a`, `coinbase-arb-a`, and `upbit-arb-a` as separate processes or containers, then assign each one a dedicated NAT gateway, elastic IP, or cloud egress address. If the exchange account has IP whitelisting enabled, whitelist only the IP assigned to that account.

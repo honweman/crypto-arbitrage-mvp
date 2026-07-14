@@ -1776,6 +1776,57 @@ class UserWorkspaceStore:
             )
             connection.commit()
 
+    def purge_owner(self, owner_email: str) -> dict[str, int]:
+        """Delete every workspace record owned by owner_email (account deletion)."""
+        email = _clean_email(owner_email)
+        self._ensure()
+        removed: dict[str, int] = {}
+        with self._connect() as connection:
+            for table in (
+                "user_api_credentials",
+                "user_strategies",
+                "user_exchange_accounts",
+                "user_projects",
+                "user_risk_profiles",
+            ):
+                cursor = connection.execute(
+                    f"DELETE FROM {table} WHERE owner_email = ?",  # noqa: S608
+                    (email,),
+                )
+                removed[table] = cursor.rowcount
+        return removed
+
+    def reassign_owner(self, old_email: str, new_email: str) -> dict[str, int]:
+        """Move workspace records to a new owner email (self-service change).
+
+        Encrypted API credentials are bound to the owner email via their
+        associated data and cannot be decrypted under the new identity, so
+        they are deleted and their accounts disabled; the user re-enters the
+        API key after the email change.
+        """
+        old = _clean_email(old_email)
+        new = _clean_email(new_email)
+        self._ensure()
+        moved: dict[str, int] = {}
+        with self._connect() as connection:
+            dropped = connection.execute(
+                "DELETE FROM user_api_credentials WHERE owner_email = ?",
+                (old,),
+            )
+            moved["user_api_credentials_deleted"] = dropped.rowcount
+            connection.execute(
+                "UPDATE user_exchange_accounts SET owner_email = ? "
+                "WHERE owner_email = ?",
+                (new, old),
+            )
+            for table in ("user_strategies", "user_projects", "user_risk_profiles"):
+                cursor = connection.execute(
+                    f"UPDATE {table} SET owner_email = ? WHERE owner_email = ?",  # noqa: S608
+                    (new, old),
+                )
+                moved[table] = cursor.rowcount
+        return moved
+
     def public_payload(self, *, owner_email: str, is_admin: bool) -> dict[str, Any]:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
         accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)

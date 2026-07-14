@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -62,6 +63,7 @@ from .user_scope import (
     _require_user_assets,
 )
 
+from .preflight import PreflightError, collect_preflight_issues, enforce_preflight
 from .security import (
     LOGIN_FAILURE_WINDOW_SECONDS,
     LOGIN_LOCKOUT_SECONDS,
@@ -83,6 +85,8 @@ from .security import (
     _login_throttled_response,
     _make_session_token,
     _owner_email_from_payload,
+    _purge_user_data,
+    _reassign_user_data,
     _request_is_https,
     _request_user,
     _require_allowed_registration_email,
@@ -155,6 +159,7 @@ from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, load_fill_rows, persist_fill_pnl
 from ..funding_basis import funding_basis_payload, funding_settings_from_strategy_center
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
+from ..data_backup import backup_task_loop
 from ..jsonl_rotation import rotate_jsonl_log_if_needed
 from ..observability import configure_logging
 from ..main import (
@@ -4975,6 +4980,123 @@ async def api_profile(request: web.Request) -> web.Response:
     )
 
 
+async def api_account(request: web.Request) -> web.Response:
+    """Self-service account management: change email, delete account."""
+    cfg: BotConfig = request.app["config"]
+    user = _request_user(request)
+    if user is None:
+        return web.json_response(
+            {"error": "a registered user session is required"},
+            status=403,
+        )
+    store = _user_store(request)
+    try:
+        payload = await request.json()
+        action = str(payload.get("action") or "")
+        if action == "request_email_change":
+            password = str(payload.get("password") or "")
+            totp = str(payload.get("totp") or "")
+            new_email = normalize_email(str(payload.get("new_email") or ""))
+            if store.authenticate(
+                email=user.email, password=password, totp=totp
+            ) is None:
+                raise PermissionError("password confirmation failed")
+            if store.get_user(new_email) is not None:
+                raise ValueError("an account with the new email already exists")
+            sender = _verification_email_sender(request)
+            if not sender.configured():
+                raise RuntimeError("email verification service is not configured")
+            code = _verification_manager(request).issue(
+                email=new_email,
+                purpose="change_email",
+                client_key=_client_ip(request, cfg) or "unknown",
+            )
+            try:
+                await sender.send_code(
+                    email=new_email,
+                    code=code,
+                    purpose="change_email",
+                )
+            except Exception:
+                _verification_manager(request).discard(
+                    email=new_email,
+                    purpose="change_email",
+                )
+                raise RuntimeError(
+                    "verification email could not be sent"
+                ) from None
+            write_web_audit_event(
+                cfg,
+                request,
+                action="account_email_change_requested",
+                target=user.email,
+                detail=f"verification code sent to {new_email}",
+            )
+            return web.json_response({"ok": True, "code_sent": True})
+        if action == "confirm_email_change":
+            new_email = normalize_email(str(payload.get("new_email") or ""))
+            code = str(payload.get("code") or "")
+            if not _verification_manager(request).verify(
+                email=new_email,
+                purpose="change_email",
+                code=code,
+            ):
+                raise PermissionError("verification code is invalid or expired")
+            old_email = user.email
+            moved = store.change_email(email=old_email, new_email=new_email)
+            _reassign_user_data(request, old_email, new_email)
+            write_web_audit_event(
+                cfg,
+                request,
+                action="account_email_changed",
+                target=new_email,
+                detail=f"email changed from {old_email}",
+            )
+            response = web.json_response(
+                {
+                    "ok": True,
+                    "email": moved.email,
+                    # Sessions for the old identity stop validating and
+                    # stored exchange credentials must be re-entered (their
+                    # encryption is bound to the account email).
+                    "reauth_required": True,
+                    "credentials_reset": True,
+                }
+            )
+            response.del_cookie(SESSION_COOKIE)
+            return response
+        if action == "delete_account":
+            password = str(payload.get("password") or "")
+            totp = str(payload.get("totp") or "")
+            store.delete_own_account(
+                email=user.email,
+                password=password,
+                totp=totp,
+            )
+            _purge_user_data(request, user.email)
+            write_web_audit_event(
+                cfg,
+                request,
+                action="account_deleted",
+                target=user.email,
+                detail="user deleted their own account",
+            )
+            response = web.json_response({"ok": True, "deleted": True})
+            response.del_cookie(SESSION_COOKIE)
+            return response
+        raise ValueError("unsupported account action")
+    except VerificationRateLimited as exc:
+        response = web.json_response({"error": str(exc)}, status=429)
+        response.headers["Retry-After"] = str(int(exc.retry_after + 0.999))
+        return response
+    except PermissionError as exc:
+        return web.json_response({"error": str(exc)}, status=403)
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
 def _public_admin_user_dict(user: WebUser) -> dict[str, Any]:
     return {
         "email": user.email,
@@ -5065,6 +5187,7 @@ async def api_admin_users(request: web.Request) -> web.Response:
             if not email:
                 raise ValueError("email is required")
             store.admin_delete_user(email=email)
+            _purge_user_data(request, email)
             audit_action = "admin_user_delete"
             audit_target = email
             audit_detail = "deleted user"
@@ -7881,6 +8004,12 @@ def create_app(
             supervisor.run(),
             name="runtime-supervisor",
         )
+        backup_task: asyncio.Task[Any] | None = None
+        if cfg.backup.enabled:
+            backup_task = asyncio.create_task(
+                backup_task_loop(cfg),
+                name="data-backup",
+            )
         try:
             yield
         finally:
@@ -7888,10 +8017,15 @@ def create_app(
             for guard_task in list(guard_tasks):
                 guard_task.cancel()
             supervisor_task.cancel()
+            if backup_task is not None:
+                backup_task.cancel()
             if guard_tasks:
                 await asyncio.gather(*guard_tasks, return_exceptions=True)
             with contextlib.suppress(asyncio.CancelledError):
                 await supervisor_task
+            if backup_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await backup_task
             await user_backtest_service.close()
             await user_paper_service.close()
 
@@ -7928,6 +8062,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override config poll interval",
     )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Log production preflight errors instead of refusing to start",
+    )
     return parser
 
 
@@ -7935,6 +8074,17 @@ def main() -> None:
     configure_logging()
     args = build_parser().parse_args()
     cfg = load_config(args.config)
+    try:
+        enforce_preflight(cfg, strict=not args.skip_preflight)
+    except PreflightError as exc:
+        for message in exc.errors:
+            print(f"preflight error: {message}", file=sys.stderr)
+        print(
+            "refusing to start; fix the configuration above or rerun with "
+            "--skip-preflight to start anyway",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from None
     app = create_app(cfg, args.strategy, args.poll_seconds)
     web.run_app(app, host=args.host, port=args.port)
 

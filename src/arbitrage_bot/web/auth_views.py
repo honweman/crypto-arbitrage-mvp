@@ -209,6 +209,58 @@ def forgot_password_html(
     return _auth_document(title="Reset Crypto Trading Password", body=body)
 
 
+def _account_management_html(user: WebUser, pending_new_email: str = "") -> str:
+    totp_field = (
+        '<label for="acct-totp">Authenticator 动态码 / Authenticator code</label>\n'
+        '  <input id="acct-totp" name="totp" type="text" inputmode="numeric" '
+        'autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>'
+        if user.totp_enabled
+        else ""
+    )
+    delete_totp_field = totp_field.replace("acct-totp", "del-totp")
+    if pending_new_email:
+        change_email_form = f"""
+<form method="post" action="/security">
+  <h1>确认新邮箱 / Confirm new email</h1>
+  <p>验证码已发送至 <code>{html.escape(pending_new_email)}</code>。</p>
+  <input type="hidden" name="action" value="confirm_email_change">
+  <input type="hidden" name="new_email" value="{html.escape(pending_new_email, quote=True)}">
+  <label for="change-code">6 位验证码 / 6-digit code</label>
+  <input id="change-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{{6}}" maxlength="6" required>
+  <button type="submit">确认更换邮箱 / Confirm email change</button>
+  <div class="rule">更换后所有会话将注销，交易所 API 凭证需重新录入。</div>
+</form>
+"""
+    else:
+        change_email_form = f"""
+<form method="post" action="/security">
+  <h1>更换登录邮箱 / Change login email</h1>
+  <p>当前邮箱 / Current email: <code>{html.escape(user.email)}</code></p>
+  <input type="hidden" name="action" value="request_email_change">
+  <label for="new-email">新邮箱 / New email</label>
+  <input id="new-email" name="new_email" type="email" autocomplete="email" required>
+  <label for="change-password">当前密码 / Current password</label>
+  <input id="change-password" name="password" type="password" autocomplete="current-password" required>
+  {totp_field}
+  <button type="submit">发送验证码 / Send verification code</button>
+  <div class="rule">验证码会发送到新邮箱。更换后需重新登录，且出于加密安全，交易所 API 凭证需重新录入。</div>
+</form>
+"""
+    delete_form = f"""
+<form method="post" action="/security">
+  <h1>删除账户 / Delete account</h1>
+  <p>删除后账户与全部数据（项目、交易所账户、策略、模拟盘与回测记录）将立即清除，且无法恢复。</p>
+  <input type="hidden" name="action" value="delete_account">
+  <label for="del-password">当前密码 / Current password</label>
+  <input id="del-password" name="password" type="password" autocomplete="current-password" required>
+  {delete_totp_field}
+  <label class="rule"><input type="checkbox" name="confirm_delete" required> 我确认永久删除该账户及全部数据 / I confirm permanent deletion</label>
+  <button type="submit">永久删除账户 / Permanently delete account</button>
+</form>
+"""
+    return change_email_form + delete_form
+
+
 def security_html(
     *,
     user: WebUser,
@@ -217,6 +269,7 @@ def security_html(
     error: str = "",
     notice: str = "",
     signed_out: bool = False,
+    pending_new_email: str = "",
 ) -> str:
     error_html = f'<div class="error">{html.escape(error)}</div>'
     notice_html = f'<div class="notice">{html.escape(notice)}</div>'
@@ -276,4 +329,6 @@ def security_html(
   {error_html}
 </form>
 """
+    if not signed_out:
+        body += _account_management_html(user, pending_new_email)
     return _auth_document(title="Crypto Trading Login Security", body=body)
