@@ -171,6 +171,31 @@ class AssetLedgerStoreTest(unittest.TestCase):
             }
         self.assertIn("unexplained_balance_change", categories)
 
+    def test_balance_projection_does_not_mix_collection_sources(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            source="web-monitor",
+            observed_at=1000,
+        )
+        changed = _balances()
+        changed["accounts"][0]["balance"]["currencies"][1] = {
+            "currency": "USDC",
+            "free": 130,
+            "used": 20,
+            "total": 150,
+        }
+        result = store.record_account_snapshot(
+            account_key="coinbase-spot",
+            balance_account=changed["accounts"][0],
+            order_account=_activity()["accounts"][0],
+            source="account-reader:coinbase-spot",
+            observed_at=1010,
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["diff_count"], 0)
+
     def test_failed_refresh_uses_last_healthy_checkpoint(self) -> None:
         balances, activity, _ = attach_ledger_checkpoint(
             self.cfg, _balances(), _activity()

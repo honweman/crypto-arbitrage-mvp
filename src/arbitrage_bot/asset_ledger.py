@@ -359,9 +359,10 @@ class AssetLedgerStore:
         previous_header = conn.execute(
             """
             select snapshot_id, observed_at from balance_snapshots
-            where account_key = ? order by observed_at desc limit 1
+            where account_key = ? and source = ?
+            order by observed_at desc limit 1
             """,
-            (account_key,),
+            (account_key, source),
         ).fetchone()
         previous_totals: dict[str, float] = {}
         if previous_header is not None:
