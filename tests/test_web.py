@@ -3609,6 +3609,50 @@ class WebMonitorTest(unittest.TestCase):
         self.assertTrue(payload["auto_stop_recommended"])
         self.assertIn("order_activity_error", payload["auto_stop_reasons"][0])
 
+    def test_order_reconciliation_isolates_partial_account_errors(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "status": "error",
+                "accounts": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "status": "error",
+                        "errors": ["open orders unavailable"],
+                    },
+                    {
+                        "exchange": "upbit-spot",
+                        "status": "ok",
+                        "errors": [],
+                    },
+                ],
+                "open_orders": [],
+                "closed_orders": [],
+                "recent_trades": [],
+            }
+        )
+
+        self.assertEqual(payload["status"], "warning")
+        self.assertFalse(payload["auto_stop_recommended"])
+        self.assertEqual(payload["critical_issue_count"], 0)
+        self.assertEqual(payload["issues"][0]["type"], "account_order_activity_error")
+        self.assertEqual(payload["issues"][0]["exchange"], "coinbase-spot")
+
+    def test_uncertain_intent_warns_but_does_not_stop_other_accounts(self) -> None:
+        payload = build_order_reconciliation_payload(
+            {
+                "status": "ok",
+                "open_orders": [],
+                "closed_orders": [],
+                "recent_trades": [],
+                "reliability": {"pending_count": 1, "unresolved_count": 1},
+            }
+        )
+
+        self.assertEqual(payload["status"], "warning")
+        self.assertFalse(payload["auto_stop_recommended"])
+        self.assertEqual(payload["critical_issue_count"], 0)
+        self.assertEqual(payload["issues"][0]["type"], "uncertain_order_intent")
+
     def test_order_reconciliation_does_not_auto_stop_for_info_only_items(self) -> None:
         payload = build_order_reconciliation_payload(
             {

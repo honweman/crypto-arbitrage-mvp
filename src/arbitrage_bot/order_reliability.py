@@ -283,6 +283,30 @@ class OrderIntentStore:
             ).fetchall()
         return [self._row(row) for row in rows]
 
+    def first_uncertain(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        exclude_client_order_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return an unresolved intent that should quarantine one market."""
+        self._ensure()
+        stale_before = time.time() - IN_FLIGHT_GRACE_SECONDS
+        query = """
+            SELECT * FROM order_intents
+            WHERE exchange = ? AND symbol = ?
+              AND (status = 'unknown' OR (status = 'reserved' AND updated_at <= ?))
+        """
+        params: list[Any] = [exchange, symbol, stale_before]
+        if exclude_client_order_id:
+            query += " AND client_order_id != ?"
+            params.append(exclude_client_order_id)
+        query += " ORDER BY updated_at ASC LIMIT 1"
+        with self._connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        return self._row(row) if row else None
+
     def summary(self) -> dict[str, Any]:
         self._ensure()
         now = time.time()
@@ -303,6 +327,18 @@ class OrderIntentStore:
         reserved_count = counts.get("reserved", 0)
         stale_reserved = max(0, reserved_count - fresh_reserved)
         uncertain_count = stale_reserved + counts.get("unknown", 0)
+        with self._connect() as connection:
+            resource_rows = connection.execute(
+                """
+                SELECT exchange, symbol, COUNT(*) AS count
+                FROM order_intents
+                WHERE status = 'unknown'
+                   OR (status = 'reserved' AND updated_at <= ?)
+                GROUP BY exchange, symbol
+                ORDER BY exchange, symbol
+                """,
+                (now - IN_FLIGHT_GRACE_SECONDS,),
+            ).fetchall()
         return {
             "path": str(self.path),
             "counts": counts,
@@ -310,6 +346,14 @@ class OrderIntentStore:
             "uncertain_count": uncertain_count,
             "in_flight_count": fresh_reserved,
             "stale_reserved_count": stale_reserved,
+            "quarantined_resources": [
+                {
+                    "exchange": str(row["exchange"]),
+                    "symbol": str(row["symbol"]),
+                    "count": int(row["count"]),
+                }
+                for row in resource_rows
+            ],
             "total_count": sum(counts.values()),
         }
 

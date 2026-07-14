@@ -7902,14 +7902,6 @@ def create_app(
                 _all_account_exchanges(startup_cfg)
             )
             await state.set_order_reliability(startup_recovery)
-            unresolved_count = int(startup_recovery.get("unresolved_count") or 0)
-            if unresolved_count > 0:
-                await state.set_auto_stopped(
-                    reason=(
-                        f"{unresolved_count} uncertain order intent(s) "
-                        "require reconciliation"
-                    )
-                )
             return startup_recovery
         finally:
             await startup_manager.close()

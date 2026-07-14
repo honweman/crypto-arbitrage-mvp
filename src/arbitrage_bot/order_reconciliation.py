@@ -8,7 +8,6 @@ from typing import Any
 RECONCILIATION_AUTO_STOP_WARMUP_SECONDS = 15.0
 RECONCILIATION_AUTO_STOP_TYPES = {
     "order_activity_error",
-    "uncertain_order_intent",
 }
 
 
@@ -240,7 +239,7 @@ def build_order_reconciliation_payload(
         if pending_count > 0 or unresolved_count > 0:
             issues.append(
                 _reconciliation_issue(
-                    level="critical",
+                    level="warning",
                     issue_type="uncertain_order_intent",
                     message=(
                         f"{max(pending_count, unresolved_count)} order intent(s) "
@@ -356,14 +355,31 @@ def build_order_reconciliation_payload(
         )
 
     if order_activity.get("status") == "error":
-        issues.insert(
-            0,
-            _reconciliation_issue(
-                level="error",
-                issue_type="order_activity_error",
-                message="Order activity contains account errors; reconciliation is incomplete.",
-            ),
-        )
+        accounts = [
+            account
+            for account in order_activity.get("accounts", []) or []
+            if isinstance(account, dict) and account.get("status") != "idle"
+        ]
+        errored_accounts = [account for account in accounts if account.get("errors")]
+        for account in errored_accounts:
+            issues.insert(
+                0,
+                _reconciliation_issue(
+                    level="warning",
+                    issue_type="account_order_activity_error",
+                    exchange=str(account.get("exchange") or ""),
+                    message="Account order activity is unavailable; its trading resources are isolated.",
+                ),
+            )
+        if not accounts or (errored_accounts and len(errored_accounts) == len(accounts)):
+            issues.insert(
+                0,
+                _reconciliation_issue(
+                    level="error",
+                    issue_type="order_activity_error",
+                    message="Order activity is unavailable for every active account.",
+                ),
+            )
 
     status = "ok"
     if any(issue["level"] == "error" for issue in issues):

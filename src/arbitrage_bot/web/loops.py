@@ -133,6 +133,21 @@ def _parse_daily_report_time(value: str) -> tuple[int, int]:
     return (hour, minute)
 
 
+async def _refresh_uncertain_order_intents(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    state: MonitorState,
+) -> dict[str, Any] | None:
+    summary = manager.order_reliability_summary()
+    if int(summary.get("pending_count") or 0) <= 0:
+        return None
+    recovery = await manager.recover_pending_order_intents(
+        _all_account_exchanges(cfg)
+    )
+    await state.set_order_reliability(recovery)
+    return recovery
+
+
 def _daily_report_due(
     cfg: BotConfig,
     *,
@@ -314,6 +329,11 @@ async def monitor_loop(
                         next_balance_scan = now + ACCOUNT_BALANCE_POLL_SECONDS
                     if now >= next_order_activity_scan:
                         try:
+                            await _refresh_uncertain_order_intents(
+                                runtime_cfg,
+                                manager,
+                                state,
+                            )
                             auto_tasks_snapshot = await state.auto_buy_sell_tasks()
                             market_maker_runtime_snapshot = (
                                 await state.market_maker_runtime()
@@ -950,6 +970,11 @@ async def monitor_loop(
 
                 if now >= next_order_activity_scan:
                     try:
+                        await _refresh_uncertain_order_intents(
+                            runtime_cfg,
+                            manager,
+                            state,
+                        )
                         auto_tasks_snapshot = await state.auto_buy_sell_tasks()
                         market_maker_runtime_snapshot = (
                             await state.market_maker_runtime()

@@ -1026,6 +1026,17 @@ class ExchangeManager:
             "price": float(prepared["price"]),
             "post_only": bool(post_only),
         }
+        quarantined = store.first_uncertain(
+            exchange=cfg.key,
+            symbol=symbol,
+            exclude_client_order_id=client_order_id,
+        )
+        if quarantined is not None:
+            raise RuntimeError(
+                "order submission quarantined for "
+                f"{cfg.key} {symbol}: uncertain intent "
+                f"{quarantined['client_order_id']} requires reconciliation"
+            )
         reservation = store.reserve(client_order_id, intent)
         if reservation["action"] == "return_existing":
             response = reservation.get("response")

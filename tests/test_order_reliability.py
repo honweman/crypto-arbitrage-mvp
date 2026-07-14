@@ -97,6 +97,36 @@ class OrderIntentStoreTest(unittest.TestCase):
             self.assertEqual(uncertain["pending_count"], 1)
             self.assertEqual(uncertain["in_flight_count"], 0)
 
+    def test_uncertain_intent_quarantines_only_its_market(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OrderIntentStore(Path(tmp) / "orders.sqlite3")
+            intent = {
+                "exchange": "coinbase-spot",
+                "symbol": "ACS/USDC",
+                "side": "buy",
+                "amount": 10.0,
+                "price": 0.1,
+            }
+            store.reserve("uncertain", intent)
+            store.mark_unknown("uncertain", "gateway timeout")
+
+            blocked = store.first_uncertain(
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+            )
+            other_market = store.first_uncertain(
+                exchange="upbit-spot",
+                symbol="ACS/USDT",
+            )
+            summary = store.summary()
+
+            self.assertEqual(blocked["client_order_id"], "uncertain")
+            self.assertIsNone(other_market)
+            self.assertEqual(
+                summary["quarantined_resources"],
+                [{"exchange": "coinbase-spot", "symbol": "ACS/USDC", "count": 1}],
+            )
+
 
 class IdempotentExchangeSubmissionTest(unittest.IsolatedAsyncioTestCase):
     async def test_same_client_id_submits_once_and_replays_response(self) -> None:
@@ -197,6 +227,58 @@ class IdempotentExchangeSubmissionTest(unittest.IsolatedAsyncioTestCase):
             summary = manager.order_reliability_summary()
             self.assertEqual(summary["pending_count"], 1)
             self.assertEqual(summary["counts"]["unknown"], 1)
+
+    async def test_uncertain_intent_blocks_only_new_orders_on_same_market(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.created: list[str] = []
+
+            async def create_order(self, *args: object) -> dict[str, object]:
+                params = dict(args[-1])  # type: ignore[arg-type]
+                self.created.append(str(params.get("clientOrderId") or ""))
+                return {"id": f"order-{len(self.created)}", "status": "open"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = ExchangeConfig(id="coinbase", label="coinbase-spot")
+            manager = ExchangeManager(
+                order_journal_path=str(Path(tmp) / "orders.sqlite3")
+            )
+            client = FakeClient()
+            manager._clients[cfg.key] = client
+            assert manager._order_intents is not None
+            manager._order_intents.reserve(
+                "uncertain-1",
+                {
+                    "exchange": cfg.key,
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                    "amount": 10.0,
+                    "price": 0.1,
+                },
+            )
+            manager._order_intents.mark_unknown("uncertain-1", "gateway timeout")
+
+            with self.assertRaisesRegex(RuntimeError, "submission quarantined"):
+                await manager.create_prepared_limit_order(
+                    cfg,
+                    symbol="ACS/USDC",
+                    side="sell",
+                    prepared={"amount": 9.0, "price": 0.2, "errors": []},
+                    post_only=False,
+                    client_order_id="new-order",
+                )
+
+            allowed = await manager.create_prepared_limit_order(
+                cfg,
+                symbol="BTC/USDC",
+                side="buy",
+                prepared={"amount": 0.01, "price": 100.0, "errors": []},
+                post_only=False,
+                client_order_id="other-market",
+            )
+
+            self.assertEqual(allowed["id"], "order-1")
+            self.assertEqual(client.created, ["other-market"])
 
     async def test_cancel_retries_until_open_order_absence_is_confirmed(self) -> None:
         class FakeClient:
