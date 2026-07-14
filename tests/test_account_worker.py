@@ -6,7 +6,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from arbitrage_bot.account_worker import AccountWorker, _isolated_config
+from arbitrage_bot.account_worker import (
+    AccountWorker,
+    _isolated_config,
+    apply_open_order_reserves,
+)
 from arbitrage_bot.config import AssetLedgerConfig, load_config
 
 
@@ -32,6 +36,42 @@ class AccountWorkerTest(unittest.IsolatedAsyncioTestCase):
         isolated = _isolated_config(self.cfg, "coinbase-spot")
         self.assertEqual([row.key for row in isolated.spot_exchanges], ["coinbase-spot"])
         self.assertEqual(isolated.derivative_exchanges, [])
+
+    def test_hidden_coinbase_order_reserves_are_added_back_to_total(self) -> None:
+        balances = {
+            "balance": {
+                "checked": True,
+                "currencies": [
+                    {"currency": "USDC", "free": 80, "used": 0, "total": 80},
+                    {"currency": "ACS", "free": 900, "used": 0, "total": 900},
+                ],
+            }
+        }
+        activity = {
+            "open_orders": [
+                {
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                    "price": 0.2,
+                    "remaining": 100,
+                },
+                {
+                    "symbol": "ACS/USDC",
+                    "side": "sell",
+                    "price": 0.3,
+                    "remaining": 100,
+                },
+            ]
+        }
+        normalized = apply_open_order_reserves(balances, activity)
+        rows = {
+            row["currency"]: row
+            for row in normalized["balance"]["currencies"]
+        }
+        self.assertEqual(rows["USDC"]["total"], 100)
+        self.assertEqual(rows["USDC"]["used"], 20)
+        self.assertEqual(rows["ACS"]["total"], 1000)
+        self.assertEqual(rows["ACS"]["used"], 100)
 
     async def test_one_worker_cycle_records_heartbeat_and_snapshot(self) -> None:
         balances = {

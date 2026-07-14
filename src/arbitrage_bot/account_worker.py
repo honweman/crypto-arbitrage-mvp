@@ -91,6 +91,93 @@ def _normalize_trade(
     }
 
 
+def _symbol_currencies(symbol: str) -> tuple[str, str]:
+    if "/" not in symbol:
+        return "", ""
+    base, quote = symbol.split("/", 1)
+    return base.upper(), quote.split(":", 1)[0].upper()
+
+
+def apply_open_order_reserves(
+    balance_account: dict[str, Any],
+    order_account: dict[str, Any],
+) -> dict[str, Any]:
+    balance = balance_account.get("balance")
+    if not isinstance(balance, dict) or not balance.get("checked"):
+        return balance_account
+    reserves: dict[str, float] = {}
+    for order in order_account.get("open_orders", []) or []:
+        if not isinstance(order, dict):
+            continue
+        base, quote = _symbol_currencies(str(order.get("symbol") or ""))
+        remaining = _number(order.get("remaining"))
+        if remaining is None:
+            amount = _number(order.get("amount"))
+            filled = _number(order.get("filled")) or 0.0
+            remaining = max(0.0, (amount or 0.0) - filled)
+        side = str(order.get("side") or "").lower()
+        if side == "sell" and base:
+            reserves[base] = reserves.get(base, 0.0) + remaining
+        elif side == "buy" and quote:
+            price = _number(order.get("price")) or 0.0
+            reserves[quote] = reserves.get(quote, 0.0) + remaining * price
+
+    currencies = {
+        str(row.get("currency") or "").upper(): dict(row)
+        for row in balance.get("currencies", []) or []
+        if isinstance(row, dict) and row.get("currency")
+    }
+    for currency, reserved in reserves.items():
+        if reserved <= 0:
+            continue
+        row = currencies.setdefault(
+            currency,
+            {"currency": currency, "free": None, "used": None, "total": None},
+        )
+        raw_free = _number(row.get("free"))
+        raw_used = _number(row.get("used"))
+        raw_total = _number(row.get("total"))
+        if raw_total is None and (raw_free is not None or raw_used is not None):
+            raw_total = float(raw_free or 0.0) + float(raw_used or 0.0)
+        adjusted_used = max(float(raw_used or 0.0), reserved)
+        hidden_reserve = (
+            raw_total is not None
+            and raw_free is not None
+            and abs(raw_total - raw_free) <= 1e-9
+            and float(raw_used or 0.0) <= 1e-9
+        )
+        if hidden_reserve:
+            adjusted_free = float(raw_free or 0.0)
+            adjusted_total = adjusted_free + adjusted_used
+            adjustment = "added_to_total"
+        else:
+            adjusted_total = max(float(raw_total or 0.0), adjusted_used)
+            adjusted_free = max(0.0, adjusted_total - adjusted_used)
+            adjustment = "within_total"
+        row.update(
+            {
+                "exchange_free": raw_free,
+                "exchange_used": raw_used,
+                "exchange_total": raw_total,
+                "open_order_reserved": reserved,
+                "open_order_reserve_adjustment": adjustment,
+                "free": adjusted_free,
+                "used": adjusted_used,
+                "total": adjusted_total,
+            }
+        )
+    normalized = dict(balance_account)
+    normalized["balance"] = {
+        **balance,
+        "currencies": sorted(currencies.values(), key=lambda row: row["currency"]),
+        "open_order_reserves": {
+            "currencies": dict(sorted(reserves.items())),
+            "open_order_count": len(order_account.get("open_orders", []) or []),
+        },
+    }
+    return normalized
+
+
 async def fetch_account_balances_snapshot(
     cfg: BotConfig,
     manager: ExchangeManager,
@@ -227,6 +314,7 @@ class AccountWorker:
         )
         self.once = once
         self.worker_id = f"account-reader:{account_key}"
+        self.snapshot_source = f"{self.worker_id}:reserve-adjusted-v1"
         self.ledger = AssetLedgerStore(cfg.asset_ledger)
         self.manager = ExchangeManager()
         self._stop = asyncio.Event()
@@ -242,7 +330,7 @@ class AccountWorker:
             balances = await fetch_account_balances_snapshot(
                 self.cfg, self.manager, self.account_key
             )
-            return balances, activity
+            return apply_open_order_reserves(balances, activity), activity
 
         return await asyncio.wait_for(
             fetch_consistent_snapshot(), timeout=self.timeout_seconds
@@ -268,7 +356,7 @@ class AccountWorker:
                 account_key=self.account_key,
                 balance_account=balances,
                 order_account=activity,
-                source=self.worker_id,
+                source=self.snapshot_source,
             )
             finished_at = time.time()
             next_due_at = finished_at + self.interval_seconds
