@@ -14,7 +14,7 @@ from ..config import AlertConfig
 from .users import normalize_email
 
 
-VERIFICATION_PURPOSES = {"register", "password_reset"}
+VERIFICATION_PURPOSES = {"register", "password_reset", "change_email"}
 
 
 class VerificationRateLimited(ValueError):
@@ -177,6 +177,9 @@ class VerificationEmailSender:
         if purpose == "register":
             subject = "Crypto Trading registration code"
             action = "complete your account registration"
+        elif purpose == "change_email":
+            subject = "Crypto Trading email change code"
+            action = "confirm your new account email"
         else:
             subject = "Crypto Trading password reset code"
             action = "reset your account password"

@@ -422,6 +422,41 @@ class UserPaperTradingStore:
                 )
             connection.commit()
 
+    def purge_owner(self, owner_email: str) -> None:
+        """Delete all paper trading data owned by owner_email."""
+        email = _clean_text(owner_email).lower()
+        self._ensure()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for table in (
+                "user_paper_states",
+                "user_paper_fills",
+                "user_paper_events",
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE owner_email = ?",  # noqa: S608
+                    (email,),
+                )
+            connection.commit()
+
+    def reassign_owner(self, old_email: str, new_email: str) -> None:
+        """Move paper trading data to a new owner email."""
+        old = _clean_text(old_email).lower()
+        new = _clean_text(new_email).lower()
+        self._ensure()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for table in (
+                "user_paper_states",
+                "user_paper_fills",
+                "user_paper_events",
+            ):
+                connection.execute(
+                    f"UPDATE {table} SET owner_email = ? WHERE owner_email = ?",  # noqa: S608
+                    (new, old),
+                )
+            connection.commit()
+
     def public_payload(self, *, owner_email: str, is_admin: bool) -> dict[str, Any]:
         self._ensure()
         where, params = self._scope(owner_email, is_admin)

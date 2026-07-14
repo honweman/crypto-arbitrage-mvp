@@ -7,6 +7,7 @@ def register_routes(app: web.Application) -> None:
     from .observability_routes import api_health, api_metrics, favicon
     from . import (
         STATIC_DIR,
+        api_account,
         api_admin_users,
         api_cancel_bulk_orders,
         api_cancel_order,
@@ -67,6 +68,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/state", api_state)
     app.router.add_get("/api/state/stream", api_state_stream)
     app.router.add_post("/api/profile", api_profile)
+    app.router.add_post("/api/account", api_account)
     app.router.add_post("/api/control", api_control)
     app.router.add_get("/api/config-versions", api_config_versions_get)
     app.router.add_post("/api/config-versions", api_config_versions_post)
