@@ -196,6 +196,34 @@ class AssetLedgerStoreTest(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["diff_count"], 0)
 
+    def test_fill_observation_cursor_is_independent_per_source(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            source="web-monitor",
+            observed_at=1000,
+        )
+        worker_result = store.record_account_snapshot(
+            account_key="coinbase-spot",
+            balance_account=_balances()["accounts"][0],
+            order_account=_activity()["accounts"][0],
+            source="account-reader:coinbase-spot",
+            observed_at=1010,
+        )
+        self.assertEqual(worker_result["status"], "ok")
+        with sqlite3.connect(self.path) as conn:
+            sources = {
+                row[0]
+                for row in conn.execute(
+                    "select source from fill_source_observations"
+                ).fetchall()
+            }
+        self.assertEqual(
+            sources,
+            {"web-monitor", "account-reader:coinbase-spot"},
+        )
+
     def test_failed_refresh_uses_last_healthy_checkpoint(self) -> None:
         balances, activity, _ = attach_ledger_checkpoint(
             self.cfg, _balances(), _activity()

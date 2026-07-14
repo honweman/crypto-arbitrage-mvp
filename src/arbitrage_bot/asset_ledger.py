@@ -155,6 +155,17 @@ def init_asset_ledger(path: str) -> None:
             create index if not exists idx_ledger_fills_order
                 on ledger_fills(account_key, symbol, order_id);
 
+            create table if not exists fill_source_observations (
+                fill_key text not null references ledger_fills(fill_key)
+                    on delete cascade,
+                source text not null,
+                first_observed_at real not null,
+                last_observed_at real not null,
+                primary key(fill_key, source)
+            );
+            create index if not exists idx_fill_source_observations_source_time
+                on fill_source_observations(source, first_observed_at);
+
             create table if not exists position_snapshots (
                 snapshot_id text primary key,
                 observed_at real not null,
@@ -365,7 +376,17 @@ class AssetLedgerStore:
             (account_key, source),
         ).fetchone()
         previous_totals: dict[str, float] = {}
+        has_source_fill_baseline = False
         if previous_header is not None:
+            has_source_fill_baseline = bool(
+                conn.execute(
+                    """
+                    select 1 from fill_source_observations
+                    where source = ? and first_observed_at <= ? limit 1
+                    """,
+                    (source, float(previous_header["observed_at"])),
+                ).fetchone()
+            )
             previous_totals = {
                 str(row["currency"]): float(row["total"])
                 for row in conn.execute(
@@ -425,16 +446,18 @@ class AssetLedgerStore:
                         "message": f"{currency} total differs from free + used",
                     }
                 )
-        if previous_header is not None:
+        if previous_header is not None and has_source_fill_baseline:
             fill_deltas: dict[str, float] = {}
             fills = conn.execute(
                 """
-                select * from ledger_fills
-                where account_key = ? and first_observed_at > ?
-                    and first_observed_at <= ?
+                select f.* from ledger_fills f
+                join fill_source_observations o on o.fill_key = f.fill_key
+                where f.account_key = ? and o.source = ?
+                    and o.first_observed_at > ? and o.first_observed_at <= ?
                 """,
                 (
                     account_key,
+                    source,
                     float(previous_header["observed_at"]),
                     observed_at,
                 ),
@@ -612,6 +635,16 @@ class AssetLedgerStore:
                     observed_at,
                     _json(trade),
                 ),
+            )
+            conn.execute(
+                """
+                insert into fill_source_observations(
+                    fill_key, source, first_observed_at, last_observed_at
+                ) values (?, ?, ?, ?)
+                on conflict(fill_key, source) do update set
+                    last_observed_at=excluded.last_observed_at
+                """,
+                (fill_key, source, observed_at, observed_at),
             )
             self._insert_event(
                 conn,

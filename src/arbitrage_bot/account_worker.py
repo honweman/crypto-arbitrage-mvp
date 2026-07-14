@@ -235,16 +235,17 @@ class AccountWorker:
         self._stop.set()
 
     async def _fetch_cycle(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        async def fetch_consistent_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+            activity = await fetch_order_activity_snapshot(
+                self.cfg, self.manager, self.account_key
+            )
+            balances = await fetch_account_balances_snapshot(
+                self.cfg, self.manager, self.account_key
+            )
+            return balances, activity
+
         return await asyncio.wait_for(
-            asyncio.gather(
-                fetch_account_balances_snapshot(
-                    self.cfg, self.manager, self.account_key
-                ),
-                fetch_order_activity_snapshot(
-                    self.cfg, self.manager, self.account_key
-                ),
-            ),
-            timeout=self.timeout_seconds,
+            fetch_consistent_snapshot(), timeout=self.timeout_seconds
         )
 
     async def run_cycle(self) -> dict[str, Any]:
