@@ -70,8 +70,6 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const HIDDEN_UI_FEATURES = new Set([
 	      "api_accounts",
 	      "audit_trail",
-	      "onchain_history",
-	      "onchain_monitor",
 	      "orders_detail",
 	      "quote_rates",
 	      "readiness",

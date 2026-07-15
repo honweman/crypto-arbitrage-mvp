@@ -686,12 +686,16 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn(
             'data-ui-feature="quote_rates" data-ui-hidden-default="true"', HTML
         )
-        self.assertIn(
+        self.assertIn('data-ui-feature="onchain_monitor"', HTML)
+        self.assertIn('data-ui-feature="onchain_history"', HTML)
+        self.assertNotIn(
             'data-ui-feature="onchain_monitor" data-ui-hidden-default="true"', HTML
         )
-        self.assertIn(
+        self.assertNotIn(
             'data-ui-feature="onchain_history" data-ui-hidden-default="true"', HTML
         )
+        self.assertNotIn('"onchain_monitor",', APP_JS)
+        self.assertNotIn('"onchain_history",', APP_JS)
         self.assertIn("const HIDDEN_UI_FEATURES = new Set", APP_JS)
         self.assertIn("function applyFeatureVisibility", APP_JS)
         self.assertIn("status: [", APP_JS)
