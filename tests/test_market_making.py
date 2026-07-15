@@ -1562,6 +1562,317 @@ class MarketMakerLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["execution"]["canceled_count"], 1)
         self.assertEqual(manager.prepared_create_count, 4)
 
+    async def test_live_cycle_hysteresis_keeps_the_real_order_anchor(self) -> None:
+        base_book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014, amount=100_000)],
+            asks=[BookLevel(price=0.00016, amount=100_000)],
+        )
+        moved_book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014 * 1.0003, amount=100_000)],
+            asks=[BookLevel(price=0.00016 * 1.0003, amount=100_000)],
+        )
+        maker_cfg = MarketMakerConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            levels=2,
+            quote_per_level=1.0,
+            depth_shape="flat",
+            reprice_threshold_bps=2.0,
+            reprice_hysteresis_bps=3.0,
+            full_reprice_threshold_bps=25.0,
+        )
+        cfg = self._cfg(
+            market_maker=maker_cfg,
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        previous_plan = build_symmetric_market_maker_plan(
+            base_book,
+            maker_cfg,
+        ).to_dict()
+
+        class FakeManager:
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return [{"id": f"old-mm-{index}"} for index in range(1, 5)]
+
+        payload = await run_cycle(
+            cfg,
+            FakeManager(),  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=[f"old-mm-{index}" for index in range(1, 5)],
+            previous_plan=previous_plan,
+            previous_mid_price=float(previous_plan["mid_price"]),
+            order_book=moved_book,
+        )
+
+        self.assertEqual(payload["status"], "unchanged")
+        self.assertEqual(payload["replacement_mode"], "unchanged")
+        self.assertAlmostEqual(payload["effective_reprice_threshold_bps"], 5.0)
+        self.assertEqual(payload["active_plan"], previous_plan)
+        self.assertGreater(payload["reprice_bps"], 3.0)
+        self.assertLess(payload["reprice_bps"], 5.0)
+
+    async def test_live_cycle_reprices_only_the_changed_level(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014, amount=100_000)],
+            asks=[BookLevel(price=0.00016, amount=100_000)],
+        )
+        maker_cfg = MarketMakerConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            levels=2,
+            quote_per_level=1.0,
+            depth_shape="flat",
+            reprice_threshold_bps=2.0,
+            reprice_hysteresis_bps=3.0,
+            full_reprice_threshold_bps=25.0,
+        )
+        cfg = self._cfg(
+            market_maker=maker_cfg,
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        current_plan = build_symmetric_market_maker_plan(book, maker_cfg)
+        previous_plan = current_plan.to_dict()
+        previous_plan["orders"][0]["price"] *= 0.998
+        open_orders = [
+            {
+                "id": f"old-mm-{index}",
+                "side": order["side"],
+                "price": order["price"],
+                "amount": order["amount"],
+                "remaining": order["amount"],
+                "filled": 0.0,
+            }
+            for index, order in enumerate(previous_plan["orders"], start=1)
+        ]
+
+        class FakeManager:
+            def __init__(self) -> None:
+                self.open_orders = list(open_orders)
+                self.canceled: list[str] = []
+                self.created = 0
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return list(self.open_orders)
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ) -> dict[str, str]:
+                self.canceled.append(order_id)
+                self.open_orders = [
+                    order for order in self.open_orders if order["id"] != order_id
+                ]
+                return {"id": order_id, "status": "canceled"}
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": order["quote_notional"],
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, str]:
+                self.created += 1
+                return {"id": f"new-mm-{self.created}"}
+
+        manager = FakeManager()
+        payload = await run_cycle(
+            cfg,
+            manager,  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=[str(order["id"]) for order in open_orders],
+            previous_plan=previous_plan,
+            existing_open_orders=open_orders,
+            previous_mid_price=current_plan.mid_price,
+            order_book=book,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertEqual(payload["replacement_mode"], "partial")
+        self.assertEqual(payload["replaced_levels"], [{"side": "buy", "level": 1}])
+        self.assertEqual(manager.canceled, ["old-mm-1"])
+        self.assertEqual(payload["execution"]["canceled_count"], 1)
+        self.assertEqual(payload["execution"]["placed_count"], 1)
+        self.assertEqual(payload["risk"]["expected_cancel_count"], 1)
+        self.assertEqual(payload["risk"]["expected_create_count"], 1)
+        self.assertEqual(payload["risk"]["projected_open_orders"], 4)
+        self.assertEqual(payload["execution"]["retained_order_ids"], [
+            "old-mm-2",
+            "old-mm-3",
+            "old-mm-4",
+        ])
+        self.assertEqual(len(payload["execution"]["active_order_ids"]), 4)
+        self.assertEqual(len(payload["active_plan"]["orders"]), 4)
+
+    async def test_live_cycle_full_reprices_after_significant_mid_move(self) -> None:
+        base_book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014, amount=100_000)],
+            asks=[BookLevel(price=0.00016, amount=100_000)],
+        )
+        moved_book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=0.00014 * 1.003, amount=100_000)],
+            asks=[BookLevel(price=0.00016 * 1.003, amount=100_000)],
+        )
+        maker_cfg = MarketMakerConfig(
+            enabled=True,
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            levels=2,
+            quote_per_level=1.0,
+            depth_shape="flat",
+            reprice_threshold_bps=2.0,
+            reprice_hysteresis_bps=3.0,
+            full_reprice_threshold_bps=25.0,
+        )
+        cfg = self._cfg(
+            market_maker=maker_cfg,
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_cycle_quote=100.0,
+                max_open_orders=50,
+                max_cancels_per_cycle=10,
+                require_post_only=False,
+            ),
+        )
+        previous_plan = build_symmetric_market_maker_plan(
+            base_book,
+            maker_cfg,
+        ).to_dict()
+        open_orders = [
+            {
+                "id": f"old-mm-{index}",
+                "side": order["side"],
+                "price": order["price"],
+                "amount": order["amount"],
+                "remaining": order["amount"],
+                "filled": 0.0,
+            }
+            for index, order in enumerate(previous_plan["orders"], start=1)
+        ]
+
+        class FakeManager:
+            def __init__(self) -> None:
+                self.open_orders = list(open_orders)
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return list(self.open_orders)
+
+            async def cancel_orders(
+                self,
+                *_: object,
+                order_ids: list[str],
+                **__: object,
+            ) -> list[dict[str, str]]:
+                self.open_orders = [
+                    order for order in self.open_orders if order["id"] not in order_ids
+                ]
+                return [{"id": order_id, "status": "canceled"} for order_id in order_ids]
+
+            async def prepare_limit_orders(
+                self,
+                *_: object,
+                orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "exchange": "bybit-spot",
+                        "symbol": "ACS/USDT",
+                        "side": order["side"],
+                        "status": "ok",
+                        "requested_amount": order["amount"],
+                        "requested_price": order["price"],
+                        "amount": order["amount"],
+                        "price": order["price"],
+                        "cost": order["quote_notional"],
+                        "limits": {},
+                        "precision": {},
+                        "errors": [],
+                        "warnings": [],
+                    }
+                    for order in orders
+                ]
+
+            async def create_prepared_limit_orders(
+                self,
+                *_: object,
+                prepared_orders: list[dict[str, object]],
+                **__: object,
+            ) -> list[dict[str, str]]:
+                return [
+                    {"id": f"new-mm-{index}"}
+                    for index, _ in enumerate(prepared_orders, start=1)
+                ]
+
+        payload = await run_cycle(
+            cfg,
+            FakeManager(),  # type: ignore[arg-type]
+            live=True,
+            replace_existing=False,
+            replace_order_ids=[str(order["id"]) for order in open_orders],
+            previous_plan=previous_plan,
+            existing_open_orders=open_orders,
+            previous_mid_price=float(previous_plan["mid_price"]),
+            order_book=moved_book,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertEqual(payload["replacement_mode"], "full")
+        self.assertGreaterEqual(payload["mid_move_bps"], 25.0)
+        self.assertIn("above full-reprice threshold", payload["full_replace_reason"])
+        self.assertEqual(payload["execution"]["canceled_count"], 4)
+        self.assertEqual(payload["execution"]["placed_count"], 4)
+
     async def test_cancel_order_ids_uses_batch_cancel_when_available(self) -> None:
         class FakeManager:
             def __init__(self) -> None:

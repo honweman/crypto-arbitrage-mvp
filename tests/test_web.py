@@ -2315,6 +2315,8 @@ class WebMonitorTest(unittest.TestCase):
                 "min_order_quote": "0.5",
                 "min_distance_bps": "20",
                 "reprice_threshold_bps": "2.5",
+                "reprice_hysteresis_bps": "3",
+                "full_reprice_threshold_bps": "25",
                 "max_order_quote": "3.5",
                 "max_cycle_quote": "70",
                 "max_open_orders": "40",
@@ -2344,6 +2346,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["min_order_quote"], 0.5)
         self.assertEqual(overrides["min_distance_bps"], 20.0)
         self.assertEqual(overrides["reprice_threshold_bps"], 2.5)
+        self.assertEqual(overrides["reprice_hysteresis_bps"], 3.0)
+        self.assertEqual(overrides["full_reprice_threshold_bps"], 25.0)
         self.assertEqual(overrides["max_order_quote"], 3.5)
         self.assertEqual(overrides["max_cycle_quote"], 70.0)
         self.assertEqual(overrides["max_open_orders"], 40)
@@ -3783,6 +3787,33 @@ class WebMonitorTest(unittest.TestCase):
             reason,
             "open order count differs from previous MM plan; assuming fill/cancel drift",
         )
+
+    def test_market_maker_force_replace_on_partial_fill_or_config_change(self) -> None:
+        previous_plan = {
+            "orders": [
+                {"side": "buy", "level": 1},
+                {"side": "sell", "level": 1},
+            ]
+        }
+        partial_fill_reason = _market_maker_force_replace_reason(
+            ["mm-1", "mm-2"],
+            previous_plan,
+            existing_open_orders=[
+                {"id": "mm-1", "amount": 10, "remaining": 9, "filled": 1},
+                {"id": "mm-2", "amount": 10, "remaining": 10, "filled": 0},
+            ],
+        )
+        config_reason = _market_maker_force_replace_reason(
+            ["mm-1", "mm-2"],
+            previous_plan,
+            config_changed=True,
+        )
+
+        self.assertEqual(
+            partial_fill_reason,
+            "an MM order is partially filled; rebuilding the full ladder",
+        )
+        self.assertEqual(config_reason, "market maker configuration changed")
 
     def test_auto_stop_decision_stops_immediately_for_daily_loss(self) -> None:
         triggered, reason = _monitor_auto_stop_decision(

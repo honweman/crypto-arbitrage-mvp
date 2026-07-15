@@ -699,6 +699,8 @@ def _market_maker_overrides_from_payload(
         "min_order_quote",
         "min_distance_bps",
         "reprice_threshold_bps",
+        "reprice_hysteresis_bps",
+        "full_reprice_threshold_bps",
         "max_order_quote",
         "max_cycle_quote",
         "max_slippage_bps",

@@ -79,6 +79,7 @@ class RiskDecision:
     total_quote_notional: float = 0.0
     projected_open_orders: int | None = None
     expected_cancel_count: int = 0
+    expected_create_count: int = 0
     projected_positions_base: dict[str, float] = field(default_factory=dict)
     projected_exposure_quote: dict[str, float] = field(default_factory=dict)
     evaluated_at: float = field(default_factory=time)
@@ -93,6 +94,7 @@ class RiskDecision:
             "total_quote_notional": self.total_quote_notional,
             "projected_open_orders": self.projected_open_orders,
             "expected_cancel_count": self.expected_cancel_count,
+            "expected_create_count": self.expected_create_count,
             "projected_positions_base": self.projected_positions_base,
             "projected_exposure_quote": self.projected_exposure_quote,
             "evaluated_at": self.evaluated_at,
@@ -218,6 +220,7 @@ def evaluate_order_batch(
     daily_pnl_quote: float | None = None,
     existing_open_order_count: int | None = None,
     expected_cancel_count: int = 0,
+    expected_create_count: int | None = None,
     last_cancel_at: float | None = None,
     open_order_error: str | None = None,
     post_only: bool = True,
@@ -233,6 +236,11 @@ def evaluate_order_batch(
 
     reasons: list[str] = []
     warnings: list[str] = []
+    projected_create_count = (
+        len(orders)
+        if expected_create_count is None
+        else max(0, int(expected_create_count))
+    )
     total_quote = sum(order.quote_notional for order in orders)
     current_positions = current_positions_base or {}
     projected_positions, projected_exposure = _projected_position_data(
@@ -280,7 +288,7 @@ def evaluate_order_batch(
         projected_open_orders = max(
             0,
             existing_open_order_count - expected_cancel_count,
-        ) + len(orders)
+        ) + projected_create_count
         if cfg.max_open_orders > 0 and projected_open_orders > cfg.max_open_orders:
             reasons.append(
                 f"projected open orders {projected_open_orders} exceeds "
@@ -476,6 +484,7 @@ def evaluate_order_batch(
         total_quote_notional=total_quote,
         projected_open_orders=projected_open_orders,
         expected_cancel_count=expected_cancel_count,
+        expected_create_count=projected_create_count,
         projected_positions_base=projected_positions,
         projected_exposure_quote=projected_exposure,
     )

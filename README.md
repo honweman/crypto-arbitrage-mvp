@@ -221,7 +221,9 @@ The web monitor also shows a dry-run market maker ladder when `market_maker.enab
 
 `depth_shape: "linear"` makes the first level closest to the top of book the smallest, then increases quote size on each farther level. `quote_per_level` is the average quote amount per active level, so the per-side total remains approximately `levels * quote_per_level`; `depth_shape: "flat"` restores the old uniform sizing. `min_order_quote` is treated as a per-level floor when the total quote budget is large enough, which helps avoid creating inner orders below exchange minimum notional.
 
-`reprice_threshold_bps` reduces unnecessary cancel/replace churn. When live MM already has tracked orders and the new target ladder moved less than this threshold, the engine keeps the current orders instead of canceling and placing a new ladder. Set it to `0.0` for the old always-replace behavior; values around `1-5` bps are usually a better starting point for thin spot markets.
+`reprice_threshold_bps` and `reprice_hysteresis_bps` reduce unnecessary cancel/replace churn. The effective per-level boundary is their sum, measured from the price of the real order that is still open on the exchange. Levels that remain inside the boundary are retained; ordinary market movement only cancels and replaces levels that cross it. Set `reprice_threshold_bps` to `0.0` for the old always-replace behavior.
+
+`full_reprice_threshold_bps` controls structural ladder rebuilds. A partial or complete fill, exchange/tracked-order drift, a configuration change, or a mid-price move beyond this boundary cancels the tracked ladder and rebuilds it as one group. The defaults `2 + 3` bps for selective repricing and `25` bps for a full rebuild are intentionally less sensitive than the old 2 bps whole-ladder replacement.
 
 When the exchange adapter supports it, MM uses batch order APIs for ladder placement and cancellation. Binance spot, Binance USDT perpetuals, Bybit spot, and Bybit perpetuals are enabled for batch create/cancel; unsupported exchanges automatically stay on the guarded single-order path.
 
@@ -251,6 +253,8 @@ manual verification item before cross-exchange arbitrage.
   "min_order_quote": 0.1,
   "min_distance_bps": 0.0,
   "reprice_threshold_bps": 2.0,
+  "reprice_hysteresis_bps": 3.0,
+  "full_reprice_threshold_bps": 25.0,
   "poll_seconds": 1,
   "post_only": true,
   "cancel_existing_orders": false,

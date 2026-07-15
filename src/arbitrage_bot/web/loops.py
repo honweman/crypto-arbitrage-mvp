@@ -1864,9 +1864,24 @@ def _market_maker_force_replace_reason(
     previous_plan: dict[str, Any] | None,
     *,
     order_sync: dict[str, Any] | None = None,
+    existing_open_orders: list[dict[str, Any]] | None = None,
+    config_changed: bool = False,
 ) -> str | None:
+    if config_changed and open_order_ids:
+        return "market maker configuration changed"
     if order_sync and order_sync.get("changed"):
         return "exchange open orders differ from tracked MM ids; assuming fill/cancel drift"
+    for order in existing_open_orders or []:
+        try:
+            amount = float(order.get("amount") or 0.0)
+            filled = float(order.get("filled") or 0.0)
+            remaining_raw = order.get("remaining")
+            remaining = float(remaining_raw) if remaining_raw is not None else amount
+        except (TypeError, ValueError):
+            continue
+        tolerance = max(abs(amount), 1.0) * 1e-10
+        if filled > tolerance or remaining < amount - tolerance:
+            return "an MM order is partially filled; rebuilding the full ladder"
     if not open_order_ids or not previous_plan:
         return None
     previous_orders = previous_plan.get("orders")
@@ -3102,6 +3117,7 @@ async def _market_maker_instance_task_loop(
     previous_mid_price: float | None = None
     previous_plan: dict[str, Any] | None = None
     last_maker_cfg = None
+    active_maker_cfg = None
     runtime: dict[str, Any] = {
         "id": instance_id,
         "status": "starting",
@@ -3236,6 +3252,7 @@ async def _market_maker_instance_task_loop(
                     open_order_symbol = ""
                     previous_plan = None
                     previous_mid_price = None
+                    active_maker_cfg = None
 
                 open_order_sync: dict[str, Any] | None = None
                 if live_allowed or open_order_ids or coordination_hold is not None:
@@ -3388,10 +3405,15 @@ async def _market_maker_instance_task_loop(
                         orderbook_cache,
                     )
                     previous_plan_for_cycle = previous_plan
+                    config_changed = (
+                        active_maker_cfg is not None and maker_cfg != active_maker_cfg
+                    )
                     force_replace_reason = _market_maker_force_replace_reason(
                         open_order_ids,
                         previous_plan,
                         order_sync=open_order_sync,
+                        existing_open_orders=open_order_snapshot.get("open_orders"),
+                        config_changed=config_changed,
                     )
                     force_replace = force_replace_reason is not None
                     if force_replace:
@@ -3428,6 +3450,8 @@ async def _market_maker_instance_task_loop(
                             last_cancel_at=last_cancel_at,
                             order_book=order_book,
                             inventory_base=inventory_base,
+                            force_full_replace=force_replace,
+                            force_replace_reason=force_replace_reason,
                         )
                     )
                     if force_replace:
@@ -3451,21 +3475,22 @@ async def _market_maker_instance_task_loop(
                         payload,
                         source="market_maker_task",
                     )
-                    plan_payload = (
-                        payload.get("plan")
-                        if isinstance(payload.get("plan"), dict)
+                    active_plan_payload = (
+                        payload.get("active_plan")
+                        if isinstance(payload.get("active_plan"), dict)
                         else None
                     )
                     if (
-                        plan_payload
+                        active_plan_payload
                         and isinstance(
-                            plan_payload.get("mid_price"),
+                            active_plan_payload.get("mid_price"),
                             (int, float),
                         )
                         and payload.get("status") in {"placed", "unchanged"}
                     ):
-                        previous_plan = plan_payload
-                        previous_mid_price = float(plan_payload["mid_price"])
+                        previous_plan = active_plan_payload
+                        previous_mid_price = float(active_plan_payload["mid_price"])
+                        active_maker_cfg = maker_cfg
                     execution = (
                         payload.get("execution")
                         if isinstance(payload.get("execution"), dict)
@@ -3477,6 +3502,11 @@ async def _market_maker_instance_task_loop(
                         last_cancel_at = time.time()
                     open_order_ids = (
                         [
+                            str(order_id)
+                            for order_id in execution.get("active_order_ids", [])
+                            if order_id
+                        ]
+                        or [
                             str(order_id)
                             for order_id in execution.get("placed_order_ids", [])
                             if order_id
@@ -3510,6 +3540,7 @@ async def _market_maker_instance_task_loop(
                         "open_order_sync": open_order_sync,
                         "force_replace": force_replace,
                         "force_replace_reason": force_replace_reason,
+                        "replacement_mode": payload.get("replacement_mode"),
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,
                         "cycle_count": cycle_count,

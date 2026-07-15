@@ -89,6 +89,8 @@ class MarketMakerConfig:
     min_order_quote: float = 0.0
     min_distance_bps: float = 0.0
     reprice_threshold_bps: float = 0.0
+    reprice_hysteresis_bps: float = 3.0
+    full_reprice_threshold_bps: float = 25.0
     max_order_quote: float = 0.0
     max_cycle_quote: float = 0.0
     max_open_orders: int = 0
@@ -583,6 +585,10 @@ def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
         min_order_quote=float(raw.get("min_order_quote", 0.0)),
         min_distance_bps=float(raw.get("min_distance_bps", 0.0)),
         reprice_threshold_bps=float(raw.get("reprice_threshold_bps", 0.0)),
+        reprice_hysteresis_bps=float(raw.get("reprice_hysteresis_bps", 3.0)),
+        full_reprice_threshold_bps=float(
+            raw.get("full_reprice_threshold_bps", 25.0)
+        ),
         max_order_quote=float(raw.get("max_order_quote", 0.0)),
         max_cycle_quote=float(raw.get("max_cycle_quote", 0.0)),
         max_open_orders=int(raw.get("max_open_orders", 0)),

@@ -31,6 +31,9 @@ from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
 
 
+_QUOTE_CHANGE_RELATIVE_TOLERANCE = 1e-3
+
+
 def _client_order_prefix(maker_cfg: Any) -> str:
     prefix = str(getattr(maker_cfg, "client_order_prefix", "") or "")
     instance_id = str(getattr(maker_cfg, "id", "") or "")
@@ -168,13 +171,231 @@ def _plan_reprice_bps(
             return None
         if current_price is None or current_quote is None:
             return None
-        if abs(float(previous_quote) - current_quote) > 1e-12:
+        quote_tolerance = (
+            max(abs(float(previous_quote)), abs(current_quote), 1e-12)
+            * _QUOTE_CHANGE_RELATIVE_TOLERANCE
+        )
+        if abs(float(previous_quote) - current_quote) > quote_tolerance:
             return None
         price_change_bps = (
             abs(current_price - float(previous_price)) / current_plan.mid_price * 10_000
         )
         max_change_bps = max(max_change_bps, price_change_bps)
     return max_change_bps
+
+
+def _plan_order_key(order: dict[str, Any]) -> tuple[str, int] | None:
+    side = str(order.get("side") or "").lower()
+    try:
+        level = int(order.get("level") or 0)
+    except (TypeError, ValueError):
+        return None
+    if side not in {"buy", "sell"} or level <= 0:
+        return None
+    return side, level
+
+
+def _plan_order_changes(
+    previous_plan: dict[str, Any] | None,
+    current_plan: MarketMakerPlan,
+    *,
+    current_orders: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]] | None:
+    if not previous_plan:
+        return None
+    previous_orders = previous_plan.get("orders")
+    if not isinstance(previous_orders, list):
+        return None
+    comparison_orders = current_orders or [
+        order.to_dict() for order in current_plan.orders
+    ]
+    previous_by_key = {
+        key: order
+        for order in previous_orders
+        if isinstance(order, dict) and (key := _plan_order_key(order)) is not None
+    }
+    if len(previous_by_key) != len(comparison_orders):
+        return None
+
+    changes: list[dict[str, Any]] = []
+    for order in comparison_orders:
+        key = _plan_order_key(order)
+        previous = previous_by_key.get(key) if key is not None else None
+        if previous is None:
+            return None
+        previous_price = _number_or_none(previous.get("price"))
+        current_price = _number_or_none(order.get("price"))
+        previous_quote = _number_or_none(previous.get("quote_notional"))
+        current_quote = _number_or_none(order.get("quote_notional"))
+        if (
+            previous_price is None
+            or current_price is None
+            or previous_quote is None
+            or current_quote is None
+            or current_plan.mid_price <= 0
+        ):
+            return None
+        quote_tolerance = (
+            max(abs(previous_quote), abs(current_quote), 1e-12)
+            * _QUOTE_CHANGE_RELATIVE_TOLERANCE
+        )
+        changes.append(
+            {
+                "key": key,
+                "side": key[0],
+                "level": key[1],
+                "price_change_bps": (
+                    abs(current_price - previous_price)
+                    / current_plan.mid_price
+                    * 10_000
+                ),
+                "quote_changed": abs(current_quote - previous_quote) > quote_tolerance,
+            }
+        )
+    return changes
+
+
+def _open_order_ids_by_plan_key(
+    previous_plan: dict[str, Any] | None,
+    open_orders: list[dict[str, Any]] | None,
+) -> dict[tuple[str, int], str] | None:
+    previous_orders = previous_plan.get("orders") if previous_plan else None
+    if not isinstance(previous_orders, list) or not open_orders:
+        return None
+    expected_by_side: dict[str, list[dict[str, Any]]] = {"buy": [], "sell": []}
+    for order in previous_orders:
+        if not isinstance(order, dict):
+            return None
+        key = _plan_order_key(order)
+        if key is None:
+            return None
+        expected_by_side[key[0]].append(order)
+
+    observed_by_side: dict[str, list[tuple[float, str]]] = {"buy": [], "sell": []}
+    for order in open_orders:
+        side = str(order.get("side") or "").lower()
+        price = _number_or_none(order.get("price"))
+        order_id = _raw_order_id(order)
+        if side not in observed_by_side or price is None or price <= 0 or not order_id:
+            return None
+        observed_by_side[side].append((price, order_id))
+
+    result: dict[tuple[str, int], str] = {}
+    for side in ("buy", "sell"):
+        expected = sorted(
+            expected_by_side[side],
+            key=lambda order: int(order.get("level") or 0),
+        )
+        observed = sorted(
+            observed_by_side[side],
+            key=lambda item: item[0],
+            reverse=side == "buy",
+        )
+        if len(expected) != len(observed):
+            return None
+        for expected_order, (_, order_id) in zip(expected, observed):
+            key = _plan_order_key(expected_order)
+            if key is None:
+                return None
+            result[key] = order_id
+    return result
+
+
+def _active_plan_after_reprice(
+    previous_plan: dict[str, Any] | None,
+    current_plan: MarketMakerPlan,
+    changed_keys: set[tuple[str, int]],
+    *,
+    current_orders: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    active = current_plan.to_dict()
+    comparison_orders = current_orders or [
+        order.to_dict() for order in current_plan.orders
+    ]
+    comparison_by_key = {
+        key: order
+        for order in comparison_orders
+        if isinstance(order, dict) and (key := _plan_order_key(order)) is not None
+    }
+    previous_orders = previous_plan.get("orders") if previous_plan else None
+    previous_by_key = {
+        key: order
+        for order in previous_orders or []
+        if isinstance(order, dict) and (key := _plan_order_key(order)) is not None
+    }
+    active_orders: list[dict[str, Any]] = []
+    for order in current_plan.orders:
+        key = (order.side, order.level)
+        comparison = comparison_by_key.get(key, {})
+        normalized_current = {
+            **order.to_dict(),
+            "price": comparison.get("price", order.price),
+            "amount": comparison.get("amount", order.amount),
+            "quote_notional": comparison.get(
+                "quote_notional",
+                order.quote_notional,
+            ),
+        }
+        active_orders.append(
+            normalized_current
+            if key in changed_keys or not previous_by_key
+            else dict(previous_by_key.get(key, normalized_current))
+        )
+    active["orders"] = active_orders
+    return active
+
+
+def _estimated_reprice_cancel_count(
+    maker_cfg: Any,
+    current_plan: MarketMakerPlan,
+    replace_order_ids: list[str],
+    *,
+    previous_plan: dict[str, Any] | None,
+    existing_open_orders: list[dict[str, Any]] | None,
+    previous_mid_price: float | None,
+    force_full_replace: bool,
+) -> int:
+    full_count = len(replace_order_ids)
+    if not replace_order_ids:
+        return 0
+    if (
+        force_full_replace
+        or float(getattr(maker_cfg, "reprice_threshold_bps", 0.0) or 0.0) <= 0
+    ):
+        return full_count
+    if not previous_plan:
+        return full_count
+    previous_orders = previous_plan.get("orders")
+    if not isinstance(previous_orders, list) or len(previous_orders) != full_count:
+        return full_count
+    if _open_order_ids_by_plan_key(previous_plan, existing_open_orders) is None:
+        return full_count
+
+    reference_mid = previous_mid_price or _number_or_none(previous_plan.get("mid_price"))
+    full_threshold = float(
+        getattr(maker_cfg, "full_reprice_threshold_bps", 0.0) or 0.0
+    )
+    if reference_mid and reference_mid > 0 and full_threshold > 0:
+        mid_move_bps = (
+            abs(current_plan.mid_price - reference_mid)
+            / current_plan.mid_price
+            * 10_000
+        )
+        if mid_move_bps >= full_threshold:
+            return full_count
+
+    changes = _plan_order_changes(previous_plan, current_plan)
+    if changes is None:
+        return full_count
+    effective_threshold = float(maker_cfg.reprice_threshold_bps) + float(
+        getattr(maker_cfg, "reprice_hysteresis_bps", 0.0) or 0.0
+    )
+    return sum(
+        1
+        for change in changes
+        if change["quote_changed"]
+        or change["price_change_bps"] >= effective_threshold
+    )
 
 
 def _number_or_none(value: Any) -> float | None:
@@ -244,7 +465,16 @@ def _previous_plan_from_open_orders(
                 return None
         elif filled is not None and filled > amount_tolerance:
             return None
-        open_by_side[side].append({"side": side, "price": price})
+        observed_amount = remaining if remaining is not None else amount
+        open_by_side[side].append(
+            {
+                "side": side,
+                "price": price,
+                "quote_notional": (
+                    price * observed_amount if observed_amount is not None else None
+                ),
+            }
+        )
 
     previous_orders: list[dict[str, Any]] = []
     for side in ("buy", "sell"):
@@ -262,7 +492,11 @@ def _previous_plan_from_open_orders(
                     "side": side,
                     "level": expected_order.get("level"),
                     "price": observed_order["price"],
-                    "quote_notional": expected_order.get("quote_notional"),
+                    "quote_notional": (
+                        observed_order.get("quote_notional")
+                        if observed_order.get("quote_notional") is not None
+                        else expected_order.get("quote_notional")
+                    ),
                 }
             )
 
@@ -346,12 +580,15 @@ async def place_plan(
     *,
     replace_existing: bool,
     replace_order_ids: list[str] | None = None,
+    retained_order_ids: list[str] | None = None,
     prepared_orders: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     maker_cfg = cfg.market_maker
     exchange_cfg = _find_exchange(cfg, maker_cfg.exchange)
     canceled: list[dict[str, Any]] = []
     cancel_errors: list[dict[str, str]] = []
+    retained_order_ids = list(dict.fromkeys(retained_order_ids or []))
+    retained_order_id_set = set(retained_order_ids)
     cancel_attempted = False
     if replace_order_ids:
         cancel_attempted = True
@@ -396,7 +633,18 @@ async def place_plan(
         confirmation_failed = any(
             item.get("order_id") == "open_order_confirmation" for item in cancel_errors
         )
-        if confirmation_failed or remaining_open_order_ids:
+        remaining_open_order_id_set = set(remaining_open_order_ids)
+        unexpected_open_order_ids = sorted(
+            remaining_open_order_id_set - retained_order_id_set
+        )
+        missing_retained_order_ids = sorted(
+            retained_order_id_set - remaining_open_order_id_set
+        )
+        if (
+            confirmation_failed
+            or unexpected_open_order_ids
+            or missing_retained_order_ids
+        ):
             return {
                 "canceled_count": len(canceled),
                 "cancel_errors": cancel_errors,
@@ -405,7 +653,13 @@ async def place_plan(
                 "used_batch_create": False,
                 "cancel_retry_required": True,
                 "remaining_open_order_ids": remaining_open_order_ids,
-                "reason": "open orders must be fully canceled before placing a new MM ladder",
+                "retained_order_ids": retained_order_ids,
+                "unexpected_open_order_ids": unexpected_open_order_ids,
+                "missing_retained_order_ids": missing_retained_order_ids,
+                "reason": (
+                    "selected MM orders must be canceled and retained levels must "
+                    "remain confirmed before placing replacements"
+                ),
             }
 
     placed: list[Any] = []
@@ -442,6 +696,15 @@ async def place_plan(
                 "placed_count": len(placed),
                 "placed_order_ids": [
                     item.get("id") for item in placed if isinstance(item, dict)
+                ],
+                "retained_order_ids": retained_order_ids,
+                "active_order_ids": [
+                    *retained_order_ids,
+                    *[
+                        str(item.get("id"))
+                        for item in placed
+                        if isinstance(item, dict) and item.get("id")
+                    ],
                 ],
                 "used_batch_create": True,
             }
@@ -482,8 +745,11 @@ async def place_plan(
                 ],
                 "create_result_uncertain": True,
                 "remaining_open_order_ids": remaining_open_order_ids,
+                "retained_order_ids": retained_order_ids,
+                "active_order_ids": remaining_open_order_ids,
                 "manual_intervention_required": bool(
-                    remaining_open_order_ids or confirmation_errors
+                    set(remaining_open_order_ids) - retained_order_id_set
+                    or confirmation_errors
                 ),
                 "used_batch_create": True,
             }
@@ -572,13 +838,24 @@ async def place_plan(
     manual_intervention_required = bool(
         emergency_cancel_errors or remaining_open_order_ids
     )
+    placed_order_ids = [
+        _raw_order_id(item) for item in placed if _raw_order_id(item)
+    ]
+    active_order_ids = list(
+        dict.fromkeys(
+            [
+                *retained_order_ids,
+                *(remaining_open_order_ids if partial_create else placed_order_ids),
+            ]
+        )
+    )
     return {
         "canceled_count": len(canceled) + len(emergency_canceled),
         "cancel_errors": cancel_errors,
         "placed_count": len(placed),
-        "placed_order_ids": [
-            _raw_order_id(item) for item in placed if _raw_order_id(item)
-        ],
+        "placed_order_ids": placed_order_ids,
+        "retained_order_ids": retained_order_ids,
+        "active_order_ids": active_order_ids,
         "create_errors": create_errors,
         "partial_create": partial_create,
         "emergency_cancel": partial_create,
@@ -758,6 +1035,8 @@ async def run_cycle(
     last_cancel_at: float | None = None,
     order_book: OrderBookSnapshot | None = None,
     inventory_base: float | None = None,
+    force_full_replace: bool = False,
+    force_replace_reason: str | None = None,
 ) -> dict[str, Any]:
     book = await load_plan_order_book(cfg, manager, order_book=order_book)
     plan = build_symmetric_market_maker_plan(
@@ -796,6 +1075,20 @@ async def run_cycle(
     replace_order_ids = [order_id for order_id in (replace_order_ids or []) if order_id]
     should_cancel_existing = replace_existing or cfg.market_maker.cancel_existing_orders
     should_cancel_tracked = bool(replace_order_ids)
+    estimated_reprice_cancel_count = _estimated_reprice_cancel_count(
+        cfg.market_maker,
+        plan,
+        replace_order_ids,
+        previous_plan=previous_plan,
+        existing_open_orders=existing_open_orders,
+        previous_mid_price=previous_mid_price,
+        force_full_replace=force_full_replace,
+    )
+    estimated_reprice_create_count = (
+        estimated_reprice_cancel_count if replace_order_ids else len(plan.orders)
+    )
+    payload["estimated_cancel_count"] = estimated_reprice_cancel_count
+    payload["estimated_create_count"] = estimated_reprice_create_count
     if live and (
         risk_cfg.max_open_orders > 0
         or risk_cfg.max_cancels_per_cycle > 0
@@ -813,7 +1106,7 @@ async def run_cycle(
     expected_cancel_count = (
         existing_open_order_count
         if should_cancel_existing and existing_open_order_count is not None
-        else len(replace_order_ids)
+        else estimated_reprice_cancel_count
     )
     market = _scaled_market_context(plan, quote_rate=quote_rate_for_risk)
     risk = evaluate_order_batch(
@@ -829,6 +1122,7 @@ async def run_cycle(
         daily_pnl_quote=current_daily_pnl_quote(cfg),
         existing_open_order_count=existing_open_order_count,
         expected_cancel_count=expected_cancel_count,
+        expected_create_count=estimated_reprice_create_count,
         last_cancel_at=last_cancel_at,
         open_order_error=open_order_error,
         post_only=cfg.market_maker.post_only,
@@ -877,6 +1171,18 @@ async def run_cycle(
             current_orders=comparison_orders,
         )
         payload["reprice_bps"] = reprice_bps
+        effective_reprice_threshold_bps = (
+            cfg.market_maker.reprice_threshold_bps
+            + cfg.market_maker.reprice_hysteresis_bps
+            if cfg.market_maker.reprice_threshold_bps > 0
+            else 0.0
+        )
+        payload["effective_reprice_threshold_bps"] = (
+            effective_reprice_threshold_bps
+        )
+        payload["full_reprice_threshold_bps"] = (
+            cfg.market_maker.full_reprice_threshold_bps
+        )
         if adopted_existing_open_orders:
             payload["adopted_existing_open_orders"] = True
         expected_open_order_count = len(plan.orders)
@@ -885,28 +1191,61 @@ async def run_cycle(
             not replace_order_ids
             or tracked_open_order_count == expected_open_order_count
         )
+        full_replace_reason = (
+            str(force_replace_reason or "forced ladder rebuild")
+            if force_full_replace
+            else None
+        )
         if replace_order_ids and not tracked_order_count_matches_plan:
             payload["tracked_open_order_count"] = tracked_open_order_count
             payload["expected_open_order_count"] = expected_open_order_count
-            payload["reprice_skip_blocked_reason"] = (
+            full_replace_reason = (
                 "tracked open order count does not match the MM plan; rebuilding ladder"
             )
+            payload["reprice_skip_blocked_reason"] = full_replace_reason
+
+        previous_reference_mid = previous_mid_price
+        if previous_reference_mid is None and previous_plan_for_reprice:
+            previous_reference_mid = _number_or_none(
+                previous_plan_for_reprice.get("mid_price")
+            )
+        mid_move_bps: float | None = None
+        if previous_reference_mid and previous_reference_mid > 0:
+            mid_move_bps = (
+                abs(plan.mid_price - previous_reference_mid)
+                / plan.mid_price
+                * 10_000
+            )
+            payload["mid_move_bps"] = mid_move_bps
+            if (
+                full_replace_reason is None
+                and cfg.market_maker.full_reprice_threshold_bps > 0
+                and mid_move_bps >= cfg.market_maker.full_reprice_threshold_bps
+            ):
+                full_replace_reason = (
+                    f"mid price moved {mid_move_bps:.4f} bps, above full-reprice "
+                    f"threshold {cfg.market_maker.full_reprice_threshold_bps:.4f} bps"
+                )
         if (
-            cfg.market_maker.reprice_threshold_bps > 0
+            full_replace_reason is None
+            and cfg.market_maker.reprice_threshold_bps > 0
             and reprice_bps is not None
-            and reprice_bps < cfg.market_maker.reprice_threshold_bps
+            and reprice_bps < effective_reprice_threshold_bps
             and replace_order_ids
             and tracked_order_count_matches_plan
         ):
             payload["status"] = "unchanged"
+            payload["replacement_mode"] = "unchanged"
+            payload["active_plan"] = previous_plan_for_reprice
             payload["execution"] = {
                 "canceled_count": 0,
                 "cancel_errors": [],
                 "placed_count": 0,
                 "placed_order_ids": [],
+                "active_order_ids": replace_order_ids,
                 "reason": (
                     f"reprice {reprice_bps:.4f} bps is below threshold "
-                    f"{cfg.market_maker.reprice_threshold_bps:.4f} bps"
+                    f"{effective_reprice_threshold_bps:.4f} bps including hysteresis"
                 ),
             }
             return payload
@@ -915,13 +1254,110 @@ async def run_cycle(
             payload["order_validation"] = validation
         if validation["status"] != "ok":
             return _block_for_validation(payload, validation)
+        comparison_orders = _comparison_orders(plan, validation.get("orders"))
+        reprice_bps = _plan_reprice_bps(
+            previous_plan_for_reprice,
+            plan,
+            current_orders=comparison_orders,
+        )
+        payload["reprice_bps"] = reprice_bps
+
+        selected_plan = plan
+        selected_prepared_orders = list(validation.get("orders") or [])
+        selected_replace_order_ids = list(replace_order_ids)
+        retained_order_ids: list[str] = []
+        changed_keys: set[tuple[str, int]] = set()
+        if (
+            full_replace_reason is None
+            and cfg.market_maker.reprice_threshold_bps > 0
+            and replace_order_ids
+            and tracked_order_count_matches_plan
+        ):
+            changes = _plan_order_changes(
+                previous_plan_for_reprice,
+                plan,
+                current_orders=comparison_orders,
+            )
+            order_ids_by_key = _open_order_ids_by_plan_key(
+                previous_plan_for_reprice,
+                existing_open_orders,
+            )
+            if changes is None or order_ids_by_key is None:
+                full_replace_reason = (
+                    "could not map live orders to MM levels; rebuilding ladder"
+                )
+            else:
+                changed_keys = {
+                    change["key"]
+                    for change in changes
+                    if change["quote_changed"]
+                    or change["price_change_bps"] >= effective_reprice_threshold_bps
+                }
+                if not changed_keys:
+                    payload["status"] = "unchanged"
+                    payload["replacement_mode"] = "unchanged"
+                    payload["active_plan"] = previous_plan_for_reprice
+                    payload["execution"] = {
+                        "canceled_count": 0,
+                        "cancel_errors": [],
+                        "placed_count": 0,
+                        "placed_order_ids": [],
+                        "active_order_ids": replace_order_ids,
+                        "reason": "no MM level crossed its hysteresis boundary",
+                    }
+                    return payload
+                if len(changed_keys) < len(plan.orders):
+                    selected_plan = replace(
+                        plan,
+                        orders=[
+                            order
+                            for order in plan.orders
+                            if (order.side, order.level) in changed_keys
+                        ],
+                    )
+                    selected_prepared_orders = [
+                        prepared
+                        for order, prepared in zip(
+                            plan.orders,
+                            validation.get("orders") or [],
+                        )
+                        if (order.side, order.level) in changed_keys
+                    ]
+                    selected_replace_order_ids = [
+                        order_ids_by_key[key] for key in sorted(changed_keys)
+                    ]
+                    retained_order_ids = sorted(
+                        order_id
+                        for key, order_id in order_ids_by_key.items()
+                        if key not in changed_keys
+                    )
+                    payload["replacement_mode"] = "partial"
+                    payload["replaced_levels"] = [
+                        {"side": side, "level": level}
+                        for side, level in sorted(changed_keys)
+                    ]
+                    payload["retained_order_count"] = len(retained_order_ids)
+                else:
+                    full_replace_reason = "every MM level crossed its hysteresis boundary"
+
+        if full_replace_reason is not None:
+            payload["replacement_mode"] = "full"
+            payload["full_replace_reason"] = full_replace_reason
+            changed_keys = {(order.side, order.level) for order in plan.orders}
+        elif "replacement_mode" not in payload:
+            payload["replacement_mode"] = "initial"
+            changed_keys = {(order.side, order.level) for order in plan.orders}
+
         execution = await place_plan(
             cfg,
             manager,
-            plan,
+            selected_plan,
             replace_existing=replace_existing,
-            replace_order_ids=replace_order_ids if should_cancel_tracked else None,
-            prepared_orders=validation.get("orders"),
+            replace_order_ids=(
+                selected_replace_order_ids if should_cancel_tracked else None
+            ),
+            retained_order_ids=retained_order_ids,
+            prepared_orders=selected_prepared_orders,
         )
         payload["execution"] = execution
         if execution.get("cancel_retry_required"):
@@ -930,6 +1366,23 @@ async def run_cycle(
             payload["status"] = (
                 "execution_error" if execution.get("create_errors") else "placed"
             )
+            if payload["status"] == "placed":
+                payload["active_plan"] = (
+                    _active_plan_after_reprice(
+                        previous_plan_for_reprice,
+                        plan,
+                        changed_keys,
+                        current_orders=comparison_orders,
+                    )
+                    if payload.get("replacement_mode") == "partial"
+                    and previous_plan_for_reprice is not None
+                    else _active_plan_after_reprice(
+                        None,
+                        plan,
+                        changed_keys,
+                        current_orders=comparison_orders,
+                    )
+                )
 
     return payload
 

@@ -6287,6 +6287,8 @@ function balanceStatusClass(status) {
       setNumericField("mm-min-quote", config.min_order_quote || 0);
       setNumericField("mm-min-distance", config.min_distance_bps || 0);
       setNumericField("mm-reprice", config.reprice_threshold_bps || 0);
+      setNumericField("mm-reprice-hysteresis", config.reprice_hysteresis_bps ?? 3);
+      setNumericField("mm-full-reprice", config.full_reprice_threshold_bps ?? 25);
       setNumericField("mm-poll", config.poll_seconds || 1);
       setNumericField("mm-max-order", config.max_order_quote || 0);
       setNumericField("mm-max-cycle", config.max_cycle_quote || 0);
@@ -6318,6 +6320,8 @@ function balanceStatusClass(status) {
         min_order_quote: numericValue("mm-min-quote"),
         min_distance_bps: numericValue("mm-min-distance"),
         reprice_threshold_bps: numericValue("mm-reprice"),
+        reprice_hysteresis_bps: numericValue("mm-reprice-hysteresis"),
+        full_reprice_threshold_bps: numericValue("mm-full-reprice"),
         poll_seconds: numericValue("mm-poll"),
         max_order_quote: numericValue("mm-max-order"),
         max_cycle_quote: numericValue("mm-max-cycle"),
