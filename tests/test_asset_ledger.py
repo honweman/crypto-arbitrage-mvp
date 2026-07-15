@@ -6,7 +6,11 @@ import time
 import unittest
 from pathlib import Path
 
-from arbitrage_bot.asset_ledger import AssetLedgerStore, attach_ledger_checkpoint
+from arbitrage_bot.asset_ledger import (
+    AssetLedgerStore,
+    attach_ledger_checkpoint,
+    prune_asset_ledger,
+)
 from arbitrage_bot.config import AssetLedgerConfig
 
 
@@ -261,6 +265,61 @@ class AssetLedgerStoreTest(unittest.TestCase):
         self.assertEqual(worker["error_count"], 1)
         self.assertEqual(worker["last_error"], "timeout")
         self.assertTrue(worker["stale"])
+
+    def test_prune_removes_expired_history_and_preserves_latest_per_source(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        store.record_monitor_checkpoint(_balances(), _activity(), observed_at=1000)
+
+        current_activity = _activity()
+        current_activity["accounts"][0]["recent_trades"][0] = {
+            **current_activity["accounts"][0]["recent_trades"][0],
+            "id": "trade-2",
+            "order_id": "order-2",
+            "timestamp": 4999000,
+        }
+        store.record_monitor_checkpoint(
+            _balances(),
+            current_activity,
+            observed_at=5000,
+        )
+        store.record_account_snapshot(
+            account_key="coinbase-spot",
+            balance_account=_balances()["accounts"][0],
+            order_account=_activity()["accounts"][0],
+            source="stale-reader",
+            observed_at=900,
+        )
+
+        deleted = prune_asset_ledger(self.cfg, before=4000)
+
+        self.assertGreater(deleted["ledger_events"], 0)
+        self.assertEqual(deleted["monitor_checkpoints"], 1)
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(
+                conn.execute("select count(*) from monitor_checkpoints").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from balance_snapshots where source = ?",
+                    ("stale-reader",),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from ledger_fills where trade_id = ?",
+                    ("trade-1",),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from ledger_fills where trade_id = ?",
+                    ("trade-2",),
+                ).fetchone()[0],
+                1,
+            )
 
 
 if __name__ == "__main__":

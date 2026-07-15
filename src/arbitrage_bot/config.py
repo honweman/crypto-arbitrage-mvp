@@ -420,6 +420,8 @@ class AssetLedgerConfig:
     enabled: bool = True
     path: str = "data/asset_ledger.sqlite3"
     stale_seconds: float = 120.0
+    checkpoint_interval_seconds: float = 60.0
+    retention_days: float = 3.0
     worker_interval_seconds: float = 30.0
     worker_timeout_seconds: float = 20.0
     worker_stale_seconds: float = 90.0
@@ -1297,6 +1299,14 @@ def load_config(path: str | Path) -> BotConfig:
             enabled=bool(asset_ledger_raw.get("enabled", True)),
             path=str(asset_ledger_raw.get("path", "data/asset_ledger.sqlite3")),
             stale_seconds=float(asset_ledger_raw.get("stale_seconds", 120.0)),
+            checkpoint_interval_seconds=max(
+                10.0,
+                float(asset_ledger_raw.get("checkpoint_interval_seconds", 60.0)),
+            ),
+            retention_days=max(
+                0.25,
+                float(asset_ledger_raw.get("retention_days", 3.0)),
+            ),
             worker_interval_seconds=float(
                 asset_ledger_raw.get("worker_interval_seconds", 30.0)
             ),

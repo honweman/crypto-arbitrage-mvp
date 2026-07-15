@@ -79,6 +79,8 @@ def init_asset_ledger(path: str) -> None:
             );
             create index if not exists idx_balance_snapshots_account_time
                 on balance_snapshots(account_key, observed_at desc);
+            create index if not exists idx_balance_snapshots_account_source_time
+                on balance_snapshots(account_key, source, observed_at desc);
 
             create table if not exists balance_rows (
                 snapshot_id text not null references balance_snapshots(snapshot_id)
@@ -107,6 +109,8 @@ def init_asset_ledger(path: str) -> None:
             );
             create index if not exists idx_order_snapshots_account_time
                 on order_snapshots(account_key, observed_at desc);
+            create index if not exists idx_order_snapshots_account_source_time
+                on order_snapshots(account_key, source, observed_at desc);
 
             create table if not exists order_rows (
                 snapshot_id text not null references order_snapshots(snapshot_id)
@@ -612,7 +616,10 @@ class AssetLedgerStore:
                         excluded.realized_pnl_common,
                         ledger_fills.realized_pnl_common
                     ),
-                    last_observed_at=excluded.last_observed_at,
+                    last_observed_at=max(
+                        excluded.last_observed_at,
+                        ledger_fills.last_observed_at
+                    ),
                     payload_json=excluded.payload_json
                 """,
                 (
@@ -1235,19 +1242,113 @@ def prune_asset_ledger(
     cfg: AssetLedgerConfig,
     *,
     before: float,
-    tables: Iterable[str] = ("ledger_events", "monitor_checkpoints"),
+    tables: Iterable[str] = (
+        "ledger_events",
+        "monitor_checkpoints",
+        "reconciliation_runs",
+        "balance_snapshots",
+        "order_snapshots",
+        "position_snapshots",
+        "pnl_snapshots",
+        "ledger_fills",
+    ),
 ) -> dict[str, int]:
     if not cfg.enabled:
         return {}
-    allowed = {"ledger_events", "monitor_checkpoints"}
+    allowed = {
+        "ledger_events",
+        "monitor_checkpoints",
+        "reconciliation_runs",
+        "balance_snapshots",
+        "order_snapshots",
+        "position_snapshots",
+        "pnl_snapshots",
+        "ledger_fills",
+    }
     selected = set(tables) & allowed
     deleted: dict[str, int] = {}
+    statements = {
+        "ledger_events": "delete from ledger_events where observed_at < ?",
+        "monitor_checkpoints": """
+            delete from monitor_checkpoints
+            where observed_at < ?
+              and checkpoint_id not in (
+                  select checkpoint_id from monitor_checkpoints
+                  order by observed_at desc limit 1
+              )
+              and checkpoint_id not in (
+                  select checkpoint_id from monitor_checkpoints
+                  where status != 'error'
+                  order by observed_at desc limit 1
+              )
+        """,
+        "reconciliation_runs": """
+            delete from reconciliation_runs
+            where observed_at < ?
+              and run_id not in (
+                  select run_id from reconciliation_runs latest
+                  where latest.account_key = reconciliation_runs.account_key
+                    and latest.source = reconciliation_runs.source
+                  order by latest.observed_at desc limit 1
+              )
+        """,
+        "balance_snapshots": """
+            delete from balance_snapshots
+            where observed_at < ?
+              and snapshot_id not in (
+                  select snapshot_id from balance_snapshots latest
+                  where latest.account_key = balance_snapshots.account_key
+                    and latest.source = balance_snapshots.source
+                  order by latest.observed_at desc limit 1
+              )
+        """,
+        "order_snapshots": """
+            delete from order_snapshots
+            where observed_at < ?
+              and snapshot_id not in (
+                  select snapshot_id from order_snapshots latest
+                  where latest.account_key = order_snapshots.account_key
+                    and latest.source = order_snapshots.source
+                  order by latest.observed_at desc limit 1
+              )
+        """,
+        "position_snapshots": """
+            delete from position_snapshots
+            where observed_at < ?
+              and snapshot_id not in (
+                  select snapshot_id from position_snapshots latest
+                  where latest.source = position_snapshots.source
+                  order by latest.observed_at desc limit 1
+              )
+        """,
+        "pnl_snapshots": """
+            delete from pnl_snapshots
+            where observed_at < ?
+              and snapshot_id not in (
+                  select snapshot_id from pnl_snapshots latest
+                  where latest.currency = pnl_snapshots.currency
+                  order by latest.observed_at desc limit 1
+              )
+        """,
+        "ledger_fills": "delete from ledger_fills where last_observed_at < ?",
+    }
+    delete_order = (
+        "reconciliation_runs",
+        "balance_snapshots",
+        "order_snapshots",
+        "position_snapshots",
+        "pnl_snapshots",
+        "monitor_checkpoints",
+        "ledger_events",
+        "ledger_fills",
+    )
     with closing(_connect(cfg.path)) as conn:
-        for table in sorted(selected):
-            cursor = conn.execute(
-                f"delete from {table} where observed_at < ?",  # noqa: S608
-                (float(before),),
-            )
+        for table in delete_order:
+            if table not in selected:
+                continue
+            cursor = conn.execute(statements[table], (float(before),))
             deleted[table] = max(0, int(cursor.rowcount))
-        conn.commit()
+            conn.commit()
+        conn.execute("pragma optimize")
+        conn.execute("pragma wal_checkpoint(passive)")
     return deleted

@@ -7,4 +7,4 @@ User=cryptoarb
 Group=cryptoarb
 WorkingDirectory=/opt/crypto-arbitrage-mvp
 UMask=0027
-ExecStart=/bin/bash -Eeuo pipefail -c 'slot="$$(tr -d "[:space:]" < /opt/crypto-arbitrage-mvp/data/active_release_slot)"; [[ "$$slot" == "blue" || "$$slot" == "green" ]]; exec "/opt/crypto-arbitrage-releases/$$slot/.venv/bin/python" -m arbitrage_bot.maintenance --config /opt/crypto-arbitrage-mvp/config.acs.json --prune-backups'
+ExecStart=/bin/bash -Eeuo pipefail -c 'slot="$$(tr -d "[:space:]" < /opt/crypto-arbitrage-mvp/data/active_release_slot)"; [[ "$$slot" == "blue" || "$$slot" == "green" ]]; exec "/opt/crypto-arbitrage-releases/$$slot/.venv/bin/python" -m arbitrage_bot.maintenance --config /opt/crypto-arbitrage-mvp/config.acs.json --prune-backups --prune-records --asset-ledger-retention-days 3 --rotated-log-retention-days 3'

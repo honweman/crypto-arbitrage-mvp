@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .asset_ledger import prune_asset_ledger
+from .config import AssetLedgerConfig, load_config
 from .jsonl_rotation import (
     prune_rotated_jsonl_logs,
     rotate_jsonl_log_if_needed,
@@ -57,6 +58,7 @@ def optimize_sqlite(
     *,
     order_intent_retention_days: float,
     order_intent_max_terminal_rows: int,
+    asset_ledger_retention_days: float | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "path": str(path),
@@ -69,6 +71,7 @@ def optimize_sqlite(
         "page_count": 0,
         "free_page_count": 0,
         "order_intent_compaction": None,
+        "asset_ledger_compaction": None,
     }
     if not path.is_file():
         return result
@@ -80,6 +83,19 @@ def optimize_sqlite(
                 max(0.0, order_intent_retention_days) * 24 * 60 * 60
             ),
             max_terminal_rows=max(1_000, order_intent_max_terminal_rows),
+        )
+    elif (
+        path.name == "asset_ledger.sqlite3"
+        and asset_ledger_retention_days is not None
+    ):
+        cfg = AssetLedgerConfig(
+            enabled=True,
+            path=str(path),
+            retention_days=max(0.25, float(asset_ledger_retention_days)),
+        )
+        result["asset_ledger_compaction"] = prune_asset_ledger(
+            cfg,
+            before=time.time() - cfg.retention_days * 24 * 60 * 60,
         )
 
     with sqlite3.connect(path, timeout=5.0) as connection:
@@ -187,6 +203,9 @@ def run_maintenance(args: argparse.Namespace) -> dict[str, Any]:
                 path,
                 order_intent_retention_days=args.order_intent_retention_days,
                 order_intent_max_terminal_rows=args.order_intent_max_terminal_rows,
+                asset_ledger_retention_days=(
+                    args.asset_ledger_retention_days if args.prune_records else None
+                ),
             )
             for path in sorted(data_dir.glob("*.sqlite3"))
             if path.is_file()
@@ -206,7 +225,22 @@ def run_maintenance(args: argparse.Namespace) -> dict[str, Any]:
         min_age_days=args.config_backup_min_age_days,
         apply=args.prune_backups,
     )
-    errors = backup_retention["errors"] + config_retention["errors"]
+    rotated_log_retention = prune_historical_files(
+        data_dir,
+        patterns=(
+            "trade_events.jsonl.*",
+            "strategy_timeline.jsonl.*",
+            "web_audit_events.jsonl.*",
+        ),
+        keep_files=0,
+        min_age_days=args.rotated_log_retention_days,
+        apply=args.prune_records,
+    )
+    errors = (
+        backup_retention["errors"]
+        + config_retention["errors"]
+        + rotated_log_retention["errors"]
+    )
     return {
         "ok": not errors,
         "config": args.config,
@@ -219,6 +253,9 @@ def run_maintenance(args: argparse.Namespace) -> dict[str, Any]:
             "order_intent_retention_days": args.order_intent_retention_days,
             "order_intent_max_terminal_rows": args.order_intent_max_terminal_rows,
             "prune_backups": args.prune_backups,
+            "prune_records": args.prune_records,
+            "asset_ledger_retention_days": args.asset_ledger_retention_days,
+            "rotated_log_retention_days": args.rotated_log_retention_days,
         },
         "results": [
             _compact_jsonl(
@@ -233,6 +270,7 @@ def run_maintenance(args: argparse.Namespace) -> dict[str, Any]:
         "sqlite": sqlite_results,
         "backup_retention": backup_retention,
         "config_backup_retention": config_retention,
+        "rotated_log_retention": rotated_log_retention,
         "errors": errors,
     }
 
@@ -256,6 +294,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--order-intent-retention-days", type=float, default=7.0)
+    parser.add_argument("--prune-records", action="store_true")
+    parser.add_argument("--asset-ledger-retention-days", type=float, default=3.0)
+    parser.add_argument("--rotated-log-retention-days", type=float, default=3.0)
     parser.add_argument(
         "--order-intent-max-terminal-rows",
         type=int,

@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import Awaitable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .coordination import (
@@ -123,12 +124,20 @@ from . import (
 )
 
 
+_ASSET_CHECKPOINT_WRITTEN_AT: dict[str, float] = {}
+
+
 def _checkpoint_asset_state(
     cfg: BotConfig,
     account_balances: dict[str, Any],
     order_activity: dict[str, Any],
     portfolio: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    now = time.time()
+    ledger_key = str(Path(cfg.asset_ledger.path).expanduser().resolve())
+    last_written = _ASSET_CHECKPOINT_WRITTEN_AT.get(ledger_key, 0.0)
+    if now - last_written < cfg.asset_ledger.checkpoint_interval_seconds:
+        return account_balances, order_activity
     try:
         balances, activity, _ = attach_ledger_checkpoint(
             cfg.asset_ledger,
@@ -136,6 +145,7 @@ def _checkpoint_asset_state(
             order_activity,
             portfolio=portfolio,
         )
+        _ASSET_CHECKPOINT_WRITTEN_AT[ledger_key] = now
         return balances, activity
     except Exception as exc:  # noqa: BLE001
         ledger_error = {
