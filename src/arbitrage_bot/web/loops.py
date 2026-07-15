@@ -45,6 +45,7 @@ from ..orderbook_cache import OrderBookCache
 from ..order_reconciliation import (
     RECONCILIATION_AUTO_STOP_WARMUP_SECONDS,
     _monitor_auto_stop_decision,
+    _monitor_reconciliation_streak,
     _monitor_reconciliation_warmup_active,
 )
 from ..pnl import build_portfolio_pnl
@@ -269,7 +270,10 @@ async def monitor_loop(
     next_onchain_scan = 0.0
     next_balance_scan = 0.0
     next_order_activity_scan = 0.0
-    consecutive_problem_cycles = 0
+    consecutive_reconciliation_cycles = 0
+    reconciliation_stop_fingerprint = ""
+    reconciliation_stop_observation = ""
+    consecutive_monitor_exception_cycles = 0
     last_daily_report_day: str | None = None
     last_spot_arbitrage_execution_at = 0.0
     last_spot_arbitrage_timeline_fingerprint = ""
@@ -395,9 +399,12 @@ async def monitor_loop(
                                 "notice_count": 0,
                                 "total_item_count": 1,
                                 "level_counts": {"error": 1, "warning": 0, "info": 0},
-                                "critical_issue_count": 1,
-                                "auto_stop_recommended": True,
-                                "auto_stop_reasons": [
+                                "critical_issue_count": 0,
+                                "auto_stop_recommended": False,
+                                "auto_stop_reasons": [],
+                                "recoverable_issue_count": 1,
+                                "automatic_retry_active": True,
+                                "recoverable_reasons": [
                                     f"order_activity_error: {str(exc)}"
                                 ],
                                 "issues": [
@@ -1079,9 +1086,12 @@ async def monitor_loop(
                                 "notice_count": 0,
                                 "total_item_count": 1,
                                 "level_counts": {"error": 1, "warning": 0, "info": 0},
-                                "critical_issue_count": 1,
-                                "auto_stop_recommended": True,
-                                "auto_stop_reasons": [
+                                "critical_issue_count": 0,
+                                "auto_stop_recommended": False,
+                                "auto_stop_reasons": [],
+                                "recoverable_issue_count": 1,
+                                "automatic_retry_active": True,
+                                "recoverable_reasons": [
                                     f"order_activity_error: {str(exc)}"
                                 ],
                                 "issues": [
@@ -1294,9 +1304,19 @@ async def monitor_loop(
                             ),
                         ]
 
-                consecutive_problem_cycles = (
-                    consecutive_problem_cycles + 1 if warnings else 0
+                (
+                    consecutive_reconciliation_cycles,
+                    reconciliation_stop_fingerprint,
+                    reconciliation_stop_observation,
+                ) = _monitor_reconciliation_streak(
+                    current_count=consecutive_reconciliation_cycles,
+                    previous_fingerprint=reconciliation_stop_fingerprint,
+                    previous_observation=reconciliation_stop_observation,
+                    reconciliation_stop=reconciliation_stop,
+                    reasons=reconciliation_reasons,
+                    observation=reconciliation_payload.get("checked_at"),
                 )
+                consecutive_monitor_exception_cycles = 0
                 auto_stop_triggered, auto_stop_reason = _monitor_auto_stop_decision(
                     auto_stop_enabled=runtime_cfg.alerts.auto_stop_enabled,
                     auto_stop_consecutive_errors=(
@@ -1304,14 +1324,15 @@ async def monitor_loop(
                     ),
                     daily_loss_stop=daily_loss_stop,
                     reconciliation_stop=reconciliation_stop,
-                    consecutive_problem_cycles=consecutive_problem_cycles,
+                    consecutive_problem_cycles=consecutive_reconciliation_cycles,
                 )
                 if auto_stop_triggered:
                     warnings = [
                         *warnings,
                         (
                             "Auto-stop triggered after "
-                            f"{consecutive_problem_cycles} problem cycle(s)"
+                            f"{consecutive_reconciliation_cycles} distinct "
+                            "reconciliation observation(s)"
                         ),
                     ]
 
@@ -1408,7 +1429,9 @@ async def monitor_loop(
                                 reconciliation_warmup_active
                             ),
                             "reconciliation_reasons": reconciliation_reasons,
-                            "consecutive_problem_cycles": consecutive_problem_cycles,
+                            "consecutive_reconciliation_cycles": (
+                                consecutive_reconciliation_cycles
+                            ),
                         },
                     )
                     await alert_service.send(
@@ -1424,7 +1447,7 @@ async def monitor_loop(
                     )
             except Exception as exc:  # noqa: BLE001
                 elapsed = time.monotonic() - monotonic_started
-                consecutive_problem_cycles += 1
+                consecutive_monitor_exception_cycles += 1
                 await state.set_error(
                     cfg=runtime_cfg,
                     poll_seconds=poll_seconds,
@@ -1445,11 +1468,12 @@ async def monitor_loop(
                 )
                 if (
                     runtime_cfg.alerts.auto_stop_enabled
-                    and consecutive_problem_cycles
+                    and consecutive_monitor_exception_cycles
                     >= max(1, runtime_cfg.alerts.auto_stop_consecutive_errors)
                 ):
                     auto_stop_reason = (
-                        f"monitor exception after {consecutive_problem_cycles} "
+                        "monitor exception after "
+                        f"{consecutive_monitor_exception_cycles} "
                         f"consecutive error cycle(s)"
                     )
                     await state.set_auto_stopped(
@@ -1464,14 +1488,16 @@ async def monitor_loop(
                         payload={
                             "scan_count": scan_count,
                             "error": str(exc),
-                            "consecutive_problem_cycles": consecutive_problem_cycles,
+                            "consecutive_monitor_exception_cycles": (
+                                consecutive_monitor_exception_cycles
+                            ),
                         },
                     )
                     await alert_service.send(
                         level="critical",
                         title="Crypto arbitrage auto-stopped",
                         message=(
-                            f"Stopped after {consecutive_problem_cycles} "
+                            f"Stopped after {consecutive_monitor_exception_cycles} "
                             f"consecutive error cycle(s): {exc}"
                         ),
                         key="monitor:auto-stop",

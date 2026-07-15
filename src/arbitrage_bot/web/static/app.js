@@ -1423,14 +1423,16 @@ function balanceStatusClass(status) {
       const criticalRecon = reconciliation.critical_issue_count || 0;
       const reconIssues = reconciliation.issue_count || 0;
       const reconNotices = reconciliation.notice_count || 0;
-      const reconSuffix = reconciliation.auto_stop_suppressed
-        ? ", suppressed"
-        : "";
+      const reconSuffix = reconciliation.automatic_retry_active
+        ? `, ${uiText("Retrying")}`
+        : reconciliation.auto_stop_suppressed
+          ? ", suppressed"
+          : "";
       const reconNoticeText = reconNotices > 0 ? `, notices ${reconNotices}` : "";
       const reconText = criticalRecon > 0
         ? `${reconciliation.status || "--"} (issues ${reconIssues}, critical ${criticalRecon}${reconNoticeText}${reconSuffix})`
         : reconIssues > 0
-          ? `${reconciliation.status || "--"} (issues ${reconIssues}${reconNoticeText})`
+          ? `${reconciliation.status || "--"} (issues ${reconIssues}${reconNoticeText}${reconSuffix})`
           : reconNotices > 0
             ? `${reconciliation.status || "--"} (notices ${reconNotices})`
             : `${reconciliation.status || "--"} (0)`;

@@ -43,6 +43,7 @@ from arbitrage_bot.cross_exchange_rebalancer import (
 )
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.pnl import build_portfolio_pnl
+from arbitrage_bot.order_reconciliation import _monitor_reconciliation_streak
 from arbitrage_bot.trade_log import (
     _read_recent_event_lines,
     normalize_trade_event,
@@ -3591,7 +3592,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("untracked_open_order", issue_types)
         self.assertIn("unattributed_fill", issue_types)
 
-    def test_order_reconciliation_auto_stop_for_activity_errors_only(self) -> None:
+    def test_order_reconciliation_retries_activity_errors_without_global_stop(
+        self,
+    ) -> None:
         payload = build_order_reconciliation_payload(
             {
                 "status": "error",
@@ -3605,9 +3608,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["issue_count"], 1)
         self.assertEqual(payload["notice_count"], 0)
         self.assertEqual(payload["total_item_count"], 1)
-        self.assertEqual(payload["critical_issue_count"], 1)
-        self.assertTrue(payload["auto_stop_recommended"])
-        self.assertIn("order_activity_error", payload["auto_stop_reasons"][0])
+        self.assertEqual(payload["critical_issue_count"], 0)
+        self.assertFalse(payload["auto_stop_recommended"])
+        self.assertEqual(payload["recoverable_issue_count"], 1)
+        self.assertTrue(payload["automatic_retry_active"])
+        self.assertIn("order_activity_error", payload["recoverable_reasons"][0])
 
     def test_order_reconciliation_isolates_partial_account_errors(self) -> None:
         payload = build_order_reconciliation_payload(
@@ -3854,6 +3859,57 @@ class WebMonitorTest(unittest.TestCase):
             reason,
             "critical reconciliation issue after 3 problem cycle(s)",
         )
+
+    def test_reconciliation_streak_counts_only_new_matching_observations(self) -> None:
+        count, fingerprint, observation = _monitor_reconciliation_streak(
+            current_count=0,
+            previous_fingerprint="",
+            previous_observation="",
+            reconciliation_stop=True,
+            reasons=["critical: coinbase"],
+            observation=100.0,
+        )
+        self.assertEqual(count, 1)
+
+        repeated = _monitor_reconciliation_streak(
+            current_count=count,
+            previous_fingerprint=fingerprint,
+            previous_observation=observation,
+            reconciliation_stop=True,
+            reasons=["critical: coinbase"],
+            observation=100.0,
+        )
+        self.assertEqual(repeated[0], 1)
+
+        advanced = _monitor_reconciliation_streak(
+            current_count=repeated[0],
+            previous_fingerprint=repeated[1],
+            previous_observation=repeated[2],
+            reconciliation_stop=True,
+            reasons=["critical: coinbase"],
+            observation=105.0,
+        )
+        self.assertEqual(advanced[0], 2)
+
+        changed = _monitor_reconciliation_streak(
+            current_count=advanced[0],
+            previous_fingerprint=advanced[1],
+            previous_observation=advanced[2],
+            reconciliation_stop=True,
+            reasons=["different critical condition"],
+            observation=110.0,
+        )
+        self.assertEqual(changed[0], 1)
+
+        cleared = _monitor_reconciliation_streak(
+            current_count=changed[0],
+            previous_fingerprint=changed[1],
+            previous_observation=changed[2],
+            reconciliation_stop=False,
+            reasons=[],
+            observation=115.0,
+        )
+        self.assertEqual(cleared, (0, "", ""))
 
     def test_reconciliation_warmup_active_after_process_start_or_resume(self) -> None:
         self.assertTrue(

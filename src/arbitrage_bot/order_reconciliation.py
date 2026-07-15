@@ -6,8 +6,11 @@ from typing import Any
 
 
 RECONCILIATION_AUTO_STOP_WARMUP_SECONDS = 15.0
-RECONCILIATION_AUTO_STOP_TYPES = {
+RECONCILIATION_AUTO_STOP_TYPES: frozenset[str] = frozenset()
+RECONCILIATION_RECOVERABLE_TYPES = {
+    "account_order_activity_error",
     "order_activity_error",
+    "uncertain_order_intent",
 }
 
 
@@ -152,14 +155,15 @@ def _reconciliation_issue(
     }
 
 
-def _reconciliation_auto_stop_reasons(
+def _reconciliation_reasons_for_types(
     issues: Iterable[dict[str, Any]],
+    issue_types: set[str] | frozenset[str],
 ) -> list[str]:
     reasons: list[str] = []
     seen: set[str] = set()
     for issue in issues:
         issue_type = str(issue.get("type") or "")
-        if issue_type not in RECONCILIATION_AUTO_STOP_TYPES:
+        if issue_type not in issue_types:
             continue
         exchange = str(issue.get("exchange") or "")
         symbol = str(issue.get("symbol") or "")
@@ -171,6 +175,35 @@ def _reconciliation_auto_stop_reasons(
             seen.add(reason)
             reasons.append(reason)
     return reasons
+
+
+def _reconciliation_auto_stop_reasons(
+    issues: Iterable[dict[str, Any]],
+) -> list[str]:
+    return _reconciliation_reasons_for_types(issues, RECONCILIATION_AUTO_STOP_TYPES)
+
+
+def _monitor_reconciliation_streak(
+    *,
+    current_count: int,
+    previous_fingerprint: str,
+    previous_observation: str,
+    reconciliation_stop: bool,
+    reasons: Iterable[str],
+    observation: Any,
+) -> tuple[int, str, str]:
+    """Count distinct observations of one unchanged critical condition."""
+    if not reconciliation_stop:
+        return 0, "", ""
+
+    fingerprint = "|".join(sorted({str(reason) for reason in reasons if reason}))
+    fingerprint = fingerprint or "critical_reconciliation_issue"
+    observation_key = str(observation) if observation is not None else ""
+    if fingerprint != previous_fingerprint:
+        return 1, fingerprint, observation_key
+    if not observation_key or observation_key == previous_observation:
+        return max(1, current_count), fingerprint, previous_observation
+    return max(1, current_count + 1), fingerprint, observation_key
 
 
 def _monitor_auto_stop_decision(
@@ -387,6 +420,10 @@ def build_order_reconciliation_payload(
     elif any(issue["level"] == "warning" for issue in issues):
         status = "warning"
     auto_stop_reasons = _reconciliation_auto_stop_reasons(issues)
+    recoverable_reasons = _reconciliation_reasons_for_types(
+        issues,
+        RECONCILIATION_RECOVERABLE_TYPES,
+    )
     level_counts = {
         "error": sum(1 for issue in issues if issue.get("level") == "error"),
         "warning": sum(1 for issue in issues if issue.get("level") == "warning"),
@@ -407,6 +444,9 @@ def build_order_reconciliation_payload(
         "critical_issue_count": len(auto_stop_reasons),
         "auto_stop_recommended": bool(auto_stop_reasons),
         "auto_stop_reasons": auto_stop_reasons[:10],
+        "recoverable_issue_count": len(recoverable_reasons),
+        "automatic_retry_active": bool(recoverable_reasons),
+        "recoverable_reasons": recoverable_reasons[:10],
         "issues": issues[:50],
         "checked_at": time.time(),
     }
