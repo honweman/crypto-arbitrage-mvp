@@ -703,6 +703,10 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertIn('data-ui-feature="onchain_monitor"', HTML)
         self.assertIn('data-ui-feature="onchain_history"', HTML)
+        self.assertIn('id="onchain-monitor-section" data-page="status"', HTML)
+        self.assertIn('id="onchain-history-section" data-page="records"', HTML)
+        self.assertIn('page === "status"', APP_JS)
+        self.assertIn('overview.insertAdjacentElement("afterend", onchain)', APP_JS)
         self.assertIn(
             'class="compact-section section-open" data-ui-feature="onchain_monitor"',
             HTML,

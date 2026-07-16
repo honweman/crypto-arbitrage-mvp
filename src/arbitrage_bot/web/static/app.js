@@ -138,6 +138,11 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function applyPageSectionOrder(page) {
       const main = document.querySelector("main");
       if (!main) return;
+	      if (page === "status") {
+	        const overview = document.getElementById("overview");
+	        const onchain = document.getElementById("onchain-monitor-section");
+	        if (overview && onchain) overview.insertAdjacentElement("afterend", onchain);
+	      }
       for (const id of PAGE_DOM_ORDER[page] || []) {
         const section = document.getElementById(id);
         if (section) main.appendChild(section);
