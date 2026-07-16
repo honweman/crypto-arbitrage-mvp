@@ -569,6 +569,16 @@ class WebMonitorTest(unittest.TestCase):
             "records",
             sections="console-open-orders",
         )
+        status_holders = state_payload_for_view(
+            payload,
+            "status",
+            sections="holders",
+        )
+        records_holders = state_payload_for_view(
+            payload,
+            "records",
+            sections="holder-changes",
+        )
 
         self.assertEqual(status_overview["markets"], [])
         self.assertEqual(status_overview["quote_rates"], {})
@@ -599,6 +609,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("open_orders", records_open_orders["order_activity"])
         self.assertNotIn("web_audit", records["operations"])
         self.assertNotIn("events", records["onchain"].get("history", {}))
+        self.assertEqual(status_holders["onchain"]["holders"], [{"rank": 1}])
+        self.assertEqual(
+            records_holders["onchain"]["history"]["events"],
+            [{"id": "wallet"}],
+        )
 
     def test_monitor_state_caches_view_payloads_and_invalidates_on_update(self) -> None:
         cfg = make_config()
@@ -688,6 +703,14 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertIn('data-ui-feature="onchain_monitor"', HTML)
         self.assertIn('data-ui-feature="onchain_history"', HTML)
+        self.assertIn(
+            'class="compact-section section-open" data-ui-feature="onchain_monitor"',
+            HTML,
+        )
+        self.assertIn(
+            'class="compact-section section-open" data-ui-feature="onchain_history"',
+            HTML,
+        )
         self.assertNotIn(
             'data-ui-feature="onchain_monitor" data-ui-hidden-default="true"', HTML
         )
