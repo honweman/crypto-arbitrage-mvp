@@ -708,11 +708,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('page === "status"', APP_JS)
         self.assertIn('overview.insertAdjacentElement("afterend", onchain)', APP_JS)
         self.assertIn(
-            'class="compact-section section-open" data-ui-feature="onchain_monitor"',
+            'class="compact-section" data-ui-feature="onchain_monitor"',
             HTML,
         )
         self.assertIn(
-            'class="compact-section section-open" data-ui-feature="onchain_history"',
+            'class="compact-section" data-ui-feature="onchain_history"',
             HTML,
         )
         self.assertNotIn(
