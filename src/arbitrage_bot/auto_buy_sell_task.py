@@ -31,6 +31,8 @@ TERMINAL_TASK_STATUSES = {
     "stopped_by_price",
     "below_min_order_quote",
 }
+TERMINAL_TASK_DETAIL_RETENTION_SECONDS = 3 * 24 * 60 * 60
+TERMINAL_TASK_RETAINED_ORDER_IDS = 100
 TASK_DUPLICATE_FIELDS = (
     "exchange",
     "symbol",
@@ -332,10 +334,35 @@ class AutoBuySellTaskStore:
 
     def save(self, tasks: list[AutoBuySellTask]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        serialized_tasks: list[dict[str, Any]] = []
+        for task in tasks:
+            row = task.to_dict()
+            terminal_at = float(task.finished_at or task.updated_at or 0.0)
+            if (
+                task.status in TERMINAL_TASK_STATUSES
+                and terminal_at > 0
+                and now - terminal_at >= TERMINAL_TASK_DETAIL_RETENTION_SECONDS
+            ):
+                row["placed_order_ids"] = list(task.placed_order_ids)[
+                    -TERMINAL_TASK_RETAINED_ORDER_IDS:
+                ]
+                row["known_filled_order_ids"] = list(task.known_filled_order_ids)[
+                    -TERMINAL_TASK_RETAINED_ORDER_IDS:
+                ]
+                row["open_order_ids"] = []
+                row["last_execution"] = {
+                    "history_compacted": True,
+                    "compacted_at": now,
+                    "placed_count": task.placed_count,
+                    "filled_base": task.filled_base,
+                    "filled_quote": task.filled_quote,
+                }
+            serialized_tasks.append(row)
         payload = {
             "version": 1,
-            "updated_at": time.time(),
-            "tasks": [task.to_dict() for task in tasks],
+            "updated_at": now,
+            "tasks": serialized_tasks,
         }
         tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
         tmp_path.write_text(

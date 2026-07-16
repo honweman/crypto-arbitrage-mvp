@@ -44,6 +44,12 @@ def _connect(path: str) -> sqlite3.Connection:
 
 
 def init_asset_ledger(path: str) -> None:
+    db_path = Path(path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.is_file() or db_path.stat().st_size == 0:
+        with closing(sqlite3.connect(str(db_path), timeout=10.0)) as bootstrap:
+            bootstrap.execute("pragma auto_vacuum = incremental")
+            bootstrap.commit()
     with closing(_connect(path)) as conn:
         conn.executescript(
             """
@@ -309,7 +315,9 @@ def _row_discrepancy(row: dict[str, Any]) -> float | None:
 class AssetLedgerStore:
     def __init__(self, cfg: AssetLedgerConfig) -> None:
         self.cfg = cfg
-        if cfg.enabled:
+        if cfg.enabled and (
+            not Path(cfg.path).is_file() or Path(cfg.path).stat().st_size == 0
+        ):
             init_asset_ledger(cfg.path)
 
     @property
@@ -371,14 +379,20 @@ class AssetLedgerStore:
         rows = [row for row in balance.get("currencies", []) or [] if isinstance(row, dict)]
         if not checked or account.get("errors"):
             return None, []
+        payload_json = _json(account)
         previous_header = conn.execute(
             """
-            select snapshot_id, observed_at from balance_snapshots
+            select snapshot_id, observed_at, payload_json from balance_snapshots
             where account_key = ? and source = ?
             order by observed_at desc limit 1
             """,
             (account_key, source),
         ).fetchone()
+        if (
+            previous_header is not None
+            and previous_header["payload_json"] == payload_json
+        ):
+            return str(previous_header["snapshot_id"]), []
         previous_totals: dict[str, float] = {}
         has_source_fill_baseline = False
         if previous_header is not None:
@@ -406,7 +420,14 @@ class AssetLedgerStore:
                 snapshot_id, account_key, observed_at, status, source, payload_json
             ) values (?, ?, ?, ?, ?, ?)
             """,
-            (snapshot_id, account_key, observed_at, str(account.get("status") or "ok"), source, _json(account)),
+            (
+                snapshot_id,
+                account_key,
+                observed_at,
+                str(account.get("status") or "ok"),
+                source,
+                payload_json,
+            ),
         )
         diffs: list[dict[str, Any]] = []
         current_totals: dict[str, float] = {}
@@ -533,18 +554,41 @@ class AssetLedgerStore:
     ) -> tuple[str | None, list[dict[str, Any]]]:
         if account.get("errors"):
             return None, []
-        snapshot_id = _stable_key("orders", account_key, observed_at, account)
-        conn.execute(
+        payload_json = _json(account)
+        previous_header = conn.execute(
             """
-            insert or ignore into order_snapshots(
-                snapshot_id, account_key, observed_at, status, source, payload_json
-            ) values (?, ?, ?, ?, ?, ?)
+            select snapshot_id, payload_json from order_snapshots
+            where account_key = ? and source = ?
+            order by observed_at desc limit 1
             """,
-            (snapshot_id, account_key, observed_at, str(account.get("status") or "ok"), source, _json(account)),
+            (account_key, source),
+        ).fetchone()
+        unchanged_snapshot = bool(
+            previous_header is not None
+            and previous_header["payload_json"] == payload_json
         )
+        snapshot_id = _stable_key("orders", account_key, observed_at, account)
+        if unchanged_snapshot:
+            snapshot_id = str(previous_header["snapshot_id"])
+        else:
+            conn.execute(
+                """
+                insert or ignore into order_snapshots(
+                    snapshot_id, account_key, observed_at, status, source, payload_json
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    account_key,
+                    observed_at,
+                    str(account.get("status") or "ok"),
+                    source,
+                    payload_json,
+                ),
+            )
         diffs: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str]] = set()
-        for bucket in ("open_orders", "closed_orders"):
+        for bucket in (() if unchanged_snapshot else ("open_orders", "closed_orders")):
             for index, order in enumerate(account.get(bucket, []) or []):
                 if not isinstance(order, dict):
                     continue
@@ -596,6 +640,13 @@ class AssetLedgerStore:
                 continue
             fill_key = _fill_key(account_key, trade)
             fee = trade.get("fee") if isinstance(trade.get("fee"), dict) else {}
+            source_observed = conn.execute(
+                """
+                select 1 from fill_source_observations
+                where fill_key = ? and source = ? limit 1
+                """,
+                (fill_key, source),
+            ).fetchone()
             conn.execute(
                 """
                 insert into ledger_fills(
@@ -653,26 +704,28 @@ class AssetLedgerStore:
                 """,
                 (fill_key, source, observed_at, observed_at),
             )
+            if source_observed is None:
+                self._insert_event(
+                    conn,
+                    event_type="fill_observed",
+                    account_key=account_key,
+                    payload=trade,
+                    observed_at=observed_at,
+                    source=source,
+                    symbol=str(trade.get("symbol") or ""),
+                    external_id=fill_key,
+                    effective_at=_number(trade.get("timestamp")),
+                )
+        if not unchanged_snapshot:
             self._insert_event(
                 conn,
-                event_type="fill_observed",
+                event_type="order_snapshot",
                 account_key=account_key,
-                payload=trade,
+                payload=account,
                 observed_at=observed_at,
                 source=source,
-                symbol=str(trade.get("symbol") or ""),
-                external_id=fill_key,
-                effective_at=_number(trade.get("timestamp")),
+                external_id=snapshot_id,
             )
-        self._insert_event(
-            conn,
-            event_type="order_snapshot",
-            account_key=account_key,
-            payload=account,
-            observed_at=observed_at,
-            source=source,
-            external_id=snapshot_id,
-        )
         return snapshot_id, diffs
 
     def record_monitor_checkpoint(
@@ -971,7 +1024,8 @@ class AssetLedgerStore:
     def latest_checkpoint(self, *, healthy_only: bool = False) -> dict[str, Any] | None:
         if not self.enabled:
             return None
-        init_asset_ledger(self.cfg.path)
+        if not Path(self.cfg.path).is_file() or Path(self.cfg.path).stat().st_size == 0:
+            init_asset_ledger(self.cfg.path)
         where = "where status != 'error'" if healthy_only else ""
         with closing(_connect(self.cfg.path)) as conn:
             row = conn.execute(
@@ -1053,24 +1107,36 @@ class AssetLedgerStore:
             )
             conn.commit()
 
-    def summary(self, *, now: float | None = None) -> dict[str, Any]:
+    def summary(
+        self,
+        *,
+        now: float | None = None,
+        include_counts: bool = True,
+    ) -> dict[str, Any]:
         if not self.enabled:
             return {"enabled": False, "status": "disabled"}
         now = float(now or time.time())
-        init_asset_ledger(self.cfg.path)
+        if not Path(self.cfg.path).is_file() or Path(self.cfg.path).stat().st_size == 0:
+            init_asset_ledger(self.cfg.path)
         with closing(_connect(self.cfg.path)) as conn:
-            counts = {
-                table: int(conn.execute(f"select count(*) from {table}").fetchone()[0])  # noqa: S608
-                for table in (
-                    "ledger_events",
-                    "balance_snapshots",
-                    "order_snapshots",
-                    "ledger_fills",
-                    "position_snapshots",
-                    "pnl_snapshots",
-                    "reconciliation_runs",
-                )
-            }
+            counts = (
+                {
+                    table: int(
+                        conn.execute(f"select count(*) from {table}").fetchone()[0]  # noqa: S608
+                    )
+                    for table in (
+                        "ledger_events",
+                        "balance_snapshots",
+                        "order_snapshots",
+                        "ledger_fills",
+                        "position_snapshots",
+                        "pnl_snapshots",
+                        "reconciliation_runs",
+                    )
+                }
+                if include_counts
+                else {}
+            )
             latest = conn.execute(
                 "select observed_at, status, checkpoint_id from monitor_checkpoints order by observed_at desc limit 1"
             ).fetchone()

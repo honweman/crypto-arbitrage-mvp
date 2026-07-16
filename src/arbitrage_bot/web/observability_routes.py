@@ -4,6 +4,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from ..asset_ledger import AssetLedgerStore
 from ..observability import render_prometheus_metrics
 from .deployment import RuntimeSupervisor
 from .security import STATIC_CACHE_CONTROL
@@ -15,6 +16,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 async def api_health(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
+    cfg = request.app["config"]
     payload = await state.get(view="status")
     supervisor = request.app.get("runtime_supervisor")
     deployment = (
@@ -30,9 +32,7 @@ async def api_health(request: web.Request) -> web.Response:
         }
     )
     order_activity = payload.get("order_activity", {})
-    ledger = order_activity.get("ledger") or payload.get("account_balances", {}).get(
-        "ledger", {}
-    )
+    ledger = AssetLedgerStore(cfg.asset_ledger).summary(include_counts=False)
     reliability = payload.get("order_reliability") or order_activity.get(
         "reliability", {}
     )

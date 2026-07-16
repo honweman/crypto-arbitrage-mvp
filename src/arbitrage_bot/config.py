@@ -91,6 +91,8 @@ class MarketMakerConfig:
     reprice_threshold_bps: float = 0.0
     reprice_hysteresis_bps: float = 3.0
     full_reprice_threshold_bps: float = 25.0
+    adaptive_reprice_enabled: bool = False
+    adaptive_reprice_spread_fraction: float = 0.05
     max_order_quote: float = 0.0
     max_cycle_quote: float = 0.0
     max_open_orders: int = 0
@@ -590,6 +592,10 @@ def _market_maker_from_dict(raw: dict[str, Any]) -> MarketMakerConfig:
         reprice_hysteresis_bps=float(raw.get("reprice_hysteresis_bps", 3.0)),
         full_reprice_threshold_bps=float(
             raw.get("full_reprice_threshold_bps", 25.0)
+        ),
+        adaptive_reprice_enabled=bool(raw.get("adaptive_reprice_enabled", False)),
+        adaptive_reprice_spread_fraction=float(
+            raw.get("adaptive_reprice_spread_fraction", 0.05)
         ),
         max_order_quote=float(raw.get("max_order_quote", 0.0)),
         max_cycle_quote=float(raw.get("max_cycle_quote", 0.0)),

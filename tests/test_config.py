@@ -50,6 +50,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.market_maker.max_cancels_per_cycle, 0)
         self.assertEqual(cfg.market_maker.max_slippage_bps, 0.0)
         self.assertEqual(cfg.market_maker.max_order_book_age_seconds, 0.0)
+        self.assertFalse(cfg.market_maker.adaptive_reprice_enabled)
+        self.assertEqual(cfg.market_maker.adaptive_reprice_spread_fraction, 0.05)
         self.assertFalse(cfg.market_maker.inventory_control_enabled)
         self.assertEqual(cfg.market_maker.inventory_target_base, 0.0)
         self.assertEqual(cfg.market_maker.inventory_band_base, 0.0)

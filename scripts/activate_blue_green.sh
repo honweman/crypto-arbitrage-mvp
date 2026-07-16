@@ -320,6 +320,45 @@ mv "${ACTIVE_SLOT_FILE}.tmp" "$ACTIVE_SLOT_FILE"
 systemctl enable "$CANDIDATE_SERVICE" >/dev/null
 systemctl disable "$OLD_SERVICE" >/dev/null 2>&1 || true
 systemctl enable --now crypto-arb-log-compact.timer >/dev/null
+mapfile -t DESIRED_ACCOUNT_KEYS < <(
+  python3 - "$SHARED_DIR/config.acs.json" /etc/crypto-arbitrage-mvp.env <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+environment_path = Path(sys.argv[2])
+if not config_path.is_file():
+    raise SystemExit(0)
+configured_env = set()
+if environment_path.is_file():
+    for raw_line in environment_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name.startswith("export "):
+            name = name[len("export "):].strip()
+        configured_env.add(name)
+payload = json.loads(config_path.read_text(encoding="utf-8"))
+for account in [
+    *payload.get("spot_exchanges", []),
+    *payload.get("derivative_exchanges", []),
+]:
+    if not isinstance(account, dict):
+        continue
+    key = str(account.get("label") or account.get("key") or "").strip()
+    required = [
+        str(account.get("api_key_env") or "").strip(),
+        str(account.get("secret_env") or "").strip(),
+    ]
+    if key and all(name and name in configured_env for name in required):
+        print(key)
+PY
+)
+for account_key in "${DESIRED_ACCOUNT_KEYS[@]}"; do
+  systemctl enable --now "crypto-arb-account-worker@${account_key}.service" >/dev/null
+done
 mapfile -t ACCOUNT_WORKER_SERVICES < <(
   systemctl list-units --type=service --state=running --no-legend \
     'crypto-arb-account-worker@*.service' | awk '{print $1}'

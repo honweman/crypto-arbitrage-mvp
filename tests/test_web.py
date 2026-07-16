@@ -213,11 +213,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260716-onchain1" defer></script>',
+            '<script src="/static/app.js?v=20260716-core1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260713-ux1" defer></script>',
+            '<script src="/static/i18n.js?v=20260716-core1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -874,6 +874,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="mm-safety-budget"', HTML)
         self.assertIn('id="mm-inventory-enabled"', HTML)
         self.assertIn('id="mm-inventory-target"', HTML)
+        self.assertIn('id="mm-adaptive-reprice"', HTML)
+        self.assertIn('id="mm-adaptive-spread"', HTML)
         self.assertIn('id="mm-quality-inventory"', HTML)
         self.assertIn('id="mm-quality-fills"', HTML)
         self.assertIn('id="mm-quality-spread"', HTML)
@@ -898,9 +900,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="rebalance-open-risk"', HTML)
         self.assertIn('id="rebalance-reset"', HTML)
         self.assertIn('id="rebalance-acknowledge-exposure"', HTML)
+        self.assertIn('id="rebalance-stop-release"', HTML)
         self.assertIn("RESET REBALANCE", APP_JS)
         self.assertIn("ACKNOWLEDGE RESIDUAL EXPOSURE", APP_JS)
+        self.assertIn("STOP REBALANCE AND RELEASE MM", APP_JS)
         self.assertIn("acknowledgeRebalanceExposure", APP_JS)
+        self.assertIn("stopRebalanceAndReleaseMm", APP_JS)
         self.assertIn("liveRebalanceValidationError", APP_JS)
         self.assertIn("confirmLiveRebalance", APP_JS)
         self.assertIn("lastState?.operations?.risk", APP_JS)
@@ -2348,6 +2353,8 @@ class WebMonitorTest(unittest.TestCase):
                 "reprice_threshold_bps": "2.5",
                 "reprice_hysteresis_bps": "3",
                 "full_reprice_threshold_bps": "25",
+                "adaptive_reprice_enabled": True,
+                "adaptive_reprice_spread_fraction": "0.05",
                 "max_order_quote": "3.5",
                 "max_cycle_quote": "70",
                 "max_open_orders": "40",
@@ -2379,6 +2386,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["reprice_threshold_bps"], 2.5)
         self.assertEqual(overrides["reprice_hysteresis_bps"], 3.0)
         self.assertEqual(overrides["full_reprice_threshold_bps"], 25.0)
+        self.assertTrue(overrides["adaptive_reprice_enabled"])
+        self.assertEqual(overrides["adaptive_reprice_spread_fraction"], 0.05)
         self.assertEqual(overrides["max_order_quote"], 3.5)
         self.assertEqual(overrides["max_cycle_quote"], 70.0)
         self.assertEqual(overrides["max_open_orders"], 40)
@@ -2392,6 +2401,19 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["inventory_band_base"], 5000.0)
         self.assertEqual(overrides["inventory_max_deviation_base"], 20000.0)
         self.assertTrue(overrides["post_only"])
+
+        with self.assertRaisesRegex(ValueError, "inventory_max_deviation_base"):
+            market_maker_config_from_payload(
+                {
+                    "inventory_control_enabled": True,
+                    "inventory_band_base": 0,
+                    "inventory_max_deviation_base": 0,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            market_maker_config_from_payload(
+                {"adaptive_reprice_spread_fraction": 1.1}
+            )
 
     def test_market_maker_update_repairs_stale_market_identity_id(self) -> None:
         base = MarketMakerConfig(
@@ -4451,6 +4473,92 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["status"], "acknowledged_exposure")
         self.assertTrue(updated["residual_exposure_acknowledged"])
         self.assertIn("acknowledged_at", updated["residual_exposure"])
+
+    async def test_rebalance_api_stops_and_releases_coordination_atomically(
+        self,
+    ) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/cross-exchange-rebalance"
+            method = "POST"
+
+            def __init__(self, app: dict[str, object]) -> None:
+                self.app = app
+
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return {
+                    "action": "stop_and_release",
+                    "confirm_stop": "STOP REBALANCE AND RELEASE MM",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = os.path.join(tmp, "rebalance_runtime.json")
+            cfg = make_config(
+                cross_exchange_rebalance=CrossExchangeRebalanceConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    buy_exchange="bithumb-spot",
+                    buy_symbol="ACS/KRW",
+                    sell_exchange="coinbase-spot",
+                    sell_symbol="ACS/USDC",
+                    total_quote_common=100.0,
+                    quote_per_cycle_common=10.0,
+                    runtime_path=runtime_path,
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                ),
+            )
+            state = MonitorState(
+                cfg,
+                1.0,
+                runtime_store_path=os.path.join(tmp, "web_runtime_overrides.json"),
+            )
+            runtime = new_rebalance_runtime(
+                cfg.cross_exchange_rebalance,
+                common_quote_currency=cfg.common_quote_currency,
+            )
+            runtime.update(
+                {
+                    "status": "halted",
+                    "halted": True,
+                    "halt_reason": "hedge_required",
+                    "residual_exposure": {
+                        "asset": "ACS",
+                        "side": "sell",
+                        "quantity_base": 12.5,
+                        "detected_at": 1.0,
+                    },
+                }
+            )
+            save_rebalance_runtime(runtime_path, runtime)
+            await state.set_cross_exchange_rebalance_runtime(runtime)
+            await state.acquire_coordination_hold(
+                "cross_exchange_rebalance",
+                [("coinbase-spot", "ACS/USDC")],
+                reason="test",
+                ttl_seconds=60,
+            )
+
+            response = await api_cross_exchange_rebalance(
+                FakeRequest({"monitor_state": state, "config": cfg})  # type: ignore[arg-type]
+            )
+            updated = await state.cross_exchange_rebalance_runtime()
+            runtime_cfg = await state.runtime_config(cfg)
+            holds = await state.coordination_holds()
+
+        self.assertEqual(response.status, 200, response.text)
+        self.assertEqual(updated["status"], "stopped_by_operator")
+        self.assertFalse(updated["halted"])
+        self.assertTrue(updated["residual_exposure_acknowledged"])
+        self.assertFalse(runtime_cfg.cross_exchange_rebalance.enabled)
+        self.assertFalse(runtime_cfg.cross_exchange_rebalance.live_enabled)
+        self.assertEqual(holds, [])
 
     async def test_market_maker_api_requires_confirmation_when_starting_live(
         self,

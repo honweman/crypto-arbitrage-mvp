@@ -345,6 +345,36 @@ def _active_plan_after_reprice(
     return active
 
 
+def _effective_reprice_threshold_bps(
+    maker_cfg: Any,
+    current_plan: MarketMakerPlan,
+) -> float:
+    threshold = max(
+        0.0,
+        float(getattr(maker_cfg, "reprice_threshold_bps", 0.0) or 0.0)
+        + float(getattr(maker_cfg, "reprice_hysteresis_bps", 0.0) or 0.0),
+    )
+    if not bool(getattr(maker_cfg, "adaptive_reprice_enabled", False)):
+        return threshold
+    spread_fraction = min(
+        1.0,
+        max(
+            0.0,
+            float(
+                getattr(maker_cfg, "adaptive_reprice_spread_fraction", 0.05)
+                or 0.0
+            ),
+        ),
+    )
+    adaptive_floor = max(0.0, current_plan.existing_spread_bps) * spread_fraction
+    full_threshold = float(
+        getattr(maker_cfg, "full_reprice_threshold_bps", 0.0) or 0.0
+    )
+    if full_threshold > 0:
+        adaptive_floor = min(adaptive_floor, full_threshold)
+    return max(threshold, adaptive_floor)
+
+
 def _estimated_reprice_cancel_count(
     maker_cfg: Any,
     current_plan: MarketMakerPlan,
@@ -387,8 +417,9 @@ def _estimated_reprice_cancel_count(
     changes = _plan_order_changes(previous_plan, current_plan)
     if changes is None:
         return full_count
-    effective_threshold = float(maker_cfg.reprice_threshold_bps) + float(
-        getattr(maker_cfg, "reprice_hysteresis_bps", 0.0) or 0.0
+    effective_threshold = _effective_reprice_threshold_bps(
+        maker_cfg,
+        current_plan,
     )
     return sum(
         1
@@ -1171,11 +1202,9 @@ async def run_cycle(
             current_orders=comparison_orders,
         )
         payload["reprice_bps"] = reprice_bps
-        effective_reprice_threshold_bps = (
-            cfg.market_maker.reprice_threshold_bps
-            + cfg.market_maker.reprice_hysteresis_bps
-            if cfg.market_maker.reprice_threshold_bps > 0
-            else 0.0
+        effective_reprice_threshold_bps = _effective_reprice_threshold_bps(
+            cfg.market_maker,
+            plan,
         )
         payload["effective_reprice_threshold_bps"] = (
             effective_reprice_threshold_bps

@@ -132,6 +132,7 @@ class AssetLedgerStoreTest(unittest.TestCase):
         self.assertEqual(summary["reconciliation"][0]["status"], "ok")
 
         with sqlite3.connect(self.path) as conn:
+            self.assertEqual(conn.execute("pragma auto_vacuum").fetchone()[0], 2)
             self.assertEqual(conn.execute("select count(*) from balance_rows").fetchone()[0], 2)
             self.assertEqual(conn.execute("select count(*) from order_rows").fetchone()[0], 1)
             self.assertGreaterEqual(conn.execute("select count(*) from ledger_events").fetchone()[0], 4)
@@ -227,6 +228,38 @@ class AssetLedgerStoreTest(unittest.TestCase):
             sources,
             {"web-monitor", "account-reader:coinbase-spot"},
         )
+
+    def test_worker_reuses_unchanged_snapshots_and_fill_events(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        source = "account-reader:coinbase-spot"
+        for observed_at in (1000, 1010):
+            store.record_account_snapshot(
+                account_key="coinbase-spot",
+                balance_account=_balances()["accounts"][0],
+                order_account=_activity()["accounts"][0],
+                source=source,
+                observed_at=observed_at,
+            )
+
+        summary = store.summary(now=1011)
+        self.assertEqual(summary["counts"]["balance_snapshots"], 1)
+        self.assertEqual(summary["counts"]["order_snapshots"], 1)
+        self.assertEqual(summary["counts"]["reconciliation_runs"], 2)
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from ledger_events where event_type = ?",
+                    ("fill_observed",),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_lightweight_summary_omits_expensive_counts(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        store.record_monitor_checkpoint(_balances(), _activity(), observed_at=1000)
+        summary = store.summary(now=1010, include_counts=False)
+        self.assertEqual(summary["counts"], {})
+        self.assertEqual(summary["status"], "ok")
 
     def test_failed_refresh_uses_last_healthy_checkpoint(self) -> None:
         balances, activity, _ = attach_ledger_checkpoint(

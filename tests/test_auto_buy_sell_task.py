@@ -230,6 +230,28 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             [stopped["id"], active["id"]],
         )
 
+    async def test_old_terminal_task_details_are_compacted_on_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tasks.json"
+            service = AutoBuySellTaskService(path)
+            await service.create_task(self._slow_cfg())
+            task = service._tasks[0]
+            task.status = "complete"
+            task.finished_at = time.time() - 4 * 24 * 60 * 60
+            task.placed_count = 250
+            task.placed_order_ids = [f"order-{index}" for index in range(250)]
+            task.known_filled_order_ids = [
+                f"order-{index}" for index in range(250)
+            ]
+
+            service.store.save(service._tasks)
+            loaded = AutoBuySellTaskStore(path).load()[0]
+
+        self.assertEqual(len(loaded.placed_order_ids), 100)
+        self.assertEqual(len(loaded.known_filled_order_ids), 100)
+        self.assertTrue(loaded.last_execution["history_compacted"])
+        self.assertEqual(loaded.last_execution["placed_count"], 250)
+
     async def test_task_progress_uses_fills_not_submitted_amount(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AutoBuySellTaskService(Path(tmp) / "tasks.json")

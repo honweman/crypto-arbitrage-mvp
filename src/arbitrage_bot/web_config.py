@@ -647,6 +647,7 @@ def _market_maker_overrides_from_payload(
         "post_only",
         "cancel_existing_orders",
         "inventory_control_enabled",
+        "adaptive_reprice_enabled",
     }:
         if field in payload:
             if not isinstance(payload[field], bool):
@@ -701,6 +702,7 @@ def _market_maker_overrides_from_payload(
         "reprice_threshold_bps",
         "reprice_hysteresis_bps",
         "full_reprice_threshold_bps",
+        "adaptive_reprice_spread_fraction",
         "max_order_quote",
         "max_cycle_quote",
         "max_slippage_bps",
@@ -743,6 +745,17 @@ def market_maker_config_from_payload(
             next_symbol,
         ) != (base_config.exchange, base_config.symbol)
     config = replace(base_config or MarketMakerConfig(), **overrides)
+    if config.adaptive_reprice_spread_fraction > 1:
+        raise ValueError("adaptive_reprice_spread_fraction must be between 0 and 1")
+    if config.inventory_control_enabled:
+        if config.inventory_max_deviation_base <= 0:
+            raise ValueError(
+                "inventory_max_deviation_base must be positive when inventory control is enabled"
+            )
+        if config.inventory_band_base >= config.inventory_max_deviation_base:
+            raise ValueError(
+                "inventory_band_base must be below inventory_max_deviation_base"
+            )
     if market_identity_changed:
         expected_id = market_maker_expected_instance_id(config)
         if config.id and config.id != expected_id:

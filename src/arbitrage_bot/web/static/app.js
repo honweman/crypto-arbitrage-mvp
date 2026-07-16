@@ -6292,6 +6292,8 @@ function balanceStatusClass(status) {
       setNumericField("mm-reprice", config.reprice_threshold_bps || 0);
       setNumericField("mm-reprice-hysteresis", config.reprice_hysteresis_bps ?? 3);
       setNumericField("mm-full-reprice", config.full_reprice_threshold_bps ?? 25);
+      document.getElementById("mm-adaptive-reprice").checked = Boolean(config.adaptive_reprice_enabled);
+      setNumericField("mm-adaptive-spread", config.adaptive_reprice_spread_fraction ?? 0.05);
       setNumericField("mm-poll", config.poll_seconds || 1);
       setNumericField("mm-max-order", config.max_order_quote || 0);
       setNumericField("mm-max-cycle", config.max_cycle_quote || 0);
@@ -6325,6 +6327,8 @@ function balanceStatusClass(status) {
         reprice_threshold_bps: numericValue("mm-reprice"),
         reprice_hysteresis_bps: numericValue("mm-reprice-hysteresis"),
         full_reprice_threshold_bps: numericValue("mm-full-reprice"),
+        adaptive_reprice_enabled: document.getElementById("mm-adaptive-reprice").checked,
+        adaptive_reprice_spread_fraction: numericValue("mm-adaptive-spread"),
         poll_seconds: numericValue("mm-poll"),
         max_order_quote: numericValue("mm-max-order"),
         max_cycle_quote: numericValue("mm-max-cycle"),
@@ -6983,13 +6987,18 @@ function balanceStatusClass(status) {
       }
       const resetButton = document.getElementById("rebalance-reset");
       const acknowledgeButton = document.getElementById("rebalance-acknowledge-exposure");
+      const stopReleaseButton = document.getElementById("rebalance-stop-release");
+      const residual = runtime.residual_exposure || {};
+      const hasReviewableResidual = runtime.halted
+        && runtime.halt_reason === "hedge_required"
+        && Number(residual.quantity_base || 0) > 0;
       if (acknowledgeButton) {
-        const residual = runtime.residual_exposure || {};
-        const canAcknowledge = runtime.halted
-          && runtime.halt_reason === "hedge_required"
-          && Number(residual.quantity_base || 0) > 0;
-        acknowledgeButton.hidden = !canAcknowledge;
-        acknowledgeButton.disabled = rebalanceFormBusy || !canAcknowledge;
+        acknowledgeButton.hidden = !hasReviewableResidual;
+        acknowledgeButton.disabled = rebalanceFormBusy || !hasReviewableResidual;
+      }
+      if (stopReleaseButton) {
+        stopReleaseButton.hidden = !hasReviewableResidual;
+        stopReleaseButton.disabled = rebalanceFormBusy || !hasReviewableResidual;
       }
       const hasProgress = Number(runtime.completed_quote_common || 0) > 0
         || Number(runtime.completed_destination_quote_common || 0) > 0
@@ -7325,6 +7334,43 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "exposure acknowledgement failed");
         setRebalanceFeedback("Residual exposure acknowledged. Rebalance remains blocked.", "ok");
+        await refresh({ force: true });
+      } catch (error) {
+        setRebalanceFeedback(error.message || String(error), "error");
+      } finally {
+        rebalanceFormBusy = false;
+        renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
+        updateCoreFormStates();
+      }
+    }
+
+    async function stopRebalanceAndReleaseMm() {
+      if (rebalanceFormBusy) return;
+      const runtime = lastState?.cross_exchange_rebalance?.runtime || {};
+      const residual = runtime.residual_exposure || {};
+      const quantity = Number(residual.quantity_base || 0);
+      const asset = residual.asset || baseCurrency(
+        lastState?.cross_exchange_rebalance?.config?.buy_symbol || "",
+      );
+      if (!dangerConfirm(
+        "Stop rebalance and release MM?",
+        `${fmt.format(quantity)} ${asset}\nNo hedge order will be placed. The residual remains in the audit log.`,
+      )) return;
+      const button = document.getElementById("rebalance-stop-release");
+      rebalanceFormBusy = true;
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/cross-exchange-rebalance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "stop_and_release",
+            confirm_stop: "STOP REBALANCE AND RELEASE MM",
+          }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "stop and release failed");
+        setRebalanceFeedback("Rebalance stopped and MM coordination released.", "ok");
         await refresh({ force: true });
       } catch (error) {
         setRebalanceFeedback(error.message || String(error), "error");
@@ -8340,6 +8386,10 @@ function balanceStatusClass(status) {
     document.getElementById("rebalance-acknowledge-exposure").addEventListener(
       "click",
       acknowledgeRebalanceExposure,
+    );
+    document.getElementById("rebalance-stop-release").addEventListener(
+      "click",
+      stopRebalanceAndReleaseMm,
     );
     document.getElementById("rebalance-live-confirm").addEventListener(
       "click",

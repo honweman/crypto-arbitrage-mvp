@@ -70,6 +70,8 @@ def optimize_sqlite(
         "checkpointed_pages": 0,
         "page_count": 0,
         "free_page_count": 0,
+        "auto_vacuum_mode": 0,
+        "incremental_vacuum_pages": 0,
         "order_intent_compaction": None,
         "asset_ledger_compaction": None,
     }
@@ -108,6 +110,16 @@ def optimize_sqlite(
         result["free_page_count"] = int(
             connection.execute("PRAGMA freelist_count").fetchone()[0]
         )
+        result["auto_vacuum_mode"] = int(
+            connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+        )
+        if result["auto_vacuum_mode"] == 2 and result["free_page_count"] > 0:
+            vacuum_pages = min(5_000, result["free_page_count"])
+            connection.execute(f"PRAGMA incremental_vacuum({vacuum_pages})")
+            result["incremental_vacuum_pages"] = vacuum_pages
+            result["free_page_count"] = int(
+                connection.execute("PRAGMA freelist_count").fetchone()[0]
+            )
         connection.commit()
 
     if checkpoint:

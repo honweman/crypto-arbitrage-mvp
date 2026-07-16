@@ -5780,6 +5780,62 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
                 payload={"residual_exposure": residual},
             )
             return web.json_response({"ok": True, "runtime": runtime})
+        if action == "stop_and_release":
+            if payload.get("confirm_stop") != "STOP REBALANCE AND RELEASE MM":
+                raise ValueError(
+                    "stop and release requires "
+                    "confirm_stop=STOP REBALANCE AND RELEASE MM"
+                )
+            runtime = await state.cross_exchange_rebalance_runtime()
+            if not runtime:
+                runtime = load_rebalance_runtime(
+                    current_config.runtime_path,
+                    current_config,
+                    common_quote_currency=runtime_cfg.common_quote_currency,
+                )
+            stopped_at = time.time()
+            residual = runtime.get("residual_exposure")
+            if isinstance(residual, dict):
+                residual = {
+                    **residual,
+                    "acknowledged_at": stopped_at,
+                    "acknowledged_by": _config_actor_email(request),
+                    "disposition": "stopped_and_released",
+                }
+            runtime = {
+                **runtime,
+                "halted": False,
+                "halt_reason": None,
+                "status": "stopped_by_operator",
+                "residual_exposure": residual,
+                "residual_exposure_acknowledged": isinstance(residual, dict),
+                "updated_at": stopped_at,
+            }
+            overrides = {
+                **cross_exchange_rebalance_config_to_dict(current_config),
+                "enabled": False,
+                "live_enabled": False,
+            }
+            await state.set_cross_exchange_rebalance_overrides(
+                overrides,
+                cfg=cfg,
+                actor_email=_config_actor_email(request),
+                action="cross_exchange_rebalance_stop_and_release",
+            )
+            save_rebalance_runtime(current_config.runtime_path, runtime)
+            await state.set_cross_exchange_rebalance_runtime(runtime)
+            await state.release_coordination_hold("cross_exchange_rebalance")
+            write_web_audit_event(
+                runtime_cfg,
+                request,
+                action="cross_exchange_rebalance_stopped_and_released",
+                target=(
+                    f"{current_config.buy_exchange} -> {current_config.sell_exchange}"
+                ),
+                detail="stopped rebalance and released matching MM coordination",
+                payload={"residual_exposure": residual},
+            )
+            return web.json_response({"ok": True, "runtime": runtime})
         if action == "reset":
             _require_admin_user(_request_user(request))
             if current_config.live_enabled:
@@ -5804,7 +5860,9 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
             )
             return web.json_response({"ok": True, "runtime": runtime})
         if action != "update":
-            raise ValueError("action must be update, reset, or acknowledge_exposure")
+            raise ValueError(
+                "action must be update, reset, acknowledge_exposure, or stop_and_release"
+            )
 
         symbols_by_exchange = _rebalance_symbols_by_exchange(runtime_cfg)
         accounts = slow_execution_accounts(

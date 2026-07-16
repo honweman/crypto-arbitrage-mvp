@@ -16,6 +16,7 @@ from arbitrage_bot.config import (
 )
 from arbitrage_bot.config import TradeLogConfig
 from arbitrage_bot.market_maker import (
+    _effective_reprice_threshold_bps,
     cancel_order_ids,
     market_maker_quote_conversion,
     run_cycle,
@@ -26,6 +27,36 @@ from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 
 
 class MarketMakingTest(unittest.TestCase):
+    def test_adaptive_reprice_uses_a_bounded_spread_floor(self) -> None:
+        book = OrderBookSnapshot(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            bids=[BookLevel(price=90.0, amount=10.0)],
+            asks=[BookLevel(price=110.0, amount=10.0)],
+        )
+        cfg = MarketMakerConfig(
+            exchange="bybit-spot",
+            symbol="ACS/USDT",
+            reprice_threshold_bps=2.0,
+            reprice_hysteresis_bps=3.0,
+            full_reprice_threshold_bps=25.0,
+            adaptive_reprice_enabled=True,
+            adaptive_reprice_spread_fraction=0.1,
+        )
+        plan = build_symmetric_market_maker_plan(book, cfg)
+
+        self.assertEqual(_effective_reprice_threshold_bps(cfg, plan), 25.0)
+        self.assertEqual(
+            _effective_reprice_threshold_bps(
+                MarketMakerConfig(
+                    reprice_threshold_bps=2.0,
+                    reprice_hysteresis_bps=3.0,
+                ),
+                plan,
+            ),
+            5.0,
+        )
+
     def test_builds_symmetric_quote_depth_around_mid(self) -> None:
         book = OrderBookSnapshot(
             exchange="bybit-spot",
