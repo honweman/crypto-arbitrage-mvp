@@ -213,7 +213,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260714-rebalance1" defer></script>',
+            '<script src="/static/app.js?v=20260716-onchain1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
