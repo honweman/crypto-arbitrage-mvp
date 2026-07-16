@@ -911,7 +911,7 @@ Auto-stop pauses the program after repeated degraded/error cycles, or immediatel
 
 Do not commit API keys, credential encryption keys, proxy URLs, or IP allowlist secrets. Put those values in local shell env vars, Docker/Kubernetes secrets, or the cloud secret manager for each account runner.
 
-The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 20 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, cumulative balance changes since the first stored baseline, and a persisted holder change log. The change history is saved under `onchain_monitor.history_path`, so browser refreshes and service restarts do not reset the displayed wallet changes.
+The same monitor also tracks the ACS Solana token mint configured in `onchain_monitor`. It shows the top 15 owner wallets inferred from the largest ACS token accounts, their labels when known, balances, supply share, cumulative balance changes since the first stored baseline, and a persisted holder change log. The change history is saved under `onchain_monitor.history_path`, so browser refreshes and service restarts do not reset the displayed wallet changes.
 
 ```json
 "onchain_monitor": {
@@ -925,7 +925,7 @@ The same monitor also tracks the ACS Solana token mint configured in `onchain_mo
   ],
   "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
   "label": "ACS",
-  "top_n": 20,
+  "top_n": 15,
   "poll_seconds": 60,
   "history_path": "data/onchain_holder_changes.json",
   "address_labels": {

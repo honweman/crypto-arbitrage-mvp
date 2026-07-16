@@ -32,7 +32,7 @@
     ],
     "token_mint": "5MAYDfq5yxtudAhtfyuMBuHZjgAbaS9tbEyEQYAhDS5y",
     "label": "ACS",
-    "top_n": 20,
+    "top_n": 15,
     "poll_seconds": 600,
     "history_path": "data/onchain_holder_changes.json",
     "address_labels": {

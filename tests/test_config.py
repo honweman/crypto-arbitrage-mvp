@@ -6,12 +6,12 @@ from arbitrage_bot.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
-    def test_acs_onchain_monitor_uses_top_20_and_labels(self) -> None:
+    def test_acs_onchain_monitor_uses_top_15_and_labels(self) -> None:
         config_path = Path(__file__).resolve().parents[1] / "config.acs.example.json"
 
         cfg = load_config(config_path)
 
-        self.assertEqual(cfg.onchain_monitor.top_n, 20)
+        self.assertEqual(cfg.onchain_monitor.top_n, 15)
         self.assertEqual(cfg.onchain_monitor.rpc_url_env, "SOLANA_RPC_URLS")
         self.assertEqual(
             cfg.onchain_monitor.rpc_urls,

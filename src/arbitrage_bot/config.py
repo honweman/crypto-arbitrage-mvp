@@ -69,7 +69,7 @@ class OnchainMonitorConfig:
     rpc_url_env: str | None = "SOLANA_RPC_URLS"
     token_mint: str = ""
     label: str = "Token"
-    top_n: int = 20
+    top_n: int = 15
     poll_seconds: float = 60.0
     history_path: str = "data/onchain_holder_changes.json"
     address_labels: dict[str, str] = field(default_factory=dict)
@@ -813,7 +813,7 @@ def load_config(path: str | Path) -> BotConfig:
             rpc_url_env=onchain_rpc_url_env,
             token_mint=onchain_raw.get("token_mint", ""),
             label=onchain_raw.get("label", "Token"),
-            top_n=int(onchain_raw.get("top_n", 20)),
+            top_n=int(onchain_raw.get("top_n", 15)),
             poll_seconds=float(onchain_raw.get("poll_seconds", 60.0)),
             history_path=onchain_raw.get(
                 "history_path",
