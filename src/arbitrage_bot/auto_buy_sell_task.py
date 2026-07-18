@@ -419,6 +419,53 @@ class AutoBuySellTaskService:
             self.store.save(self._tasks)
             return task.to_dict()
 
+    async def enable_market_maker_coordination(
+        self,
+        task_id: str,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            task = self._get_task_unlocked(task_id)
+            if task.status in TERMINAL_TASK_STATUSES:
+                raise ValueError(
+                    f"cannot enable MM coordination for terminal task: {task.status}"
+                )
+            if task.open_order_ids:
+                raise ValueError(
+                    "cannot enable MM coordination while the task has open orders"
+                )
+            if task.filled_base > 0 or task.filled_quote > 0 or task.placed_count > 0:
+                raise ValueError(
+                    "MM coordination can only be enabled in place for an unfilled "
+                    "task with no submitted orders"
+                )
+            risk = task.last_risk if isinstance(task.last_risk, dict) else {}
+            guard = (
+                risk.get("self_trade_guard")
+                if isinstance(risk.get("self_trade_guard"), dict)
+                else {}
+            )
+            if task.status != "blocked_by_risk" or not guard.get("blocked"):
+                raise ValueError(
+                    "task is not currently blocked by the MM self-trade guard"
+                )
+            task_cfg = task.exec_cfg
+            if not task_cfg.block_conflicting_market_maker:
+                raise ValueError("MM self-trade guard must remain enabled")
+            task.config = asdict(
+                replace(
+                    task_cfg,
+                    coordinate_market_maker=True,
+                    block_conflicting_market_maker=True,
+                )
+            )
+            task.status = "running"
+            task.last_status = "mm_coordination_enabled"
+            task.last_error = None
+            task.next_run_at = 0.0
+            task.updated_at = time.time()
+            self.store.save(self._tasks)
+            return task.to_dict()
+
     async def stop_task(
         self,
         task_id: str,

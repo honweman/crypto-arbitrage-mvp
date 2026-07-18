@@ -155,6 +155,39 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
                     self._slow_cfg(start_price=0.1, stop_price=0.05)
                 )
 
+    async def test_blocked_unfilled_task_can_enable_mm_coordination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tasks.json"
+            service = AutoBuySellTaskService(path)
+            task = await service.create_task(self._slow_cfg())
+            service._tasks[0].status = "blocked_by_risk"
+            service._tasks[0].last_risk = {
+                "approved": False,
+                "self_trade_guard": {"blocked": True},
+            }
+            service.store.save(service._tasks)
+
+            updated = await service.enable_market_maker_coordination(task["id"])
+            loaded = AutoBuySellTaskStore(path).load()[0]
+
+        self.assertEqual(updated["status"], "running")
+        self.assertEqual(updated["last_status"], "mm_coordination_enabled")
+        self.assertTrue(updated["config"]["coordinate_market_maker"])
+        self.assertTrue(loaded.exec_cfg.coordinate_market_maker)
+
+    async def test_mm_coordination_upgrade_rejects_submitted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            task = await service.create_task(self._slow_cfg())
+            service._tasks[0].status = "blocked_by_risk"
+            service._tasks[0].last_risk = {
+                "self_trade_guard": {"blocked": True},
+            }
+            service._tasks[0].placed_count = 1
+
+            with self.assertRaisesRegex(ValueError, "unfilled task"):
+                await service.enable_market_maker_coordination(task["id"])
+
     async def test_stop_task_cancels_open_orders_and_marks_stopped(self) -> None:
         manager = FakeTaskManager()
         with tempfile.TemporaryDirectory() as tmp:

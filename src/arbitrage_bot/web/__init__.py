@@ -7580,8 +7580,10 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
         _require_admin_user(_request_user(request))
         payload = await request.json()
         action = str(payload.get("action", "")).strip().lower()
-        if action not in {"pause", "resume", "stop"}:
-            raise ValueError("action must be pause, resume, or stop")
+        if action not in {"pause", "resume", "stop", "enable_mm_coordination"}:
+            raise ValueError(
+                "action must be pause, resume, stop, or enable_mm_coordination"
+            )
         task_snapshot = await tasks.snapshot()
         task_row = next(
             (
@@ -7601,7 +7603,14 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
                 _request_user(request),
                 [_base_asset_from_symbol(str(task_config.get("symbol") or ""))],
             )
-        if action == "stop":
+        if action == "enable_mm_coordination":
+            if payload.get("confirm_live") != LIVE_AUTO_BUY_SELL_CONFIRMATION:
+                raise ValueError(
+                    "enabling live MM coordination requires "
+                    f"confirm_live={LIVE_AUTO_BUY_SELL_CONFIRMATION}"
+                )
+            task = await tasks.enable_market_maker_coordination(task_id)
+        elif action == "stop":
             manager = ExchangeManager()
             runtime_cfg = await state.runtime_config(cfg)
             cancel_open_orders = bool(payload.get("cancel_open_orders", True))

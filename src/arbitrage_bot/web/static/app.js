@@ -5163,6 +5163,41 @@ function balanceStatusClass(status) {
         `;
         const action = tr.querySelector(".strategy-action");
         if (!terminal) {
+          const selfTradeGuard = task.last_risk?.self_trade_guard || {};
+          const canEnableCoordination = status === "blocked_by_risk"
+            && selfTradeGuard.blocked
+            && !config.coordinate_market_maker
+            && Number(task.filled_base || 0) === 0
+            && Number(task.filled_quote || 0) === 0
+            && Number(task.open_order_count || 0) === 0
+            && Number(task.placed_count || 0) === 0;
+          if (canEnableCoordination) {
+            const coordinationButton = document.createElement("button");
+            coordinationButton.className = "control-button";
+            coordinationButton.type = "button";
+            coordinationButton.textContent = uiText("Enable MM Coordination");
+            coordinationButton.addEventListener("click", () => {
+              const detail = [
+                `${uiText("Account")}: ${config.exchange || "--"}`,
+                `${uiText("Trading pair")}: ${config.symbol || "--"}`,
+                `${uiText("Side")}: ${String(config.side || "--").toUpperCase()}`,
+                `${uiText("Total Quote")}: ${quoteCurrency(config.symbol)} ${money.format(config.total_quote || 0)}`,
+                config.side === "buy"
+                  ? uiText("The MM sell side will be withdrawn before live buying starts.")
+                  : uiText("The MM buy side will be withdrawn before live selling starts."),
+              ].join("\n");
+              if (!dangerConfirm(
+                uiText("Enable MM coordination and resume this live task?"),
+                detail,
+              )) return;
+              controlAutoBuySellTask(
+                task.id,
+                "enable_mm_coordination",
+                coordinationButton,
+              );
+            });
+            action.appendChild(coordinationButton);
+          }
           const button = document.createElement("button");
           button.className = status === "paused" ? "control-button" : "danger-button";
           button.type = "button";
@@ -7827,7 +7862,13 @@ function balanceStatusClass(status) {
         const res = await fetch(`/api/auto-buy-sell/tasks/${encodeURIComponent(taskId)}/control`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, cancel_open_orders: action === "stop" }),
+          body: JSON.stringify({
+            action,
+            cancel_open_orders: action === "stop",
+            confirm_live: action === "enable_mm_coordination"
+              ? LIVE_AUTO_BUY_SELL_CONFIRMATION
+              : "",
+          }),
         });
         if (!res.ok) throw new Error("task control failed");
         await refresh();

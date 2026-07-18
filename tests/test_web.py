@@ -37,6 +37,7 @@ from arbitrage_bot.config import (
     TradeLogConfig,
     WebSecurityConfig,
 )
+from arbitrage_bot.auto_buy_sell_task import AutoBuySellTaskService
 from arbitrage_bot.cross_exchange_rebalancer import (
     new_rebalance_runtime,
     save_rebalance_runtime,
@@ -85,6 +86,7 @@ from arbitrage_bot.web import (
     _session_identity,
     _session_valid,
     api_create_auto_buy_sell_task,
+    api_control_auto_buy_sell_task,
     api_cancel_order,
     api_cross_exchange_rebalance,
     api_market_maker,
@@ -213,11 +215,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260716-core1" defer></script>',
+            '<script src="/static/app.js?v=20260718-mmcoord2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260716-core1" defer></script>',
+            '<script src="/static/i18n.js?v=20260718-mmcoord2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -4696,6 +4698,86 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 400)
         self.assertIn("confirm_live", json.loads(response.text)["error"])
+
+    async def test_existing_blocked_task_requires_confirmation_to_enable_mm_coordination(
+        self,
+    ) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/auto-buy-sell/tasks/auto-1/control"
+            method = "POST"
+
+            def __init__(
+                self,
+                app: dict[str, object],
+                task_id: str,
+                payload: dict[str, object],
+            ) -> None:
+                self.app = app
+                self.match_info = {"task_id": task_id}
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                ),
+            )
+            state = MonitorState(cfg, 1.0)
+            tasks = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            task = await tasks.create_task(
+                SlowExecutionConfig(
+                    enabled=True,
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    side="buy",
+                    total_quote=10_000.0,
+                    slice_base_min=50_000.0,
+                    slice_base_max=80_000.0,
+                )
+            )
+            tasks._tasks[0].status = "blocked_by_risk"
+            tasks._tasks[0].last_risk = {
+                "approved": False,
+                "self_trade_guard": {"blocked": True},
+            }
+            tasks.store.save(tasks._tasks)
+            app: dict[str, object] = {
+                "monitor_state": state,
+                "config": cfg,
+                "auto_buy_sell_tasks": tasks,
+            }
+
+            denied = await api_control_auto_buy_sell_task(
+                FakeRequest(
+                    app,
+                    task["id"],
+                    {"action": "enable_mm_coordination"},
+                )  # type: ignore[arg-type]
+            )
+            approved = await api_control_auto_buy_sell_task(
+                FakeRequest(
+                    app,
+                    task["id"],
+                    {
+                        "action": "enable_mm_coordination",
+                        "confirm_live": "ENABLE LIVE AUTO BUY SELL",
+                    },
+                )  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(denied.status, 400)
+        self.assertIn("confirm_live", denied.text)
+        self.assertEqual(approved.status, 200, approved.text)
+        self.assertTrue(json.loads(approved.text)["task"]["config"]["coordinate_market_maker"])
 
     async def test_login_lockout_after_repeated_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
