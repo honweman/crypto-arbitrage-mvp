@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from .coordination import (
+    coordination_blocked_sides,
     market_maker_coordination_status,
+    market_maker_resources_coordination_status,
     rebalance_coordination_hold_required,
     rebalance_coordination_resources,
     wait_for_market_maker_coordination,
@@ -18,7 +20,10 @@ from .state import MonitorState
 
 from ..alerts import AlertService
 from ..asset_ledger import attach_ledger_checkpoint
-from ..auto_buy_sell_task import AutoBuySellTaskService
+from ..auto_buy_sell_task import (
+    TERMINAL_TASK_STATUSES,
+    AutoBuySellTaskService,
+)
 from ..config import BotConfig
 from ..cross_exchange_rebalancer import (
     STRATEGY_ID as CROSS_EXCHANGE_REBALANCE_STRATEGY_ID,
@@ -1530,22 +1535,127 @@ async def auto_buy_sell_task_loop(
     tasks: AutoBuySellTaskService,
 ) -> None:
     manager = ExchangeManager()
+    coordination_owners: dict[str, str] = {}
     try:
         await state.set_auto_buy_sell_tasks(await tasks.snapshot())
         while True:
             runtime_cfg = await state.runtime_config(cfg)
             strategy_pauses = await state.strategy_pauses()
+            program_running = await state.is_running()
+            before = await tasks.snapshot()
+            task_rows = {
+                str(task.get("id") or ""): task
+                for task in before.get("tasks", [])
+                if isinstance(task, dict) and task.get("id")
+            }
+            if not program_running or strategy_pauses.get("slow_execution", False):
+                desired_task_ids: set[str] = set()
+            else:
+                desired_task_ids = {
+                    task_id
+                    for task_id, task in task_rows.items()
+                    if _auto_buy_sell_coordination_required(
+                        task,
+                        already_coordinating=task_id in coordination_owners,
+                    )
+                }
+
+            for task_id in set(coordination_owners) - desired_task_ids:
+                await state.release_coordination_hold(coordination_owners.pop(task_id))
+
+            ready_task_ids: set[str] = set()
+            coordination_statuses: dict[str, dict[str, Any]] = {}
+            market_maker_runtime = await state.market_maker_runtime()
+            for task_id in sorted(desired_task_ids):
+                task = task_rows[task_id]
+                task_cfg = task.get("config") or {}
+                owner = f"auto_buy_sell:{task_id}"
+                resource = _auto_buy_sell_coordination_resource(task_cfg)
+                coordination_owners[task_id] = owner
+                await state.acquire_coordination_hold(
+                    owner,
+                    [resource],
+                    reason=(
+                        f"Auto Buy/Sell {task_id} temporarily withdrew the "
+                        f"conflicting MM {resource[2]} side"
+                    ),
+                    ttl_seconds=5.0,
+                )
+                status = market_maker_resources_coordination_status(
+                    runtime_cfg,
+                    market_maker_runtime,
+                    resources=[resource],
+                    owner=owner,
+                )
+                coordination_statuses[task_id] = status
+                if status.get("ready"):
+                    ready_task_ids.add(task_id)
             payload = await tasks.run_due_tasks(
                 runtime_cfg,
                 manager,
                 strategy_paused=strategy_pauses.get("slow_execution", False),
                 market_maker_paused=strategy_pauses.get("market_maker", False),
-                program_running=await state.is_running(),
+                coordinated_market_maker_task_ids=ready_task_ids,
+                program_running=program_running,
             )
+            for task in payload.get("tasks", []):
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("id") or "")
+                if task_id in coordination_statuses:
+                    task["market_maker_coordination"] = coordination_statuses[task_id]
+            payload["market_maker_coordination"] = {
+                "active_task_ids": sorted(coordination_owners),
+                "ready_task_ids": sorted(ready_task_ids),
+                "tasks": coordination_statuses,
+            }
             await state.set_auto_buy_sell_tasks(payload)
             await asyncio.sleep(1.0)
     finally:
+        for owner in coordination_owners.values():
+            await state.release_coordination_hold(owner)
         await manager.close()
+
+
+def _auto_buy_sell_coordination_resource(
+    task_cfg: dict[str, Any],
+) -> tuple[str, str, str]:
+    task_side = str(task_cfg.get("side") or "").lower()
+    blocked_side = "sell" if task_side == "buy" else "buy"
+    return (
+        str(task_cfg.get("exchange") or ""),
+        str(task_cfg.get("symbol") or ""),
+        blocked_side,
+    )
+
+
+def _auto_buy_sell_coordination_required(
+    task: dict[str, Any],
+    *,
+    already_coordinating: bool,
+) -> bool:
+    task_cfg = task.get("config") if isinstance(task.get("config"), dict) else {}
+    if not task_cfg.get("coordinate_market_maker"):
+        return False
+    if not task_cfg.get("block_conflicting_market_maker", True):
+        return False
+    status = str(task.get("status") or "")
+    if status in TERMINAL_TASK_STATUSES or status == "paused":
+        return False
+    risk = task.get("last_risk") if isinstance(task.get("last_risk"), dict) else {}
+    guard = (
+        risk.get("self_trade_guard")
+        if isinstance(risk.get("self_trade_guard"), dict)
+        else {}
+    )
+    guard_blocked = bool(guard.get("blocked"))
+    if guard_blocked:
+        return True
+    if not already_coordinating:
+        return False
+    if status in {"blocked_by_risk", "error", "waiting_for_start_price"}:
+        return bool(task.get("open_order_count") or task.get("open_order_ids"))
+    return True
 
 
 def _stat_int(stats: dict[str, Any], key: str, default: int = 0) -> int:
@@ -3220,6 +3330,11 @@ async def _market_maker_instance_task_loop(
                 maker_cfg.symbol,
                 requester=f"market_maker:{instance_id}",
             )
+            coordination_sides = coordination_blocked_sides(
+                coordination_hold,
+                maker_cfg.exchange,
+                maker_cfg.symbol,
+            )
             if coordination_hold is not None:
                 live_allowed = False
                 status = "coordinating"
@@ -3298,12 +3413,34 @@ async def _market_maker_instance_task_loop(
                     )
                 if not live_allowed:
                     cancel_payload = None
-                    if open_order_ids:
+                    open_orders_by_id = {
+                        _raw_order_id(order): order
+                        for order in open_order_snapshot.get("open_orders", [])
+                        if isinstance(order, dict) and _raw_order_id(order)
+                    }
+                    side_scoped_coordination = bool(
+                        coordination_hold is not None
+                        and coordination_sides
+                        and coordination_sides != {"buy", "sell"}
+                    )
+                    ids_to_cancel = list(open_order_ids)
+                    if side_scoped_coordination and not open_order_snapshot.get(
+                        "error"
+                    ):
+                        ids_to_cancel = [
+                            order_id
+                            for order_id in open_order_ids
+                            if str(
+                                open_orders_by_id.get(order_id, {}).get("side") or ""
+                            ).lower()
+                            in coordination_sides
+                        ]
+                    if ids_to_cancel:
                         ids_before_cancel = list(open_order_ids)
                         cancel_payload = await cancel_market_maker_order_ids(
                             runtime_cfg,
                             manager,
-                            open_order_ids,
+                            ids_to_cancel,
                         )
                         canceled_count += int(
                             cancel_payload.get("canceled_count", 0) or 0
@@ -3334,14 +3471,22 @@ async def _market_maker_instance_task_loop(
                             open_order_exchange = ""
                             open_order_symbol = ""
                     sync_error = open_order_snapshot.get("error")
-                    if sync_error or open_order_ids:
+                    conflicting_open_order_count = len(open_order_ids)
+                    if side_scoped_coordination and not sync_error:
+                        conflicting_open_order_count = sum(
+                            1
+                            for order in open_order_snapshot.get("open_orders", [])
+                            if str(order.get("side") or "").lower()
+                            in coordination_sides
+                        )
+                    if sync_error or conflicting_open_order_count:
                         status = (
                             "coordination_cancel_retry"
                             if coordination_hold is not None
                             else "cancel_retry"
                         )
                         reason = (
-                            "could not confirm all MM orders are canceled; "
+                            "could not confirm all conflicting MM orders are canceled; "
                             "new orders remain blocked"
                         )
                     runtime = {
@@ -3366,6 +3511,14 @@ async def _market_maker_instance_task_loop(
                         "open_order_source": open_order_snapshot.get("source"),
                         "open_order_sync_error": open_order_snapshot.get("error"),
                         "open_order_sync": open_order_sync,
+                        "coordination_blocked_sides": sorted(coordination_sides),
+                        "coordination_conflicting_open_order_count": (
+                            conflicting_open_order_count
+                        ),
+                        "coordination_retained_open_order_count": max(
+                            0,
+                            len(open_order_ids) - conflicting_open_order_count,
+                        ),
                         "placed_count": placed_count,
                         "canceled_count": canceled_count,
                         "cycle_count": cycle_count,

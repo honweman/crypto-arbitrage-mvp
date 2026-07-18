@@ -548,6 +548,7 @@ class AutoBuySellTaskService:
         *,
         strategy_paused: bool = False,
         market_maker_paused: bool = False,
+        coordinated_market_maker_task_ids: set[str] | None = None,
         program_running: bool = True,
     ) -> dict[str, Any]:
         async with self._lock:
@@ -574,7 +575,10 @@ class AutoBuySellTaskService:
                 task,
                 cfg,
                 manager,
-                market_maker_paused=market_maker_paused,
+                market_maker_paused=(
+                    market_maker_paused
+                    or task.id in (coordinated_market_maker_task_ids or set())
+                ),
             )
             changed = True
 

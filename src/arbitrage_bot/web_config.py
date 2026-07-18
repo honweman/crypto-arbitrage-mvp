@@ -430,6 +430,13 @@ def _slow_execution_overrides_from_payload(
             "block_conflicting_market_maker"
         ]
 
+    if "coordinate_market_maker" in payload:
+        if not isinstance(payload["coordinate_market_maker"], bool):
+            raise ValueError("coordinate_market_maker must be a boolean")
+        overrides["coordinate_market_maker"] = payload[
+            "coordinate_market_maker"
+        ]
+
     numeric_fields = {
         "total_base",
         "total_quote",

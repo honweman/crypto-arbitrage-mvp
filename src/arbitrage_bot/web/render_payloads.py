@@ -196,6 +196,7 @@ def _compact_slow_execution_payload(
                 "start_price",
                 "stop_price",
                 "block_conflicting_market_maker",
+                "coordinate_market_maker",
             ),
         )
 

@@ -1597,6 +1597,11 @@
           <input id="slow-stop-price" type="number" min="0" step="any">
           <div id="slow-stop-price-help" class="field-hint"></div>
         </div>
+        <div class="form-divider">Strategy Coordination</div>
+        <label class="check-field wide-field" title="Temporarily withdraws only the conflicting MM side after exchange cancellation is confirmed, then restores it when this task ends.">
+          <input id="slow-coordinate-mm" type="checkbox">
+          Coordinate with MM automatically
+        </label>
         <div class="form-divider">Actions</div>
         <div class="strategy-action-bar">
           <button id="slow-apply" class="ghost-button" type="submit">Save Defaults</button>

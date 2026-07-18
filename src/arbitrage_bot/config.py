@@ -136,6 +136,7 @@ class SlowExecutionConfig:
     cancel_existing_orders: bool = False
     client_order_prefix: str = "crypto-arb-slow"
     block_conflicting_market_maker: bool = True
+    coordinate_market_maker: bool = False
 
 
 @dataclass(frozen=True)
@@ -863,6 +864,9 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             block_conflicting_market_maker=bool(
                 slow_execution_raw.get("block_conflicting_market_maker", True)
+            ),
+            coordinate_market_maker=bool(
+                slow_execution_raw.get("coordinate_market_maker", False)
             ),
         ),
         cross_exchange_rebalance=CrossExchangeRebalanceConfig(

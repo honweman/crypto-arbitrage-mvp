@@ -21,13 +21,16 @@ from arbitrage_bot.cross_exchange_rebalancer import (
 )
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 from arbitrage_bot.web.coordination import (
+    coordination_blocked_sides,
     market_maker_coordination_status,
+    market_maker_resources_coordination_status,
     rebalance_coordination_hold_required,
 )
 from arbitrage_bot.web.loops import (
     RebalanceMarketDataTimeout,
     _fetch_rebalance_books,
     _market_maker_instance_task_loop,
+    _auto_buy_sell_coordination_required,
     _refresh_rebalance_runtime_from_state,
     _sleep_for_rebalance_config_change,
     cross_exchange_rebalance_task_loop,
@@ -329,6 +332,124 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await state.coordination_holds(), [])
 
+    async def test_directional_hold_records_only_the_conflicting_side(self) -> None:
+        state = MonitorState(make_config(), 1.0)
+        hold = await state.acquire_coordination_hold(
+            "auto_buy_sell:auto-1",
+            [("coinbase-spot", "ACS/USDC", "sell")],
+            reason="Auto Buy withdraws MM asks",
+            ttl_seconds=30.0,
+        )
+
+        self.assertEqual(
+            coordination_blocked_sides(
+                hold,
+                "coinbase-spot",
+                "ACS/USDC",
+            ),
+            {"sell"},
+        )
+        self.assertEqual(hold["resources"][0]["side"], "sell")
+
+    async def test_directional_hold_retains_non_conflicting_mm_side(self) -> None:
+        cfg = make_config()
+        maker = market_maker_configs_for_runtime(cfg)[0]
+        state = MonitorState(cfg, 1.0)
+        owner = "auto_buy_sell:auto-1"
+        await state.acquire_coordination_hold(
+            owner,
+            [(maker.exchange, maker.symbol, "sell")],
+            reason="Auto Buy withdraws MM asks",
+            ttl_seconds=30.0,
+        )
+
+        class FakeManager:
+            def __init__(self) -> None:
+                self.orders = {
+                    "mm-buy": {"id": "mm-buy", "side": "buy"},
+                    "mm-sell": {"id": "mm-sell", "side": "sell"},
+                }
+                self.canceled_ids: list[str] = []
+
+            async def fetch_open_orders(self, *_: object, **__: object):
+                return list(self.orders.values())
+
+            async def cancel_orders(
+                self,
+                *_: object,
+                order_ids: list[str],
+                **__: object,
+            ):
+                self.canceled_ids.extend(order_ids)
+                return [self.orders.pop(order_id) for order_id in order_ids]
+
+            async def cancel_order(
+                self,
+                *_: object,
+                order_id: str,
+                **__: object,
+            ):
+                self.canceled_ids.append(order_id)
+                return self.orders.pop(order_id)
+
+            async def close(self) -> None:
+                return None
+
+        manager = FakeManager()
+        with (
+            patch("arbitrage_bot.web.loops.ExchangeManager", return_value=manager),
+            patch("arbitrage_bot.web.loops.write_trade_event"),
+            patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+        ):
+            loop_task = asyncio.create_task(
+                _market_maker_instance_task_loop(cfg, state, maker.id)
+            )
+            try:
+                for _ in range(100):
+                    runtime = await state.market_maker_runtime()
+                    instance = next(
+                        (
+                            item
+                            for item in runtime.get("instances", [])
+                            if item.get("id") == maker.id
+                        ),
+                        {},
+                    )
+                    if (
+                        instance.get("status") == "coordinating"
+                        and instance.get(
+                            "coordination_conflicting_open_order_count"
+                        )
+                        == 0
+                    ):
+                        break
+                    await asyncio.sleep(0.02)
+                else:
+                    self.fail(
+                        "directional MM coordination was not acknowledged: "
+                        f"{instance}"
+                    )
+            finally:
+                loop_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await loop_task
+
+        self.assertEqual(manager.canceled_ids, ["mm-sell"])
+        self.assertEqual(instance["open_order_ids"], ["mm-buy"])
+        self.assertEqual(instance["coordination_retained_open_order_count"], 1)
+        status = market_maker_resources_coordination_status(
+            cfg,
+            {"instances": [instance]},
+            resources=[(maker.exchange, maker.symbol, "sell")],
+            owner=owner,
+        )
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["instances"][0]["open_order_count"], 1)
+        self.assertEqual(
+            status["instances"][0]["conflicting_open_order_count"],
+            0,
+        )
+
     async def test_mm_acknowledges_only_after_exchange_confirms_cancellation(
         self,
     ) -> None:
@@ -573,6 +694,44 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
 
 
 class CoordinationStatusTest(unittest.TestCase):
+    def test_auto_buy_sell_coordination_requires_explicit_opt_in(self) -> None:
+        blocked_guard = {
+            "blocked": True,
+            "reasons": ["self-trade guard: market maker is live"],
+        }
+        task = {
+            "id": "auto-1",
+            "status": "blocked_by_risk",
+            "config": {
+                "block_conflicting_market_maker": True,
+                "coordinate_market_maker": False,
+            },
+            "last_risk": {"self_trade_guard": blocked_guard},
+        }
+        self.assertFalse(
+            _auto_buy_sell_coordination_required(
+                task,
+                already_coordinating=False,
+            )
+        )
+        task["config"]["coordinate_market_maker"] = True
+        self.assertTrue(
+            _auto_buy_sell_coordination_required(
+                task,
+                already_coordinating=False,
+            )
+        )
+        task["last_risk"] = {
+            "self_trade_guard": {"blocked": False},
+            "reasons": ["maximum exposure exceeded"],
+        }
+        self.assertFalse(
+            _auto_buy_sell_coordination_required(
+                task,
+                already_coordinating=True,
+            )
+        )
+
     def test_matching_mm_must_acknowledge_and_clear_orders(self) -> None:
         cfg = make_config()
         maker = market_maker_configs_for_runtime(cfg)[0]

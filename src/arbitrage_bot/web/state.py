@@ -1556,18 +1556,26 @@ class MonitorState:
     async def acquire_coordination_hold(
         self,
         owner: str,
-        resources: list[tuple[str, str]],
+        resources: list[tuple[str, str] | tuple[str, str, str]],
         *,
         reason: str,
         ttl_seconds: float,
     ) -> dict[str, Any]:
-        normalized = sorted(
-            {
-                (str(exchange).strip(), str(symbol).strip())
-                for exchange, symbol in resources
-                if str(exchange).strip() and str(symbol).strip()
-            }
-        )
+        normalized: set[tuple[str, str, str]] = set()
+        for resource in resources:
+            if len(resource) == 2:
+                exchange, symbol = resource
+                side = ""
+            else:
+                exchange, symbol, side = resource
+            exchange = str(exchange).strip()
+            symbol = str(symbol).strip()
+            side = str(side).strip().lower()
+            if side not in {"", "buy", "sell"}:
+                raise ValueError("coordination resource side must be buy or sell")
+            if exchange and symbol:
+                normalized.add((exchange, symbol, side))
+        normalized_rows = sorted(normalized)
         if not owner.strip():
             raise ValueError("coordination owner is required")
         if not normalized:
@@ -1580,8 +1588,12 @@ class MonitorState:
                 "owner": owner,
                 "reason": reason,
                 "resources": [
-                    {"exchange": exchange, "symbol": symbol}
-                    for exchange, symbol in normalized
+                    {
+                        "exchange": exchange,
+                        "symbol": symbol,
+                        **({"side": side} if side else {}),
+                    }
+                    for exchange, symbol, side in normalized_rows
                 ],
                 "acquired_at": (
                     float(previous.get("acquired_at") or now) if previous else now

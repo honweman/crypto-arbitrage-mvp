@@ -92,7 +92,8 @@
     "post_only": false,
     "cancel_existing_orders": false,
     "client_order_prefix": "crypto-arb-slow",
-    "block_conflicting_market_maker": true
+    "block_conflicting_market_maker": true,
+    "coordinate_market_maker": false
   },
   "cross_exchange_rebalance": {
     "enabled": false,

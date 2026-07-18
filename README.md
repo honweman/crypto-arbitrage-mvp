@@ -311,6 +311,8 @@ The market maker CLI clamps its effective loop interval to at least 1 second. Ev
 
 The monitor can also show and configure a dry-run Auto Buy/Sell plan when `slow_execution.enabled` is true. By default this tool submits one buy or sell marketable limit order at the current execution-side top of book: buys use the best ask and sells use the best bid. Set `price_mode` to `maker` to quote on the passive side instead: buys use the best bid and sells use the best ask. Use `price_offset_bps` to move the order farther away from the book top, such as selling slightly above the best ask. The speed is configured with `interval_seconds`; live orders can also be canceled after `order_ttl_seconds`. The config key stays `slow_execution` for backward compatibility, but the user-facing feature name is Auto Buy/Sell.
 
+`block_conflicting_market_maker` keeps the same-account, same-symbol self-trade guard enabled. `coordinate_market_maker` is a separate explicit opt-in and defaults to `false`: when enabled, an Auto Buy task temporarily withdraws the matching MM sell side, while Auto Sell withdraws the MM buy side. The non-conflicting MM side remains open. Auto Buy/Sell proceeds only after the exchange confirms that no conflicting orders remain; cancellation errors stay in retry state. The withdrawn side is rebuilt after the task ends or coordination is released. Existing saved tasks do not gain this live behavior during an upgrade unless the option was explicitly enabled for that task.
+
 ```json
 "slow_execution": {
   "enabled": true,

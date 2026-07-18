@@ -4921,6 +4921,7 @@ function balanceStatusClass(status) {
       ["start_price", "Start", "number"],
       ["stop_price", "Stop", "number"],
       ["block_conflicting_market_maker", "MM Guard", "boolean"],
+      ["coordinate_market_maker", "MM Coordination", "boolean"],
     ];
 
     function normalizeAutoConfigValue(value, type) {
@@ -4972,7 +4973,8 @@ function balanceStatusClass(status) {
         ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
         : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
       const guard = config.block_conflicting_market_maker === false ? "MM guard off" : "MM guard on";
-      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard}`;
+      const coordination = config.coordinate_market_maker ? "MM auto-coordinate" : "MM coordination off";
+      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard} · ${coordination}`;
     }
 
     function compareAutoTaskConfig(taskConfig, defaultConfig) {
@@ -5098,6 +5100,14 @@ function balanceStatusClass(status) {
       for (const reason of task.last_risk?.reasons || []) {
         parts.push(`risk: ${reason}`);
       }
+      const coordination = task.market_maker_coordination;
+      if (coordination) {
+        parts.push(
+          coordination.ready
+            ? "MM coordination: conflicting side withdrawn"
+            : `MM coordination: ${(coordination.reasons || ["waiting for cancellation confirmation"])[0]}`,
+        );
+      }
       if (task.last_error) parts.push(`error: ${task.last_error}`);
       return parts.join(" · ");
     }
@@ -5117,6 +5127,9 @@ function balanceStatusClass(status) {
       for (const task of tasks) {
         const config = task.config || {};
         const status = task.status || "--";
+        const displayStatus = task.market_maker_coordination
+          ? (task.market_maker_coordination.ready ? "mm_coordinated" : "coordinating_mm")
+          : status;
         const terminal = AUTO_TERMINAL_STATUSES.has(status);
         const statusClass = status === "complete" ? "risk-ok" : status === "paused" || status === "stopped" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
         const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
@@ -5136,7 +5149,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td data-label="${uiText("Task")}" title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
-          <td data-label="${uiText("Status")}" class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(status)}</td>
+          <td data-label="${uiText("Status")}" class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(displayStatus)}</td>
           <td data-label="${uiText("Config")}" class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
           <td data-label="${uiText("Account")}">${escapeHtml(config.exchange || "--")}</td>
           <td data-label="${uiText("Side")}" class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
@@ -6789,6 +6802,7 @@ function balanceStatusClass(status) {
         `${uiText("Place Sec")}: ${fmt.format(payload.interval_seconds)}`,
         `${uiText("Start Gate")}: ${payload.start_price > 0 ? `${gatePrice} ${startOperator} ${fmt.format(payload.start_price)} ${quote}` : uiText("Immediate")}`,
         `${uiText("Stop Gate")}: ${payload.stop_price > 0 ? `${gatePrice} ${stopOperator} ${fmt.format(payload.stop_price)} ${quote}` : uiText("None")}`,
+        `${uiText("MM Coordination")}: ${payload.coordinate_market_maker ? uiText("On") : uiText("Off")}`,
       ].join("\n");
     }
 
@@ -6816,6 +6830,7 @@ function balanceStatusClass(status) {
       setNumericField("slow-ttl", config.order_ttl_seconds || 0);
       setNumericField("slow-start-price", config.start_price || 0);
       setNumericField("slow-stop-price", config.stop_price || 0);
+      document.getElementById("slow-coordinate-mm").checked = Boolean(config.coordinate_market_maker);
       updateSlowMarketLimitHint();
       updateCoreFormStates();
       renderSlowExecutionWorkflow(lastState?.slow_execution);
@@ -6840,6 +6855,8 @@ function balanceStatusClass(status) {
         order_ttl_seconds: numericValue("slow-ttl"),
         start_price: numericValue("slow-start-price"),
         stop_price: numericValue("slow-stop-price"),
+        block_conflicting_market_maker: true,
+        coordinate_market_maker: document.getElementById("slow-coordinate-mm").checked,
       };
     }
 

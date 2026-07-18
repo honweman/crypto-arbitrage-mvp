@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Protocol
+from typing import Any, Protocol, Union
 
 from ..config import BotConfig
 from ..web_config import market_maker_configs_for_runtime
@@ -10,6 +10,48 @@ from ..web_config import market_maker_configs_for_runtime
 
 class CoordinationState(Protocol):
     async def market_maker_runtime(self) -> dict[str, Any]: ...
+
+
+CoordinationResource = Union[tuple[str, str], tuple[str, str, str]]
+
+
+def coordination_resource_parts(
+    resource: CoordinationResource | dict[str, Any],
+) -> tuple[str, str, str]:
+    if isinstance(resource, dict):
+        return (
+            str(resource.get("exchange") or "").strip(),
+            str(resource.get("symbol") or "").strip(),
+            str(resource.get("side") or "").strip().lower(),
+        )
+    if len(resource) == 2:
+        return str(resource[0]).strip(), str(resource[1]).strip(), ""
+    return (
+        str(resource[0]).strip(),
+        str(resource[1]).strip(),
+        str(resource[2]).strip().lower(),
+    )
+
+
+def coordination_blocked_sides(
+    hold: dict[str, Any] | None,
+    exchange: str,
+    symbol: str,
+) -> set[str]:
+    if not isinstance(hold, dict):
+        return set()
+    sides: set[str] = set()
+    for resource in hold.get("resources", []):
+        resource_exchange, resource_symbol, side = coordination_resource_parts(
+            resource
+        )
+        if resource_exchange != exchange or resource_symbol != symbol:
+            continue
+        if side in {"buy", "sell"}:
+            sides.add(side)
+        else:
+            return {"buy", "sell"}
+    return sides
 
 
 def rebalance_coordination_resources(cfg: BotConfig) -> list[tuple[str, str]]:
@@ -26,11 +68,31 @@ def market_maker_coordination_status(
     *,
     owner: str,
 ) -> dict[str, Any]:
-    resources = set(rebalance_coordination_resources(cfg))
+    return market_maker_resources_coordination_status(
+        cfg,
+        runtime,
+        resources=rebalance_coordination_resources(cfg),
+        owner=owner,
+    )
+
+
+def market_maker_resources_coordination_status(
+    cfg: BotConfig,
+    runtime: dict[str, Any],
+    *,
+    resources: list[CoordinationResource],
+    owner: str,
+) -> dict[str, Any]:
+    normalized_resources = [coordination_resource_parts(item) for item in resources]
+    resource_keys = {
+        (exchange, symbol)
+        for exchange, symbol, _ in normalized_resources
+        if exchange and symbol
+    }
     affected = [
         maker_cfg
         for maker_cfg in market_maker_configs_for_runtime(cfg)
-        if (maker_cfg.exchange, maker_cfg.symbol) in resources
+        if (maker_cfg.exchange, maker_cfg.symbol) in resource_keys
     ]
     instances = {
         str(instance.get("id") or ""): instance
@@ -62,6 +124,17 @@ def market_maker_coordination_status(
         )
         acknowledged = hold.get("owner") == owner
         open_order_count = int(instance.get("open_order_count") or 0)
+        blocked_sides = coordination_blocked_sides(
+            hold if acknowledged else None,
+            maker_cfg.exchange,
+            maker_cfg.symbol,
+        )
+        conflicting_open_order_count = int(
+            instance.get("coordination_conflicting_open_order_count")
+            if acknowledged
+            and instance.get("coordination_conflicting_open_order_count") is not None
+            else open_order_count
+        )
         sync_error = instance.get("open_order_sync_error")
         rows.append(
             {
@@ -71,6 +144,8 @@ def market_maker_coordination_status(
                 "status": instance.get("status"),
                 "acknowledged": acknowledged,
                 "open_order_count": open_order_count,
+                "conflicting_open_order_count": conflicting_open_order_count,
+                "blocked_sides": sorted(blocked_sides),
                 "sync_error": sync_error,
             }
         )
@@ -78,10 +153,10 @@ def market_maker_coordination_status(
             reasons.append(f"waiting for MM instance {maker_cfg.id} acknowledgement")
         if sync_error:
             reasons.append(f"MM instance {maker_cfg.id} sync error: {sync_error}")
-        if open_order_count:
+        if conflicting_open_order_count:
             reasons.append(
                 f"MM instance {maker_cfg.id} still has "
-                f"{open_order_count} open order(s)"
+                f"{conflicting_open_order_count} open conflicting order(s)"
             )
     return {
         "ready": not reasons,
@@ -138,7 +213,11 @@ def rebalance_coordination_hold_required(payload: dict[str, Any]) -> bool:
 
 
 __all__ = [
+    "CoordinationResource",
+    "coordination_blocked_sides",
+    "coordination_resource_parts",
     "market_maker_coordination_status",
+    "market_maker_resources_coordination_status",
     "rebalance_coordination_hold_required",
     "rebalance_coordination_resources",
     "wait_for_market_maker_coordination",

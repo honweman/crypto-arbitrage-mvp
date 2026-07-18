@@ -73,6 +73,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.slow_execution.price_mode, "taker")
         self.assertEqual(cfg.slow_execution.price_offset_bps, 0.0)
         self.assertFalse(cfg.slow_execution.post_only)
+        self.assertFalse(cfg.slow_execution.coordinate_market_maker)
         self.assertFalse(cfg.cross_exchange_rebalance.enabled)
         self.assertFalse(cfg.cross_exchange_rebalance.live_enabled)
         self.assertEqual(
