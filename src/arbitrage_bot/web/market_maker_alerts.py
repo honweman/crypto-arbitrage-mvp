@@ -9,6 +9,7 @@ MARKET_MAKER_ALERT_STATUSES = {
     "cancel_retry",
     "execution_error",
     "open_order_sync_error",
+    "reconciliation_required",
     "error",
 }
 

@@ -3238,6 +3238,9 @@ async def _market_maker_instance_task_loop(
     previous_plan: dict[str, Any] | None = None
     last_maker_cfg = None
     active_maker_cfg = None
+    previous_live_allowed = False
+    last_start_recovery: dict[str, Any] | None = None
+    start_reconciliation_block_reason: str | None = None
     runtime: dict[str, Any] = {
         "id": instance_id,
         "status": "starting",
@@ -3325,6 +3328,9 @@ async def _market_maker_instance_task_loop(
                 strategy_paused=strategy_pauses.get("market_maker", False),
                 program_running=program_running,
             )
+            if not live_allowed:
+                previous_live_allowed = False
+                start_reconciliation_block_reason = None
             coordination_hold = await state.coordination_hold_for(
                 maker_cfg.exchange,
                 maker_cfg.symbol,
@@ -3342,7 +3348,57 @@ async def _market_maker_instance_task_loop(
                     coordination_hold.get("reason")
                     or "temporarily paused for another strategy"
                 )
+            starting_live_run = live_allowed and not previous_live_allowed
+            previous_live_allowed = live_allowed
             try:
+                if starting_live_run:
+                    previous_plan = None
+                    previous_mid_price = None
+                    active_maker_cfg = None
+                    placed_count = 0
+                    canceled_count = 0
+                    cycle_count = 0
+                    last_cancel_at = None
+                    exchange_cfg = _find_exchange_by_key(
+                        runtime_cfg,
+                        maker_cfg.exchange,
+                    )
+                    try:
+                        last_start_recovery = (
+                            await manager.recover_pending_order_intents(
+                                [exchange_cfg],
+                                exchange=maker_cfg.exchange,
+                                symbol=maker_cfg.symbol,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        last_start_recovery = {
+                            "status": "error",
+                            "unresolved_count": 1,
+                            "unresolved": [],
+                            "error": f"{exc.__class__.__name__}: {exc}",
+                            "checked_at": time.time(),
+                        }
+                    if int(last_start_recovery.get("unresolved_count") or 0) > 0:
+                        unresolved = last_start_recovery.get("unresolved") or []
+                        first = unresolved[0] if unresolved else {}
+                        start_reconciliation_block_reason = (
+                            "an earlier order result is still uncertain; "
+                            + str(
+                                first.get("recovery_error")
+                                or first.get("last_error")
+                                or last_start_recovery.get("error")
+                                or "exchange reconciliation is required"
+                            )
+                        )
+                    else:
+                        start_reconciliation_block_reason = None
+
+                if start_reconciliation_block_reason:
+                    live_allowed = False
+                    status = "reconciliation_required"
+                    reason = start_reconciliation_block_reason
+
                 current_tracking_key = (maker_cfg.exchange, maker_cfg.symbol)
                 previous_tracking_key = (open_order_exchange, open_order_symbol)
                 if (
@@ -3523,6 +3579,7 @@ async def _market_maker_instance_task_loop(
                         "canceled_count": canceled_count,
                         "cycle_count": cycle_count,
                         "last_error": sync_error,
+                        "start_recovery": last_start_recovery,
                         "last_execution": cancel_payload,
                         "market_data": None,
                         "coordination_hold": coordination_hold,
@@ -3548,6 +3605,7 @@ async def _market_maker_instance_task_loop(
                             "canceled_count": canceled_count,
                             "cycle_count": cycle_count,
                             "last_error": open_order_snapshot.get("error"),
+                            "start_recovery": last_start_recovery,
                             "market_data": None,
                             "coordination_hold": None,
                             "updated_at": time.time(),
@@ -3711,6 +3769,7 @@ async def _market_maker_instance_task_loop(
                         "last_risk": payload.get("risk"),
                         "last_execution": execution,
                         "last_error": None,
+                        "start_recovery": last_start_recovery,
                         "market_data": payload.get("market_data"),
                         "coordination_hold": None,
                         "updated_at": time.time(),

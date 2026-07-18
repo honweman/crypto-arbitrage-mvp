@@ -2386,12 +2386,12 @@ function balanceStatusClass(status) {
       const statusReason = marketMakerStatusReason(marketMaker);
       const statusText = runtimeStatus === "disabled"
         ? "Disabled"
-        : ["error", "open_order_sync_error", "execution_error", "cancel_retry"].includes(runtimeStatus)
+        : ["error", "open_order_sync_error", "execution_error", "reconciliation_required", "cancel_retry"].includes(runtimeStatus)
           ? runtimeStatus
           : approved ? "Ready" : "Blocked";
       const statusClass = runtimeStatus === "disabled"
         ? "risk-off"
-        : ["error", "open_order_sync_error", "execution_error", "cancel_retry", "blocked_by_risk"].includes(runtimeStatus)
+        : ["error", "open_order_sync_error", "execution_error", "reconciliation_required", "cancel_retry", "blocked_by_risk"].includes(runtimeStatus)
           ? "risk-blocked"
           : approved ? "risk-ok" : "risk-blocked";
 

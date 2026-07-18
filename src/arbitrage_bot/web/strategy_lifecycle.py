@@ -224,6 +224,8 @@ def _market_maker_actual(raw_status: str, desired: str) -> str:
         return "paused"
     if status in {"blocked_by_risk"}:
         return "blocked"
+    if status == "reconciliation_required":
+        return "blocked"
     if status in {
         "error",
         "execution_error",

@@ -127,8 +127,98 @@ class OrderIntentStoreTest(unittest.TestCase):
                 [{"exchange": "coinbase-spot", "symbol": "ACS/USDC", "count": 1}],
             )
 
+    def test_confirmed_post_only_rejection_leaves_uncertain_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OrderIntentStore(Path(tmp) / "orders.sqlite3")
+            store.reserve(
+                "rejected",
+                {
+                    "exchange": "coinbase-spot",
+                    "symbol": "ACS/USDC",
+                    "side": "sell",
+                    "amount": 10.0,
+                    "price": 0.1,
+                },
+            )
+            store.mark_unknown(
+                "rejected",
+                "ExchangeError: PREVIEW_INVALID_LIMIT_PRICE_POST_ONLY",
+            )
+
+            rows = store.reclassify_confirmed_rejections(
+                exchange="coinbase-spot",
+                symbol="ACS/USDC",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "failed")
+            self.assertEqual(store.summary()["pending_count"], 0)
+
 
 class IdempotentExchangeSubmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_coinbase_post_only_rejection_is_terminal(self) -> None:
+        class ExchangeError(Exception):
+            pass
+
+        class FakeClient:
+            async def create_order(self, *args: object) -> dict[str, object]:
+                raise ExchangeError(
+                    'coinbase {"success":false,"error_response":'
+                    '{"error":"INVALID_LIMIT_PRICE_POST_ONLY"}}'
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = ExchangeConfig(id="coinbase", label="coinbase-spot")
+            journal_path = Path(tmp) / "orders.sqlite3"
+            manager = ExchangeManager(order_journal_path=str(journal_path))
+            manager._clients[cfg.key] = FakeClient()
+
+            with self.assertRaises(ExchangeError):
+                await manager.create_prepared_limit_order(
+                    cfg,
+                    symbol="ACS/USDC",
+                    side="sell",
+                    prepared={"amount": 10.0, "price": 0.1, "errors": []},
+                    post_only=True,
+                    client_order_id="rejected-post-only",
+                )
+
+            intent = OrderIntentStore(journal_path).get("rejected-post-only")
+            assert intent is not None
+            self.assertEqual(intent["status"], "failed")
+            self.assertEqual(manager.order_reliability_summary()["pending_count"], 0)
+
+    async def test_scoped_recovery_reclassifies_confirmed_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = ExchangeConfig(id="coinbase", label="coinbase-spot")
+            journal_path = Path(tmp) / "orders.sqlite3"
+            manager = ExchangeManager(order_journal_path=str(journal_path))
+            assert manager._order_intents is not None
+            manager._order_intents.reserve(
+                "legacy-rejection",
+                {
+                    "exchange": cfg.key,
+                    "symbol": "ACS/USDC",
+                    "side": "sell",
+                    "amount": 10.0,
+                    "price": 0.1,
+                },
+            )
+            manager._order_intents.mark_unknown(
+                "legacy-rejection",
+                "ExchangeError: INVALID_LIMIT_PRICE_POST_ONLY",
+            )
+
+            result = await manager.recover_pending_order_intents(
+                [cfg],
+                exchange=cfg.key,
+                symbol="ACS/USDC",
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["reclassified_count"], 1)
+            self.assertEqual(result["unresolved_count"], 0)
+
     async def test_same_client_id_submits_once_and_replays_response(self) -> None:
         class FakeClient:
             def __init__(self) -> None:

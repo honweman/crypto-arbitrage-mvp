@@ -15,6 +15,21 @@ DEFAULT_MAX_TERMINAL_ROWS = 200_000
 COMPACT_EVERY_RESERVATIONS = 1_000
 
 
+_CONFIRMED_REJECTION_TOKENS = (
+    "invalid_limit_price_post_only",
+    "preview_invalid_limit_price_post_only",
+    "invalid limit price for post-only order",
+)
+
+
+def is_confirmed_order_rejection(error: str) -> bool:
+    """Return true only when the exchange explicitly confirms no order was created."""
+    normalized = str(error or "").strip().lower()
+    return bool(normalized) and any(
+        token in normalized for token in _CONFIRMED_REJECTION_TOKENS
+    )
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(
         value,
@@ -272,16 +287,59 @@ class OrderIntentStore:
 
     def pending(self, *, limit: int = 100) -> list[dict[str, Any]]:
         self._ensure()
+        return self.pending_for_market(limit=limit)
+
+    def pending_for_market(
+        self,
+        *,
+        limit: int = 100,
+        exchange: str = "",
+        symbol: str = "",
+    ) -> list[dict[str, Any]]:
+        self._ensure()
+        clauses = ["status IN ('reserved', 'unknown')"]
+        params: list[Any] = []
+        if exchange:
+            clauses.append("exchange = ?")
+            params.append(exchange)
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        params.append(max(1, min(int(limit), 1000)))
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM order_intents
-                WHERE status IN ('reserved', 'unknown')
+                WHERE {" AND ".join(clauses)}
                 ORDER BY updated_at ASC LIMIT ?
                 """,
-                (max(1, min(int(limit), 1000)),),
+                params,
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def reclassify_confirmed_rejections(
+        self,
+        *,
+        exchange: str = "",
+        symbol: str = "",
+    ) -> list[dict[str, Any]]:
+        """Move explicit exchange rejections out of the uncertain quarantine."""
+        reclassified: list[dict[str, Any]] = []
+        for intent in self.pending_for_market(
+            limit=1000,
+            exchange=exchange,
+            symbol=symbol,
+        ):
+            if intent["status"] != "unknown" or not is_confirmed_order_rejection(
+                str(intent.get("last_error") or "")
+            ):
+                continue
+            updated = self.mark_failed(
+                str(intent["client_order_id"]),
+                str(intent.get("last_error") or "confirmed exchange rejection"),
+            )
+            reclassified.append(updated)
+        return reclassified
 
     def first_uncertain(
         self,

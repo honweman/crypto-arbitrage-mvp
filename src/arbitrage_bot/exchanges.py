@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from .config import ExchangeConfig
 from .models import OrderBookSnapshot, Side
-from .order_reliability import OrderIntentStore
+from .order_reliability import OrderIntentStore, is_confirmed_order_rejection
 from .order_validation import validate_prepared_limit_order
 from .orderbook import normalize_levels
 
@@ -994,16 +994,20 @@ class ExchangeManager:
     @staticmethod
     def _terminal_create_error(exc: Exception) -> bool:
         name = exc.__class__.__name__.lower()
-        return any(
-            token in name
-            for token in (
-                "invalidorder",
-                "insufficientfunds",
-                "authentication",
-                "permissiondenied",
-                "badrequest",
+        return (
+            any(
+                token in name
+                for token in (
+                    "invalidorder",
+                    "insufficientfunds",
+                    "authentication",
+                    "permissiondenied",
+                    "badrequest",
+                )
             )
-        ) or isinstance(exc, ValueError)
+            or isinstance(exc, ValueError)
+            or is_confirmed_order_rejection(str(exc))
+        )
 
     async def _create_order_idempotently(
         self,
@@ -1590,6 +1594,9 @@ class ExchangeManager:
     async def recover_pending_order_intents(
         self,
         configs: Iterable[ExchangeConfig],
+        *,
+        exchange: str = "",
+        symbol: str = "",
     ) -> dict[str, Any]:
         if self._order_intents is None:
             return {
@@ -1600,9 +1607,17 @@ class ExchangeManager:
                 "pending_count": 0,
             }
         configs_by_key = {cfg.key: cfg for cfg in configs}
+        reclassified_rows = self._order_intents.reclassify_confirmed_rejections(
+            exchange=exchange,
+            symbol=symbol,
+        )
         recovered_rows: list[dict[str, Any]] = []
         unresolved_rows: list[dict[str, Any]] = []
-        for intent in self._order_intents.pending(limit=1000):
+        for intent in self._order_intents.pending_for_market(
+            limit=1000,
+            exchange=exchange,
+            symbol=symbol,
+        ):
             cfg = configs_by_key.get(str(intent.get("exchange") or ""))
             if cfg is None:
                 unresolved_rows.append(
@@ -1647,6 +1662,16 @@ class ExchangeManager:
             "status": "blocked" if unresolved_rows else "ok",
             "recovered": recovered_rows,
             "recovered_count": len(recovered_rows),
+            "reclassified": [
+                {
+                    "client_order_id": row["client_order_id"],
+                    "exchange": row["exchange"],
+                    "symbol": row["symbol"],
+                    "status": row["status"],
+                }
+                for row in reclassified_rows
+            ],
+            "reclassified_count": len(reclassified_rows),
             "unresolved": unresolved_rows,
             "unresolved_count": len(unresolved_rows),
             "checked_at": time.time(),

@@ -102,6 +102,37 @@ def test_market_maker_instances_keep_independent_actual_states() -> None:
     assert lifecycle["summary"]["blocked_count"] == 1
 
 
+def test_market_maker_reconciliation_required_is_blocked_with_reason() -> None:
+    maker = MarketMakerConfig(
+        id="coinbase-acs",
+        enabled=True,
+        live_enabled=True,
+        exchange="coinbase-spot",
+        symbol="ACS/USDC",
+    )
+    lifecycle = build_strategy_lifecycle_payload(
+        _config(market_maker=maker, market_makers=[maker]),
+        program={"running": True},
+        market_maker={
+            "runtime": {
+                "instances": [
+                    {
+                        "id": maker.id,
+                        "status": "reconciliation_required",
+                        "mode": "live",
+                        "reason": "an earlier order result is still uncertain",
+                    }
+                ]
+            }
+        },
+    )
+
+    row = _rows(lifecycle, "market_maker")[0]
+    assert row["actual_state"] == "blocked"
+    assert row["convergence_state"] == "blocked"
+    assert row["reason"] == "an earlier order result is still uncertain"
+
+
 def test_auto_waiting_state_is_healthy_and_program_pause_converges() -> None:
     cfg = _config()
     task = {
