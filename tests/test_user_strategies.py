@@ -50,6 +50,7 @@ class UserStrategyTest(unittest.TestCase):
         account_id: str,
         exchange: str,
         symbol: str,
+        market_type: str = "spot",
     ) -> UserExchangeAccount:
         account = store.upsert_account(
             UserExchangeAccount.from_dict(
@@ -59,6 +60,7 @@ class UserStrategyTest(unittest.TestCase):
                     "project_id": project.id,
                     "label": account_id,
                     "exchange": exchange,
+                    "market_type": market_type,
                     "symbol": symbol,
                     "enabled": False,
                     "withdrawal_disabled_confirmed": True,
@@ -83,7 +85,7 @@ class UserStrategyTest(unittest.TestCase):
         self.assertEqual(strategy.mode, "paper")
         self.assertFalse(strategy.to_dict()["live_enabled"])
         self.assertEqual(strategy.parameters["levels"], 2)
-        self.assertEqual(len(user_strategy_catalog()), 5)
+        self.assertEqual(len(user_strategy_catalog()), 6)
         with self.assertRaisesRegex(ValueError, "paper-only"):
             UserStrategy.from_dict({**base, "live_enabled": True})
         with self.assertRaisesRegex(ValueError, "credential values"):
@@ -275,6 +277,74 @@ class UserStrategyTest(unittest.TestCase):
         self.assertTrue(
             any("quote currency mismatch" in row for row in mismatched_single["blockers"])
         )
+
+    def test_contract_arbitrage_requires_spot_derivative_and_optional_dex_leg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_USER_STRATEGY_MASTER_KEY": MASTER_KEY},
+        ):
+            store = self._store(Path(tmp) / "workspace.sqlite3")
+            project = self._project(store)
+            spot = self._account(
+                store,
+                project,
+                account_id="bybit-spot",
+                exchange="bybit",
+                symbol="ACS/USDT",
+            )
+            swap = self._account(
+                store,
+                project,
+                account_id="bybit-swap",
+                exchange="bybit",
+                symbol="ACS/USDT:USDT",
+                market_type="swap",
+            )
+            cex_only = UserStrategy.from_dict(
+                {
+                    "owner_email": project.owner_email,
+                    "project_id": project.id,
+                    "strategy_type": "contract_arbitrage",
+                    "account_ids": [spot.id, swap.id],
+                    "parameters": {"require_dex_leg": False},
+                }
+            )
+            dex_required = UserStrategy.from_dict(
+                {
+                    **cex_only.to_dict(),
+                    "id": "dex-required",
+                    "parameters": {
+                        **cex_only.parameters,
+                        "require_dex_leg": True,
+                    },
+                }
+            )
+
+            cex_readiness = store.strategy_readiness(cex_only)
+            dex_readiness = store.strategy_readiness(dex_required)
+
+        self.assertTrue(cex_readiness["ready"])
+        self.assertFalse(dex_readiness["ready"])
+        self.assertIn(
+            "contract arbitrage requires a DEX derivative account",
+            dex_readiness["blockers"],
+        )
+
+    def test_contract_arbitrage_budget_counts_both_legs_and_caps_leverage(self) -> None:
+        strategy = UserStrategy.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "project_id": "project-acs",
+                "strategy_type": "contract_arbitrage",
+                "parameters": {"max_cycle_quote": 5.0, "max_leverage": 4.0},
+                "risk": {"max_order_quote": 5.0, "max_total_quote": 5.0},
+            }
+        )
+
+        blockers = strategy_parameter_blockers(strategy)
+
+        self.assertIn("strategy budget exceeds max total quote", blockers)
+        self.assertIn("contract arbitrage leverage above 3x is not allowed", blockers)
 
     def test_referenced_account_cannot_be_deleted_and_project_disable_pauses_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

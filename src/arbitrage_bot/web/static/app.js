@@ -4908,18 +4908,27 @@ function balanceStatusClass(status) {
         container.appendChild(empty);
       } else {
         for (const account of accounts) {
+          const contractAccount = ["spot", "swap", "future"].includes(account.market_type);
+          const accountTypeAllowed = strategyType === "contract_arbitrage"
+            ? contractAccount
+            : account.market_type === "spot";
           const label = document.createElement("label");
           label.className = "account-option";
           const input = document.createElement("input");
           input.type = "checkbox";
           input.value = account.id;
-          input.checked = selected.has(account.id);
-          input.disabled = false;
-          input.title = account.enabled && account.connection_fresh
+          input.checked = selected.has(account.id) && accountTypeAllowed;
+          input.disabled = !accountTypeAllowed;
+          input.title = !accountTypeAllowed
+            ? uiText("Account market type is not supported by this strategy.")
+            : account.enabled && account.connection_fresh
             ? uiText("Account ready")
             : uiText("Account must be enabled with a fresh connection test.");
           const name = document.createElement("span");
-          name.textContent = `${account.label} · ${account.exchange} ${account.symbol}`;
+          const venueType = ["hyperliquid", "dydx", "aster"].includes(account.exchange)
+            ? "DEX"
+            : "CEX";
+          name.textContent = `${account.label} · ${venueType} ${account.market_type} · ${account.exchange} ${account.symbol}`;
           label.append(input, name);
           container.appendChild(label);
         }
@@ -4966,6 +4975,13 @@ function balanceStatusClass(status) {
         setFieldValue("user-strategy-profit-bps", values.min_profit_bps);
         setFieldValue("user-strategy-cycle-quote", values.max_cycle_quote);
         setFieldValue("user-strategy-scan-seconds", values.scan_interval_seconds);
+      } else if (strategyType === "contract_arbitrage") {
+        setFieldValue("user-strategy-contract-basis", values.min_basis_bps);
+        setFieldValue("user-strategy-contract-funding", values.min_funding_bps);
+        setFieldValue("user-strategy-contract-quote", values.max_cycle_quote);
+        setFieldValue("user-strategy-contract-leverage", values.max_leverage);
+        setFieldValue("user-strategy-contract-scan", values.scan_interval_seconds);
+        setCheckedValue("user-strategy-contract-require-dex", values.require_dex_leg);
       }
     }
 
@@ -5066,6 +5082,16 @@ function balanceStatusClass(status) {
           quote_per_grid: numericValue("user-strategy-grid-quote"),
           spacing: document.getElementById("user-strategy-grid-spacing").value,
           refresh_seconds: numericValue("user-strategy-grid-refresh"),
+        };
+      }
+      if (strategyType === "contract_arbitrage") {
+        return {
+          min_basis_bps: numericValue("user-strategy-contract-basis"),
+          min_funding_bps: numericValue("user-strategy-contract-funding"),
+          max_cycle_quote: numericValue("user-strategy-contract-quote"),
+          max_leverage: numericValue("user-strategy-contract-leverage"),
+          scan_interval_seconds: numericValue("user-strategy-contract-scan"),
+          require_dex_leg: document.getElementById("user-strategy-contract-require-dex").checked,
         };
       }
       return {

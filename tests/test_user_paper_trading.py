@@ -76,6 +76,7 @@ def account(
     account_id: str,
     exchange: str,
     symbol: str,
+    market_type: str = "spot",
 ) -> UserExchangeAccount:
     return UserExchangeAccount.from_dict(
         {
@@ -84,6 +85,7 @@ def account(
             "project_id": project_row.id,
             "label": account_id,
             "exchange": exchange,
+            "market_type": market_type,
             "symbol": symbol,
             "enabled": True,
             "withdrawal_disabled_confirmed": True,
@@ -118,6 +120,88 @@ class FakePaperManager:
 
 
 class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
+    def test_contract_arbitrage_scans_hyperliquid_dex_leg_without_live_fills(self) -> None:
+        now = time.time()
+        project_row = project()
+        spot = account(
+            project_row,
+            account_id="coinbase-spot",
+            exchange="coinbase",
+            symbol="ACS/USDC",
+        )
+        derivative = account(
+            project_row,
+            account_id="hyperliquid-swap",
+            exchange="hyperliquid",
+            symbol="ACS/USDC:USDC",
+            market_type="swap",
+        )
+        strategy = UserStrategy.from_dict(
+            {
+                "owner_email": project_row.owner_email,
+                "project_id": project_row.id,
+                "strategy_type": "contract_arbitrage",
+                "account_ids": [spot.id, derivative.id],
+                "parameters": {
+                    "min_basis_bps": 50.0,
+                    "min_funding_bps": 0.5,
+                    "max_cycle_quote": 10.0,
+                    "max_leverage": 1.0,
+                    "scan_interval_seconds": 1.0,
+                    "require_dex_leg": True,
+                },
+                "risk": {
+                    "max_order_quote": 10.0,
+                    "max_total_quote": 20.0,
+                    "max_daily_loss_quote": 10.0,
+                    "max_open_orders": 2,
+                    "max_slippage_bps": 50.0,
+                    "paper_fee_bps": 10.0,
+                },
+            }
+        )
+        books = {
+            spot.id: paper_book(
+                spot.id,
+                spot.symbol,
+                99.9,
+                100.0,
+                now=now,
+            ),
+            derivative.id: paper_book(
+                derivative.id,
+                derivative.symbol,
+                102.0,
+                102.1,
+                now=now,
+            ),
+        }
+
+        state, fills, event = simulate_user_paper_cycle(
+            strategy,
+            project_row,
+            [spot, derivative],
+            books,
+            None,
+            quote_rates={"USDC": 1.0},
+            common_quote_currency="USD",
+            funding_rates={derivative.id: 0.0001},
+            now=now,
+        )
+
+        self.assertEqual(fills, [])
+        self.assertEqual(state["status"], "candidate")
+        self.assertFalse(state["live_submit_allowed"])
+        self.assertEqual(
+            state["contract_scan"]["best"]["derivative_venue_type"], "dex"
+        )
+        self.assertEqual(
+            state["contract_scan"]["best"]["direction"], "positive_basis"
+        )
+        self.assertGreater(state["contract_scan"]["best"]["basis_bps"], 50.0)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "candidate")
+
     def test_store_is_owner_scoped_idempotent_and_restart_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper.sqlite3"

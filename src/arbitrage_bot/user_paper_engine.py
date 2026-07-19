@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from .config import ExchangeConfig, MarketMakerConfig, SpotGridConfig, SpotMarketConfig
+from .contract_arbitrage import scan_user_contract_arbitrage
 from .exchanges import ExchangeManager
 from .grid_trading import build_spot_grid_plan
 from .market_making import build_symmetric_market_maker_plan
@@ -22,7 +23,11 @@ from .strategies.spot_spread import find_converted_spot_spread_opportunities
 from .user_account_check import workspace_exchange_config
 from .user_paper_store import UserPaperStateConflict, UserPaperTradingStore
 from .user_strategies import UserStrategy
-from .user_workspace import UserExchangeAccount, UserProject, UserWorkspaceStore
+from .user_workspace import (
+    UserExchangeAccount,
+    UserProject,
+    UserWorkspaceStore,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -213,8 +218,16 @@ def _initialize_wallets(
         rate = quote_rates.get(quote)
         if rate is None:
             raise ValueError(f"quote rate is missing: {quote}")
-        local_capital = capital_common / rate
-        if strategy.strategy_type in {"auto_buy_sell", "dca"}:
+        account_capital_common = (
+            capital_common / len(accounts)
+            if strategy.strategy_type == "contract_arbitrage"
+            else capital_common
+        )
+        local_capital = account_capital_common / rate
+        if strategy.strategy_type == "contract_arbitrage":
+            initial_quote = local_capital
+            initial_base = 0.0
+        elif strategy.strategy_type in {"auto_buy_sell", "dca"}:
             initial_quote = (
                 local_capital * fee_multiplier if directional_side == "buy" else 0.0
             )
@@ -975,6 +988,7 @@ def simulate_user_paper_cycle(
     *,
     quote_rates: dict[str, float],
     common_quote_currency: str,
+    funding_rates: dict[str, float | None] | None = None,
     now: float | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
     cycle_at = time.time() if now is None else float(now)
@@ -1083,6 +1097,19 @@ def simulate_user_paper_cycle(
             books[accounts[0].id],
             now=cycle_at,
         )
+    elif strategy.strategy_type == "contract_arbitrage":
+        status, reason, event_type, metrics, contract_scan = (
+            scan_user_contract_arbitrage(
+                strategy,
+                project,
+                accounts,
+                books,
+                rates,
+                funding_rates or {},
+            )
+        )
+        state["contract_scan"] = contract_scan
+        fills = []
     else:
         fills, status, reason, event_type, metrics = _simulate_spot_spread(
             strategy,
@@ -1256,6 +1283,19 @@ class UserPaperTradingService:
         if book is None:
             raise ValueError("order book is unavailable")
         return book
+
+    async def _fetch_funding_rate(
+        self,
+        account: UserExchangeAccount,
+        semaphore: asyncio.Semaphore,
+    ) -> float | None:
+        cfg = _paper_exchange_config(account, fee_bps=0.0)
+        async with semaphore:
+            result = await asyncio.wait_for(
+                self.manager.fetch_funding_rate(cfg, account.symbol),
+                timeout=self.fetch_timeout_seconds,
+            )
+        return float(result[2]) if result is not None else None
 
     async def pause_all(self, *, now: float | None = None) -> dict[str, int]:
         paused_at = time.time() if now is None else float(now)
@@ -1528,6 +1568,26 @@ class UserPaperTradingService:
                 else:
                     fetched[account_id] = fetched_by_market[market_key]
 
+            funding_accounts = {
+                account.id: account
+                for strategy, _, accounts, _ in jobs
+                if strategy.strategy_type == "contract_arbitrage"
+                for account in accounts
+                if account.market_type in {"swap", "future"}
+            }
+            funding_results = await asyncio.gather(
+                *[
+                    self._fetch_funding_rate(account, semaphore)
+                    for account in funding_accounts.values()
+                ],
+                return_exceptions=True,
+            )
+            funding_by_account: dict[str, float | None] = {}
+            for account_id, result in zip(funding_accounts, funding_results):
+                funding_by_account[account_id] = (
+                    None if isinstance(result, Exception) else result
+                )
+
             for strategy, project, accounts, state in jobs:
                 account_error = next(
                     (
@@ -1569,6 +1629,11 @@ class UserPaperTradingService:
                         state,
                         quote_rates=self.quote_rates,
                         common_quote_currency=self.common_quote_currency,
+                        funding_rates={
+                            account.id: funding_by_account.get(account.id)
+                            for account in accounts
+                            if account.market_type in {"swap", "future"}
+                        },
                         now=cycle_at,
                     )
                     self._persist_current_cycle(

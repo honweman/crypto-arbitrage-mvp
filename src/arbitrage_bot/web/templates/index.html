@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260713-ux1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260713-ux1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260719-dex-contract-arb1">
 
 </head>
 <body>
@@ -766,6 +766,32 @@
           <label for="user-strategy-scan-seconds">Scan Seconds</label>
           <input id="user-strategy-scan-seconds" type="number" min="0.1" step="any">
         </div>
+
+        <div class="field" data-user-strategy-types="contract_arbitrage">
+          <label for="user-strategy-contract-basis">Min Basis Bps</label>
+          <input id="user-strategy-contract-basis" type="number" min="0" max="10000" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="contract_arbitrage">
+          <label for="user-strategy-contract-funding">Min Supportive Funding Bps</label>
+          <input id="user-strategy-contract-funding" type="number" min="0" max="1000" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="contract_arbitrage">
+          <label for="user-strategy-contract-quote">Max Quote / Leg</label>
+          <input id="user-strategy-contract-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="contract_arbitrage">
+          <label for="user-strategy-contract-leverage">Max Leverage</label>
+          <input id="user-strategy-contract-leverage" type="number" min="1" max="3" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="contract_arbitrage">
+          <label for="user-strategy-contract-scan">Scan Seconds</label>
+          <input id="user-strategy-contract-scan" type="number" min="0.1" step="any">
+        </div>
+        <label class="check-field" data-user-strategy-types="contract_arbitrage">
+          <input id="user-strategy-contract-require-dex" type="checkbox">
+          Require DEX Contract Leg
+        </label>
+        <div class="subtle wide-field" data-user-strategy-types="contract_arbitrage">Select at least one spot account and one swap/future account. Candidate plans remain paper-only.</div>
 
         <div class="form-divider">Safety Limits</div>
         <div class="field">
@@ -2493,8 +2519,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260719-hyperliquid2" defer></script>
-  <script src="/static/app.js?v=20260719-hyperliquid2" defer></script>
+  <script src="/static/i18n.js?v=20260719-dex-contract-arb1" defer></script>
+  <script src="/static/app.js?v=20260719-dex-contract-arb1" defer></script>
 
 </body>
 </html>

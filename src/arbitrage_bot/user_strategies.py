@@ -71,6 +71,19 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
             "scan_interval_seconds": 1.0,
         },
     },
+    "contract_arbitrage": {
+        "label": "Contract Arbitrage (CEX/DEX)",
+        "min_accounts": 2,
+        "max_accounts": 8,
+        "parameters": {
+            "min_basis_bps": 15.0,
+            "min_funding_bps": 0.0,
+            "max_cycle_quote": 5.0,
+            "max_leverage": 1.0,
+            "scan_interval_seconds": 1.0,
+            "require_dex_leg": True,
+        },
+    },
 }
 
 DEFAULT_USER_STRATEGY_RISK: dict[str, Any] = {
@@ -318,6 +331,41 @@ def _clean_parameters(strategy_type: str, value: Any) -> dict[str, Any]:
                 maximum=1000.0,
             ),
         }
+    if strategy_type == "contract_arbitrage":
+        return {
+            "min_basis_bps": _finite_float(
+                merged["min_basis_bps"],
+                label="min_basis_bps",
+                maximum=10_000.0,
+            ),
+            "min_funding_bps": _finite_float(
+                merged["min_funding_bps"],
+                label="min_funding_bps",
+                maximum=1_000.0,
+            ),
+            "max_cycle_quote": _finite_float(
+                merged["max_cycle_quote"],
+                label="max_cycle_quote",
+                minimum=0.00000001,
+            ),
+            "max_leverage": _finite_float(
+                merged["max_leverage"],
+                label="max_leverage",
+                minimum=1.0,
+                maximum=20.0,
+            ),
+            "scan_interval_seconds": _finite_float(
+                merged["scan_interval_seconds"],
+                label="scan_interval_seconds",
+                minimum=0.1,
+                maximum=3600.0,
+            ),
+            "require_dex_leg": _strict_bool(
+                merged["require_dex_leg"],
+                label="require_dex_leg",
+                default=True,
+            ),
+        }
     return {
         "min_profit_bps": _finite_float(
             merged["min_profit_bps"],
@@ -504,6 +552,12 @@ def strategy_parameter_blockers(strategy: UserStrategy) -> list[str]:
             blockers.append("grid lower and upper prices are required")
         elif parameters["upper_price"] <= parameters["lower_price"]:
             blockers.append("grid upper price must be above lower price")
+    elif strategy.strategy_type == "contract_arbitrage":
+        order_quote = parameters["max_cycle_quote"]
+        total_quote = parameters["max_cycle_quote"] * 2
+        planned_orders = 2
+        if parameters["max_leverage"] > 3:
+            blockers.append("contract arbitrage leverage above 3x is not allowed")
     else:
         order_quote = parameters["max_cycle_quote"]
         total_quote = parameters["max_cycle_quote"]

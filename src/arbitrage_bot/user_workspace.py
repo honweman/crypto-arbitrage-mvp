@@ -2462,8 +2462,13 @@ class UserWorkspaceStore:
                 blockers.append(f"account owner mismatch: {account.label}")
             if account.project_id != strategy.project_id:
                 blockers.append(f"account project mismatch: {account.label}")
-            if account.market_type != "spot":
-                blockers.append(f"spot account required: {account.label}")
+            contract_arbitrage = strategy.strategy_type == "contract_arbitrage"
+            allowed_market_types = (
+                {"spot", "swap", "future"} if contract_arbitrage else {"spot"}
+            )
+            if account.market_type not in allowed_market_types:
+                expected = "spot, swap or future" if contract_arbitrage else "spot"
+                blockers.append(f"{expected} account required: {account.label}")
             if not account.symbol:
                 blockers.append(f"account symbol is missing: {account.label}")
             elif (
@@ -2472,7 +2477,7 @@ class UserWorkspaceStore:
                 blockers.append(f"account symbol asset mismatch: {account.label}")
             elif (
                 project is not None
-                and strategy.strategy_type != "spot_spread"
+                and strategy.strategy_type not in {"spot_spread", "contract_arbitrage"}
                 and account.symbol.split("/", 1)[1].split(":", 1)[0]
                 != project.quote_currency
             ):
@@ -2499,6 +2504,25 @@ class UserWorkspaceStore:
             exchanges = {account.exchange for account in accounts}
             if len(exchanges) < 2:
                 blockers.append("spot arbitrage requires two different exchanges")
+        elif strategy.strategy_type == "contract_arbitrage":
+            spot_accounts = [row for row in accounts if row.market_type == "spot"]
+            derivative_accounts = [
+                row for row in accounts if row.market_type in {"swap", "future"}
+            ]
+            if not spot_accounts:
+                blockers.append("contract arbitrage requires at least one spot account")
+            if not derivative_accounts:
+                blockers.append(
+                    "contract arbitrage requires at least one swap or future account"
+                )
+            if strategy.parameters.get("require_dex_leg") and not any(
+                row.exchange in DEX_VENUES_BY_ID for row in derivative_accounts
+            ):
+                blockers.append("contract arbitrage requires a DEX derivative account")
+            if any(row.exchange in DEX_VENUES_BY_ID for row in derivative_accounts):
+                warnings.append(
+                    "DEX derivative leg is paper-only; wallet authorization does not enable live submission"
+                )
 
         profile = risk_profile or self.risk_profile(strategy.owner_email)
         if not profile.trading_enabled:
