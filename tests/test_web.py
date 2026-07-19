@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260719-wallets1" defer></script>',
+            '<script src="/static/app.js?v=20260719-wallets2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260719-wallets1" defer></script>',
+            '<script src="/static/i18n.js?v=20260719-wallets2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -258,6 +258,7 @@ class WebMonitorTest(unittest.TestCase):
             "wallet-venue-select",
             "wallet-venue-test",
             "wallet-connections",
+            "wallet-venue-connections",
         ):
             self.assertIn(f'id="{element_id}"', INDEX_HTML)
         self.assertIn("eip6963:requestProvider", APP_JS)
@@ -266,6 +267,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('action: "wallet_challenge"', APP_JS)
         self.assertIn('action: "verify_wallet"', APP_JS)
         self.assertIn('action: "test_wallet_venue"', APP_JS)
+        self.assertIn('action: "delete_venue_connection"', APP_JS)
 
     def test_core_strategy_forms_use_review_start_workflows(self) -> None:
         for element_id in (
@@ -7720,6 +7722,37 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 verify_payload = await verify_response.json()
+                with patch(
+                    "arbitrage_bot.web.probe_dex_venue",
+                    new=AsyncMock(
+                        return_value={
+                            "status": "healthy",
+                            "venue": "polymarket",
+                            "wallet_address": signer.address,
+                            "detail": {"position_count": 2},
+                            "latency_ms": 15.0,
+                            "checked_at": time.time(),
+                            "live_trading_authorized": False,
+                        }
+                    ),
+                ):
+                    venue_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "test_wallet_venue",
+                            "venue": "polymarket",
+                            "wallet_id": verify_payload["wallet"]["id"],
+                        },
+                    )
+                    venue_payload = await venue_response.json()
+                delete_venue_response = await client.post(
+                    "/api/user-workspace",
+                    json={
+                        "action": "delete_venue_connection",
+                        "connection_id": venue_payload["venue_connection"]["id"],
+                    },
+                )
+                delete_venue_payload = await delete_venue_response.json()
             finally:
                 await client.close()
 
@@ -7728,6 +7761,15 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(verify_payload["wallet"]["address"], signer.address)
         self.assertFalse(verify_payload["wallet"]["trading_authorized"])
         self.assertEqual(verify_payload["workspace"]["summary"]["wallet_count"], 1)
+        self.assertEqual(venue_response.status, 200, venue_payload)
+        self.assertTrue(venue_payload["venue_connection"]["read_only_verified"])
+        self.assertFalse(venue_payload["venue_connection"]["trading_authorized"])
+        self.assertEqual(
+            venue_payload["workspace"]["summary"]["venue_connection_count"],
+            1,
+        )
+        self.assertEqual(delete_venue_response.status, 200, delete_venue_payload)
+        self.assertEqual(delete_venue_payload["workspace"]["venue_connections"], [])
 
     async def test_user_workspace_project_approval_and_encrypted_account_flow(
         self,

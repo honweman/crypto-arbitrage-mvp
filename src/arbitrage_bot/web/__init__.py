@@ -2804,6 +2804,7 @@ def build_user_workspace_payload(
             "projects": [],
             "accounts": [],
             "wallets": [],
+            "venue_connections": [],
             "strategies": [],
             "exchange_catalog": [],
             "dex_venue_catalog": [],
@@ -2825,6 +2826,8 @@ def build_user_workspace_payload(
                 },
                 "account_count": 0,
                 "wallet_count": 0,
+                "venue_connection_count": 0,
+                "healthy_venue_connection_count": 0,
                 "configured_account_count": 0,
                 "ready_account_count": 0,
                 "strategy_count": 0,
@@ -2898,6 +2901,7 @@ def build_user_workspace_payload(
             "projects": [],
             "accounts": [],
             "wallets": [],
+            "venue_connections": [],
             "strategies": [],
             "exchange_catalog": [],
             "dex_venue_catalog": [],
@@ -2919,6 +2923,8 @@ def build_user_workspace_payload(
                 },
                 "account_count": 0,
                 "wallet_count": 0,
+                "venue_connection_count": 0,
+                "healthy_venue_connection_count": 0,
                 "configured_account_count": 0,
                 "ready_account_count": 0,
                 "strategy_count": 0,
@@ -6372,6 +6378,12 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 venue=venue,
                 wallet_address=wallet.address if wallet else "",
             )
+            venue_connection = store.upsert_venue_connection(
+                owner_email=user.email,
+                venue=venue,
+                wallet=wallet,
+                check=venue_check,
+            )
             audit_target = f"{venue}:{wallet.id if wallet else 'public'}"
             audit_detail = f"tested {venue} read-only connectivity"
             audit_payload = {
@@ -6381,7 +6393,29 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 "latency_ms": venue_check["latency_ms"],
                 "live_trading_authorized": False,
             }
-            response_extra = {"venue_check": venue_check}
+            response_extra = {
+                "venue_check": venue_check,
+                "venue_connection": venue_connection.to_dict(),
+            }
+        elif action == "delete_venue_connection":
+            connection_id = str(
+                payload.get("connection_id") or payload.get("id") or ""
+            ).strip()
+            venue_connection = store.get_venue_connection(connection_id)
+            if venue_connection is None:
+                raise ValueError(f"venue connection not found: {connection_id}")
+            _require_workspace_owner(user, venue_connection.owner_email)
+            store.delete_venue_connection(
+                venue_connection.id,
+                owner_email=user.email,
+            )
+            audit_target = venue_connection.id
+            audit_detail = "revoked read-only venue connection"
+            audit_payload = {
+                "connection_id": venue_connection.id,
+                "venue": venue_connection.venue,
+                "wallet_id": venue_connection.wallet_id,
+            }
         elif action == "upsert_project":
             raw = dict(
                 payload.get("project")

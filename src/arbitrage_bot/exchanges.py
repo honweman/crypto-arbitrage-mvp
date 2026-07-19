@@ -17,6 +17,8 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
+from eth_account import Account
+
 from .config import ExchangeConfig
 from .models import OrderBookSnapshot, Side
 from .order_reliability import OrderIntentStore, is_confirmed_order_rejection
@@ -754,14 +756,20 @@ class ExchangeManager:
                 options["walletAddress"] = api_key
             if secret:
                 options["privateKey"] = secret
-        elif cfg.id == "dydx" and secret:
-            options["privateKey"] = secret
+        elif cfg.id == "dydx":
+            if api_key:
+                options["walletAddress"] = api_key
+            if secret:
+                options["options"].setdefault("mnemonic", secret)
         elif cfg.id == "aster":
             if api_key:
                 options["walletAddress"] = api_key
-                options["options"].setdefault("signerAddress", api_key)
             if secret:
                 options["privateKey"] = secret
+                options["options"].setdefault(
+                    "signerAddress",
+                    Account.from_key(secret).address,
+                )
 
         client = exchange_cls(options)
         if cfg.id == "bithumb" and str(cfg.options.get("private_api", "")).lower() in {

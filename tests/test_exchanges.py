@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from eth_account import Account
+
 from arbitrage_bot.config import ExchangeConfig, load_config
 from arbitrage_bot.exchanges import (
     BithumbV2Client,
@@ -198,6 +200,9 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
     def test_decentralized_exchange_credentials_map_to_ccxt_signers(self) -> None:
         created = {}
+        signer = Account.create()
+        owner_address = "0x0000000000000000000000000000000000000001"
+        mnemonic = "one two three four five six seven eight nine ten eleven twelve"
 
         class FakeClient:
             def __init__(self, options: dict[str, object]) -> None:
@@ -208,6 +213,20 @@ class ExchangeProxyConfigTest(unittest.TestCase):
             dydx = FakeClient
             aster = FakeClient
 
+        credentials = {
+            "hyperliquid": {
+                "api_key": owner_address,
+                "secret": signer.key.hex(),
+            },
+            "dydx": {
+                "api_key": "dydx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe36p3",
+                "secret": mnemonic,
+            },
+            "aster": {
+                "api_key": owner_address,
+                "secret": signer.key.hex(),
+            },
+        }
         for exchange_id in ("hyperliquid", "dydx", "aster"):
             cfg = ExchangeConfig(
                 id=exchange_id,
@@ -216,10 +235,7 @@ class ExchangeProxyConfigTest(unittest.TestCase):
             )
             manager = ExchangeManager(
                 credentials_by_key={
-                    cfg.key: {
-                        "api_key": "0x0000000000000000000000000000000000000001",
-                        "secret": "0xagent-private-key",
-                    }
+                    cfg.key: credentials[exchange_id]
                 }
             )
             with patch(
@@ -230,14 +246,20 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
         self.assertEqual(
             created["hyperliquid"]["walletAddress"],
-            "0x0000000000000000000000000000000000000001",
+            owner_address,
         )
-        self.assertEqual(created["hyperliquid"]["privateKey"], "0xagent-private-key")
-        self.assertEqual(created["dydx"]["privateKey"], "0xagent-private-key")
+        self.assertEqual(created["hyperliquid"]["privateKey"], signer.key.hex())
+        self.assertEqual(
+            created["dydx"]["walletAddress"],
+            "dydx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe36p3",
+        )
+        self.assertEqual(created["dydx"]["options"]["mnemonic"], mnemonic)
         self.assertEqual(
             created["aster"]["options"]["signerAddress"],
-            "0x0000000000000000000000000000000000000001",
+            signer.address,
         )
+        self.assertEqual(created["aster"]["walletAddress"], owner_address)
+        self.assertEqual(created["aster"]["privateKey"], signer.key.hex())
 
     def test_bithumb_limit_order_features_block_post_only(self) -> None:
         cfg = ExchangeConfig(id="bithumb", label="bithumb-spot")

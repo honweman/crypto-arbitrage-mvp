@@ -17,6 +17,7 @@ from arbitrage_bot.user_workspace import (
     UserProject,
     UserRiskProfile,
     UserWorkspaceStore,
+    validate_exchange_credentials,
 )
 from arbitrage_bot.user_strategies import UserStrategy
 
@@ -73,7 +74,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             )
             self.assertEqual(
                 exchange_catalog["dydx"]["required_credentials"],
-                ["secret"],
+                ["api_key", "secret"],
             )
             self.assertEqual(
                 exchange_catalog["aster"]["default_variant"],
@@ -93,6 +94,97 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                     is_admin=False,
                 ),
                 [],
+            )
+
+    def test_venue_connection_persists_and_is_removed_with_wallet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "workspace.sqlite3"
+            store = UserWorkspaceStore(path, master_key_env=None)
+            signer = Account.create()
+            challenge = store.create_wallet_challenge(
+                owner_email="trader@example.com",
+                address=signer.address,
+                chain_id=137,
+                wallet_type="metamask",
+                domain="daydayuptrade.com",
+            )
+            signature = Account.sign_message(
+                encode_defunct(text=challenge["message"]),
+                signer.key,
+            ).signature.hex()
+            wallet = store.verify_wallet_challenge(
+                owner_email="trader@example.com",
+                challenge_id=challenge["challenge_id"],
+                signature=signature,
+            )
+            link = store.upsert_venue_connection(
+                owner_email="trader@example.com",
+                venue="polymarket",
+                wallet=wallet,
+                check={
+                    "status": "healthy",
+                    "checked_at": time.time(),
+                    "latency_ms": 12.5,
+                    "detail": {"position_count": 3, "ignored": ["secret"]},
+                },
+            )
+
+            restarted = UserWorkspaceStore(path, master_key_env=None)
+            payload = restarted.public_payload(
+                owner_email="trader@example.com",
+                is_admin=False,
+            )
+
+            self.assertTrue(link.to_dict()["read_only_verified"])
+            self.assertFalse(link.to_dict()["trading_authorized"])
+            self.assertEqual(payload["summary"]["venue_connection_count"], 1)
+            self.assertEqual(payload["summary"]["healthy_venue_connection_count"], 1)
+            self.assertEqual(payload["venue_connections"][0]["detail"], {"position_count": 3})
+            restarted.delete_wallet(wallet.id, owner_email="trader@example.com")
+            self.assertEqual(
+                restarted.list_venue_connections(
+                    owner_email="trader@example.com",
+                    is_admin=False,
+                ),
+                [],
+            )
+
+    def test_decentralized_exchange_credentials_are_validated(self) -> None:
+        signer = Account.create()
+        owner = Account.create()
+        validate_exchange_credentials(
+            "hyperliquid",
+            {"api_key": owner.address, "secret": signer.key.hex()},
+        )
+        validate_exchange_credentials(
+            "dydx",
+            {
+                "api_key": "dydx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe36p3",
+                "secret": "one two three four five six seven eight nine ten eleven twelve",
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "valid EVM address"):
+            validate_exchange_credentials(
+                "aster",
+                {"api_key": "not-an-address", "secret": signer.key.hex()},
+            )
+        with self.assertRaisesRegex(ValueError, "32-byte EVM private key"):
+            validate_exchange_credentials(
+                "hyperliquid",
+                {"api_key": signer.address, "secret": "not-a-key"},
+            )
+        with self.assertRaisesRegex(ValueError, "dedicated agent/signer key"):
+            validate_exchange_credentials(
+                "hyperliquid",
+                {"api_key": signer.address, "secret": signer.key.hex()},
+            )
+        with self.assertRaisesRegex(ValueError, "dYdX Chain address"):
+            validate_exchange_credentials(
+                "dydx",
+                {
+                    "api_key": signer.address,
+                    "secret": "one two three four five six seven eight nine ten eleven twelve",
+                },
             )
 
     def test_wallet_challenge_rejects_another_signer(self) -> None:

@@ -835,6 +835,22 @@ Registered users can open `Security` from the dashboard header to bind Google Au
 
 Each registered user gets an isolated project workspace. A user creates a project for an asset and quote currency, then adds exchange accounts with trade-only API credentials. The account form selects the exchange, market type, API region, and actual trading pair; `Load Pairs` uses public exchange metadata and shows the reported minimum order value when available. Upbit supports both Global and Indonesia (`id.Upbit`) API regions, and Bithumb user accounts use API v2.0.
 
+Registered users can also verify an EVM wallet from MetaMask, imToken, or another
+EIP-1193-compatible wallet by signing a short-lived nonce. The server verifies
+the signature and stores only the public address, wallet label, provider, and
+verification timestamps. A verified wallet can then be linked to Hyperliquid,
+Polymarket, dYdX, or Aster for a persistent read-only connection check. These
+checks may read public markets and account positions, but they never authorize
+automated trading, submit an order, approve a token, or request a transfer.
+
+Use a dedicated agent or signer key for Hyperliquid and Aster; the owner wallet
+address and signer address must differ. Never enter the primary wallet private
+key. dYdX uses a dedicated trading mnemonic together with its chain address.
+Polymarket public market checks do not require a private credential; any future
+authenticated order path must use its separate API key, secret, passphrase, and
+order signature. Venue credentials are validated, encrypted, write-only in the
+browser, and intentionally unavailable to the current read-only wallet workflow.
+
 Platform exchange balances, orders, P/L, strategy configuration, cancellation,
 and live controls are administrator-only. Ordinary users see only their own
 project workspace, encrypted account metadata, paper strategies, backtests, and

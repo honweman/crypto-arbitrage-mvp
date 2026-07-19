@@ -29,6 +29,7 @@ from .user_strategies import (
 PROJECT_STATUSES = {"pending", "active", "disabled"}
 MARKET_TYPES = {"spot", "swap", "future"}
 CONNECTION_STATUSES = {"unverified", "healthy", "error"}
+VENUE_CONNECTION_STATUSES = {"healthy", "error"}
 CONNECTION_MAX_AGE_SECONDS = 86_400.0
 CREDENTIAL_ROTATION_SECONDS = 90 * 86_400.0
 WALLET_CHALLENGE_TTL_SECONDS = 300.0
@@ -103,10 +104,10 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "id": "dydx",
         "label": "dYdX v4",
         "market_types": ["swap"],
-        "required_credentials": ["secret"],
+        "required_credentials": ["api_key", "secret"],
         "credential_labels": {
-            "api_key": "Wallet Address (Optional)",
-            "secret": "Permissioned / Trading Private Key",
+            "api_key": "dYdX Chain Address",
+            "secret": "Dedicated Trading Mnemonic",
         },
         "default_variant": "mainnet",
         "variants": [{"id": "mainnet", "label": "Mainnet"}],
@@ -117,8 +118,8 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "market_types": ["spot", "swap"],
         "required_credentials": ["api_key", "secret"],
         "credential_labels": {
-            "api_key": "Wallet Address",
-            "secret": "Signer Private Key",
+            "api_key": "Owner Wallet Address",
+            "secret": "Dedicated Signer Private Key",
         },
         "default_variant": "v3",
         "variants": [{"id": "v3", "label": "API v3"}],
@@ -169,6 +170,7 @@ DEX_VENUE_CATALOG: tuple[dict[str, Any], ...] = (
         "live_enabled": False,
     },
 )
+DEX_VENUES_BY_ID = {row["id"]: row for row in DEX_VENUE_CATALOG}
 
 
 def _now() -> float:
@@ -230,6 +232,36 @@ def required_credentials_for_exchange(exchange: str) -> set[str]:
     if row is None:
         raise ValueError(f"unsupported exchange: {exchange}")
     return set(row.get("required_credentials") or [])
+
+
+def validate_exchange_credentials(
+    exchange: str,
+    credentials: dict[str, str],
+) -> None:
+    exchange_id = str(exchange or "").strip().lower()
+    if exchange_id in {"hyperliquid", "aster"}:
+        owner_address = _normalize_evm_address(credentials.get("api_key"))
+        try:
+            signer_address = Account.from_key(
+                str(credentials.get("secret") or "")
+            ).address
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{exchange_id} signer key must be a valid 32-byte EVM private key"
+            ) from exc
+        if signer_address == owner_address:
+            raise ValueError(
+                f"{exchange_id} requires a dedicated agent/signer key, not the owner wallet key"
+            )
+    elif exchange_id == "dydx":
+        address = str(credentials.get("api_key") or "").strip().lower()
+        if not address.startswith("dydx1") or len(address) < 20:
+            raise ValueError("dydx API key field must be a dYdX Chain address")
+        words = str(credentials.get("secret") or "").strip().split()
+        if len(words) not in {12, 15, 18, 21, 24}:
+            raise ValueError(
+                "dydx trading mnemonic must contain 12, 15, 18, 21, or 24 words"
+            )
 
 
 def dex_venue_catalog() -> list[dict[str, Any]]:
@@ -294,6 +326,62 @@ class UserWalletConnection:
             "permissions": list(self.permissions),
             "verified_at": self.verified_at,
             "last_seen_at": self.last_seen_at,
+            "trading_authorized": False,
+        }
+
+
+@dataclass(frozen=True)
+class UserVenueConnection:
+    id: str
+    owner_email: str
+    venue: str
+    wallet_id: str
+    wallet_address: str
+    status: str
+    latency_ms: float
+    checked_at: float
+    detail: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "UserVenueConnection":
+        if not isinstance(raw, dict):
+            raise ValueError("venue connection must be an object")
+        venue = str(raw.get("venue") or "").strip().lower()
+        if venue not in DEX_VENUES_BY_ID:
+            raise ValueError(f"unsupported decentralized venue: {venue}")
+        status = str(raw.get("status") or "error").strip().lower()
+        if status not in VENUE_CONNECTION_STATUSES:
+            raise ValueError(f"unsupported venue connection status: {status}")
+        wallet_address = str(raw.get("wallet_address") or "").strip()
+        if wallet_address:
+            wallet_address = _normalize_evm_address(wallet_address)
+        return cls(
+            id=_clean_id(raw.get("id"), prefix="venue-connection"),
+            owner_email=_clean_email(raw.get("owner_email")),
+            venue=venue,
+            wallet_id=str(raw.get("wallet_id") or "").strip(),
+            wallet_address=wallet_address,
+            status=status,
+            latency_ms=max(0.0, float(raw.get("latency_ms") or 0.0)),
+            checked_at=float(raw.get("checked_at") or _now()),
+            detail=(dict(raw.get("detail")) if isinstance(raw.get("detail"), dict) else {}),
+            error=_clean_text(raw.get("error"), max_length=240),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "owner_email": self.owner_email,
+            "venue": self.venue,
+            "wallet_id": self.wallet_id,
+            "wallet_address": self.wallet_address,
+            "status": self.status,
+            "latency_ms": self.latency_ms,
+            "checked_at": self.checked_at,
+            "detail": dict(self.detail),
+            "error": self.error,
+            "read_only_verified": self.status == "healthy",
             "trading_authorized": False,
         }
 
@@ -713,6 +801,18 @@ class UserWorkspaceStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_user_wallet_challenges_owner
                     ON user_wallet_challenges(owner_email, expires_at);
+                CREATE TABLE IF NOT EXISTS user_venue_connections (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL,
+                    venue TEXT NOT NULL,
+                    wallet_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL,
+                    UNIQUE(owner_email, venue, wallet_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_venue_connections_owner
+                    ON user_venue_connections(owner_email, updated_at);
                 """
             )
             self._migrate_legacy_accounts(connection)
@@ -869,12 +969,16 @@ class UserWorkspaceStore:
             connection.commit()
         return accounts
 
-    def _list_accounts_and_wallets(
+    def _list_accounts_wallets_and_venues(
         self,
         *,
         owner_email: str,
         is_admin: bool,
-    ) -> tuple[list[UserExchangeAccount], list[UserWalletConnection]]:
+    ) -> tuple[
+        list[UserExchangeAccount],
+        list[UserWalletConnection],
+        list[UserVenueConnection],
+    ]:
         self._ensure()
         where, params = self._scope_sql(owner_email, is_admin)
         with self._connect() as connection:
@@ -886,6 +990,12 @@ class UserWorkspaceStore:
             ).fetchall()
             wallet_rows = connection.execute(
                 "SELECT payload FROM user_wallet_connections"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+            venue_rows = connection.execute(
+                "SELECT payload FROM user_venue_connections"
                 + where
                 + " ORDER BY updated_at DESC, id ASC",
                 params,
@@ -903,7 +1013,11 @@ class UserWorkspaceStore:
             UserWalletConnection.from_dict(json.loads(row["payload"]))
             for row in wallet_rows
         ]
-        return accounts, wallets
+        venues = [
+            UserVenueConnection.from_dict(json.loads(row["payload"]))
+            for row in venue_rows
+        ]
+        return accounts, wallets, venues
 
     def list_wallets(
         self,
@@ -1106,8 +1220,149 @@ class UserWorkspaceStore:
             raise PermissionError("wallet belongs to another user")
         with self._connect() as connection:
             connection.execute(
+                "DELETE FROM user_venue_connections WHERE wallet_id = ?",
+                (wallet.id,),
+            )
+            connection.execute(
                 "DELETE FROM user_wallet_connections WHERE id = ?",
                 (wallet.id,),
+            )
+            connection.commit()
+
+    def list_venue_connections(
+        self,
+        *,
+        owner_email: str,
+        is_admin: bool,
+    ) -> list[UserVenueConnection]:
+        self._ensure()
+        where, params = self._scope_sql(owner_email, is_admin)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM user_venue_connections"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+        return [
+            UserVenueConnection.from_dict(json.loads(row["payload"])) for row in rows
+        ]
+
+    def get_venue_connection(
+        self,
+        connection_id: str,
+    ) -> UserVenueConnection | None:
+        self._ensure()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_venue_connections WHERE id = ?",
+                (str(connection_id or "").strip(),),
+            ).fetchone()
+        return (
+            UserVenueConnection.from_dict(json.loads(row["payload"])) if row else None
+        )
+
+    def upsert_venue_connection(
+        self,
+        *,
+        owner_email: str,
+        venue: str,
+        wallet: UserWalletConnection | None,
+        check: dict[str, Any],
+    ) -> UserVenueConnection:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        venue_id = str(venue or "").strip().lower()
+        venue_row = DEX_VENUES_BY_ID.get(venue_id)
+        if venue_row is None:
+            raise ValueError(f"unsupported decentralized venue: {venue_id}")
+        if venue_row.get("wallet_required") and wallet is None:
+            raise ValueError(f"{venue_id} requires a verified wallet")
+        if wallet is not None and wallet.owner_email != owner:
+            raise PermissionError("wallet belongs to another user")
+        status = str(check.get("status") or "error").strip().lower()
+        if status not in VENUE_CONNECTION_STATUSES:
+            status = "error"
+        safe_detail = {
+            key: value
+            for key, value in dict(check.get("detail") or {}).items()
+            if key
+            in {
+                "market_count",
+                "account_value",
+                "position_count",
+                "server_time",
+                "balance_available",
+            }
+            and isinstance(value, (str, int, float, bool, type(None)))
+        }
+        wallet_id = wallet.id if wallet else ""
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT payload FROM user_venue_connections "
+                "WHERE owner_email = ? AND venue = ? AND wallet_id = ?",
+                (owner, venue_id, wallet_id),
+            ).fetchone()
+            existing_link = (
+                UserVenueConnection.from_dict(json.loads(existing["payload"]))
+                if existing
+                else None
+            )
+            link = UserVenueConnection(
+                id=(
+                    existing_link.id
+                    if existing_link is not None
+                    else _new_id("venue-connection")
+                ),
+                owner_email=owner,
+                venue=venue_id,
+                wallet_id=wallet_id,
+                wallet_address=wallet.address if wallet else "",
+                status=status,
+                latency_ms=max(0.0, float(check.get("latency_ms") or 0.0)),
+                checked_at=float(check.get("checked_at") or _now()),
+                detail=safe_detail,
+                error=_clean_text(check.get("error"), max_length=240),
+            )
+            connection.execute(
+                """
+                INSERT INTO user_venue_connections(
+                    id, owner_email, venue, wallet_id, status, updated_at, payload
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_email, venue, wallet_id) DO UPDATE SET
+                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    payload = excluded.payload
+                """,
+                (
+                    link.id,
+                    link.owner_email,
+                    link.venue,
+                    link.wallet_id,
+                    link.status,
+                    link.checked_at,
+                    self._dump(link.to_dict()),
+                ),
+            )
+            connection.commit()
+        return link
+
+    def delete_venue_connection(
+        self,
+        connection_id: str,
+        *,
+        owner_email: str,
+    ) -> None:
+        self._ensure()
+        link = self.get_venue_connection(connection_id)
+        if link is None:
+            raise ValueError(f"venue connection not found: {connection_id}")
+        if link.owner_email != _clean_email(owner_email):
+            raise PermissionError("venue connection belongs to another user")
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_venue_connections WHERE id = ?",
+                (link.id,),
             )
             connection.commit()
 
@@ -1471,6 +1726,7 @@ class UserWorkspaceStore:
                     raise ValueError(
                         "missing required API credential fields: " + ", ".join(missing)
                     )
+                validate_exchange_credentials(account.exchange, merged_credentials)
                 nonce, ciphertext = self.cipher.encrypt(
                     account_id=account.id,
                     owner_email=account.owner_email,
@@ -2208,6 +2464,7 @@ class UserWorkspaceStore:
         with self._connect() as connection:
             for table in (
                 "user_wallet_challenges",
+                "user_venue_connections",
                 "user_wallet_connections",
                 "user_api_credentials",
                 "user_strategies",
@@ -2262,6 +2519,24 @@ class UserWorkspaceStore:
                     ),
                 )
             moved["user_wallet_connections"] = len(wallet_rows)
+            venue_rows = connection.execute(
+                "SELECT id, payload FROM user_venue_connections WHERE owner_email = ?",
+                (old,),
+            ).fetchall()
+            for row in venue_rows:
+                link = UserVenueConnection.from_dict(json.loads(row["payload"]))
+                updated_link = replace(link, owner_email=new, checked_at=_now())
+                connection.execute(
+                    "UPDATE user_venue_connections "
+                    "SET owner_email = ?, updated_at = ?, payload = ? WHERE id = ?",
+                    (
+                        new,
+                        updated_link.checked_at,
+                        self._dump(updated_link.to_dict()),
+                        updated_link.id,
+                    ),
+                )
+            moved["user_venue_connections"] = len(venue_rows)
             connection.execute(
                 "UPDATE user_exchange_accounts SET owner_email = ? "
                 "WHERE owner_email = ?",
@@ -2277,7 +2552,7 @@ class UserWorkspaceStore:
 
     def public_payload(self, *, owner_email: str, is_admin: bool) -> dict[str, Any]:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
-        accounts, wallets = self._list_accounts_and_wallets(
+        accounts, wallets, venue_connections = self._list_accounts_wallets_and_venues(
             owner_email=owner_email,
             is_admin=is_admin,
         )
@@ -2373,6 +2648,7 @@ class UserWorkspaceStore:
             "projects": project_rows,
             "accounts": account_rows,
             "wallets": [wallet.to_dict() for wallet in wallets],
+            "venue_connections": [link.to_dict() for link in venue_connections],
             "strategies": strategy_rows,
             "exchange_catalog": exchange_catalog(),
             "dex_venue_catalog": dex_venue_catalog(),
@@ -2407,6 +2683,10 @@ class UserWorkspaceStore:
                 ),
                 "account_count": len(account_rows),
                 "wallet_count": len(wallets),
+                "venue_connection_count": len(venue_connections),
+                "healthy_venue_connection_count": sum(
+                    1 for link in venue_connections if link.status == "healthy"
+                ),
                 "configured_account_count": sum(
                     1 for row in account_rows if row["credentials"]["configured"]
                 ),

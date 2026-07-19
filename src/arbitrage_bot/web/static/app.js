@@ -3554,10 +3554,50 @@ function balanceStatusClass(status) {
       return labels[Number(chainId)] || `EVM ${chainId}`;
     }
 
+    function renderVenueConnections(workspace, wallets, venues) {
+      const body = document.getElementById("wallet-venue-connections");
+      if (!body) return;
+      const walletById = new Map(wallets.map((wallet) => [wallet.id, wallet]));
+      const venueById = new Map(venues.map((venue) => [venue.id, venue]));
+      const links = workspace?.venue_connections || [];
+      body.replaceChildren();
+      if (!links.length) {
+        const row = document.createElement("tr");
+        row.innerHTML = `<td colspan="5">${escapeHtml(uiText("No venue connections yet."))}</td>`;
+        body.appendChild(row);
+        return;
+      }
+      for (const link of links) {
+        const wallet = walletById.get(link.wallet_id);
+        const venue = venueById.get(link.venue);
+        const healthy = link.status === "healthy";
+        const detail = link.detail || {};
+        const detailParts = [];
+        if (detail.position_count != null) detailParts.push(`${uiText("Positions")} ${detail.position_count}`);
+        if (detail.market_count != null) detailParts.push(`${uiText("Markets")} ${detail.market_count}`);
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${escapeHtml(venue?.label || link.venue || "--")}</td>
+          <td title="${escapeHtml(link.wallet_address || "")}">${escapeHtml(wallet?.label || uiText("Public read-only"))}<br><span class="subtle">${escapeHtml(link.wallet_address ? `${link.wallet_address.slice(0, 8)}…${link.wallet_address.slice(-6)}` : "--")}</span></td>
+          <td class="${healthy ? "ok" : "bad"}" title="${escapeHtml(link.error || "")}">${escapeHtml(uiText(healthy ? "Read-only verified" : "Connection error"))}<br><span class="subtle">${escapeHtml(healthy ? uiText("Automation disabled") : link.error || "--")}${detailParts.length ? ` · ${escapeHtml(detailParts.join(" · "))}` : ""}</span></td>
+          <td>${escapeHtml(formatAge(link.checked_at))}<br><span class="subtle">${Number(link.latency_ms || 0).toFixed(0)}ms</span></td>
+          <td><div class="workspace-table-actions"></div></td>
+        `;
+        const revokeButton = document.createElement("button");
+        revokeButton.type = "button";
+        revokeButton.className = "danger-button";
+        revokeButton.textContent = uiText("Revoke");
+        revokeButton.addEventListener("click", () => revokeVenueConnection(link, revokeButton));
+        row.querySelector(".workspace-table-actions").appendChild(revokeButton);
+        body.appendChild(row);
+      }
+    }
+
     function renderWalletConnections(workspace) {
       renderWalletProviderOptions();
       const wallets = workspace?.wallets || [];
       const venues = workspace?.dex_venue_catalog || [];
+      renderVenueConnections(workspace, wallets, venues);
       setSelectOptions(
         "wallet-link-select",
         wallets.map((wallet) => ({
@@ -3695,6 +3735,22 @@ function balanceStatusClass(status) {
         );
       } catch (error) {
         text("wallet-connection-status", `${venue} check failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function revokeVenueConnection(link, button) {
+      if (!dangerConfirm("Revoke this venue connection?")) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "delete_venue_connection",
+          connection_id: link.id,
+        });
+        text("wallet-connection-status", uiText("Venue connection revoked."));
+      } catch (error) {
+        text("wallet-connection-status", `venue revoke failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -4151,11 +4207,11 @@ function balanceStatusClass(status) {
       const needsPassphrase = (exchange?.required_credentials || []).includes("passphrase");
       text(
         "user-exchange-api-key-label",
-        exchange?.credential_labels?.api_key || "API Key",
+        uiText(exchange?.credential_labels?.api_key || "API Key"),
       );
       text(
         "user-exchange-secret-label",
-        exchange?.credential_labels?.secret || "API Secret / Private Key",
+        uiText(exchange?.credential_labels?.secret || "API Secret / Private Key"),
       );
       const passphraseField = document.getElementById("user-exchange-passphrase-field");
       if (passphraseField) passphraseField.hidden = !needsPassphrase;
