@@ -19,6 +19,12 @@ from .grid_trading import build_spot_grid_plan
 from .market_making import build_symmetric_market_maker_plan
 from .models import FillEstimate, OrderBookSnapshot
 from .orderbook import available_base, estimate_fill, max_base_for_quote
+from .polymarket_arbitrage import (
+    PolymarketBook,
+    fetch_polymarket_order_books,
+    prediction_token_ids,
+    scan_polymarket_arbitrage,
+)
 from .strategies.spot_spread import find_converted_spot_spread_opportunities
 from .user_account_check import workspace_exchange_config
 from .user_paper_store import UserPaperStateConflict, UserPaperTradingStore
@@ -211,6 +217,22 @@ def _initialize_wallets(
     directional_side = str(strategy.parameters.get("side") or "")
     fee_multiplier = 1 + float(strategy.risk["paper_fee_bps"]) / 10_000
     wallets: dict[str, dict[str, Any]] = {}
+    if strategy.strategy_type == "prediction_arbitrage" and not accounts:
+        wallets["polymarket-collateral"] = {
+            "account_id": "polymarket-collateral",
+            "exchange": "polymarket",
+            "symbol": f"PREDICTION/{project.quote_currency}",
+            "base_currency": "PREDICTION",
+            "quote_currency": project.quote_currency,
+            "quote_rate": project_rate,
+            "base_balance": 0.0,
+            "quote_balance": capital_common / project_rate,
+            "base_cost_quote": 0.0,
+            "initial_base": 0.0,
+            "initial_quote": capital_common / project_rate,
+            "initial_mid_price": 0.0,
+            "average_cost": 0.0,
+        }
     for account in accounts:
         book = books[account.id]
         mid = _mid_price(book)
@@ -220,11 +242,15 @@ def _initialize_wallets(
             raise ValueError(f"quote rate is missing: {quote}")
         account_capital_common = (
             capital_common / len(accounts)
-            if strategy.strategy_type == "contract_arbitrage"
+            if strategy.strategy_type
+            in {"contract_arbitrage", "prediction_arbitrage"}
             else capital_common
         )
         local_capital = account_capital_common / rate
-        if strategy.strategy_type == "contract_arbitrage":
+        if strategy.strategy_type in {
+            "contract_arbitrage",
+            "prediction_arbitrage",
+        }:
             initial_quote = local_capital
             initial_base = 0.0
         elif strategy.strategy_type in {"auto_buy_sell", "dca"}:
@@ -989,6 +1015,7 @@ def simulate_user_paper_cycle(
     quote_rates: dict[str, float],
     common_quote_currency: str,
     funding_rates: dict[str, float | None] | None = None,
+    prediction_books: dict[str, PolymarketBook] | None = None,
     now: float | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
     cycle_at = time.time() if now is None else float(now)
@@ -1109,6 +1136,20 @@ def simulate_user_paper_cycle(
             )
         )
         state["contract_scan"] = contract_scan
+        fills = []
+    elif strategy.strategy_type == "prediction_arbitrage":
+        status, reason, event_type, metrics, prediction_scan = (
+            scan_polymarket_arbitrage(
+                strategy,
+                project,
+                accounts,
+                books,
+                prediction_books or {},
+                rates,
+                now=cycle_at,
+            )
+        )
+        state["prediction_scan"] = prediction_scan
         fills = []
     else:
         fills, status, reason, event_type, metrics = _simulate_spot_spread(
@@ -1296,6 +1337,16 @@ class UserPaperTradingService:
                 timeout=self.fetch_timeout_seconds,
             )
         return float(result[2]) if result is not None else None
+
+    async def _fetch_prediction_books(
+        self,
+        token_ids: list[str],
+    ) -> dict[str, PolymarketBook]:
+        return await fetch_polymarket_order_books(
+            token_ids,
+            depth=self.order_book_depth,
+            timeout_seconds=self.fetch_timeout_seconds,
+        )
 
     async def pause_all(self, *, now: float | None = None) -> dict[str, int]:
         paused_at = time.time() if now is None else float(now)
@@ -1588,6 +1639,24 @@ class UserPaperTradingService:
                     None if isinstance(result, Exception) else result
                 )
 
+            prediction_ids = list(
+                dict.fromkeys(
+                    token_id
+                    for strategy, _, _, _ in jobs
+                    if strategy.strategy_type == "prediction_arbitrage"
+                    for token_id in prediction_token_ids(strategy.parameters)
+                )
+            )
+            prediction_books: dict[str, PolymarketBook] = {}
+            prediction_error = ""
+            if prediction_ids:
+                try:
+                    prediction_books = await self._fetch_prediction_books(
+                        prediction_ids
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    prediction_error = f"{exc.__class__.__name__}: {exc}"[:240]
+
             for strategy, project, accounts, state in jobs:
                 account_error = next(
                     (
@@ -1620,6 +1689,32 @@ class UserPaperTradingService:
                     else:
                         processed += 1
                     continue
+                if (
+                    strategy.strategy_type == "prediction_arbitrage"
+                    and prediction_error
+                ):
+                    blocked, event = _nonrunning_state(
+                        strategy,
+                        project,
+                        state,
+                        status="blocked_market_data",
+                        reason=prediction_error,
+                        common_quote_currency=self.common_quote_currency,
+                        now=cycle_at,
+                    )
+                    errors += 1
+                    try:
+                        self._persist_current_cycle(
+                            strategy,
+                            state,
+                            blocked,
+                            event=event,
+                        )
+                    except UserPaperStateConflict:
+                        conflicts += 1
+                    else:
+                        processed += 1
+                    continue
                 try:
                     next_state, fills, event = simulate_user_paper_cycle(
                         strategy,
@@ -1634,6 +1729,11 @@ class UserPaperTradingService:
                             for account in accounts
                             if account.market_type in {"swap", "future"}
                         },
+                        prediction_books=(
+                            prediction_books
+                            if strategy.strategy_type == "prediction_arbitrage"
+                            else None
+                        ),
                         now=cycle_at,
                     )
                     self._persist_current_cycle(

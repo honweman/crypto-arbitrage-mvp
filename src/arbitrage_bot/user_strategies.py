@@ -84,6 +84,30 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
             "require_dex_leg": True,
         },
     },
+    "prediction_arbitrage": {
+        "label": "Polymarket Arbitrage",
+        "min_accounts": 0,
+        "max_accounts": 8,
+        "parameters": {
+            "mechanism": "auto",
+            "event_group_id": "",
+            "outcome_asset_ids": [],
+            "neg_risk_no_asset_ids": [],
+            "min_profit_bps": 25.0,
+            "max_cycle_quote": 5.0,
+            "scan_interval_seconds": 2.0,
+            "conversion_cost_bps": 5.0,
+            "augmented_neg_risk": False,
+            "event_direction": "above",
+            "strike_price": 0.0,
+            "resolution_timestamp": 0.0,
+            "annualized_volatility_pct": 80.0,
+            "hedge_ratio": 1.0,
+            "min_time_to_resolution_seconds": 3600.0,
+            "resolution_source_confirmed": False,
+            "require_dex_hedge": False,
+        },
+    },
 }
 
 DEFAULT_USER_STRATEGY_RISK: dict[str, Any] = {
@@ -97,6 +121,7 @@ DEFAULT_USER_STRATEGY_RISK: dict[str, Any] = {
 }
 
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+PREDICTION_TOKEN_ID_RE = re.compile(r"^(?:0x[0-9A-Fa-f]{8,128}|[0-9]{8,100})$")
 SECRET_FIELD_RE = re.compile(
     r"(^|_)(api[_-]?key|secret|password|passphrase|token|private[_-]?key)($|_)",
     re.IGNORECASE,
@@ -205,6 +230,29 @@ def _normalized_account_ids(value: Any) -> list[str]:
             continue
         result.append(account_id)
         seen.add(account_id)
+    return result
+
+
+def _prediction_token_ids(value: Any, *, label: str) -> list[str]:
+    if value is None:
+        rows: list[Any] = []
+    elif isinstance(value, list):
+        rows = value
+    elif isinstance(value, str):
+        rows = value.split(",")
+    else:
+        raise ValueError(f"{label} must be a list")
+    result: list[str] = []
+    for raw in rows:
+        token_id = str(raw or "").strip()
+        if not token_id:
+            continue
+        if not PREDICTION_TOKEN_ID_RE.fullmatch(token_id):
+            raise ValueError(f"{label} contains an invalid Polymarket token ID")
+        if token_id not in result:
+            result.append(token_id)
+    if len(result) > 20:
+        raise ValueError(f"{label} supports at most 20 token IDs")
     return result
 
 
@@ -364,6 +412,84 @@ def _clean_parameters(strategy_type: str, value: Any) -> dict[str, Any]:
                 merged["require_dex_leg"],
                 label="require_dex_leg",
                 default=True,
+            ),
+        }
+    if strategy_type == "prediction_arbitrage":
+        mechanism = str(merged["mechanism"] or "").strip().lower()
+        if mechanism not in {"auto", "complete_set", "neg_risk", "cross_venue"}:
+            raise ValueError("unsupported Polymarket arbitrage mechanism")
+        event_direction = str(merged["event_direction"] or "").strip().lower()
+        if event_direction not in {"above", "below"}:
+            raise ValueError("event_direction must be above or below")
+        return {
+            "mechanism": mechanism,
+            "event_group_id": _clean_text(merged["event_group_id"], max_length=80),
+            "outcome_asset_ids": _prediction_token_ids(
+                merged["outcome_asset_ids"],
+                label="outcome_asset_ids",
+            ),
+            "neg_risk_no_asset_ids": _prediction_token_ids(
+                merged["neg_risk_no_asset_ids"],
+                label="neg_risk_no_asset_ids",
+            ),
+            "min_profit_bps": _finite_float(
+                merged["min_profit_bps"],
+                label="min_profit_bps",
+                maximum=10_000.0,
+            ),
+            "max_cycle_quote": _finite_float(
+                merged["max_cycle_quote"],
+                label="max_cycle_quote",
+                minimum=0.00000001,
+            ),
+            "scan_interval_seconds": _finite_float(
+                merged["scan_interval_seconds"],
+                label="scan_interval_seconds",
+                minimum=0.5,
+                maximum=3600.0,
+            ),
+            "conversion_cost_bps": _finite_float(
+                merged["conversion_cost_bps"],
+                label="conversion_cost_bps",
+                maximum=1000.0,
+            ),
+            "augmented_neg_risk": _strict_bool(
+                merged["augmented_neg_risk"],
+                label="augmented_neg_risk",
+            ),
+            "event_direction": event_direction,
+            "strike_price": _finite_float(
+                merged["strike_price"],
+                label="strike_price",
+            ),
+            "resolution_timestamp": _finite_float(
+                merged["resolution_timestamp"],
+                label="resolution_timestamp",
+                maximum=5_000_000_000.0,
+            ),
+            "annualized_volatility_pct": _finite_float(
+                merged["annualized_volatility_pct"],
+                label="annualized_volatility_pct",
+                minimum=0.01,
+                maximum=1000.0,
+            ),
+            "hedge_ratio": _finite_float(
+                merged["hedge_ratio"],
+                label="hedge_ratio",
+                maximum=2.0,
+            ),
+            "min_time_to_resolution_seconds": _finite_float(
+                merged["min_time_to_resolution_seconds"],
+                label="min_time_to_resolution_seconds",
+                maximum=31_536_000.0,
+            ),
+            "resolution_source_confirmed": _strict_bool(
+                merged["resolution_source_confirmed"],
+                label="resolution_source_confirmed",
+            ),
+            "require_dex_hedge": _strict_bool(
+                merged["require_dex_hedge"],
+                label="require_dex_hedge",
             ),
         }
     return {
@@ -558,6 +684,32 @@ def strategy_parameter_blockers(strategy: UserStrategy) -> list[str]:
         planned_orders = 2
         if parameters["max_leverage"] > 3:
             blockers.append("contract arbitrage leverage above 3x is not allowed")
+    elif strategy.strategy_type == "prediction_arbitrage":
+        token_ids = parameters["outcome_asset_ids"]
+        no_token_ids = parameters["neg_risk_no_asset_ids"]
+        mechanism = parameters["mechanism"]
+        order_quote = parameters["max_cycle_quote"]
+        total_quote = parameters["max_cycle_quote"]
+        planned_orders = max(2, len(token_ids), len(no_token_ids))
+        if len(token_ids) < 2:
+            blockers.append("Polymarket strategy requires at least two outcome token IDs")
+        if mechanism == "neg_risk":
+            if len(token_ids) < 3 or len(no_token_ids) != len(token_ids):
+                blockers.append(
+                    "Neg-Risk requires matching YES and NO token IDs for at least three outcomes"
+                )
+            if not parameters["event_group_id"]:
+                blockers.append("Neg-Risk requires a Polymarket event/group ID")
+        if mechanism == "cross_venue":
+            planned_orders = 2
+            if parameters["strike_price"] <= 0:
+                blockers.append("cross-venue prediction hedge requires a strike price")
+            if parameters["resolution_timestamp"] <= time.time():
+                blockers.append("cross-venue prediction hedge requires a future resolution time")
+            if not parameters["resolution_source_confirmed"]:
+                blockers.append(
+                    "confirm that the Polymarket resolution source matches the hedge asset"
+                )
     else:
         order_quote = parameters["max_cycle_quote"]
         total_quote = parameters["max_cycle_quote"]

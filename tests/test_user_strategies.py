@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -85,7 +86,7 @@ class UserStrategyTest(unittest.TestCase):
         self.assertEqual(strategy.mode, "paper")
         self.assertFalse(strategy.to_dict()["live_enabled"])
         self.assertEqual(strategy.parameters["levels"], 2)
-        self.assertEqual(len(user_strategy_catalog()), 6)
+        self.assertEqual(len(user_strategy_catalog()), 7)
         with self.assertRaisesRegex(ValueError, "paper-only"):
             UserStrategy.from_dict({**base, "live_enabled": True})
         with self.assertRaisesRegex(ValueError, "credential values"):
@@ -345,6 +346,62 @@ class UserStrategyTest(unittest.TestCase):
 
         self.assertIn("strategy budget exceeds max total quote", blockers)
         self.assertIn("contract arbitrage leverage above 3x is not allowed", blockers)
+
+    def test_polymarket_complete_set_needs_no_exchange_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_USER_STRATEGY_MASTER_KEY": MASTER_KEY},
+        ):
+            store = self._store(Path(tmp) / "workspace.sqlite3")
+            project = self._project(store)
+            strategy = UserStrategy.from_dict(
+                {
+                    "owner_email": project.owner_email,
+                    "project_id": project.id,
+                    "strategy_type": "prediction_arbitrage",
+                    "parameters": {
+                        "mechanism": "complete_set",
+                        "outcome_asset_ids": ["11111111", "22222222"],
+                    },
+                }
+            )
+
+            readiness = store.strategy_readiness(strategy)
+
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(
+            any("Polymarket CLOB data is public" in row for row in readiness["warnings"])
+        )
+
+    def test_polymarket_cross_venue_requires_hedge_account_and_resolution_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_USER_STRATEGY_MASTER_KEY": MASTER_KEY},
+        ):
+            store = self._store(Path(tmp) / "workspace.sqlite3")
+            project = self._project(store)
+            strategy = UserStrategy.from_dict(
+                {
+                    "owner_email": project.owner_email,
+                    "project_id": project.id,
+                    "strategy_type": "prediction_arbitrage",
+                    "parameters": {
+                        "mechanism": "cross_venue",
+                        "outcome_asset_ids": ["11111111", "22222222"],
+                        "strike_price": 1.0,
+                        "resolution_timestamp": time.time() + 86_400,
+                        "resolution_source_confirmed": True,
+                    },
+                }
+            )
+
+            readiness = store.strategy_readiness(strategy)
+
+        self.assertFalse(readiness["ready"])
+        self.assertIn(
+            "cross-venue prediction hedge requires a CEX or DEX hedge account",
+            readiness["blockers"],
+        )
 
     def test_referenced_account_cannot_be_deleted_and_project_disable_pauses_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

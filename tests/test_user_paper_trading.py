@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
+from arbitrage_bot.polymarket_arbitrage import PolymarketBook
 from arbitrage_bot.user_paper_engine import (
     UserPaperTradingService,
     simulate_user_paper_cycle,
@@ -120,6 +121,69 @@ class FakePaperManager:
 
 
 class UserPaperTradingTest(unittest.IsolatedAsyncioTestCase):
+    def test_polymarket_complete_set_runs_without_exchange_account_or_live_fill(self) -> None:
+        now = time.time()
+        project_row = project()
+        strategy = UserStrategy.from_dict(
+            {
+                "owner_email": project_row.owner_email,
+                "project_id": project_row.id,
+                "strategy_type": "prediction_arbitrage",
+                "parameters": {
+                    "mechanism": "complete_set",
+                    "outcome_asset_ids": ["11111111", "22222222"],
+                    "min_profit_bps": 100,
+                    "max_cycle_quote": 10,
+                    "conversion_cost_bps": 0,
+                },
+                "risk": {
+                    "max_order_quote": 10,
+                    "max_total_quote": 10,
+                    "max_daily_loss_quote": 5,
+                    "max_open_orders": 2,
+                    "max_slippage_bps": 50,
+                    "paper_fee_bps": 0,
+                },
+            }
+        )
+        prediction_books = {
+            token_id: PolymarketBook(
+                token_id=token_id,
+                condition_id="condition-acs",
+                snapshot=OrderBookSnapshot(
+                    exchange="polymarket",
+                    symbol=token_id,
+                    bids=[BookLevel(price=bid, amount=100)],
+                    asks=[BookLevel(price=ask, amount=100)],
+                    timestamp_ms=int(now * 1000),
+                    received_at=now,
+                ),
+                min_order_size=1,
+            )
+            for token_id, bid, ask in (
+                ("11111111", 0.44, 0.45),
+                ("22222222", 0.47, 0.48),
+            )
+        }
+
+        state, fills, event = simulate_user_paper_cycle(
+            strategy,
+            project_row,
+            [],
+            {},
+            None,
+            quote_rates={"USDC": 1.0},
+            common_quote_currency="USD",
+            prediction_books=prediction_books,
+            now=now,
+        )
+
+        self.assertEqual(state["status"], "candidate")
+        self.assertIn("polymarket-collateral", state["wallets"])
+        self.assertEqual(fills, [])
+        self.assertFalse(state["live_submit_allowed"])
+        self.assertIsNotNone(event)
+
     def test_contract_arbitrage_scans_hyperliquid_dex_leg_without_live_fills(self) -> None:
         now = time.time()
         project_row = project()

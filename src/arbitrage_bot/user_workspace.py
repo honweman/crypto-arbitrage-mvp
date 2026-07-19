@@ -2462,12 +2462,15 @@ class UserWorkspaceStore:
                 blockers.append(f"account owner mismatch: {account.label}")
             if account.project_id != strategy.project_id:
                 blockers.append(f"account project mismatch: {account.label}")
-            contract_arbitrage = strategy.strategy_type == "contract_arbitrage"
+            multi_venue_arbitrage = strategy.strategy_type in {
+                "contract_arbitrage",
+                "prediction_arbitrage",
+            }
             allowed_market_types = (
-                {"spot", "swap", "future"} if contract_arbitrage else {"spot"}
+                {"spot", "swap", "future"} if multi_venue_arbitrage else {"spot"}
             )
             if account.market_type not in allowed_market_types:
-                expected = "spot, swap or future" if contract_arbitrage else "spot"
+                expected = "spot, swap or future" if multi_venue_arbitrage else "spot"
                 blockers.append(f"{expected} account required: {account.label}")
             if not account.symbol:
                 blockers.append(f"account symbol is missing: {account.label}")
@@ -2477,7 +2480,12 @@ class UserWorkspaceStore:
                 blockers.append(f"account symbol asset mismatch: {account.label}")
             elif (
                 project is not None
-                and strategy.strategy_type not in {"spot_spread", "contract_arbitrage"}
+                and strategy.strategy_type
+                not in {
+                    "spot_spread",
+                    "contract_arbitrage",
+                    "prediction_arbitrage",
+                }
                 and account.symbol.split("/", 1)[1].split(":", 1)[0]
                 != project.quote_currency
             ):
@@ -2522,6 +2530,26 @@ class UserWorkspaceStore:
             if any(row.exchange in DEX_VENUES_BY_ID for row in derivative_accounts):
                 warnings.append(
                     "DEX derivative leg is paper-only; wallet authorization does not enable live submission"
+                )
+        elif strategy.strategy_type == "prediction_arbitrage":
+            mechanism = strategy.parameters["mechanism"]
+            if mechanism == "cross_venue" and not accounts:
+                blockers.append(
+                    "cross-venue prediction hedge requires a CEX or DEX hedge account"
+                )
+            if strategy.parameters["require_dex_hedge"] and not any(
+                row.exchange in DEX_VENUES_BY_ID for row in accounts
+            ):
+                blockers.append("prediction hedge requires a DEX hedge account")
+            warnings.extend(
+                [
+                    "Polymarket CLOB data is public and paper-only; no prediction orders are submitted",
+                    "event completeness, resolution source and outcome semantics require user verification",
+                ]
+            )
+            if strategy.parameters["augmented_neg_risk"]:
+                warnings.append(
+                    "augmented Neg-Risk candidates require manual review of the Other outcome"
                 )
 
         profile = risk_profile or self.risk_profile(strategy.owner_email)

@@ -4909,7 +4909,7 @@ function balanceStatusClass(status) {
       } else {
         for (const account of accounts) {
           const contractAccount = ["spot", "swap", "future"].includes(account.market_type);
-          const accountTypeAllowed = strategyType === "contract_arbitrage"
+          const accountTypeAllowed = ["contract_arbitrage", "prediction_arbitrage"].includes(strategyType)
             ? contractAccount
             : account.market_type === "spot";
           const label = document.createElement("label");
@@ -4925,7 +4925,7 @@ function balanceStatusClass(status) {
             ? uiText("Account ready")
             : uiText("Account must be enabled with a fresh connection test.");
           const name = document.createElement("span");
-          const venueType = ["hyperliquid", "dydx", "aster"].includes(account.exchange)
+          const venueType = ["hyperliquid", "polymarket", "dydx", "aster"].includes(account.exchange)
             ? "DEX"
             : "CEX";
           name.textContent = `${account.label} · ${venueType} ${account.market_type} · ${account.exchange} ${account.symbol}`;
@@ -4941,6 +4941,28 @@ function balanceStatusClass(status) {
           ? `${uiText("Required accounts")}: ${minAccounts}`
           : `${uiText("Required accounts")}: ${minAccounts}-${maxAccounts}`
       );
+    }
+
+    function predictionAssetIds(value) {
+      return String(value || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item, index, rows) => item && rows.indexOf(item) === index);
+    }
+
+    function timestampToLocalInput(value) {
+      const timestamp = Number(value || 0);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+      const date = new Date(timestamp * 1000);
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      return local.toISOString().slice(0, 19);
+    }
+
+    function localInputToTimestamp(fieldId) {
+      const value = document.getElementById(fieldId)?.value || "";
+      if (!value) return 0;
+      const timestamp = new Date(value).getTime() / 1000;
+      return Number.isFinite(timestamp) ? timestamp : 0;
     }
 
     function setUserStrategyParameterValues(strategyType, parameters = {}) {
@@ -4982,6 +5004,24 @@ function balanceStatusClass(status) {
         setFieldValue("user-strategy-contract-leverage", values.max_leverage);
         setFieldValue("user-strategy-contract-scan", values.scan_interval_seconds);
         setCheckedValue("user-strategy-contract-require-dex", values.require_dex_leg);
+      } else if (strategyType === "prediction_arbitrage") {
+        setFieldValue("user-strategy-prediction-mechanism", values.mechanism);
+        setFieldValue("user-strategy-prediction-event", values.event_group_id);
+        setFieldValue("user-strategy-prediction-assets", (values.outcome_asset_ids || []).join(", "));
+        setFieldValue("user-strategy-prediction-no-assets", (values.neg_risk_no_asset_ids || []).join(", "));
+        setFieldValue("user-strategy-prediction-profit", values.min_profit_bps);
+        setFieldValue("user-strategy-prediction-quote", values.max_cycle_quote);
+        setFieldValue("user-strategy-prediction-scan", values.scan_interval_seconds);
+        setFieldValue("user-strategy-prediction-conversion-cost", values.conversion_cost_bps);
+        setCheckedValue("user-strategy-prediction-augmented", values.augmented_neg_risk);
+        setFieldValue("user-strategy-prediction-direction", values.event_direction);
+        setFieldValue("user-strategy-prediction-strike", values.strike_price);
+        setFieldValue("user-strategy-prediction-expiry", timestampToLocalInput(values.resolution_timestamp));
+        setFieldValue("user-strategy-prediction-volatility", values.annualized_volatility_pct);
+        setFieldValue("user-strategy-prediction-hedge-ratio", values.hedge_ratio);
+        setFieldValue("user-strategy-prediction-min-expiry", values.min_time_to_resolution_seconds);
+        setCheckedValue("user-strategy-prediction-resolution-confirmed", values.resolution_source_confirmed);
+        setCheckedValue("user-strategy-prediction-require-dex", values.require_dex_hedge);
       }
     }
 
@@ -5004,6 +5044,14 @@ function balanceStatusClass(status) {
           .split(/\s+/)
           .filter(Boolean);
         field.hidden = !supported.includes(strategyType);
+      });
+      const predictionMechanism = document.getElementById("user-strategy-prediction-mechanism")?.value || "auto";
+      document.querySelectorAll("[data-prediction-mechanisms]").forEach((field) => {
+        const mechanisms = String(field.dataset.predictionMechanisms || "")
+          .split(/\s+/)
+          .filter(Boolean);
+        field.hidden = strategyType !== "prediction_arbitrage"
+          || !mechanisms.includes(predictionMechanism);
       });
       if (applyDefaults) {
         setUserStrategyParameterValues(strategyType);
@@ -5092,6 +5140,27 @@ function balanceStatusClass(status) {
           max_leverage: numericValue("user-strategy-contract-leverage"),
           scan_interval_seconds: numericValue("user-strategy-contract-scan"),
           require_dex_leg: document.getElementById("user-strategy-contract-require-dex").checked,
+        };
+      }
+      if (strategyType === "prediction_arbitrage") {
+        return {
+          mechanism: document.getElementById("user-strategy-prediction-mechanism").value,
+          event_group_id: document.getElementById("user-strategy-prediction-event").value.trim(),
+          outcome_asset_ids: predictionAssetIds(document.getElementById("user-strategy-prediction-assets").value),
+          neg_risk_no_asset_ids: predictionAssetIds(document.getElementById("user-strategy-prediction-no-assets").value),
+          min_profit_bps: numericValue("user-strategy-prediction-profit"),
+          max_cycle_quote: numericValue("user-strategy-prediction-quote"),
+          scan_interval_seconds: numericValue("user-strategy-prediction-scan"),
+          conversion_cost_bps: numericValue("user-strategy-prediction-conversion-cost"),
+          augmented_neg_risk: document.getElementById("user-strategy-prediction-augmented").checked,
+          event_direction: document.getElementById("user-strategy-prediction-direction").value,
+          strike_price: numericValue("user-strategy-prediction-strike"),
+          resolution_timestamp: localInputToTimestamp("user-strategy-prediction-expiry"),
+          annualized_volatility_pct: numericValue("user-strategy-prediction-volatility"),
+          hedge_ratio: numericValue("user-strategy-prediction-hedge-ratio"),
+          min_time_to_resolution_seconds: numericValue("user-strategy-prediction-min-expiry"),
+          resolution_source_confirmed: document.getElementById("user-strategy-prediction-resolution-confirmed").checked,
+          require_dex_hedge: document.getElementById("user-strategy-prediction-require-dex").checked,
         };
       }
       return {
@@ -5229,7 +5298,19 @@ function balanceStatusClass(status) {
           ? `<br><span class="subtle">${escapeHtml(`${progress.toFixed(1)}%`)}</span>`
           : "";
         const activityText = `${Number(runtime.fill_count || 0)} ${uiText("fills")} · ${Number(runtime.open_order_count || 0)} ${uiText("open")}`;
-        const runtimeDetail = [runtimeReason, activityText].filter(Boolean).join(" · ");
+        const predictionScan = runtime.prediction_scan || {};
+        const predictionBest = predictionScan.best || {};
+        const predictionEdge = Number(
+          predictionBest.profit_bps ?? predictionBest.model_edge_bps
+        );
+        const predictionText = strategy.strategy_type === "prediction_arbitrage"
+          ? [
+              predictionBest.mechanism || "Polymarket",
+              Number.isFinite(predictionEdge) ? `${fmt.format(predictionEdge)} bps` : "",
+              `${Number(predictionScan.candidate_count || 0)} ${uiText("candidates")}`,
+            ].filter(Boolean).join(" · ")
+          : "";
+        const runtimeDetail = [runtimeReason, predictionText, activityText].filter(Boolean).join(" · ");
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || strategy.id)}<br><span class="subtle">${escapeHtml(uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type))}</span></td>
@@ -8928,6 +9009,8 @@ function balanceStatusClass(status) {
         renderUserStrategyAccountOptions([]);
       } else if (event.target?.id === "user-strategy-type") {
         syncUserStrategyTypeFields({ applyDefaults: true });
+      } else if (event.target?.id === "user-strategy-prediction-mechanism") {
+        syncUserStrategyTypeFields();
       } else if (
         event.target?.matches("#user-strategy-accounts input[type='checkbox']")
         && event.target.checked
