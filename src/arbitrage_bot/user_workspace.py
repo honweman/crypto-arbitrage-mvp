@@ -18,6 +18,11 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_address, to_checksum_address
 
+from .hyperliquid_auth import (
+    AUTHORIZATION_TTL_SECONDS,
+    build_agent_authorization,
+    new_agent_credentials,
+)
 from .user_strategies import (
     USER_STRATEGY_DEFINITIONS,
     UserStrategy,
@@ -328,7 +333,9 @@ class UserWalletConnection:
             owner_email=_clean_email(raw.get("owner_email")),
             address=_normalize_evm_address(raw.get("address")),
             chain_id=chain_id,
-            wallet_type=_clean_text(raw.get("wallet_type") or "injected", max_length=40),
+            wallet_type=_clean_text(
+                raw.get("wallet_type") or "injected", max_length=40
+            ),
             label=_clean_text(raw.get("label") or "EVM Wallet", max_length=80),
             permissions=permissions,
             verified_at=float(raw.get("verified_at") or now),
@@ -385,7 +392,9 @@ class UserVenueConnection:
             status=status,
             latency_ms=max(0.0, float(raw.get("latency_ms") or 0.0)),
             checked_at=float(raw.get("checked_at") or _now()),
-            detail=(dict(raw.get("detail")) if isinstance(raw.get("detail"), dict) else {}),
+            detail=(
+                dict(raw.get("detail")) if isinstance(raw.get("detail"), dict) else {}
+            ),
             error=_clean_text(raw.get("error"), max_length=240),
         )
 
@@ -486,6 +495,10 @@ class UserExchangeAccount:
     connection_status: str = "unverified"
     connection_checked_at: float | None = None
     connection_error: str = ""
+    wallet_id: str = ""
+    agent_address: str = ""
+    agent_name: str = ""
+    authorization_verified_at: float | None = None
     created_at: float = field(default_factory=_now)
     updated_at: float = field(default_factory=_now)
 
@@ -560,6 +573,18 @@ class UserExchangeAccount:
                 raw.get("connection_error"),
                 max_length=240,
             ),
+            wallet_id=str(raw.get("wallet_id") or "").strip(),
+            agent_address=(
+                _normalize_evm_address(raw.get("agent_address"))
+                if str(raw.get("agent_address") or "").strip()
+                else ""
+            ),
+            agent_name=_clean_text(raw.get("agent_name"), max_length=64),
+            authorization_verified_at=(
+                float(raw["authorization_verified_at"])
+                if raw.get("authorization_verified_at") is not None
+                else None
+            ),
             created_at=float(raw.get("created_at") or now),
             updated_at=float(raw.get("updated_at") or now),
         )
@@ -580,6 +605,10 @@ class UserExchangeAccount:
             "connection_status": self.connection_status,
             "connection_checked_at": self.connection_checked_at,
             "connection_error": self.connection_error,
+            "wallet_id": self.wallet_id,
+            "agent_address": self.agent_address,
+            "agent_name": self.agent_name,
+            "authorization_verified_at": self.authorization_verified_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -832,6 +861,20 @@ class UserWorkspaceStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_user_wallet_challenges_owner
                     ON user_wallet_challenges(owner_email, expires_at);
+                CREATE TABLE IF NOT EXISTS user_hyperliquid_authorizations (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL,
+                    wallet_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    secret_nonce BLOB NOT NULL,
+                    secret_ciphertext BLOB NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_hyperliquid_auth_owner
+                    ON user_hyperliquid_authorizations(owner_email, expires_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_user_hyperliquid_auth_account
+                    ON user_hyperliquid_authorizations(owner_email, account_id);
                 CREATE TABLE IF NOT EXISTS user_venue_connections (
                     id TEXT PRIMARY KEY,
                     owner_email TEXT NOT NULL,
@@ -1208,12 +1251,11 @@ class UserWorkspaceStore:
                 chain_id=int(row["chain_id"]),
                 wallet_type=str(row["wallet_type"]),
                 label=_clean_text(
-                    label or (existing_wallet.label if existing_wallet else "EVM Wallet"),
+                    label
+                    or (existing_wallet.label if existing_wallet else "EVM Wallet"),
                     max_length=80,
                 ),
-                verified_at=(
-                    existing_wallet.verified_at if existing_wallet else now
-                ),
+                verified_at=(existing_wallet.verified_at if existing_wallet else now),
                 last_seen_at=now,
             )
             connection.execute(
@@ -1250,6 +1292,25 @@ class UserWorkspaceStore:
         if wallet.owner_email != _clean_email(owner_email):
             raise PermissionError("wallet belongs to another user")
         with self._connect() as connection:
+            account_rows = connection.execute(
+                "SELECT payload FROM user_exchange_accounts WHERE owner_email = ?",
+                (wallet.owner_email,),
+            ).fetchall()
+            linked_accounts = []
+            for row in account_rows:
+                raw = json.loads(row["payload"])
+                if raw.get("wallet_id") == wallet.id:
+                    linked_accounts.append(UserExchangeAccount.from_dict(raw))
+            if linked_accounts:
+                raise ValueError(
+                    "revoke the API Wallet on Hyperliquid and delete its linked "
+                    "exchange account before removing this wallet: "
+                    + ", ".join(account.label for account in linked_accounts[:5])
+                )
+            connection.execute(
+                "DELETE FROM user_hyperliquid_authorizations WHERE wallet_id = ?",
+                (wallet.id,),
+            )
             connection.execute(
                 "DELETE FROM user_venue_connections WHERE wallet_id = ?",
                 (wallet.id,),
@@ -1257,6 +1318,221 @@ class UserWorkspaceStore:
             connection.execute(
                 "DELETE FROM user_wallet_connections WHERE id = ?",
                 (wallet.id,),
+            )
+            connection.commit()
+
+    def prepare_hyperliquid_authorization(
+        self,
+        *,
+        owner_email: str,
+        wallet: UserWalletConnection,
+        account: UserExchangeAccount,
+        chain_id: int,
+    ) -> dict[str, Any]:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        if not self.cipher.available:
+            raise RuntimeError("credential encryption is not configured")
+        if wallet.owner_email != owner or account.owner_email != owner:
+            raise PermissionError(
+                "wallet and exchange account must belong to this user"
+            )
+        if account.exchange != "hyperliquid":
+            raise ValueError("MetaMask agent authorization is only for Hyperliquid")
+        if account.enabled:
+            raise ValueError(
+                "disable the Hyperliquid account before rotating its agent"
+            )
+        existing = self.get_account(account.id)
+        if existing is not None:
+            if existing.owner_email != owner:
+                raise PermissionError("exchange account belongs to another user")
+            if existing.exchange != "hyperliquid":
+                raise ValueError(
+                    "an existing non-Hyperliquid account cannot be replaced"
+                )
+            if existing.enabled:
+                raise ValueError(
+                    "disable the Hyperliquid account before rotating its agent"
+                )
+        authorization_id = _new_id("hyperliquid-auth")
+        agent_address, agent_private_key = new_agent_credentials()
+        agent_name = (
+            existing.agent_name
+            if existing is not None and existing.agent_name
+            else f"crypto-arb-{account.id[-12:]}"
+        )
+        authorization = build_agent_authorization(
+            agent_address=agent_address,
+            agent_name=agent_name,
+            chain_id=int(chain_id),
+            api_variant=account.api_variant,
+        )
+        expires_at = _now() + AUTHORIZATION_TTL_SECONDS
+        secret_nonce, secret_ciphertext = self.cipher.encrypt(
+            account_id=authorization_id,
+            owner_email=owner,
+            credentials={"secret": agent_private_key},
+        )
+        payload = {
+            "authorization_id": authorization_id,
+            "owner_email": owner,
+            "wallet_id": wallet.id,
+            "wallet_address": wallet.address,
+            "account": replace(
+                account,
+                enabled=False,
+                wallet_id=wallet.id,
+                agent_address=agent_address,
+                agent_name=agent_name,
+                authorization_verified_at=None,
+            ).to_dict(),
+            "existing_account_updated_at": (
+                existing.updated_at if existing is not None else None
+            ),
+            "action": authorization["action"],
+            "nonce": authorization["nonce"],
+            "typed_data": authorization["typed_data"],
+            "agent_address": agent_address,
+            "agent_name": agent_name,
+            "api_variant": account.api_variant,
+            "created_at": _now(),
+            "expires_at": expires_at,
+        }
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_hyperliquid_authorizations "
+                "WHERE expires_at < ? OR (owner_email = ? AND account_id = ?)",
+                (_now(), owner, account.id),
+            )
+            connection.execute(
+                """
+                INSERT INTO user_hyperliquid_authorizations(
+                    id, owner_email, wallet_id, account_id, expires_at,
+                    secret_nonce, secret_ciphertext, payload
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    authorization_id,
+                    owner,
+                    wallet.id,
+                    account.id,
+                    expires_at,
+                    secret_nonce,
+                    secret_ciphertext,
+                    self._dump(payload),
+                ),
+            )
+            connection.commit()
+        agent_private_key = ""
+        return dict(payload)
+
+    def get_hyperliquid_authorization(
+        self,
+        authorization_id: str,
+        *,
+        owner_email: str,
+    ) -> dict[str, Any]:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_hyperliquid_authorizations "
+                "WHERE id = ? AND owner_email = ?",
+                (str(authorization_id or "").strip(), owner),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Hyperliquid authorization request was not found")
+        payload = json.loads(row["payload"])
+        if float(payload.get("expires_at") or 0.0) < _now():
+            self.cancel_hyperliquid_authorization(
+                authorization_id,
+                owner_email=owner,
+            )
+            raise ValueError("Hyperliquid authorization request has expired")
+        return payload
+
+    def finalize_hyperliquid_authorization(
+        self,
+        authorization_id: str,
+        *,
+        owner_email: str,
+    ) -> UserExchangeAccount:
+        owner = _clean_email(owner_email)
+        pending = self.get_hyperliquid_authorization(
+            authorization_id,
+            owner_email=owner,
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT secret_nonce, secret_ciphertext "
+                "FROM user_hyperliquid_authorizations "
+                "WHERE id = ? AND owner_email = ?",
+                (authorization_id, owner),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Hyperliquid authorization request was not found")
+        credentials = self.cipher.decrypt(
+            account_id=authorization_id,
+            owner_email=owner,
+            nonce=row["secret_nonce"],
+            ciphertext=row["secret_ciphertext"],
+        )
+        account = UserExchangeAccount.from_dict(dict(pending["account"]))
+        existing = self.get_account(account.id)
+        expected_updated_at = pending.get("existing_account_updated_at")
+        if existing is not None and existing.updated_at != expected_updated_at:
+            credentials.clear()
+            raise RuntimeError(
+                "Hyperliquid account changed during wallet authorization; "
+                "the new agent was not saved"
+            )
+        verified_at = _now()
+        account = replace(
+            account,
+            enabled=False,
+            withdrawal_disabled_confirmed=True,
+            trade_permission_confirmed=True,
+            connection_status="unverified",
+            connection_checked_at=None,
+            connection_error="",
+            wallet_id=str(pending["wallet_id"]),
+            agent_address=str(pending["agent_address"]),
+            agent_name=str(pending["agent_name"]),
+            authorization_verified_at=verified_at,
+        )
+        try:
+            saved = self.upsert_account(
+                account,
+                credentials={
+                    "api_key": str(pending["wallet_address"]),
+                    "secret": credentials["secret"],
+                },
+                replace_credentials=True,
+            )
+        finally:
+            credentials.clear()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_hyperliquid_authorizations WHERE id = ?",
+                (authorization_id,),
+            )
+            connection.commit()
+        return saved
+
+    def cancel_hyperliquid_authorization(
+        self,
+        authorization_id: str,
+        *,
+        owner_email: str,
+    ) -> None:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_hyperliquid_authorizations "
+                "WHERE id = ? AND owner_email = ?",
+                (str(authorization_id or "").strip(), owner),
             )
             connection.commit()
 
@@ -2503,6 +2779,9 @@ class UserWorkspaceStore:
 
     def delete_account(self, account_id: str) -> None:
         self._ensure()
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError(f"exchange account not found: {account_id}")
         with self._connect() as connection:
             referenced_by = self._strategies_using_account_in_connection(
                 connection,
@@ -2513,6 +2792,12 @@ class UserWorkspaceStore:
                     "delete or update strategies using this account first: "
                     + ", ".join(strategy.name for strategy in referenced_by[:5])
                 )
+            if account.enabled:
+                raise ValueError("disable the exchange account before deleting it")
+            connection.execute(
+                "DELETE FROM user_hyperliquid_authorizations WHERE account_id = ?",
+                (account_id,),
+            )
             connection.execute(
                 "DELETE FROM user_api_credentials WHERE account_id = ?",
                 (account_id,),
@@ -2531,6 +2816,7 @@ class UserWorkspaceStore:
         with self._connect() as connection:
             for table in (
                 "user_wallet_challenges",
+                "user_hyperliquid_authorizations",
                 "user_venue_connections",
                 "user_wallet_connections",
                 "user_api_credentials",

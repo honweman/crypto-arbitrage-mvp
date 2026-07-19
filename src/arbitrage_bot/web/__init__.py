@@ -160,6 +160,7 @@ from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, load_fill_rows, persist_fill_pnl
 from ..funding_basis import funding_basis_payload, funding_settings_from_strategy_center
 from ..grid_trading import build_dca_plan, build_spot_grid_plan
+from ..hyperliquid_auth import recover_authorizer, submit_agent_authorization
 from ..data_backup import backup_task_loop
 from ..jsonl_rotation import rotate_jsonl_log_if_needed
 from ..observability import configure_logging
@@ -5022,9 +5023,10 @@ async def api_account(request: web.Request) -> web.Response:
             password = str(payload.get("password") or "")
             totp = str(payload.get("totp") or "")
             new_email = normalize_email(str(payload.get("new_email") or ""))
-            if store.authenticate(
-                email=user.email, password=password, totp=totp
-            ) is None:
+            if (
+                store.authenticate(email=user.email, password=password, totp=totp)
+                is None
+            ):
                 raise PermissionError("password confirmation failed")
             if store.get_user(new_email) is not None:
                 raise ValueError("an account with the new email already exists")
@@ -5047,9 +5049,7 @@ async def api_account(request: web.Request) -> web.Response:
                     email=new_email,
                     purpose="change_email",
                 )
-                raise RuntimeError(
-                    "verification email could not be sent"
-                ) from None
+                raise RuntimeError("verification email could not be sent") from None
             write_web_audit_event(
                 cfg,
                 request,
@@ -5731,7 +5731,10 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
         current_config = runtime_cfg.cross_exchange_rebalance
         action = str(payload.get("action") or "update").strip().lower()
         if action == "acknowledge_exposure":
-            if payload.get("confirm_acknowledgement") != "ACKNOWLEDGE RESIDUAL EXPOSURE":
+            if (
+                payload.get("confirm_acknowledgement")
+                != "ACKNOWLEDGE RESIDUAL EXPOSURE"
+            ):
                 raise ValueError(
                     "acknowledgement requires "
                     "confirm_acknowledgement=ACKNOWLEDGE RESIDUAL EXPOSURE"
@@ -5743,12 +5746,16 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
                     current_config,
                     common_quote_currency=runtime_cfg.common_quote_currency,
                 )
-            if not runtime.get("halted") or runtime.get("halt_reason") != "hedge_required":
+            if (
+                not runtime.get("halted")
+                or runtime.get("halt_reason") != "hedge_required"
+            ):
                 raise ValueError("only a hedge_required stop can be acknowledged")
             residual = runtime.get("residual_exposure")
-            if not isinstance(residual, dict) or float(
-                residual.get("quantity_base") or 0.0
-            ) <= 0:
+            if (
+                not isinstance(residual, dict)
+                or float(residual.get("quantity_base") or 0.0) <= 0
+            ):
                 entry = find_latest_strategy_timeline_entry(
                     runtime_cfg.strategy_timeline,
                     strategy="cross_exchange_rebalance",
@@ -5767,9 +5774,10 @@ async def api_cross_exchange_rebalance(request: web.Request) -> web.Response:
                             "detected_at": entry.logged_at,
                             "source": "strategy_timeline",
                         }
-            if not isinstance(residual, dict) or float(
-                residual.get("quantity_base") or 0.0
-            ) <= 0:
+            if (
+                not isinstance(residual, dict)
+                or float(residual.get("quantity_base") or 0.0) <= 0
+            ):
                 raise ValueError(
                     "the residual exposure amount is unavailable; do not acknowledge it"
                 )
@@ -6364,6 +6372,142 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_detail = "verified and linked read-only wallet"
             audit_payload = wallet.to_dict()
             response_extra = {"wallet": wallet.to_dict()}
+        elif action == "prepare_hyperliquid_agent":
+            wallet_id = str(payload.get("wallet_id") or "").strip()
+            wallet = store.get_wallet(wallet_id)
+            if wallet is None:
+                raise ValueError(
+                    "verify a MetaMask wallet before authorizing Hyperliquid"
+                )
+            _require_workspace_owner(user, wallet.owner_email)
+            raw = dict(
+                payload.get("account")
+                if isinstance(payload.get("account"), dict)
+                else {}
+            )
+            account_id = str(raw.get("id") or "").strip()
+            existing = store.get_account(account_id) if account_id else None
+            if existing is not None:
+                _require_workspace_owner(user, existing.owner_email)
+                base = existing.to_dict()
+                base.update(raw)
+                raw = base
+            project_id = str(raw.get("project_id") or "").strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_workspace_owner(user, project.owner_email)
+            raw.update(
+                {
+                    "owner_email": user.email,
+                    "exchange": "hyperliquid",
+                    "symbol": str(raw.get("symbol") or project.symbol).upper(),
+                    "enabled": False,
+                    "withdrawal_disabled_confirmed": True,
+                    "trade_permission_confirmed": True,
+                    "connection_status": (
+                        existing.connection_status if existing else "unverified"
+                    ),
+                    "connection_checked_at": (
+                        existing.connection_checked_at if existing else None
+                    ),
+                    "connection_error": existing.connection_error if existing else "",
+                }
+            )
+            account = UserExchangeAccount.from_dict(raw)
+            if _base_asset_from_symbol(account.symbol) != project.asset:
+                raise ValueError(
+                    f"account symbol base must match project asset {project.asset}"
+                )
+            authorization = store.prepare_hyperliquid_authorization(
+                owner_email=user.email,
+                wallet=wallet,
+                account=account,
+                chain_id=int(payload.get("chain_id") or 0),
+            )
+            audit_target = authorization["authorization_id"]
+            audit_detail = "prepared encrypted Hyperliquid API wallet authorization"
+            audit_payload = {
+                "authorization_id": authorization["authorization_id"],
+                "wallet_id": wallet.id,
+                "wallet_address": wallet.address,
+                "account_id": account.id,
+                "agent_address": authorization["agent_address"],
+                "agent_name": authorization["agent_name"],
+                "api_variant": account.api_variant,
+                "expires_at": authorization["expires_at"],
+            }
+            response_extra = {
+                "hyperliquid_authorization": {
+                    **audit_payload,
+                    "typed_data": authorization["typed_data"],
+                }
+            }
+        elif action == "complete_hyperliquid_agent":
+            authorization_id = str(payload.get("authorization_id") or "").strip()
+            signature = str(payload.get("signature") or "").strip()
+            pending = store.get_hyperliquid_authorization(
+                authorization_id,
+                owner_email=user.email,
+            )
+            recovered = recover_authorizer(pending["typed_data"], signature)
+            if recovered.lower() != str(pending["wallet_address"]).lower():
+                raise ValueError(
+                    "MetaMask signature does not match the verified wallet address"
+                )
+            submission = await submit_agent_authorization(
+                action=pending["action"],
+                nonce=int(pending["nonce"]),
+                signature=signature,
+                api_variant=str(pending["api_variant"]),
+            )
+            account = store.finalize_hyperliquid_authorization(
+                authorization_id,
+                owner_email=user.email,
+            )
+            wallet = store.get_wallet(str(pending["wallet_id"]))
+            venue_connection = None
+            if wallet is not None:
+                venue_check = await probe_dex_venue(
+                    venue="hyperliquid",
+                    wallet_address=wallet.address,
+                )
+                venue_connection = store.upsert_venue_connection(
+                    owner_email=user.email,
+                    venue="hyperliquid",
+                    wallet=wallet,
+                    check=venue_check,
+                )
+            audit_target = account.id
+            audit_detail = "authorized encrypted Hyperliquid API wallet"
+            audit_payload = {
+                "account_id": account.id,
+                "wallet_id": account.wallet_id,
+                "agent_address": account.agent_address,
+                "agent_name": account.agent_name,
+                "api_variant": account.api_variant,
+                "enabled": False,
+                "live_order_submitted": False,
+            }
+            response_extra = {
+                "account": {
+                    **account.to_dict(),
+                    "credentials": store.credential_status(account.id),
+                },
+                "hyperliquid_authorization": submission,
+                "venue_connection": (
+                    venue_connection.to_dict() if venue_connection else None
+                ),
+            }
+        elif action == "cancel_hyperliquid_agent":
+            authorization_id = str(payload.get("authorization_id") or "").strip()
+            store.cancel_hyperliquid_authorization(
+                authorization_id,
+                owner_email=user.email,
+            )
+            audit_target = authorization_id
+            audit_detail = "discarded pending Hyperliquid API wallet authorization"
+            audit_payload = {"authorization_id": authorization_id}
         elif action == "delete_wallet":
             wallet_id = str(payload.get("wallet_id") or payload.get("id") or "").strip()
             wallet = store.get_wallet(wallet_id)
@@ -6597,6 +6741,20 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 existing.connection_checked_at if existing else None
             )
             raw["connection_error"] = existing.connection_error if existing else ""
+            for managed_field in (
+                "wallet_id",
+                "agent_address",
+                "agent_name",
+                "authorization_verified_at",
+            ):
+                raw[managed_field] = (
+                    getattr(existing, managed_field)
+                    if existing is not None
+                    and str(raw.get("exchange") or "").strip().lower() == "hyperliquid"
+                    else None
+                    if managed_field == "authorization_verified_at"
+                    else ""
+                )
             account = UserExchangeAccount.from_dict(raw)
             if _base_asset_from_symbol(account.symbol) != project.asset:
                 raise ValueError(
@@ -6730,7 +6888,9 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raise ValueError(f"project not found: {account.project_id}")
             credential_status = store.credential_status(account.id)
             if not credential_status["configured"]:
-                raise ValueError("configure required credentials before testing account")
+                raise ValueError(
+                    "configure required credentials before testing account"
+                )
             credentials = store.decrypt_credentials(
                 account_id=account.id,
                 owner_email=account.owner_email,

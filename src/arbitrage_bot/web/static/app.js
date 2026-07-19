@@ -3578,13 +3578,18 @@ function balanceStatusClass(status) {
           : uiText(healthy ? "Read-only verified" : "Connection error");
         const detail = link.detail || {};
         const detailParts = [];
+        const authorizedAccount = (workspace?.accounts || []).find((account) => (
+          account.exchange === link.venue
+          && account.wallet_id === link.wallet_id
+          && account.authorization_verified_at
+        ));
         if (detail.position_count != null) detailParts.push(`${uiText("Positions")} ${detail.position_count}`);
         if (detail.market_count != null) detailParts.push(`${uiText("Markets")} ${detail.market_count}`);
         const row = document.createElement("tr");
         row.innerHTML = `
           <td>${escapeHtml(venue?.label || link.venue || "--")}</td>
           <td title="${escapeHtml(link.wallet_address || "")}">${escapeHtml(wallet?.label || uiText("Public read-only"))}<br><span class="subtle">${escapeHtml(link.wallet_address ? `${link.wallet_address.slice(0, 8)}…${link.wallet_address.slice(-6)}` : "--")}</span></td>
-          <td class="${statusClass}" title="${escapeHtml(link.error || "")}">${escapeHtml(statusLabel)}<br><span class="subtle">${escapeHtml(stale ? uiText("Automatic recheck pending") : healthy ? uiText("Automation disabled") : link.error || "--")}${detailParts.length ? ` · ${escapeHtml(detailParts.join(" · "))}` : ""}</span></td>
+          <td class="${statusClass}" title="${escapeHtml(link.error || "")}">${escapeHtml(statusLabel)}<br><span class="subtle">${escapeHtml(stale ? uiText("Automatic recheck pending") : authorizedAccount ? uiText("API Wallet authorized; account disabled") : healthy ? uiText("Automation disabled") : link.error || "--")}${detailParts.length ? ` · ${escapeHtml(detailParts.join(" · "))}` : ""}</span></td>
           <td>${escapeHtml(formatAge(link.checked_at))}<br><span class="subtle">${Number(link.latency_ms || 0).toFixed(0)}ms · ${escapeHtml(uiText("Auto-check enabled"))}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
@@ -4273,6 +4278,30 @@ function balanceStatusClass(status) {
       );
       const passphraseField = document.getElementById("user-exchange-passphrase-field");
       if (passphraseField) passphraseField.hidden = !needsPassphrase;
+      const isHyperliquid = exchangeId === "hyperliquid";
+      const apiKeyField = document.getElementById("user-exchange-api-key-field");
+      const secretField = document.getElementById("user-exchange-secret-field");
+      if (apiKeyField) apiKeyField.hidden = isHyperliquid;
+      if (secretField) secretField.hidden = isHyperliquid;
+      const authorizeButton = document.getElementById("user-hyperliquid-authorize");
+      const authorizeHint = document.getElementById("user-hyperliquid-authorize-hint");
+      if (authorizeButton) {
+        authorizeButton.hidden = !isHyperliquid;
+        authorizeButton.disabled = !projectId || !currentSymbol
+          || !(currentUserWorkspace?.wallets || []).length
+          || userExchangeAccountFormBusy;
+      }
+      if (authorizeHint) authorizeHint.hidden = !isHyperliquid;
+      const noWithdraw = document.getElementById("user-exchange-no-withdraw");
+      const tradePermission = document.getElementById("user-exchange-trade-permission");
+      if (noWithdraw) {
+        if (isHyperliquid) noWithdraw.checked = true;
+        noWithdraw.disabled = isHyperliquid;
+      }
+      if (tradePermission) {
+        if (isHyperliquid) tradePermission.checked = true;
+        tradePermission.disabled = isHyperliquid;
+      }
 
       const selectedAccount = workspaceSelectedAccount();
       const sameConnection = Boolean(
@@ -4302,6 +4331,90 @@ function balanceStatusClass(status) {
         testButton.title = testButton.disabled
           ? uiText("Save the account and credentials before testing the connection.")
           : uiText("This test reads account data and never places or cancels orders.");
+      }
+    }
+
+    async function authorizeHyperliquidWithMetaMask() {
+      if (userExchangeAccountFormBusy) return;
+      const walletId = document.getElementById("wallet-link-select")?.value || "";
+      const wallet = (currentUserWorkspace?.wallets || []).find((row) => row.id === walletId);
+      const providerKey = document.getElementById("wallet-provider-select")?.value || "";
+      const providerRow = discoveredWalletProviders.get(providerKey);
+      if (!wallet || !providerRow) {
+        setUserWorkspaceNotice(uiText("Connect and verify MetaMask first."));
+        return;
+      }
+      const button = document.getElementById("user-hyperliquid-authorize");
+      let authorizationId = "";
+      let signatureCreated = false;
+      userExchangeAccountFormBusy = true;
+      button.disabled = true;
+      text("wallet-connection-status", uiText("Waiting for Hyperliquid authorization…"));
+      try {
+        const accounts = await providerRow.provider.request({ method: "eth_requestAccounts" });
+        const address = String(accounts?.[0] || "");
+        if (!address || address.toLowerCase() !== wallet.address.toLowerCase()) {
+          throw new Error(uiText("Selected MetaMask account does not match the verified wallet."));
+        }
+        const chainValue = await providerRow.provider.request({ method: "eth_chainId" });
+        const chainId = Number.parseInt(
+          String(chainValue),
+          String(chainValue).startsWith("0x") ? 16 : 10,
+        );
+        const account = {
+          project_id: document.getElementById("user-exchange-project").value,
+          label: document.getElementById("user-exchange-label").value.trim() || "Hyperliquid MetaMask",
+          exchange: "hyperliquid",
+          market_type: document.getElementById("user-exchange-market-type").value,
+          api_variant: document.getElementById("user-exchange-api-variant").value,
+          symbol: document.getElementById("user-exchange-symbol").value,
+          enabled: false,
+          withdrawal_disabled_confirmed: true,
+          trade_permission_confirmed: true,
+        };
+        const accountId = document.getElementById("user-exchange-account-id").value.trim();
+        if (accountId) account.id = accountId;
+        const prepared = await postUserWorkspace({
+          action: "prepare_hyperliquid_agent",
+          wallet_id: wallet.id,
+          chain_id: chainId,
+          account,
+        });
+        const authorization = prepared.hyperliquid_authorization || {};
+        authorizationId = authorization.authorization_id || "";
+        if (!authorizationId || !authorization.typed_data) {
+          throw new Error("server did not return a Hyperliquid authorization request");
+        }
+        const signature = await providerRow.provider.request({
+          method: "eth_signTypedData_v4",
+          params: [address, JSON.stringify(authorization.typed_data)],
+        });
+        signatureCreated = true;
+        const completed = await postUserWorkspace({
+          action: "complete_hyperliquid_agent",
+          authorization_id: authorizationId,
+          signature,
+        });
+        const saved = completed.account || {};
+        resetUserExchangeAccountForm();
+        setUserWorkspaceNotice(
+          `${uiText("Hyperliquid API Wallet authorized")} · ${saved.agent_address?.slice(0, 8) || "--"}…${saved.agent_address?.slice(-6) || ""} · ${uiText("Account remains disabled until connection test passes.")}`,
+          12000,
+        );
+        text("wallet-connection-status", uiText("Hyperliquid trading authorization verified."));
+      } catch (error) {
+        if (authorizationId && !signatureCreated) {
+          await postUserWorkspace({
+            action: "cancel_hyperliquid_agent",
+            authorization_id: authorizationId,
+          }).catch(() => {});
+        }
+        setUserWorkspaceNotice(`Hyperliquid authorization failed: ${error.message || error}`, 12000);
+        text("wallet-connection-status", uiText("Hyperliquid authorization was not completed."));
+      } finally {
+        userExchangeAccountFormBusy = false;
+        button.disabled = false;
+        syncUserExchangeMarketTypes();
       }
     }
 
@@ -4387,6 +4500,9 @@ function balanceStatusClass(status) {
         const credentialText = credentials.configured
           ? `Encrypted / configured${rotationText}`
           : "Missing";
+        const agentText = account.agent_address
+          ? `\n${account.agent_name || "API Wallet"} · ${account.agent_address.slice(0, 8)}…${account.agent_address.slice(-6)}`
+          : "";
         const connectionFresh = workspaceConnectionFresh(account);
         const accountStatus = account.enabled
           ? "Enabled"
@@ -4419,7 +4535,7 @@ function balanceStatusClass(status) {
           <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || account.id)}<br><span class="subtle">${escapeHtml(account.owner_email || "--")}</span></td>
           <td>${escapeHtml(project?.name || account.project_id || "--")}<br><span class="subtle">${escapeHtml(account.symbol || project?.symbol || "--")}</span></td>
           <td>${escapeHtml(workspaceExchange(account.exchange)?.label || account.exchange)}<br><span class="subtle">${escapeHtml(`${account.market_type || "spot"}${variantText}`)}</span></td>
-          <td class="${credentials.configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
+          <td class="${credentials.configured ? "ok" : "missing"}">${escapeHtml(credentialText)}${agentText ? `<br><span class="subtle">${escapeHtml(agentText.trim())}</span>` : ""}</td>
           <td class="${connectionClass}" title="${escapeHtml((readiness.blockers || []).join(" · ") || account.connection_error || "")}">${escapeHtml(uiText(accountStatus))}<br><span class="subtle">${escapeHtml(connectionText + expiryText)}</span><br><span class="subtle">${escapeHtml(readinessText)}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
@@ -4723,7 +4839,10 @@ function balanceStatusClass(status) {
     }
 
     async function deleteUserExchangeAccount(account, button) {
-      if (!dangerConfirm("Delete this exchange account and its encrypted API credentials?")) return;
+      const confirmation = account.exchange === "hyperliquid" && account.agent_address
+        ? "Delete local Hyperliquid credentials? Revoke this API Wallet on Hyperliquid first; local deletion cannot revoke an on-chain authorization."
+        : "Delete this exchange account and its encrypted API credentials?";
+      if (!dangerConfirm(confirmation)) return;
       button.disabled = true;
       try {
         await postUserWorkspace({ action: "delete_account", account_id: account.id });
@@ -8752,6 +8871,18 @@ function balanceStatusClass(status) {
 	        "user-exchange-market-type",
 	        "user-exchange-api-variant",
 	      ].includes(event.target?.id)) {
+	        if (event.target?.id === "user-exchange-id" && !selectedUserExchangeAccountId) {
+	          const labelInput = document.getElementById("user-exchange-label");
+	          const currentLabel = labelInput?.value.trim() || "";
+	          if (!currentLabel || currentLabel === "Coinbase Main") {
+	            const exchange = workspaceExchange(event.target.value);
+	            if (labelInput) {
+	              labelInput.value = event.target.value === "hyperliquid"
+	                ? "Hyperliquid MetaMask"
+	                : `${exchange?.label || event.target.value} Main`;
+	            }
+	          }
+	        }
 	        syncUserExchangeMarketTypes();
 	      }
 	    });
@@ -8759,6 +8890,7 @@ function balanceStatusClass(status) {
 	    document.getElementById("user-exchange-new").addEventListener("click", resetUserExchangeAccountForm);
 	    document.getElementById("user-exchange-load-markets").addEventListener("click", loadUserExchangeMarkets);
 	    document.getElementById("user-exchange-test").addEventListener("click", testSelectedUserExchangeAccount);
+	    document.getElementById("user-hyperliquid-authorize").addEventListener("click", authorizeHyperliquidWithMetaMask);
     document.getElementById("user-strategy-new").addEventListener("click", () => openUserStrategyForm());
     document.getElementById("user-strategy-cancel").addEventListener("click", closeUserStrategyForm);
     document.getElementById("user-strategy-form").addEventListener("input", () => {

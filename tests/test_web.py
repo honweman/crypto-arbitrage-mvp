@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260719-wallets3" defer></script>',
+            '<script src="/static/app.js?v=20260719-hyperliquid2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260719-wallets3" defer></script>',
+            '<script src="/static/i18n.js?v=20260719-hyperliquid2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(

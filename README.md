@@ -843,6 +843,21 @@ Polymarket, dYdX, or Aster for a persistent read-only connection check. These
 checks may read public markets and account positions, but they never authorize
 automated trading, submit an order, approve a token, or request a transfer.
 
+Hyperliquid has a separate opt-in authorization flow in the exchange account
+form. `Authorize Hyperliquid with MetaMask` creates a dedicated API/agent wallet
+on the server, encrypts its private key immediately, and asks the already
+verified owner wallet to sign Hyperliquid's EIP-712 `ApproveAgent` action. The
+owner private key and recovery phrase never enter the browser form or server.
+After Hyperliquid accepts the signature, the main wallet address and encrypted
+agent key are saved as a disabled, unverified Hyperliquid account. No order is
+submitted; the user must still run the read-only account test and explicitly
+enable the account. Per-user strategies remain paper-only.
+
+Deleting local credentials does not revoke an approved agent on Hyperliquid.
+Revoke or replace that API Wallet on Hyperliquid first, then delete the local
+account. The dashboard blocks removal of a linked wallet while a local
+Hyperliquid account still refers to it.
+
 The active web leader refreshes healthy decentralized-venue connections every
 five minutes and retries failed checks every minute, with at most four public
 probes in flight at once. A connection that has not completed a check for ten
@@ -854,11 +869,15 @@ program, Market Maker, Auto Buy/Sell, or arbitrage runners.
 
 Use a dedicated agent or signer key for Hyperliquid and Aster; the owner wallet
 address and signer address must differ. Never enter the primary wallet private
-key. dYdX uses a dedicated trading mnemonic together with its chain address.
+key. The MetaMask authorization flow generates this dedicated Hyperliquid key
+automatically; manual Hyperliquid credentials remain supported by the backend
+but are hidden from the browser form. dYdX uses a dedicated trading mnemonic
+together with its chain address.
 Polymarket public market checks do not require a private credential; any future
 authenticated order path must use its separate API key, secret, passphrase, and
-order signature. Venue credentials are validated, encrypted, write-only in the
-browser, and intentionally unavailable to the current read-only wallet workflow.
+order signature. Venue credentials are validated, encrypted, and write-only in
+the browser. Only the explicit Hyperliquid agent authorization flow currently
+bridges a verified wallet to an encrypted exchange account.
 
 Platform exchange balances, orders, P/L, strategy configuration, cancellation,
 and live controls are administrator-only. Ordinary users see only their own

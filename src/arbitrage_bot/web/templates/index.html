@@ -590,11 +590,11 @@
           <select id="user-exchange-symbol" required></select>
         </div>
         <button id="user-exchange-load-markets" class="ghost-button" type="button">Load Pairs</button>
-        <div class="field wide-field">
+        <div id="user-exchange-api-key-field" class="field wide-field">
           <label id="user-exchange-api-key-label" for="user-exchange-api-key">API Key</label>
           <textarea id="user-exchange-api-key" rows="2" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
         </div>
-        <div class="field wide-field">
+        <div id="user-exchange-secret-field" class="field wide-field">
           <label id="user-exchange-secret-label" for="user-exchange-secret">API Secret / Private Key</label>
           <textarea id="user-exchange-secret" rows="3" autocomplete="new-password" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
         </div>
@@ -615,6 +615,8 @@
           I confirm this API key has spot trading permission
         </label>
         <div class="subtle wide-field">Use a trade-only API key. Save it, test the connection, then enable the account. Credentials are encrypted and never shown again.</div>
+        <button id="user-hyperliquid-authorize" class="control-button wide-field" type="button" hidden>Authorize Hyperliquid with MetaMask</button>
+        <div id="user-hyperliquid-authorize-hint" class="subtle wide-field" hidden>MetaMask signs one API Wallet approval. The dedicated agent key is encrypted on the server; this does not enable the account or place an order.</div>
         <button id="user-exchange-save" class="control-button" type="submit">Save Account</button>
         <button id="user-exchange-test" class="ghost-button" type="button">Test Connection</button>
         <button id="user-exchange-new" class="ghost-button" type="button">New</button>
@@ -2491,8 +2493,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260719-wallets3" defer></script>
-  <script src="/static/app.js?v=20260719-wallets3" defer></script>
+  <script src="/static/i18n.js?v=20260719-hyperliquid2" defer></script>
+  <script src="/static/app.js?v=20260719-hyperliquid2" defer></script>
 
 </body>
 </html>
