@@ -196,6 +196,49 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(client.options_payload["password"], "direct-passphrase")
         self.assertEqual(global_api_key_after, "global-key")
 
+    def test_decentralized_exchange_credentials_map_to_ccxt_signers(self) -> None:
+        created = {}
+
+        class FakeClient:
+            def __init__(self, options: dict[str, object]) -> None:
+                self.options_payload = options
+
+        class FakeCcxt:
+            hyperliquid = FakeClient
+            dydx = FakeClient
+            aster = FakeClient
+
+        for exchange_id in ("hyperliquid", "dydx", "aster"):
+            cfg = ExchangeConfig(
+                id=exchange_id,
+                label=f"workspace:{exchange_id}",
+                market_type="swap",
+            )
+            manager = ExchangeManager(
+                credentials_by_key={
+                    cfg.key: {
+                        "api_key": "0x0000000000000000000000000000000000000001",
+                        "secret": "0xagent-private-key",
+                    }
+                }
+            )
+            with patch(
+                "arbitrage_bot.exchanges.importlib.import_module",
+                return_value=FakeCcxt,
+            ):
+                created[exchange_id] = manager.client(cfg).options_payload
+
+        self.assertEqual(
+            created["hyperliquid"]["walletAddress"],
+            "0x0000000000000000000000000000000000000001",
+        )
+        self.assertEqual(created["hyperliquid"]["privateKey"], "0xagent-private-key")
+        self.assertEqual(created["dydx"]["privateKey"], "0xagent-private-key")
+        self.assertEqual(
+            created["aster"]["options"]["signerAddress"],
+            "0x0000000000000000000000000000000000000001",
+        )
+
     def test_bithumb_limit_order_features_block_post_only(self) -> None:
         cfg = ExchangeConfig(id="bithumb", label="bithumb-spot")
 

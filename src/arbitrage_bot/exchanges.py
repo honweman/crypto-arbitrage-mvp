@@ -749,6 +749,19 @@ class ExchangeManager:
             options["secret"] = secret
         if password:
             options["password"] = password
+        if cfg.id == "hyperliquid":
+            if api_key:
+                options["walletAddress"] = api_key
+            if secret:
+                options["privateKey"] = secret
+        elif cfg.id == "dydx" and secret:
+            options["privateKey"] = secret
+        elif cfg.id == "aster":
+            if api_key:
+                options["walletAddress"] = api_key
+                options["options"].setdefault("signerAddress", api_key)
+            if secret:
+                options["privateKey"] = secret
 
         client = exchange_cls(options)
         if cfg.id == "bithumb" and str(cfg.options.get("private_api", "")).lower() in {

@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from eth_account import Account
+from eth_account.messages import encode_defunct
+
 from arbitrage_bot.user_workspace import (
     CONNECTION_MAX_AGE_SECONDS,
     CredentialCipher,
@@ -22,6 +25,103 @@ MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_wallet_challenge_verifies_once_and_persists_read_only_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env=None,
+            )
+            signer = Account.create()
+            challenge = store.create_wallet_challenge(
+                owner_email="trader@example.com",
+                address=signer.address,
+                chain_id=137,
+                wallet_type="metamask",
+                domain="daydayuptrade.com",
+            )
+            signature = Account.sign_message(
+                encode_defunct(text=challenge["message"]),
+                signer.key,
+            ).signature.hex()
+
+            wallet = store.verify_wallet_challenge(
+                owner_email="trader@example.com",
+                challenge_id=challenge["challenge_id"],
+                signature=signature,
+                label="Trading Wallet",
+            )
+            payload = store.public_payload(
+                owner_email="trader@example.com",
+                is_admin=False,
+            )
+
+            self.assertEqual(wallet.address, signer.address)
+            self.assertEqual(wallet.chain_id, 137)
+            self.assertFalse(wallet.to_dict()["trading_authorized"])
+            self.assertEqual(payload["summary"]["wallet_count"], 1)
+            self.assertEqual(payload["wallets"][0]["label"], "Trading Wallet")
+            self.assertEqual(
+                {row["id"] for row in payload["dex_venue_catalog"]},
+                {"hyperliquid", "polymarket", "dydx", "aster"},
+            )
+            exchange_catalog = {
+                row["id"]: row for row in payload["exchange_catalog"]
+            }
+            self.assertEqual(
+                exchange_catalog["hyperliquid"]["market_types"],
+                ["spot", "swap"],
+            )
+            self.assertEqual(
+                exchange_catalog["dydx"]["required_credentials"],
+                ["secret"],
+            )
+            self.assertEqual(
+                exchange_catalog["aster"]["default_variant"],
+                "v3",
+            )
+            with self.assertRaisesRegex(ValueError, "already been used"):
+                store.verify_wallet_challenge(
+                    owner_email="trader@example.com",
+                    challenge_id=challenge["challenge_id"],
+                    signature=signature,
+                )
+
+            store.delete_wallet(wallet.id, owner_email="trader@example.com")
+            self.assertEqual(
+                store.list_wallets(
+                    owner_email="trader@example.com",
+                    is_admin=False,
+                ),
+                [],
+            )
+
+    def test_wallet_challenge_rejects_another_signer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env=None,
+            )
+            expected = Account.create()
+            attacker = Account.create()
+            challenge = store.create_wallet_challenge(
+                owner_email="trader@example.com",
+                address=expected.address,
+                chain_id=1,
+                wallet_type="injected",
+                domain="daydayuptrade.com",
+            )
+            signature = Account.sign_message(
+                encode_defunct(text=challenge["message"]),
+                attacker.key,
+            ).signature.hex()
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                store.verify_wallet_challenge(
+                    owner_email="trader@example.com",
+                    challenge_id=challenge["challenge_id"],
+                    signature=signature,
+                )
+
     def test_user_risk_profile_is_owner_scoped_and_validated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = UserWorkspaceStore(

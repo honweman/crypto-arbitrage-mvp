@@ -154,6 +154,7 @@ from ..cross_exchange_rebalancer import (
     save_rebalance_runtime,
 )
 from ..derivatives import derivative_account_summary, normalize_derivative_position
+from ..dex_venues import probe_dex_venue
 from ..exchanges import ExchangeManager, limit_order_features
 from ..execution_algos import build_execution_algo_plan
 from ..fill_store import load_daily_pnl_summary, load_fill_rows, persist_fill_pnl
@@ -253,6 +254,7 @@ from ..user_workspace import (
     UserRiskProfile,
     UserWorkspaceStore,
     account_connection_is_fresh,
+    required_credentials_for_exchange,
 )
 from ..web_config import (
     _backtest_overrides_from_payload,
@@ -2801,8 +2803,10 @@ def build_user_workspace_payload(
             "status": "user_account_required",
             "projects": [],
             "accounts": [],
+            "wallets": [],
             "strategies": [],
             "exchange_catalog": [],
+            "dex_venue_catalog": [],
             "strategy_catalog": [],
             "paper": empty_paper,
             "vault_available": store.cipher.available,
@@ -2820,6 +2824,7 @@ def build_user_workspace_payload(
                     "label": "Create your first trading project",
                 },
                 "account_count": 0,
+                "wallet_count": 0,
                 "configured_account_count": 0,
                 "ready_account_count": 0,
                 "strategy_count": 0,
@@ -2892,8 +2897,10 @@ def build_user_workspace_payload(
             "error": str(exc),
             "projects": [],
             "accounts": [],
+            "wallets": [],
             "strategies": [],
             "exchange_catalog": [],
+            "dex_venue_catalog": [],
             "strategy_catalog": [],
             "paper": {**empty_paper, "status": "error"},
             "vault_available": store.cipher.available,
@@ -2911,6 +2918,7 @@ def build_user_workspace_payload(
                     "label": "Create your first trading project",
                 },
                 "account_count": 0,
+                "wallet_count": 0,
                 "configured_account_count": 0,
                 "ready_account_count": 0,
                 "strategy_count": 0,
@@ -6314,7 +6322,67 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         audit_payload: dict[str, Any] = {}
         response_extra: dict[str, Any] = {}
 
-        if action == "upsert_project":
+        if action == "wallet_challenge":
+            challenge = store.create_wallet_challenge(
+                owner_email=user.email,
+                address=str(payload.get("address") or ""),
+                chain_id=int(payload.get("chain_id") or 0),
+                wallet_type=str(payload.get("wallet_type") or "injected"),
+                domain=str(request.host or "crypto-arbitrage"),
+            )
+            audit_target = challenge["address"]
+            audit_detail = "issued read-only wallet authorization challenge"
+            audit_payload = {
+                "challenge_id": challenge["challenge_id"],
+                "address": challenge["address"],
+                "chain_id": challenge["chain_id"],
+                "expires_at": challenge["expires_at"],
+            }
+            response_extra = {"wallet_challenge": challenge}
+        elif action == "verify_wallet":
+            wallet = store.verify_wallet_challenge(
+                owner_email=user.email,
+                challenge_id=str(payload.get("challenge_id") or ""),
+                signature=str(payload.get("signature") or ""),
+                label=str(payload.get("label") or ""),
+            )
+            audit_target = wallet.id
+            audit_detail = "verified and linked read-only wallet"
+            audit_payload = wallet.to_dict()
+            response_extra = {"wallet": wallet.to_dict()}
+        elif action == "delete_wallet":
+            wallet_id = str(payload.get("wallet_id") or payload.get("id") or "").strip()
+            wallet = store.get_wallet(wallet_id)
+            if wallet is None:
+                raise ValueError(f"wallet not found: {wallet_id}")
+            _require_workspace_owner(user, wallet.owner_email)
+            store.delete_wallet(wallet.id, owner_email=user.email)
+            audit_target = wallet.id
+            audit_detail = "revoked linked wallet"
+            audit_payload = {"wallet_id": wallet.id, "address": wallet.address}
+        elif action == "test_wallet_venue":
+            wallet_id = str(payload.get("wallet_id") or "").strip()
+            wallet = store.get_wallet(wallet_id) if wallet_id else None
+            if wallet is not None:
+                _require_workspace_owner(user, wallet.owner_email)
+            venue = str(payload.get("venue") or "").strip().lower()
+            if venue != "dydx" and wallet is None:
+                raise ValueError(f"{venue or 'venue'} requires a verified wallet")
+            venue_check = await probe_dex_venue(
+                venue=venue,
+                wallet_address=wallet.address if wallet else "",
+            )
+            audit_target = f"{venue}:{wallet.id if wallet else 'public'}"
+            audit_detail = f"tested {venue} read-only connectivity"
+            audit_payload = {
+                "venue": venue,
+                "wallet_id": wallet.id if wallet else "",
+                "status": venue_check["status"],
+                "latency_ms": venue_check["latency_ms"],
+                "live_trading_authorized": False,
+            }
+            response_extra = {"venue_check": venue_check}
+        elif action == "upsert_project":
             raw = dict(
                 payload.get("project")
                 if isinstance(payload.get("project"), dict)
@@ -6470,14 +6538,15 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     connection_error="",
                 )
             if exchange_changed:
-                required = {"api_key", "secret"}
+                required = required_credentials_for_exchange(account.exchange)
                 supplied_fields = {
                     key for key, value in supplied.items() if str(value or "").strip()
                 }
                 missing = sorted(required.difference(supplied_fields))
                 if missing:
                     raise ValueError(
-                        "re-enter API key and secret when changing exchange"
+                        "re-enter API key / required credentials when changing exchange: "
+                        + ", ".join(missing)
                     )
             if account.enabled:
                 if project.status != "active":
@@ -6492,13 +6561,16 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 if not account.trade_permission_confirmed:
                     raise ValueError("confirm that the API key has trading permission")
                 current_auth = store.credential_status(account.id)
-                has_required = current_auth["configured"] or (
-                    bool(str(supplied.get("api_key") or "").strip())
-                    and bool(str(supplied.get("secret") or "").strip())
+                required = required_credentials_for_exchange(account.exchange)
+                supplied_fields = {
+                    key for key, value in supplied.items() if str(value or "").strip()
+                }
+                has_required = current_auth["configured"] or required.issubset(
+                    supplied_fields
                 )
                 if not has_required:
                     raise ValueError(
-                        "configure API key and secret before enabling account"
+                        "configure required credentials before enabling account"
                     )
                 if not current_auth["vault_available"]:
                     raise RuntimeError("credential encryption is not configured")
@@ -6570,7 +6642,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raise ValueError(f"project not found: {account.project_id}")
             credential_status = store.credential_status(account.id)
             if not credential_status["configured"]:
-                raise ValueError("configure API key and secret before testing account")
+                raise ValueError("configure required credentials before testing account")
             credentials = store.decrypt_credentials(
                 account_id=account.id,
                 owner_email=account.owner_email,

@@ -7,7 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9.0",
   "ccxt>=4.4.0",
-  "cryptography>=44.0.0"
+  "cryptography>=44.0.0",
+  "eth-account>=0.13.0,<0.14.0"
 ]
 
 [project.optional-dependencies]

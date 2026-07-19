@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 from arbitrage_bot.config import (
     AlertConfig,
@@ -215,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260719-fastcontrols1" defer></script>',
+            '<script src="/static/app.js?v=20260719-wallets1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260718-mmrestart1" defer></script>',
+            '<script src="/static/i18n.js?v=20260719-wallets1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -246,6 +248,24 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('"Account / Project / Exchange / Pair"', i18n_js)
         self.assertIn('"Continue Setup": "설정 계속"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
+
+    def test_settings_support_verified_browser_wallets_and_dex_venues(self) -> None:
+        for element_id in (
+            "wallet-provider-select",
+            "wallet-connect",
+            "wallet-open-imtoken",
+            "wallet-link-select",
+            "wallet-venue-select",
+            "wallet-venue-test",
+            "wallet-connections",
+        ):
+            self.assertIn(f'id="{element_id}"', INDEX_HTML)
+        self.assertIn("eip6963:requestProvider", APP_JS)
+        self.assertIn("eth_requestAccounts", APP_JS)
+        self.assertIn('method: "personal_sign"', APP_JS)
+        self.assertIn('action: "wallet_challenge"', APP_JS)
+        self.assertIn('action: "verify_wallet"', APP_JS)
+        self.assertIn('action: "test_wallet_venue"', APP_JS)
 
     def test_core_strategy_forms_use_review_start_workflows(self) -> None:
         for element_id in (
@@ -7638,6 +7658,76 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(completed_payload["selected"]["live_submit_allowed"])
         self.assertEqual(delete.status, 200, delete_payload)
         self.assertEqual(delete_payload["backtests"]["runs"], [])
+
+    async def test_user_workspace_wallet_signature_api_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            member = user_store.create_user(
+                email="wallet@example.com",
+                username="wallet01",
+                password="Strong-pass-2!",
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(data_dir / "user_workspace.sqlite3"),
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=True,
+                    path=str(data_dir / "trade_events.jsonl"),
+                ),
+            )
+            signer = Account.create()
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "username": member.username,
+                        "password": "Strong-pass-2!",
+                    },
+                )
+                challenge_response = await client.post(
+                    "/api/user-workspace",
+                    json={
+                        "action": "wallet_challenge",
+                        "address": signer.address,
+                        "chain_id": 137,
+                        "wallet_type": "metamask",
+                    },
+                )
+                challenge_payload = await challenge_response.json()
+                challenge = challenge_payload["wallet_challenge"]
+                signature = Account.sign_message(
+                    encode_defunct(text=challenge["message"]),
+                    signer.key,
+                ).signature.hex()
+                verify_response = await client.post(
+                    "/api/user-workspace",
+                    json={
+                        "action": "verify_wallet",
+                        "challenge_id": challenge["challenge_id"],
+                        "signature": signature,
+                        "label": "MetaMask Main",
+                    },
+                )
+                verify_payload = await verify_response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(challenge_response.status, 200, challenge_payload)
+        self.assertEqual(verify_response.status, 200, verify_payload)
+        self.assertEqual(verify_payload["wallet"]["address"], signer.address)
+        self.assertFalse(verify_payload["wallet"]["trading_authorized"])
+        self.assertEqual(verify_payload["workspace"]["summary"]["wallet_count"], 1)
 
     async def test_user_workspace_project_approval_and_encrypted_account_flow(
         self,

@@ -14,6 +14,9 @@ from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from eth_utils import is_address, to_checksum_address
 
 from .user_strategies import (
     USER_STRATEGY_DEFINITIONS,
@@ -28,6 +31,7 @@ MARKET_TYPES = {"spot", "swap", "future"}
 CONNECTION_STATUSES = {"unverified", "healthy", "error"}
 CONNECTION_MAX_AGE_SECONDS = 86_400.0
 CREDENTIAL_ROTATION_SECONDS = 90 * 86_400.0
+WALLET_CHALLENGE_TTL_SECONDS = 300.0
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 ASSET_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{1,19}$")
 SYMBOL_RE = re.compile(
@@ -80,8 +84,91 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "default_variant": "default",
         "variants": [{"id": "default", "label": "Default"}],
     },
+    {
+        "id": "hyperliquid",
+        "label": "Hyperliquid",
+        "market_types": ["spot", "swap"],
+        "required_credentials": ["api_key", "secret"],
+        "credential_labels": {
+            "api_key": "Main Wallet Address",
+            "secret": "Agent Wallet Private Key",
+        },
+        "default_variant": "mainnet",
+        "variants": [
+            {"id": "mainnet", "label": "Mainnet"},
+            {"id": "testnet", "label": "Testnet"},
+        ],
+    },
+    {
+        "id": "dydx",
+        "label": "dYdX v4",
+        "market_types": ["swap"],
+        "required_credentials": ["secret"],
+        "credential_labels": {
+            "api_key": "Wallet Address (Optional)",
+            "secret": "Permissioned / Trading Private Key",
+        },
+        "default_variant": "mainnet",
+        "variants": [{"id": "mainnet", "label": "Mainnet"}],
+    },
+    {
+        "id": "aster",
+        "label": "Aster",
+        "market_types": ["spot", "swap"],
+        "required_credentials": ["api_key", "secret"],
+        "credential_labels": {
+            "api_key": "Wallet Address",
+            "secret": "Signer Private Key",
+        },
+        "default_variant": "v3",
+        "variants": [{"id": "v3", "label": "API v3"}],
+    },
 )
 EXCHANGES_BY_ID = {row["id"]: row for row in EXCHANGE_CATALOG}
+
+DEX_VENUE_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "hyperliquid",
+        "label": "Hyperliquid",
+        "market_types": ["spot", "swap"],
+        "wallet_network": "EVM",
+        "wallet_required": True,
+        "read_only_supported": True,
+        "automation_auth": "agent_wallet",
+        "live_enabled": False,
+    },
+    {
+        "id": "polymarket",
+        "label": "Polymarket",
+        "market_types": ["prediction"],
+        "wallet_network": "Polygon",
+        "wallet_required": True,
+        "required_chain_id": 137,
+        "read_only_supported": True,
+        "automation_auth": "eip712_and_clob_credentials",
+        "live_enabled": False,
+    },
+    {
+        "id": "dydx",
+        "label": "dYdX",
+        "market_types": ["swap"],
+        "wallet_network": "dYdX Chain",
+        "wallet_required": False,
+        "read_only_supported": True,
+        "automation_auth": "permissioned_key",
+        "live_enabled": False,
+    },
+    {
+        "id": "aster",
+        "label": "Aster",
+        "market_types": ["spot", "swap"],
+        "wallet_network": "EVM",
+        "wallet_required": True,
+        "read_only_supported": True,
+        "automation_auth": "api_or_signer_key",
+        "live_enabled": False,
+    },
+)
 
 
 def _now() -> float:
@@ -136,6 +223,79 @@ def _clean_symbol(value: Any) -> str:
 
 def exchange_catalog() -> list[dict[str, Any]]:
     return [dict(row) for row in EXCHANGE_CATALOG]
+
+
+def required_credentials_for_exchange(exchange: str) -> set[str]:
+    row = EXCHANGES_BY_ID.get(str(exchange or "").strip().lower())
+    if row is None:
+        raise ValueError(f"unsupported exchange: {exchange}")
+    return set(row.get("required_credentials") or [])
+
+
+def dex_venue_catalog() -> list[dict[str, Any]]:
+    return [dict(row) for row in DEX_VENUE_CATALOG]
+
+
+def _normalize_evm_address(value: Any) -> str:
+    address = str(value or "").strip()
+    if not is_address(address):
+        raise ValueError("wallet address must be a valid EVM address")
+    return to_checksum_address(address)
+
+
+@dataclass(frozen=True)
+class UserWalletConnection:
+    id: str
+    owner_email: str
+    address: str
+    chain_id: int
+    wallet_type: str = "injected"
+    label: str = "EVM Wallet"
+    permissions: tuple[str, ...] = ("identify", "read_account")
+    verified_at: float = field(default_factory=_now)
+    last_seen_at: float = field(default_factory=_now)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "UserWalletConnection":
+        if not isinstance(raw, dict):
+            raise ValueError("wallet connection must be an object")
+        try:
+            chain_id = int(raw.get("chain_id") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("wallet chain id must be an integer") from exc
+        if chain_id <= 0:
+            raise ValueError("wallet chain id must be positive")
+        permissions = tuple(
+            item
+            for item in raw.get("permissions", ["identify", "read_account"])
+            if item in {"identify", "read_account"}
+        ) or ("identify", "read_account")
+        now = _now()
+        return cls(
+            id=_clean_id(raw.get("id"), prefix="wallet"),
+            owner_email=_clean_email(raw.get("owner_email")),
+            address=_normalize_evm_address(raw.get("address")),
+            chain_id=chain_id,
+            wallet_type=_clean_text(raw.get("wallet_type") or "injected", max_length=40),
+            label=_clean_text(raw.get("label") or "EVM Wallet", max_length=80),
+            permissions=permissions,
+            verified_at=float(raw.get("verified_at") or now),
+            last_seen_at=float(raw.get("last_seen_at") or now),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "owner_email": self.owner_email,
+            "address": self.address,
+            "chain_id": self.chain_id,
+            "wallet_type": self.wallet_type,
+            "label": self.label,
+            "permissions": list(self.permissions),
+            "verified_at": self.verified_at,
+            "last_seen_at": self.last_seen_at,
+            "trading_authorized": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -530,6 +690,29 @@ class UserWorkspaceStore:
                     updated_at REAL NOT NULL,
                     payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS user_wallet_connections (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    chain_id INTEGER NOT NULL,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL,
+                    UNIQUE(owner_email, address)
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_wallet_connections_owner
+                    ON user_wallet_connections(owner_email);
+                CREATE TABLE IF NOT EXISTS user_wallet_challenges (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    chain_id INTEGER NOT NULL,
+                    wallet_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    used_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_wallet_challenges_owner
+                    ON user_wallet_challenges(owner_email, expires_at);
                 """
             )
             self._migrate_legacy_accounts(connection)
@@ -685,6 +868,248 @@ class UserWorkspaceStore:
             )
             connection.commit()
         return accounts
+
+    def _list_accounts_and_wallets(
+        self,
+        *,
+        owner_email: str,
+        is_admin: bool,
+    ) -> tuple[list[UserExchangeAccount], list[UserWalletConnection]]:
+        self._ensure()
+        where, params = self._scope_sql(owner_email, is_admin)
+        with self._connect() as connection:
+            account_rows = connection.execute(
+                "SELECT payload FROM user_exchange_accounts"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+            wallet_rows = connection.execute(
+                "SELECT payload FROM user_wallet_connections"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+            accounts = [
+                UserExchangeAccount.from_dict(json.loads(row["payload"]))
+                for row in account_rows
+            ]
+            accounts = self._disable_stale_accounts_in_connection(
+                connection,
+                accounts,
+            )
+            connection.commit()
+        wallets = [
+            UserWalletConnection.from_dict(json.loads(row["payload"]))
+            for row in wallet_rows
+        ]
+        return accounts, wallets
+
+    def list_wallets(
+        self,
+        *,
+        owner_email: str,
+        is_admin: bool,
+    ) -> list[UserWalletConnection]:
+        self._ensure()
+        where, params = self._scope_sql(owner_email, is_admin)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM user_wallet_connections"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+        return [
+            UserWalletConnection.from_dict(json.loads(row["payload"])) for row in rows
+        ]
+
+    def get_wallet(self, wallet_id: str) -> UserWalletConnection | None:
+        self._ensure()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_wallet_connections WHERE id = ?",
+                (str(wallet_id or "").strip(),),
+            ).fetchone()
+        return (
+            UserWalletConnection.from_dict(json.loads(row["payload"])) if row else None
+        )
+
+    def create_wallet_challenge(
+        self,
+        *,
+        owner_email: str,
+        address: str,
+        chain_id: int,
+        wallet_type: str,
+        domain: str,
+    ) -> dict[str, Any]:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        normalized_address = _normalize_evm_address(address)
+        try:
+            normalized_chain_id = int(chain_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("wallet chain id must be an integer") from exc
+        if normalized_chain_id <= 0:
+            raise ValueError("wallet chain id must be positive")
+        challenge_id = _new_id("wallet-challenge")
+        issued_at = int(_now())
+        expires_at = float(issued_at) + WALLET_CHALLENGE_TTL_SECONDS
+        nonce = secrets.token_urlsafe(24)
+        safe_domain = _clean_text(domain or "crypto-arbitrage", max_length=160)
+        normalized_wallet_type = _clean_text(
+            wallet_type or "injected",
+            max_length=40,
+        )
+        message = "\n".join(
+            (
+                "Crypto Arbitrage Wallet Authorization",
+                "",
+                f"Domain: {safe_domain}",
+                f"Account: {owner}",
+                f"Address: {normalized_address}",
+                f"Chain ID: {normalized_chain_id}",
+                f"Nonce: {nonce}",
+                f"Issued At: {issued_at}",
+                f"Expiration: {int(expires_at)}",
+                "Purpose: Link this wallet for identification and read-only account access.",
+                "This signature does not authorize transactions, token approvals, or withdrawals.",
+            )
+        )
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_wallet_challenges "
+                "WHERE expires_at < ? OR used_at IS NOT NULL",
+                (_now() - WALLET_CHALLENGE_TTL_SECONDS,),
+            )
+            connection.execute(
+                """
+                INSERT INTO user_wallet_challenges(
+                    id, owner_email, address, chain_id, wallet_type,
+                    message, expires_at, used_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    challenge_id,
+                    owner,
+                    normalized_address,
+                    normalized_chain_id,
+                    normalized_wallet_type,
+                    message,
+                    expires_at,
+                ),
+            )
+            connection.commit()
+        return {
+            "challenge_id": challenge_id,
+            "message": message,
+            "address": normalized_address,
+            "chain_id": normalized_chain_id,
+            "expires_at": expires_at,
+        }
+
+    def verify_wallet_challenge(
+        self,
+        *,
+        owner_email: str,
+        challenge_id: str,
+        signature: str,
+        label: str = "",
+    ) -> UserWalletConnection:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        challenge_key = str(challenge_id or "").strip()
+        signature_text = str(signature or "").strip()
+        if not challenge_key or not signature_text:
+            raise ValueError("wallet challenge and signature are required")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM user_wallet_challenges WHERE id = ?",
+                (challenge_key,),
+            ).fetchone()
+            if row is None or str(row["owner_email"]) != owner:
+                raise ValueError("wallet challenge is invalid")
+            if row["used_at"] is not None:
+                raise ValueError("wallet challenge has already been used")
+            if float(row["expires_at"]) < now:
+                raise ValueError("wallet challenge has expired")
+            try:
+                recovered = Account.recover_message(
+                    encode_defunct(text=str(row["message"])),
+                    signature=signature_text,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("wallet signature is invalid") from exc
+            expected = _normalize_evm_address(row["address"])
+            if _normalize_evm_address(recovered) != expected:
+                raise ValueError("wallet signature does not match the selected address")
+            existing = connection.execute(
+                "SELECT payload FROM user_wallet_connections "
+                "WHERE owner_email = ? AND address = ?",
+                (owner, expected),
+            ).fetchone()
+            existing_wallet = (
+                UserWalletConnection.from_dict(json.loads(existing["payload"]))
+                if existing
+                else None
+            )
+            wallet = UserWalletConnection(
+                id=(existing_wallet.id if existing_wallet else _new_id("wallet")),
+                owner_email=owner,
+                address=expected,
+                chain_id=int(row["chain_id"]),
+                wallet_type=str(row["wallet_type"]),
+                label=_clean_text(
+                    label or (existing_wallet.label if existing_wallet else "EVM Wallet"),
+                    max_length=80,
+                ),
+                verified_at=(
+                    existing_wallet.verified_at if existing_wallet else now
+                ),
+                last_seen_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO user_wallet_connections(
+                    id, owner_email, address, chain_id, updated_at, payload
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_email, address) DO UPDATE SET
+                    chain_id = excluded.chain_id,
+                    updated_at = excluded.updated_at,
+                    payload = excluded.payload
+                """,
+                (
+                    wallet.id,
+                    wallet.owner_email,
+                    wallet.address,
+                    wallet.chain_id,
+                    wallet.last_seen_at,
+                    self._dump(wallet.to_dict()),
+                ),
+            )
+            connection.execute(
+                "UPDATE user_wallet_challenges SET used_at = ? WHERE id = ?",
+                (now, challenge_key),
+            )
+            connection.commit()
+        return wallet
+
+    def delete_wallet(self, wallet_id: str, *, owner_email: str) -> None:
+        self._ensure()
+        wallet = self.get_wallet(wallet_id)
+        if wallet is None:
+            raise ValueError(f"wallet not found: {wallet_id}")
+        if wallet.owner_email != _clean_email(owner_email):
+            raise PermissionError("wallet belongs to another user")
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM user_wallet_connections WHERE id = ?",
+                (wallet.id,),
+            )
+            connection.commit()
 
     def list_strategies(
         self,
@@ -981,10 +1406,13 @@ class UserWorkspaceStore:
             existing is not None and existing.exchange != account.exchange
         )
         if exchange_changed:
-            required = set(EXCHANGES_BY_ID[account.exchange]["required_credentials"])
+            required = required_credentials_for_exchange(account.exchange)
             missing = sorted(required.difference(supplied))
             if missing:
-                raise ValueError("re-enter API key and secret when changing exchange")
+                raise ValueError(
+                    "re-enter API key / required credentials when changing exchange: "
+                    + ", ".join(missing)
+                )
             replace_credentials = True
         connection_changed = bool(
             existing is None
@@ -1037,9 +1465,7 @@ class UserWorkspaceStore:
                         ciphertext=existing_credential["ciphertext"],
                     )
                 merged_credentials.update(supplied)
-                required = set(
-                    EXCHANGES_BY_ID[account.exchange]["required_credentials"]
-                )
+                required = required_credentials_for_exchange(account.exchange)
                 missing = sorted(required.difference(merged_credentials))
                 if missing:
                     raise ValueError(
@@ -1081,9 +1507,7 @@ class UserWorkspaceStore:
                     raise ValueError("confirm that the API key has trading permission")
                 if not self.cipher.available:
                     raise RuntimeError("credential encryption is not configured")
-                required = set(
-                    EXCHANGES_BY_ID[updated.exchange]["required_credentials"]
-                )
+                required = required_credentials_for_exchange(updated.exchange)
                 missing = sorted(required.difference(configured_fields))
                 if missing:
                     raise ValueError(
@@ -1783,6 +2207,8 @@ class UserWorkspaceStore:
         removed: dict[str, int] = {}
         with self._connect() as connection:
             for table in (
+                "user_wallet_challenges",
+                "user_wallet_connections",
                 "user_api_credentials",
                 "user_strategies",
                 "user_exchange_accounts",
@@ -1815,6 +2241,28 @@ class UserWorkspaceStore:
             )
             moved["user_api_credentials_deleted"] = dropped.rowcount
             connection.execute(
+                "DELETE FROM user_wallet_challenges WHERE owner_email = ?",
+                (old,),
+            )
+            wallet_rows = connection.execute(
+                "SELECT id, payload FROM user_wallet_connections WHERE owner_email = ?",
+                (old,),
+            ).fetchall()
+            for row in wallet_rows:
+                wallet = UserWalletConnection.from_dict(json.loads(row["payload"]))
+                updated_wallet = replace(wallet, owner_email=new, last_seen_at=_now())
+                connection.execute(
+                    "UPDATE user_wallet_connections "
+                    "SET owner_email = ?, updated_at = ?, payload = ? WHERE id = ?",
+                    (
+                        new,
+                        updated_wallet.last_seen_at,
+                        self._dump(updated_wallet.to_dict()),
+                        updated_wallet.id,
+                    ),
+                )
+            moved["user_wallet_connections"] = len(wallet_rows)
+            connection.execute(
                 "UPDATE user_exchange_accounts SET owner_email = ? "
                 "WHERE owner_email = ?",
                 (new, old),
@@ -1829,7 +2277,10 @@ class UserWorkspaceStore:
 
     def public_payload(self, *, owner_email: str, is_admin: bool) -> dict[str, Any]:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
-        accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)
+        accounts, wallets = self._list_accounts_and_wallets(
+            owner_email=owner_email,
+            is_admin=is_admin,
+        )
         strategies = self.list_strategies(owner_email=owner_email, is_admin=is_admin)
         now = _now()
         risk_profile = self.risk_profile(owner_email)
@@ -1921,8 +2372,10 @@ class UserWorkspaceStore:
             "risk_profile": risk_profile.to_dict(),
             "projects": project_rows,
             "accounts": account_rows,
+            "wallets": [wallet.to_dict() for wallet in wallets],
             "strategies": strategy_rows,
             "exchange_catalog": exchange_catalog(),
+            "dex_venue_catalog": dex_venue_catalog(),
             "strategy_catalog": user_strategy_catalog(),
             "vault_available": self.cipher.available,
             "summary": {
@@ -1953,6 +2406,7 @@ class UserWorkspaceStore:
                     }
                 ),
                 "account_count": len(account_rows),
+                "wallet_count": len(wallets),
                 "configured_account_count": sum(
                     1 for row in account_rows if row["credentials"]["configured"]
                 ),

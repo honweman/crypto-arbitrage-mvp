@@ -126,10 +126,20 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             api_variant="default",
             runtime_key="account-3",
         )
+        hyperliquid_testnet = workspace_exchange_config(
+            exchange="hyperliquid",
+            market_type="swap",
+            api_variant="testnet",
+            runtime_key="account-4",
+        )
 
         self.assertEqual(upbit.options["hostname"], "id-api.upbit.com")
         self.assertEqual(bithumb.options["private_api"], "v2.0")
         self.assertEqual(binance.id, "binanceusdm")
+        self.assertEqual(
+            hyperliquid_testnet.options["hostname"],
+            "hyperliquid-testnet.xyz",
+        )
 
     async def test_discovers_only_active_asset_markets_for_requested_type(self) -> None:
         rows = await discover_workspace_markets(

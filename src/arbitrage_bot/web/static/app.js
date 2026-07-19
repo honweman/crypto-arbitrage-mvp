@@ -3500,6 +3500,211 @@ function balanceStatusClass(status) {
       ) || null;
     }
 
+    function walletProviderType(provider, fallback = "injected") {
+      if (provider?.isMetaMask) return "metamask";
+      if (provider?.isImToken) return "imtoken";
+      if (provider?.isCoinbaseWallet) return "coinbase_wallet";
+      if (provider?.isRabby) return "rabby";
+      if (provider?.isTrust || provider?.isTrustWallet) return "trust_wallet";
+      return fallback;
+    }
+
+    function registerWalletProvider(provider, info = {}) {
+      if (!provider || typeof provider.request !== "function") return;
+      if ([...discoveredWalletProviders.values()].some((row) => row.provider === provider)) return;
+      const providerType = walletProviderType(provider, info.name || "injected");
+      const key = String(info.uuid || `${providerType}:${info.rdns || info.name || discoveredWalletProviders.size}`);
+      discoveredWalletProviders.set(key, {
+        key,
+        provider,
+        type: providerType,
+        name: String(info.name || providerType.replaceAll("_", " ") || "Browser Wallet"),
+      });
+      renderWalletProviderOptions();
+    }
+
+    function renderWalletProviderOptions() {
+      const rows = [...discoveredWalletProviders.values()].map((row) => ({
+        value: row.key,
+        label: row.name,
+      }));
+      const selected = document.getElementById("wallet-provider-select")?.value || rows[0]?.value || "";
+      setSelectOptions(
+        "wallet-provider-select",
+        rows,
+        selected,
+        rows.length ? "Select wallet" : "Open in a wallet browser",
+      );
+      const connectButton = document.getElementById("wallet-connect");
+      const workspaceUnavailable = ["user_account_required", "error"].includes(
+        currentUserWorkspace?.status,
+      );
+      if (connectButton) connectButton.disabled = rows.length === 0 || workspaceUnavailable;
+    }
+
+    function walletNetworkLabel(chainId) {
+      const labels = {
+        1: "Ethereum",
+        10: "Optimism",
+        56: "BNB Chain",
+        137: "Polygon",
+        8453: "Base",
+        42161: "Arbitrum",
+      };
+      return labels[Number(chainId)] || `EVM ${chainId}`;
+    }
+
+    function renderWalletConnections(workspace) {
+      renderWalletProviderOptions();
+      const wallets = workspace?.wallets || [];
+      const venues = workspace?.dex_venue_catalog || [];
+      setSelectOptions(
+        "wallet-link-select",
+        wallets.map((wallet) => ({
+          value: wallet.id,
+          label: `${wallet.label || "Wallet"} · ${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`,
+        })),
+        document.getElementById("wallet-link-select")?.value || wallets[0]?.id || "",
+        "No verified wallet",
+      );
+      setSelectOptions(
+        "wallet-venue-select",
+        venues.map((venue) => ({
+          value: venue.id,
+          label: `${venue.label} · ${(venue.market_types || []).join(" / ")}`,
+          title: `Automation authorization: ${venue.automation_auth || "separate key"}`,
+        })),
+        document.getElementById("wallet-venue-select")?.value || venues[0]?.id || "",
+        "Select venue",
+      );
+      const testButton = document.getElementById("wallet-venue-test");
+      const selectedVenue = document.getElementById("wallet-venue-select")?.value || "";
+      if (testButton) {
+        testButton.disabled = ["user_account_required", "error"].includes(workspace?.status)
+          || !selectedVenue
+          || (!wallets.length && selectedVenue !== "dydx");
+      }
+
+      const body = document.getElementById("wallet-connections");
+      if (!body) return;
+      body.replaceChildren();
+      if (!wallets.length) {
+        const row = document.createElement("tr");
+        row.innerHTML = `<td colspan="4">${escapeHtml(uiText("No verified wallets yet."))}</td>`;
+        body.appendChild(row);
+        return;
+      }
+      for (const wallet of wallets) {
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td title="${escapeHtml(wallet.address)}">${escapeHtml(wallet.label || "Wallet")}<br><span class="subtle">${escapeHtml(`${wallet.address.slice(0, 8)}…${wallet.address.slice(-6)}`)}</span></td>
+          <td>${escapeHtml(walletNetworkLabel(wallet.chain_id))}<br><span class="subtle">${escapeHtml(wallet.wallet_type || "injected")}</span></td>
+          <td class="ok">${escapeHtml(uiText("Read-only verified"))}<br><span class="subtle">${escapeHtml((wallet.permissions || []).join(" · "))}</span></td>
+          <td><div class="workspace-table-actions"></div></td>
+        `;
+        const revokeButton = document.createElement("button");
+        revokeButton.type = "button";
+        revokeButton.className = "danger-button";
+        revokeButton.textContent = uiText("Revoke");
+        revokeButton.addEventListener("click", () => revokeWalletConnection(wallet, revokeButton));
+        row.querySelector(".workspace-table-actions").appendChild(revokeButton);
+        body.appendChild(row);
+      }
+    }
+
+    async function connectAndVerifyWallet() {
+      const providerKey = document.getElementById("wallet-provider-select")?.value || "";
+      const providerRow = discoveredWalletProviders.get(providerKey);
+      if (!providerRow) {
+        text("wallet-connection-status", uiText("Open this page in a supported wallet browser."));
+        return;
+      }
+      const button = document.getElementById("wallet-connect");
+      button.disabled = true;
+      text("wallet-connection-status", uiText("Waiting for wallet approval…"));
+      try {
+        const accounts = await providerRow.provider.request({ method: "eth_requestAccounts" });
+        const address = String(accounts?.[0] || "");
+        if (!address) throw new Error("wallet did not return an account");
+        const chainValue = await providerRow.provider.request({ method: "eth_chainId" });
+        const chainId = Number.parseInt(String(chainValue), String(chainValue).startsWith("0x") ? 16 : 10);
+        const challengeResult = await postUserWorkspace({
+          action: "wallet_challenge",
+          address,
+          chain_id: chainId,
+          wallet_type: providerRow.type,
+        });
+        const challenge = challengeResult.wallet_challenge || {};
+        let signature;
+        try {
+          signature = await providerRow.provider.request({
+            method: "personal_sign",
+            params: [challenge.message, address],
+          });
+        } catch (error) {
+          if (Number(error?.code) !== -32602) throw error;
+          signature = await providerRow.provider.request({
+            method: "personal_sign",
+            params: [address, challenge.message],
+          });
+        }
+        await postUserWorkspace({
+          action: "verify_wallet",
+          challenge_id: challenge.challenge_id,
+          signature,
+          label: document.getElementById("wallet-label")?.value.trim() || providerRow.name,
+        });
+        text("wallet-connection-status", uiText("Wallet verified for read-only access."));
+      } catch (error) {
+        text("wallet-connection-status", `wallet connection failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function revokeWalletConnection(wallet, button) {
+      if (!dangerConfirm("Revoke this wallet connection?")) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({ action: "delete_wallet", wallet_id: wallet.id });
+        text("wallet-connection-status", uiText("Wallet connection revoked."));
+      } catch (error) {
+        text("wallet-connection-status", `wallet revoke failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function testWalletVenue() {
+      const button = document.getElementById("wallet-venue-test");
+      const venue = document.getElementById("wallet-venue-select")?.value || "";
+      const walletId = document.getElementById("wallet-link-select")?.value || "";
+      button.disabled = true;
+      text("wallet-connection-status", `${uiText("Testing read-only access")} · ${venue}`);
+      try {
+        const result = await postUserWorkspace({
+          action: "test_wallet_venue",
+          venue,
+          wallet_id: walletId,
+        });
+        const check = result.venue_check || {};
+        if (check.status !== "healthy") throw new Error(check.error || "venue check failed");
+        text(
+          "wallet-connection-status",
+          `${venue} · ${uiText("Read-only access healthy")} · ${Number(check.latency_ms || 0).toFixed(0)}ms`,
+        );
+      } catch (error) {
+        text("wallet-connection-status", `${venue} check failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function openCurrentPageInImToken() {
+      const target = encodeURIComponent(window.location.href);
+      window.location.href = `imtokenv2://navigate?screen=DappView&url=${target}`;
+    }
+
     function focusWorkspaceControl(id) {
       const control = document.getElementById(id);
       if (!control) return;
@@ -3944,6 +4149,14 @@ function balanceStatusClass(status) {
       );
 
       const needsPassphrase = (exchange?.required_credentials || []).includes("passphrase");
+      text(
+        "user-exchange-api-key-label",
+        exchange?.credential_labels?.api_key || "API Key",
+      );
+      text(
+        "user-exchange-secret-label",
+        exchange?.credential_labels?.secret || "API Secret / Private Key",
+      );
       const passphraseField = document.getElementById("user-exchange-passphrase-field");
       if (passphraseField) passphraseField.hidden = !needsPassphrase;
 
@@ -4192,13 +4405,14 @@ function balanceStatusClass(status) {
       text("user-workspace-meta", statusText);
       text("user-workspace-notice", userWorkspaceNoticeText);
       const formsDisabled = workspace?.status === "user_account_required" || workspace?.status === "error";
-      document.querySelectorAll("#user-risk-profile-form input, #user-risk-profile-form button, #user-project-form input, #user-project-form button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button, #user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
+      document.querySelectorAll("#user-risk-profile-form input, #user-risk-profile-form button, #user-project-form input, #user-project-form button, #wallet-connection-panel input, #wallet-connection-panel select, #wallet-connection-panel button, #user-exchange-account-form input, #user-exchange-account-form textarea, #user-exchange-account-form select, #user-exchange-account-form button, #user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
         control.disabled = formsDisabled;
       });
       renderUserSetupReadiness(workspace);
       renderUserRiskProfile(workspace);
       renderUserProjectForm(workspace);
       renderUserProjects(workspace);
+      renderWalletConnections(workspace);
       renderUserExchangeAccountForm(workspace);
       renderUserExchangeAccounts(workspace);
       renderUserStrategies(workspace);
@@ -5512,6 +5726,7 @@ function balanceStatusClass(status) {
     let userSetupReadinessSignature = "";
     let userMarketDiscoveryBusy = false;
     const discoveredUserMarkets = new Map();
+    const discoveredWalletProviders = new Map();
     let userWorkspaceNoticeText = "";
     let userWorkspaceNoticeUntil = 0;
 
@@ -8380,6 +8595,14 @@ function balanceStatusClass(status) {
       setActivePage(pageFromLocation());
     });
 
+    window.addEventListener("eip6963:announceProvider", (event) => {
+      registerWalletProvider(event.detail?.provider, event.detail?.info || {});
+    });
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+    for (const provider of window.ethereum?.providers || [window.ethereum]) {
+      registerWalletProvider(provider, {});
+    }
+
     refresh({ force: true });
     document.getElementById("program-toggle").addEventListener("change", (event) => {
       setProgramRunning(event.target.checked);
@@ -8395,6 +8618,12 @@ function balanceStatusClass(status) {
 	    });
 	    document.getElementById("user-project-form").addEventListener("submit", applyUserProject);
 	    document.getElementById("user-project-new").addEventListener("click", resetUserProjectForm);
+	    document.getElementById("wallet-connect").addEventListener("click", connectAndVerifyWallet);
+	    document.getElementById("wallet-open-imtoken").addEventListener("click", openCurrentPageInImToken);
+	    document.getElementById("wallet-venue-test").addEventListener("click", testWalletVenue);
+	    document.getElementById("wallet-venue-select").addEventListener("change", () => {
+	      renderWalletConnections(currentUserWorkspace);
+	    });
 	    document.getElementById("user-exchange-account-form").addEventListener("input", () => {
 	      userExchangeAccountFormDirty = true;
 	    });

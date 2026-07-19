@@ -39,6 +39,8 @@ def workspace_exchange_config(
         options["private_api"] = "v2.0"
     elif exchange_id == "upbit" and variant == "indonesia":
         options["hostname"] = "id-api.upbit.com"
+    elif exchange_id == "hyperliquid" and variant == "testnet":
+        options["hostname"] = "hyperliquid-testnet.xyz"
 
     ccxt_id = (
         "binanceusdm" if exchange_id == "binance" and market == "swap" else exchange_id

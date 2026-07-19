@@ -510,6 +510,43 @@
         </table>
       </div>
 
+      <div class="form-divider">Wallets &amp; Decentralized Venues</div>
+      <div id="wallet-connection-panel" class="control-panel">
+        <div class="field">
+          <label for="wallet-provider-select">Wallet</label>
+          <select id="wallet-provider-select"></select>
+        </div>
+        <div class="field">
+          <label for="wallet-label">Wallet Name</label>
+          <input id="wallet-label" type="text" maxlength="80" placeholder="Trading Wallet">
+        </div>
+        <button id="wallet-connect" class="control-button" type="button">Connect &amp; Verify</button>
+        <button id="wallet-open-imtoken" class="ghost-button" type="button">Open in imToken</button>
+        <div class="field">
+          <label for="wallet-link-select">Verified Wallet</label>
+          <select id="wallet-link-select"></select>
+        </div>
+        <div class="field">
+          <label for="wallet-venue-select">Venue</label>
+          <select id="wallet-venue-select"></select>
+        </div>
+        <button id="wallet-venue-test" class="ghost-button" type="button">Test Read-only Access</button>
+        <span id="wallet-connection-status" class="subtle wide-field" role="status" aria-live="polite"></span>
+      </div>
+      <div class="table-wrap stacked-table">
+        <table class="mobile-card-table">
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th>Network</th>
+              <th>Authorization</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-connections"></tbody>
+        </table>
+      </div>
+
       <div class="form-divider">Exchange API Account</div>
       <form id="user-exchange-account-form" class="control-panel">
         <input id="user-exchange-account-id" type="hidden">
@@ -539,11 +576,11 @@
         </div>
         <button id="user-exchange-load-markets" class="ghost-button" type="button">Load Pairs</button>
         <div class="field wide-field">
-          <label for="user-exchange-api-key">API Key</label>
+          <label id="user-exchange-api-key-label" for="user-exchange-api-key">API Key</label>
           <textarea id="user-exchange-api-key" rows="2" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
         </div>
         <div class="field wide-field">
-          <label for="user-exchange-secret">API Secret / Private Key</label>
+          <label id="user-exchange-secret-label" for="user-exchange-secret">API Secret / Private Key</label>
           <textarea id="user-exchange-secret" rows="3" autocomplete="new-password" spellcheck="false" placeholder="Leave blank to keep existing"></textarea>
         </div>
         <div class="field" id="user-exchange-passphrase-field">
@@ -2439,8 +2476,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260718-mmrestart1" defer></script>
-  <script src="/static/app.js?v=20260719-fastcontrols1" defer></script>
+  <script src="/static/i18n.js?v=20260719-wallets1" defer></script>
+  <script src="/static/app.js?v=20260719-wallets1" defer></script>
 
 </body>
 </html>
