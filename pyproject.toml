@@ -8,6 +8,7 @@ dependencies = [
   "aiohttp>=3.9.0",
   "ccxt>=4.4.0",
   "cryptography>=44.0.0",
+  "eth-abi>=5.0.0,<6.0.0",
   "eth-account>=0.13.0,<0.14.0"
 ]
 
