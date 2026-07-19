@@ -154,6 +154,54 @@ class ApiWriteRateLimiterTest(unittest.TestCase):
             self.assertEqual(limiter.retry_after("u", now=float(i)), 0.0)
 
 
+class RateLimit429IntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_authenticated_writes_hit_429_past_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "web_users.json"
+            store = WebUserStore(store_path)
+            user = store.create_user(
+                email="u@example.com", password="Strong-pass-9!"
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(store_path),
+                    user_workspace_path=str(Path(tmp) / "ws.sqlite3"),
+                    api_write_rate_limit=5,
+                    api_write_rate_window_seconds=60.0,
+                ),
+            )
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                await client.post(
+                    "/login",
+                    data={
+                        "email": user.email,
+                        "password": "Strong-pass-9!",
+                        "totp": totp_code(user.totp_secret),
+                    },
+                )
+                codes = []
+                for _ in range(8):
+                    response = await client.post(
+                        "/api/profile", json={"preferred_asset": ""}
+                    )
+                    codes.append(response.status)
+
+                self.assertEqual(codes[:5], [200] * 5)
+                self.assertIn(429, codes)
+                throttled = await client.post("/api/profile", json={})
+                self.assertEqual(throttled.status, 429)
+                self.assertTrue(throttled.headers.get("Retry-After"))
+            finally:
+                await client.close()
+
+
 class SelfServiceAccountTest(unittest.IsolatedAsyncioTestCase):
     async def test_delete_account_requires_password_and_purges_workspace(
         self,
