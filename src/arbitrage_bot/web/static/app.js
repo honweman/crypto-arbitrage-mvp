@@ -22,6 +22,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const LIVE_MARKET_MAKER_CONFIRMATION = "ENABLE LIVE MARKET MAKER";
 	    const LIVE_REBALANCE_CONFIRMATION = "ENABLE LIVE REBALANCE";
 	    let refreshTimer = null;
+	    let mutationRefreshTimer = null;
 	    const PAGE_SECTION_IDS = {
 	      status: [
 	        "overview",
@@ -6316,6 +6317,48 @@ function balanceStatusClass(status) {
       return result;
     }
 
+    function applyMarketMakerMutationResult(result) {
+      if (!lastState || !result || typeof result !== "object") return;
+      const current = lastState.market_maker || {};
+      const incoming = result.market_maker || {};
+      const previousById = new Map(
+        marketMakerInstances(current).map((instance) => [instance?.config?.id || "", instance]),
+      );
+      const configs = Array.isArray(result.instances) ? result.instances : [];
+      const instances = configs.map((config) => {
+        const previous = previousById.get(config.id) || {};
+        const starting = Boolean(config.enabled && config.live_enabled);
+        return {
+          ...previous,
+          config,
+          status: starting ? "starting" : "disabled",
+          mode: starting ? "live" : "paused",
+          status_reason: "",
+          error: null,
+          runtime: {
+            ...(previous.runtime || {}),
+            status: starting ? "starting" : "disabled",
+            mode: starting ? "live" : "paused",
+            reason: null,
+            last_error: null,
+            last_risk: null,
+            updated_at: Date.now() / 1000,
+          },
+        };
+      });
+      lastState = {
+        ...lastState,
+        market_maker: {
+          ...current,
+          ...incoming,
+          config: result.config || incoming.config || current.config,
+          instances,
+        },
+        trading_console: result.trading_console || lastState.trading_console,
+      };
+      pageStateCache[currentPage] = lastState;
+    }
+
     function renderMarketMakerConfig(marketMaker) {
       if (!marketMaker || mmFormBusy) return;
       renderMarketMakerInstanceSelect(marketMaker);
@@ -6417,7 +6460,8 @@ function balanceStatusClass(status) {
         selectedDraft.exchange,
         selectedDraft.symbol,
       );
-      await refresh({ force: true });
+      applyMarketMakerMutationResult(result);
+      scheduleMutationRefresh();
     }
 
     async function addMarketMakerInstance() {
@@ -6451,14 +6495,15 @@ function balanceStatusClass(status) {
       updateCoreFormStates();
       try {
         selectedMarketMakerInstanceId = newId;
-        await postMarketMakerConfig({ copy_id: sourceId, new_id: newId });
+        const result = await postMarketMakerConfig({ copy_id: sourceId, new_id: newId });
+        applyMarketMakerMutationResult(result);
         mmFormDirty = false;
         setStrategyFeedback(
           "mm-feedback",
           "Strategy copy created in stopped mode.",
           "ok",
         );
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         selectedMarketMakerInstanceId = sourceId;
         setStrategyFeedback("mm-feedback", error.message || String(error), "error");
@@ -6523,10 +6568,11 @@ function balanceStatusClass(status) {
       updateCoreFormStates();
       renderMarketMakerWorkflow(lastState?.market_maker);
       try {
-        await postMarketMakerConfig(payload);
+        const result = await postMarketMakerConfig(payload);
+        applyMarketMakerMutationResult(result);
         mmFormDirty = false;
         setStrategyFeedback("mm-feedback", "Market Maker settings saved.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         setStrategyFeedback("mm-feedback", error.message || String(error), "error");
       } finally {
@@ -6575,10 +6621,11 @@ function balanceStatusClass(status) {
       updateCoreFormStates();
       renderMarketMakerWorkflow(lastState?.market_maker);
       try {
-        await postMarketMakerConfig(payload);
+        const result = await postMarketMakerConfig(payload);
+        applyMarketMakerMutationResult(result);
         mmFormDirty = false;
         setStrategyFeedback("mm-feedback", "Live Market Maker started.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         document.getElementById("mm-enabled").checked = false;
         document.getElementById("mm-live-enabled").checked = false;
@@ -6608,10 +6655,11 @@ function balanceStatusClass(status) {
       updateCoreFormStates();
       renderMarketMakerWorkflow(lastState?.market_maker);
       try {
-        await postMarketMakerConfig(payload);
+        const result = await postMarketMakerConfig(payload);
+        applyMarketMakerMutationResult(result);
         mmFormDirty = false;
         setStrategyFeedback("mm-feedback", "Market Maker stop requested.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         document.getElementById("mm-enabled").checked = true;
         document.getElementById("mm-live-enabled").checked = true;
@@ -6919,7 +6967,7 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "auto buy/sell update failed");
         slowFormDirty = false;
         setStrategyFeedback("slow-feedback", "Auto Buy/Sell defaults saved.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         setStrategyFeedback("slow-feedback", error.message || String(error), "error");
       } finally {
@@ -7257,7 +7305,7 @@ function balanceStatusClass(status) {
         rebalanceFormDirty = false;
         invalidateLiveRebalanceConfirmation();
         setRebalanceFeedback(successMessage, "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
         return true;
       } catch (error) {
         document.getElementById("rebalance-enabled").checked = Boolean(previousConfig.enabled);
@@ -7346,7 +7394,7 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "rebalance reset failed");
         setRebalanceFeedback("Rebalance progress reset. Review settings before enabling live.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         setRebalanceFeedback(error.message || String(error), "error");
       } finally {
@@ -7386,7 +7434,7 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "exposure acknowledgement failed");
         setRebalanceFeedback("Residual exposure acknowledged. Rebalance remains blocked.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         setRebalanceFeedback(error.message || String(error), "error");
       } finally {
@@ -7423,7 +7471,7 @@ function balanceStatusClass(status) {
         const result = await res.json();
         if (!res.ok) throw new Error(result.error || "stop and release failed");
         setRebalanceFeedback("Rebalance stopped and MM coordination released.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         setRebalanceFeedback(error.message || String(error), "error");
       } finally {
@@ -7845,7 +7893,7 @@ function balanceStatusClass(status) {
         if (!res.ok) throw new Error(result.error || "create task failed");
         slowFormDirty = false;
         setStrategyFeedback("slow-feedback", "Auto Buy/Sell task started.", "ok");
-        await refresh({ force: true });
+        scheduleMutationRefresh();
       } catch (error) {
         setStrategyFeedback("slow-feedback", error.message || String(error), "error");
       } finally {
@@ -8243,6 +8291,14 @@ function balanceStatusClass(status) {
           scheduleNextRefresh();
         }
       }
+    }
+
+    function scheduleMutationRefresh(delayMs = 200) {
+      if (mutationRefreshTimer) window.clearTimeout(mutationRefreshTimer);
+      mutationRefreshTimer = window.setTimeout(() => {
+        mutationRefreshTimer = null;
+        refresh({ force: true });
+      }, Math.max(0, delayMs));
     }
 
     // ---- Server-Sent Events state stream (with polling fallback) ----

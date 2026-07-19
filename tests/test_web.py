@@ -215,7 +215,7 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260718-mmrestart1" defer></script>',
+            '<script src="/static/app.js?v=20260719-fastcontrols1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -269,6 +269,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("data?.strategy_lifecycle?.instances", APP_JS)
         self.assertIn("function startMarketMaker", APP_JS)
         self.assertIn("function stopCrossExchangeRebalance", APP_JS)
+        self.assertIn("function applyMarketMakerMutationResult", APP_JS)
+        self.assertIn("function scheduleMutationRefresh", APP_JS)
         self.assertIn("LIVE_AUTO_BUY_SELL_CONFIRMATION", APP_JS)
         self.assertIn("LIVE_MARKET_MAKER_CONFIRMATION", APP_JS)
         self.assertIn(".strategy-internal-state[hidden]", STYLES_CSS)
@@ -6712,6 +6714,62 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["config"]["quote_per_level"], 2.0)
         strategies = {row["id"]: row for row in update["trading_console"]["strategies"]}
         self.assertTrue(strategies["market_maker"]["live"])
+
+    async def test_control_updates_do_not_reload_operations_logs(self) -> None:
+        cfg = make_config(
+            market_maker=MarketMakerConfig(
+                enabled=True,
+                live_enabled=False,
+                exchange="bybit-spot",
+                symbol="ACS/USDT",
+            ),
+            spot_exchanges=[ExchangeConfig(id="bybit", label="bybit-spot")],
+            risk=RiskConfig(
+                allow_live_trading=True,
+                allow_market_maker=True,
+                max_order_quote=2.0,
+            ),
+        )
+        state = MonitorState(cfg, 1.0)
+
+        with patch(
+            "arbitrage_bot.web.state.build_operations_payload",
+            side_effect=AssertionError("control update reloaded operations logs"),
+        ):
+            mm_update = await state.set_market_maker_overrides(
+                {"levels": 4},
+                cfg=cfg,
+            )
+            risk_update = await state.set_risk_overrides(
+                {"max_order_quote": 7.0},
+                cfg=cfg,
+            )
+
+        self.assertEqual(mm_update["config"]["levels"], 4)
+        self.assertEqual(risk_update["operations"]["risk"]["max_order_quote"], 7.0)
+
+    async def test_strategy_preflight_payload_is_compact(self) -> None:
+        cfg = make_config()
+        state = MonitorState(cfg, 1.0)
+        state._payload.update(
+            {
+                "quote_rates": {"USD": 1.0},
+                "markets": [{"exchange": "coinbase-spot"}],
+                "account_balances": {"accounts": []},
+                "order_activity": {"open_orders": []},
+                "market_maker": {"runtime": {"instances": []}},
+                "slow_execution": {"tasks": {"tasks": []}},
+                "operations": {"strategy_timeline": ["large-history"]},
+                "onchain": {"holders": ["large-history"]},
+            }
+        )
+
+        payload = await state.strategy_preflight_payload()
+
+        self.assertEqual(payload["quote_rates"], {"USD": 1.0})
+        self.assertIn("market_maker", payload)
+        self.assertNotIn("operations", payload)
+        self.assertNotIn("onchain", payload)
 
     async def test_market_maker_instances_persist_across_state_restart(self) -> None:
         cfg = make_config(

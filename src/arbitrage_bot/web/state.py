@@ -579,7 +579,7 @@ class MonitorState:
                 ),
                 spot_markets=runtime_cfg.spot_markets,
             )
-        self._payload["operations"] = build_operations_payload(runtime_cfg)
+        self._refresh_operations_controls_unlocked(runtime_cfg)
         self._payload["trading_console"] = build_trading_console_payload(
             runtime_cfg,
             strategy_paused=self._strategy_paused,
@@ -587,6 +587,14 @@ class MonitorState:
             auto_buy_sell_tasks=self._auto_buy_sell_tasks,
         )
         self._refresh_strategy_lifecycle_unlocked(runtime_cfg)
+
+    def _refresh_operations_controls_unlocked(self, runtime_cfg: BotConfig) -> None:
+        """Update control-plane fields without rereading large append-only logs."""
+        operations = self._payload.get("operations")
+        if not isinstance(operations, dict):
+            operations = {}
+            self._payload["operations"] = operations
+        operations["risk"] = risk_config_to_dict(runtime_cfg.risk)
 
     async def config_versions(self, *, limit: int = 30) -> dict[str, Any]:
         async with self._lock:
@@ -891,6 +899,19 @@ class MonitorState:
         async with self._lock:
             return json.loads(json.dumps(self._payload.get("portfolio", {})))
 
+    async def strategy_preflight_payload(self) -> dict[str, Any]:
+        """Return only the live state needed by strategy safety checks."""
+        async with self._lock:
+            payload = {
+                "quote_rates": self._payload.get("quote_rates", {}),
+                "markets": self._payload.get("markets", []),
+                "account_balances": self._payload.get("account_balances", {}),
+                "order_activity": self._payload.get("order_activity", {}),
+                "market_maker": self._payload.get("market_maker", {}),
+                "slow_execution": self._payload.get("slow_execution", {}),
+            }
+            return json.loads(json.dumps(payload))
+
     async def quote_rates(self) -> dict[str, float]:
         async with self._lock:
             raw = self._payload.get("quote_rates", self._base_cfg.quote_rates)
@@ -1033,7 +1054,7 @@ class MonitorState:
             self._payload["config"]["strategy_universe"] = strategy_universe_to_dict(
                 runtime_cfg
             )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1088,7 +1109,7 @@ class MonitorState:
             self._payload["config"]["strategy_universe"] = strategy_universe_to_dict(
                 runtime_cfg
             )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1133,7 +1154,7 @@ class MonitorState:
                     _rebalance_symbols_by_exchange(runtime_cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1179,7 +1200,7 @@ class MonitorState:
                     _grid_symbols_by_exchange(runtime_cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1220,7 +1241,7 @@ class MonitorState:
                     _grid_symbols_by_exchange(runtime_cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1261,7 +1282,7 @@ class MonitorState:
                     _execution_symbols_by_exchange(runtime_cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1304,7 +1325,7 @@ class MonitorState:
                     _execution_symbols_by_exchange(runtime_cfg),
                     spot_markets=runtime_cfg.spot_markets,
                 )
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,
@@ -1522,7 +1543,7 @@ class MonitorState:
                     overrides[field] = merged
             self._risk_overrides.update(overrides)
             runtime_cfg = self._runtime_config_unlocked(cfg)
-            self._payload["operations"] = build_operations_payload(runtime_cfg)
+            self._refresh_operations_controls_unlocked(runtime_cfg)
             self._payload["trading_console"] = build_trading_console_payload(
                 runtime_cfg,
                 strategy_paused=self._strategy_paused,

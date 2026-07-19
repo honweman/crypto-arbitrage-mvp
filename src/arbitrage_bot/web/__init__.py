@@ -5593,7 +5593,7 @@ async def api_strategy_preflight(request: web.Request) -> web.Response:
         )
         _require_user_assets(user, assets)
         runtime_cfg = await state.runtime_config(cfg)
-        state_payload = await state.get()
+        state_payload = await state.strategy_preflight_payload()
         result = build_strategy_preflight(
             runtime_cfg,
             strategy_id=strategy_id,
