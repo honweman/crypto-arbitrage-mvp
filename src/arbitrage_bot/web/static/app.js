@@ -3571,6 +3571,11 @@ function balanceStatusClass(status) {
         const wallet = walletById.get(link.wallet_id);
         const venue = venueById.get(link.venue);
         const healthy = link.status === "healthy";
+        const stale = Boolean(link.stale);
+        const statusClass = stale ? "warn" : healthy ? "ok" : "bad";
+        const statusLabel = stale
+          ? uiText("Check overdue")
+          : uiText(healthy ? "Read-only verified" : "Connection error");
         const detail = link.detail || {};
         const detailParts = [];
         if (detail.position_count != null) detailParts.push(`${uiText("Positions")} ${detail.position_count}`);
@@ -3579,16 +3584,21 @@ function balanceStatusClass(status) {
         row.innerHTML = `
           <td>${escapeHtml(venue?.label || link.venue || "--")}</td>
           <td title="${escapeHtml(link.wallet_address || "")}">${escapeHtml(wallet?.label || uiText("Public read-only"))}<br><span class="subtle">${escapeHtml(link.wallet_address ? `${link.wallet_address.slice(0, 8)}…${link.wallet_address.slice(-6)}` : "--")}</span></td>
-          <td class="${healthy ? "ok" : "bad"}" title="${escapeHtml(link.error || "")}">${escapeHtml(uiText(healthy ? "Read-only verified" : "Connection error"))}<br><span class="subtle">${escapeHtml(healthy ? uiText("Automation disabled") : link.error || "--")}${detailParts.length ? ` · ${escapeHtml(detailParts.join(" · "))}` : ""}</span></td>
-          <td>${escapeHtml(formatAge(link.checked_at))}<br><span class="subtle">${Number(link.latency_ms || 0).toFixed(0)}ms</span></td>
+          <td class="${statusClass}" title="${escapeHtml(link.error || "")}">${escapeHtml(statusLabel)}<br><span class="subtle">${escapeHtml(stale ? uiText("Automatic recheck pending") : healthy ? uiText("Automation disabled") : link.error || "--")}${detailParts.length ? ` · ${escapeHtml(detailParts.join(" · "))}` : ""}</span></td>
+          <td>${escapeHtml(formatAge(link.checked_at))}<br><span class="subtle">${Number(link.latency_ms || 0).toFixed(0)}ms · ${escapeHtml(uiText("Auto-check enabled"))}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
+        const refreshButton = document.createElement("button");
+        refreshButton.type = "button";
+        refreshButton.className = "ghost-button";
+        refreshButton.textContent = uiText("Refresh");
+        refreshButton.addEventListener("click", () => refreshVenueConnection(link, refreshButton));
         const revokeButton = document.createElement("button");
         revokeButton.type = "button";
         revokeButton.className = "danger-button";
         revokeButton.textContent = uiText("Revoke");
         revokeButton.addEventListener("click", () => revokeVenueConnection(link, revokeButton));
-        row.querySelector(".workspace-table-actions").appendChild(revokeButton);
+        row.querySelector(".workspace-table-actions").append(refreshButton, revokeButton);
         body.appendChild(row);
       }
     }
@@ -3623,6 +3633,11 @@ function balanceStatusClass(status) {
         testButton.disabled = ["user_account_required", "error"].includes(workspace?.status)
           || !selectedVenue
           || (!wallets.length && selectedVenue !== "dydx");
+      }
+      const refreshAllButton = document.getElementById("wallet-venue-refresh-all");
+      if (refreshAllButton) {
+        refreshAllButton.disabled = ["user_account_required", "error"].includes(workspace?.status)
+          || !(workspace?.venue_connections || []).length;
       }
 
       const body = document.getElementById("wallet-connections");
@@ -3751,6 +3766,49 @@ function balanceStatusClass(status) {
         text("wallet-connection-status", uiText("Venue connection revoked."));
       } catch (error) {
         text("wallet-connection-status", `venue revoke failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function refreshVenueConnection(link, button) {
+      button.disabled = true;
+      text("wallet-connection-status", `${uiText("Refreshing connection")} · ${link.venue}`);
+      try {
+        const result = await postUserWorkspace({
+          action: "refresh_venue_connection",
+          connection_id: link.id,
+        });
+        const refresh = result.venue_refresh || {};
+        const healthy = Number(refresh.healthy_count || 0);
+        text(
+          "wallet-connection-status",
+          healthy
+            ? `${link.venue} · ${uiText("Read-only access healthy")}`
+            : `${link.venue} · ${uiText("Connection error")}`,
+        );
+      } catch (error) {
+        text("wallet-connection-status", `venue refresh failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function refreshAllVenueConnections() {
+      const button = document.getElementById("wallet-venue-refresh-all");
+      button.disabled = true;
+      text("wallet-connection-status", uiText("Refreshing all connections…"));
+      try {
+        const result = await postUserWorkspace({
+          action: "refresh_all_venue_connections",
+        });
+        const refresh = result.venue_refresh || {};
+        text(
+          "wallet-connection-status",
+          `${uiText("Connections refreshed")} · ${Number(refresh.healthy_count || 0)} ${uiText("healthy")} · ${Number(refresh.error_count || 0)} ${uiText("errors")}`,
+        );
+      } catch (error) {
+        text("wallet-connection-status", `venue refresh failed: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }
@@ -8677,6 +8735,7 @@ function balanceStatusClass(status) {
 	    document.getElementById("wallet-connect").addEventListener("click", connectAndVerifyWallet);
 	    document.getElementById("wallet-open-imtoken").addEventListener("click", openCurrentPageInImToken);
 	    document.getElementById("wallet-venue-test").addEventListener("click", testWalletVenue);
+	    document.getElementById("wallet-venue-refresh-all").addEventListener("click", refreshAllVenueConnections);
 	    document.getElementById("wallet-venue-select").addEventListener("change", () => {
 	      renderWalletConnections(currentUserWorkspace);
 	    });

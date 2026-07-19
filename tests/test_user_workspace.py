@@ -148,6 +148,42 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 ),
                 [],
             )
+            self.assertIsNone(
+                restarted.record_venue_connection_check(
+                    link.id,
+                    {"status": "healthy", "checked_at": time.time()},
+                )
+            )
+
+    def test_venue_connection_staleness_is_computed_when_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env=None,
+            )
+            store.upsert_venue_connection(
+                owner_email="trader@example.com",
+                venue="dydx",
+                wallet=None,
+                check={
+                    "status": "healthy",
+                    "checked_at": time.time() - 601.0,
+                    "latency_ms": 8.0,
+                    "detail": {"market_count": 200},
+                },
+            )
+
+            payload = store.public_payload(
+                owner_email="trader@example.com",
+                is_admin=False,
+            )
+            link = payload["venue_connections"][0]
+
+            self.assertTrue(link["stale"])
+            self.assertFalse(link["read_only_verified"])
+            self.assertEqual(payload["summary"]["healthy_venue_connection_count"], 0)
+            self.assertEqual(payload["summary"]["stale_venue_connection_count"], 1)
+            self.assertEqual(payload["summary"]["error_venue_connection_count"], 0)
 
     def test_decentralized_exchange_credentials_are_validated(self) -> None:
         signer = Account.create()

@@ -231,6 +231,10 @@ from ..strategy_timeline import (
     summarize_strategy_timeline_entries,
     write_strategy_timeline_from_payload,
 )
+from ..venue_health import (
+    refresh_venue_connections,
+    venue_connection_health_loop,
+)
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..trade_log import (
     read_recent_trade_entries,
@@ -2828,6 +2832,8 @@ def build_user_workspace_payload(
                 "wallet_count": 0,
                 "venue_connection_count": 0,
                 "healthy_venue_connection_count": 0,
+                "stale_venue_connection_count": 0,
+                "error_venue_connection_count": 0,
                 "configured_account_count": 0,
                 "ready_account_count": 0,
                 "strategy_count": 0,
@@ -2925,6 +2931,8 @@ def build_user_workspace_payload(
                 "wallet_count": 0,
                 "venue_connection_count": 0,
                 "healthy_venue_connection_count": 0,
+                "stale_venue_connection_count": 0,
+                "error_venue_connection_count": 0,
                 "configured_account_count": 0,
                 "ready_account_count": 0,
                 "strategy_count": 0,
@@ -6397,6 +6405,52 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 "venue_check": venue_check,
                 "venue_connection": venue_connection.to_dict(),
             }
+        elif action == "refresh_venue_connection":
+            connection_id = str(
+                payload.get("connection_id") or payload.get("id") or ""
+            ).strip()
+            venue_connection = store.get_venue_connection(connection_id)
+            if venue_connection is None:
+                raise ValueError(f"venue connection not found: {connection_id}")
+            _require_workspace_owner(user, venue_connection.owner_email)
+            refresh_result = await refresh_venue_connections(
+                store,
+                [venue_connection],
+                force=True,
+                max_batch=1,
+            )
+            if not refresh_result["connections"]:
+                raise ValueError("venue connection was revoked during refresh")
+            refreshed_connection = refresh_result["connections"][0]
+            audit_target = venue_connection.id
+            audit_detail = "refreshed read-only venue connection"
+            audit_payload = {
+                "connection_id": venue_connection.id,
+                "venue": venue_connection.venue,
+                "status": refreshed_connection["status"],
+                "live_trading_authorized": False,
+            }
+            response_extra = {"venue_refresh": refresh_result}
+        elif action == "refresh_all_venue_connections":
+            venue_connections = store.list_venue_connections(
+                owner_email=user.email,
+                is_admin=False,
+            )
+            refresh_result = await refresh_venue_connections(
+                store,
+                venue_connections,
+                force=True,
+            )
+            audit_target = user.email
+            audit_detail = "refreshed all owned read-only venue connections"
+            audit_payload = {
+                "candidate_count": refresh_result["candidate_count"],
+                "refreshed_count": refresh_result["refreshed_count"],
+                "healthy_count": refresh_result["healthy_count"],
+                "error_count": refresh_result["error_count"],
+                "live_trading_authorized": False,
+            }
+            response_extra = {"venue_refresh": refresh_result}
         elif action == "delete_venue_connection":
             connection_id = str(
                 payload.get("connection_id") or payload.get("id") or ""
@@ -8180,6 +8234,15 @@ def create_app(
             supervisor.run(),
             name="runtime-supervisor",
         )
+        venue_health_task = asyncio.create_task(
+            venue_connection_health_loop(
+                user_workspace_store,
+                leader_check=lambda: (
+                    supervisor.role == "leader" and supervisor.leader_ready
+                ),
+            ),
+            name="venue-connection-health",
+        )
         backup_task: asyncio.Task[Any] | None = None
         if cfg.backup.enabled:
             backup_task = asyncio.create_task(
@@ -8193,12 +8256,14 @@ def create_app(
             for guard_task in list(guard_tasks):
                 guard_task.cancel()
             supervisor_task.cancel()
+            venue_health_task.cancel()
             if backup_task is not None:
                 backup_task.cancel()
             if guard_tasks:
                 await asyncio.gather(*guard_tasks, return_exceptions=True)
             with contextlib.suppress(asyncio.CancelledError):
                 await supervisor_task
+            await asyncio.gather(venue_health_task, return_exceptions=True)
             if backup_task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await backup_task

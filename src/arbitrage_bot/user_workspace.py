@@ -30,6 +30,9 @@ PROJECT_STATUSES = {"pending", "active", "disabled"}
 MARKET_TYPES = {"spot", "swap", "future"}
 CONNECTION_STATUSES = {"unverified", "healthy", "error"}
 VENUE_CONNECTION_STATUSES = {"healthy", "error"}
+VENUE_HEALTHY_REFRESH_SECONDS = 300.0
+VENUE_ERROR_RETRY_SECONDS = 60.0
+VENUE_CONNECTION_STALE_SECONDS = 600.0
 CONNECTION_MAX_AGE_SECONDS = 86_400.0
 CREDENTIAL_ROTATION_SECONDS = 90 * 86_400.0
 WALLET_CHALLENGE_TTL_SECONDS = 300.0
@@ -268,6 +271,23 @@ def dex_venue_catalog() -> list[dict[str, Any]]:
     return [dict(row) for row in DEX_VENUE_CATALOG]
 
 
+def _safe_venue_detail(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "market_count",
+        "account_value",
+        "position_count",
+        "server_time",
+        "balance_available",
+    }
+    return {
+        key: item
+        for key, item in value.items()
+        if key in allowed and isinstance(item, (str, int, float, bool, type(None)))
+    }
+
+
 def _normalize_evm_address(value: Any) -> str:
     address = str(value or "").strip()
     if not is_address(address):
@@ -370,6 +390,14 @@ class UserVenueConnection:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        now = _now()
+        age_seconds = max(0.0, now - self.checked_at)
+        refresh_seconds = (
+            VENUE_HEALTHY_REFRESH_SECONDS
+            if self.status == "healthy"
+            else VENUE_ERROR_RETRY_SECONDS
+        )
+        stale = age_seconds > VENUE_CONNECTION_STALE_SECONDS
         return {
             "id": self.id,
             "owner_email": self.owner_email,
@@ -381,7 +409,10 @@ class UserVenueConnection:
             "checked_at": self.checked_at,
             "detail": dict(self.detail),
             "error": self.error,
-            "read_only_verified": self.status == "healthy",
+            "health_age_seconds": age_seconds,
+            "next_check_at": self.checked_at + refresh_seconds,
+            "stale": stale,
+            "read_only_verified": self.status == "healthy" and not stale,
             "trading_authorized": False,
         }
 
@@ -1283,19 +1314,7 @@ class UserWorkspaceStore:
         status = str(check.get("status") or "error").strip().lower()
         if status not in VENUE_CONNECTION_STATUSES:
             status = "error"
-        safe_detail = {
-            key: value
-            for key, value in dict(check.get("detail") or {}).items()
-            if key
-            in {
-                "market_count",
-                "account_value",
-                "position_count",
-                "server_time",
-                "balance_available",
-            }
-            and isinstance(value, (str, int, float, bool, type(None)))
-        }
+        safe_detail = _safe_venue_detail(check.get("detail"))
         wallet_id = wallet.id if wallet else ""
         with self._connect() as connection:
             existing = connection.execute(
@@ -1346,6 +1365,54 @@ class UserWorkspaceStore:
             )
             connection.commit()
         return link
+
+    def record_venue_connection_check(
+        self,
+        connection_id: str,
+        check: dict[str, Any],
+    ) -> UserVenueConnection | None:
+        """Update a still-existing link without recreating a revoked connection."""
+        self._ensure()
+        connection_key = str(connection_id or "").strip()
+        status = str(check.get("status") or "error").strip().lower()
+        if status not in VENUE_CONNECTION_STATUSES:
+            status = "error"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM user_venue_connections WHERE id = ?",
+                (connection_key,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            existing = UserVenueConnection.from_dict(json.loads(row["payload"]))
+            updated = replace(
+                existing,
+                status=status,
+                latency_ms=max(0.0, float(check.get("latency_ms") or 0.0)),
+                checked_at=float(check.get("checked_at") or _now()),
+                detail=_safe_venue_detail(check.get("detail")),
+                error=_clean_text(check.get("error"), max_length=240),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE user_venue_connections
+                SET status = ?, updated_at = ?, payload = ?
+                WHERE id = ?
+                """,
+                (
+                    updated.status,
+                    updated.checked_at,
+                    self._dump(updated.to_dict()),
+                    updated.id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return None
+            connection.commit()
+        return updated
 
     def delete_venue_connection(
         self,
@@ -2642,13 +2709,14 @@ class UserWorkspaceStore:
             (row for row in project_rows if not row["readiness"]["ready"]),
             project_rows[0] if project_rows else None,
         )
+        venue_rows = [link.to_dict() for link in venue_connections]
         return {
             "status": "ok",
             "risk_profile": risk_profile.to_dict(),
             "projects": project_rows,
             "accounts": account_rows,
             "wallets": [wallet.to_dict() for wallet in wallets],
-            "venue_connections": [link.to_dict() for link in venue_connections],
+            "venue_connections": venue_rows,
             "strategies": strategy_rows,
             "exchange_catalog": exchange_catalog(),
             "dex_venue_catalog": dex_venue_catalog(),
@@ -2685,7 +2753,13 @@ class UserWorkspaceStore:
                 "wallet_count": len(wallets),
                 "venue_connection_count": len(venue_connections),
                 "healthy_venue_connection_count": sum(
-                    1 for link in venue_connections if link.status == "healthy"
+                    1 for row in venue_rows if row["read_only_verified"]
+                ),
+                "stale_venue_connection_count": sum(
+                    1 for row in venue_rows if row["stale"]
+                ),
+                "error_venue_connection_count": sum(
+                    1 for row in venue_rows if row["status"] == "error"
                 ),
                 "configured_account_count": sum(
                     1 for row in account_rows if row["credentials"]["configured"]

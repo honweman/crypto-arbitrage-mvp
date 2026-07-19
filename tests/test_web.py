@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260719-wallets2" defer></script>',
+            '<script src="/static/app.js?v=20260719-wallets3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260719-wallets2" defer></script>',
+            '<script src="/static/i18n.js?v=20260719-wallets3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -257,6 +257,7 @@ class WebMonitorTest(unittest.TestCase):
             "wallet-link-select",
             "wallet-venue-select",
             "wallet-venue-test",
+            "wallet-venue-refresh-all",
             "wallet-connections",
             "wallet-venue-connections",
         ):
@@ -267,6 +268,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('action: "wallet_challenge"', APP_JS)
         self.assertIn('action: "verify_wallet"', APP_JS)
         self.assertIn('action: "test_wallet_venue"', APP_JS)
+        self.assertIn('action: "refresh_venue_connection"', APP_JS)
+        self.assertIn('action: "refresh_all_venue_connections"', APP_JS)
         self.assertIn('action: "delete_venue_connection"', APP_JS)
 
     def test_core_strategy_forms_use_review_start_workflows(self) -> None:
@@ -7745,6 +7748,32 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     venue_payload = await venue_response.json()
+                refresh_check = {
+                    "status": "healthy",
+                    "venue": "polymarket",
+                    "wallet_address": signer.address,
+                    "detail": {"position_count": 3},
+                    "latency_ms": 9.0,
+                    "checked_at": time.time(),
+                    "live_trading_authorized": False,
+                }
+                with patch(
+                    "arbitrage_bot.venue_health.probe_dex_venue",
+                    new=AsyncMock(return_value=refresh_check),
+                ):
+                    refresh_venue_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "refresh_venue_connection",
+                            "connection_id": venue_payload["venue_connection"]["id"],
+                        },
+                    )
+                    refresh_venue_payload = await refresh_venue_response.json()
+                    refresh_all_response = await client.post(
+                        "/api/user-workspace",
+                        json={"action": "refresh_all_venue_connections"},
+                    )
+                    refresh_all_payload = await refresh_all_response.json()
                 delete_venue_response = await client.post(
                     "/api/user-workspace",
                     json={
@@ -7768,6 +7797,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             venue_payload["workspace"]["summary"]["venue_connection_count"],
             1,
         )
+        self.assertEqual(refresh_venue_response.status, 200, refresh_venue_payload)
+        self.assertEqual(refresh_venue_payload["venue_refresh"]["healthy_count"], 1)
+        self.assertEqual(refresh_all_response.status, 200, refresh_all_payload)
+        self.assertEqual(refresh_all_payload["venue_refresh"]["refreshed_count"], 1)
         self.assertEqual(delete_venue_response.status, 200, delete_venue_payload)
         self.assertEqual(delete_venue_payload["workspace"]["venue_connections"], [])
 

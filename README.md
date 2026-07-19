@@ -843,6 +843,15 @@ Polymarket, dYdX, or Aster for a persistent read-only connection check. These
 checks may read public markets and account positions, but they never authorize
 automated trading, submit an order, approve a token, or request a transfer.
 
+The active web leader refreshes healthy decentralized-venue connections every
+five minutes and retries failed checks every minute, with at most four public
+probes in flight at once. A connection that has not completed a check for ten
+minutes is displayed as stale and no longer counts as read-only verified. Users
+can also refresh one connection or all of their own connections from Settings.
+This health worker is deliberately non-critical: a venue timeout or maintenance
+failure changes only that connection's status and never pauses the global
+program, Market Maker, Auto Buy/Sell, or arbitrage runners.
+
 Use a dedicated agent or signer key for Hyperliquid and Aster; the owner wallet
 address and signer address must differ. Never enter the primary wallet private
 key. dYdX uses a dedicated trading mnemonic together with its chain address.
