@@ -586,6 +586,15 @@ def build_strategy_preflight(
         route_sides[key] = "both" if previous and previous != side else side
     owned_order_ids: set[str] = set()
     coordinated_market_maker_order_ids: set[str] = set()
+    coordinate_market_maker = False
+    if strategy_id == "cross_exchange_rebalance":
+        coordinate_market_maker = bool(
+            candidate.get("coordinate_market_maker", True)
+        )
+    elif strategy_id == "slow_execution":
+        coordinate_market_maker = bool(
+            candidate.get("coordinate_market_maker", False)
+        ) and bool(candidate.get("block_conflicting_market_maker", True))
     market_maker = state_payload.get("market_maker") or {}
     mm_runtime = market_maker.get("runtime") if isinstance(market_maker, dict) else {}
     mm_instances = (
@@ -609,9 +618,7 @@ def build_strategy_preflight(
         }
         if strategy_id == "market_maker":
             owned_order_ids.update(instance_order_ids)
-        elif strategy_id == "cross_exchange_rebalance" and bool(
-            candidate.get("coordinate_market_maker", True)
-        ):
+        elif coordinate_market_maker:
             coordinated_market_maker_order_ids.update(instance_order_ids)
     slow_tasks = ((state_payload.get("slow_execution") or {}).get("tasks") or {}).get(
         "tasks", []
@@ -630,23 +637,25 @@ def build_strategy_preflight(
                 if order_id
             )
     conflicts = []
+    coordinated_conflict_count = 0
     for order in open_orders:
         key = (str(order.get("exchange") or ""), str(order.get("symbol") or ""))
         candidate_side = route_sides.get(key)
         if not candidate_side:
             continue
-        if str(order.get("id") or "") in owned_order_ids:
+        order_id = str(order.get("id") or "")
+        if order_id in owned_order_ids:
             continue
-        if str(order.get("id") or "") in coordinated_market_maker_order_ids:
+        order_side = str(order.get("side") or "").lower()
+        opposing_order = candidate_side == "both" or order_side != candidate_side
+        if order_id in coordinated_market_maker_order_ids and opposing_order:
+            coordinated_conflict_count += 1
             continue
         owner = _order_strategy(order)
         if owner == strategy_id:
             continue
         non_owned_open_count += 1
-        order_side = str(order.get("side") or "").lower()
-        if candidate_side in {"both", "buy", "sell"} and (
-            candidate_side == "both" or order_side != candidate_side
-        ):
+        if candidate_side in {"both", "buy", "sell"} and opposing_order:
             conflicts.append(
                 f"{key[0]} {key[1]} {order_side} order {order.get('id')} ({owner})"
             )
@@ -660,15 +669,15 @@ def build_strategy_preflight(
             else "No opposing strategy orders detected",
         )
     )
-    if coordinated_market_maker_order_ids:
+    if coordinated_conflict_count:
         checks.append(
             _check(
                 "market_maker_coordination",
                 "Market maker coordination",
                 "warning",
                 (
-                    f"{len(coordinated_market_maker_order_ids)} tracked MM order(s) "
-                    "will be canceled and confirmed before rebalance orders are placed"
+                    f"{coordinated_conflict_count} tracked conflicting MM order(s) "
+                    "will be canceled and confirmed before strategy orders are placed"
                 ),
             )
         )

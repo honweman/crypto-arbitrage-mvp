@@ -192,3 +192,62 @@ def test_rebalance_preflight_blocks_mm_orders_when_coordination_is_off() -> None
 
     assert not result["ready"]
     assert any("mm-order-1" in blocker for blocker in result["blockers"])
+
+
+def _slow_execution_config():
+    cfg = _config()
+    return replace(
+        cfg,
+        risk=replace(
+            cfg.risk,
+            strategy_enabled={"slow_execution": True},
+        ),
+    )
+
+
+def _slow_candidate(*, coordinate_market_maker: bool = True):
+    return {
+        "enabled": True,
+        "exchange": "coinbase-spot",
+        "symbol": "ACS/USDC",
+        "side": "buy",
+        "slice_quote": 10.0,
+        "block_conflicting_market_maker": True,
+        "coordinate_market_maker": coordinate_market_maker,
+    }
+
+
+def test_auto_buy_preflight_allows_tracked_mm_orders_when_coordinated() -> None:
+    result = build_strategy_preflight(
+        _slow_execution_config(),
+        strategy_id="slow_execution",
+        candidate=_slow_candidate(),
+        state_payload=_state_payload("mm-order-1", tracked_order_ids=["mm-order-1"]),
+    )
+
+    assert result["ready"], result["blockers"]
+    assert any("tracked conflicting MM" in warning for warning in result["warnings"])
+
+
+def test_auto_buy_preflight_still_blocks_untracked_orders_when_coordinated() -> None:
+    result = build_strategy_preflight(
+        _slow_execution_config(),
+        strategy_id="slow_execution",
+        candidate=_slow_candidate(),
+        state_payload=_state_payload("manual-order-1", tracked_order_ids=[]),
+    )
+
+    assert not result["ready"]
+    assert any("manual-order-1" in blocker for blocker in result["blockers"])
+
+
+def test_auto_buy_preflight_blocks_mm_orders_when_coordination_is_off() -> None:
+    result = build_strategy_preflight(
+        _slow_execution_config(),
+        strategy_id="slow_execution",
+        candidate=_slow_candidate(coordinate_market_maker=False),
+        state_payload=_state_payload("mm-order-1", tracked_order_ids=["mm-order-1"]),
+    )
+
+    assert not result["ready"]
+    assert any("mm-order-1" in blocker for blocker in result["blockers"])
