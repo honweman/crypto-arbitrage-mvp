@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260713-ux1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260720-mm-recovery1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260720-mm-simple2">
 
 </head>
 <body>
@@ -2366,7 +2366,7 @@
           <label>Account / Project / Exchange / Pair</label>
           <div id="mm-accounts" class="account-options"></div>
         </div>
-        <div class="form-divider">Ladder</div>
+        <div class="form-divider">Core Settings</div>
         <div class="field">
           <label for="mm-levels">Levels</label>
           <input id="mm-levels" type="number" min="1" step="1">
@@ -2387,35 +2387,6 @@
           </select>
         </div>
         <div class="field">
-          <label for="mm-min-quote">Min Quote</label>
-          <input id="mm-min-quote" type="number" min="0" step="any">
-        </div>
-        <div class="field">
-          <label for="mm-min-distance">Min Distance</label>
-          <input id="mm-min-distance" type="number" min="0" step="any">
-        </div>
-        <div class="form-divider">Execution</div>
-        <div class="field">
-          <label for="mm-reprice">Reprice Bps</label>
-          <input id="mm-reprice" type="number" min="0" step="any">
-        </div>
-        <div class="field">
-          <label for="mm-reprice-hysteresis">Hysteresis Bps</label>
-          <input id="mm-reprice-hysteresis" type="number" min="0" step="any">
-        </div>
-        <div class="field">
-          <label for="mm-full-reprice">Full Reprice Bps</label>
-          <input id="mm-full-reprice" type="number" min="0" step="any">
-        </div>
-        <label class="check-field">
-          <input id="mm-adaptive-reprice" type="checkbox">
-          Adaptive Reprice
-        </label>
-        <div class="field">
-          <label for="mm-adaptive-spread">Spread Fraction (0-1)</label>
-          <input id="mm-adaptive-spread" type="number" min="0" max="1" step="0.01">
-        </div>
-        <div class="field">
           <label for="mm-poll">Refresh Sec</label>
           <input id="mm-poll" type="number" min="1" step="any">
         </div>
@@ -2423,58 +2394,100 @@
           <input id="mm-post-only" type="checkbox">
           Post Only
         </label>
-        <div class="form-divider">Risk</div>
+        <div class="form-divider">Per-MM Limits</div>
         <div class="field">
-          <label for="mm-max-order">Max Order USD</label>
-          <input id="mm-max-order" type="number" min="0" step="any" placeholder="0 = global">
+          <label for="mm-max-cycle">MM Budget Cap USD</label>
+          <input id="mm-max-cycle" type="number" min="0" step="any" placeholder="Use global limit">
         </div>
         <div class="field">
-          <label for="mm-max-cycle">Max Cycle USD</label>
-          <input id="mm-max-cycle" type="number" min="0" step="any" placeholder="0 = global">
+          <label for="mm-max-open-orders">MM Open Order Cap</label>
+          <input id="mm-max-open-orders" type="number" min="0" step="1" placeholder="Use global limit">
         </div>
-        <div class="field">
-          <label for="mm-max-open-orders">Max Open Orders</label>
-          <input id="mm-max-open-orders" type="number" min="0" step="1" placeholder="0 = global">
-        </div>
-        <div class="field">
-          <label for="mm-max-cancels">Max Cancels</label>
-          <input id="mm-max-cancels" type="number" min="0" step="1" placeholder="0 = global">
-        </div>
-        <div class="field">
-          <label for="mm-max-slippage">Max Slippage Bps</label>
-          <input id="mm-max-slippage" type="number" min="0" step="any" placeholder="0 = global">
-        </div>
-        <div class="field">
-          <label for="mm-max-gap">Max Gap Bps</label>
-          <input id="mm-max-gap" type="number" min="0" step="any" placeholder="0 = global">
-        </div>
-        <div class="field">
-          <label for="mm-max-book-age">Max Book Age Sec</label>
-          <input id="mm-max-book-age" type="number" min="0" step="any" placeholder="0 = global">
-        </div>
-        <div class="form-divider">Inventory</div>
-        <label class="check-field">
-          <input id="mm-inventory-enabled" type="checkbox">
-          Inventory Control
-        </label>
-        <div class="field">
-          <label for="mm-inventory-target">Target Base</label>
-          <input id="mm-inventory-target" type="number" min="0" step="any">
-        </div>
-        <div class="field">
-          <label for="mm-inventory-band">No-skew Band</label>
-          <input id="mm-inventory-band" type="number" min="0" step="any">
-        </div>
-        <div class="field">
-          <label for="mm-inventory-max">Max Deviation</label>
-          <input id="mm-inventory-max" type="number" min="0" step="any">
-        </div>
+        <details class="mm-advanced">
+          <summary>Advanced Ladder &amp; Execution</summary>
+          <div class="mm-advanced-grid">
+            <div class="field">
+              <label for="mm-min-quote">Min Quote</label>
+              <input id="mm-min-quote" type="number" min="0" step="any">
+            </div>
+            <div class="field">
+              <label for="mm-min-distance">Min Distance</label>
+              <input id="mm-min-distance" type="number" min="0" step="any">
+            </div>
+            <div class="field">
+              <label for="mm-reprice">Reprice Bps</label>
+              <input id="mm-reprice" type="number" min="0" step="any">
+            </div>
+            <div class="field">
+              <label for="mm-reprice-hysteresis">Hysteresis Bps</label>
+              <input id="mm-reprice-hysteresis" type="number" min="0" step="any">
+            </div>
+            <div class="field">
+              <label for="mm-full-reprice">Full Reprice Bps</label>
+              <input id="mm-full-reprice" type="number" min="0" step="any">
+            </div>
+            <label class="check-field">
+              <input id="mm-adaptive-reprice" type="checkbox">
+              Adaptive Reprice
+            </label>
+            <div class="field">
+              <label for="mm-adaptive-spread">Spread Fraction (0-1)</label>
+              <input id="mm-adaptive-spread" type="number" min="0" max="1" step="0.01">
+            </div>
+          </div>
+        </details>
+        <details class="mm-advanced">
+          <summary>Advanced Risk</summary>
+          <div class="mm-advanced-grid">
+            <div class="field">
+              <label for="mm-max-order">Order Cap USD</label>
+              <input id="mm-max-order" type="number" min="0" step="any" placeholder="Use global limit">
+            </div>
+            <div class="field">
+              <label for="mm-max-cancels">Cancel Rate Cap</label>
+              <input id="mm-max-cancels" type="number" min="0" step="1" placeholder="Use global limit">
+            </div>
+            <div class="field">
+              <label for="mm-max-slippage">Slippage Cap Bps</label>
+              <input id="mm-max-slippage" type="number" min="0" step="any" placeholder="Use global limit">
+            </div>
+            <div class="field">
+              <label for="mm-max-gap">Book Gap Cap Bps</label>
+              <input id="mm-max-gap" type="number" min="0" step="any" placeholder="Use global limit">
+            </div>
+            <div class="field">
+              <label for="mm-max-book-age">Book Age Cap Sec</label>
+              <input id="mm-max-book-age" type="number" min="0" step="any" placeholder="Use global limit">
+            </div>
+          </div>
+        </details>
+        <details class="mm-advanced">
+          <summary>Inventory Control</summary>
+          <div class="mm-advanced-grid">
+            <label class="check-field">
+              <input id="mm-inventory-enabled" type="checkbox">
+              Inventory Control
+            </label>
+            <div class="field">
+              <label for="mm-inventory-target">Target Base</label>
+              <input id="mm-inventory-target" type="number" min="0" step="any">
+            </div>
+            <div class="field">
+              <label for="mm-inventory-band">No-skew Band</label>
+              <input id="mm-inventory-band" type="number" min="0" step="any">
+            </div>
+            <div class="field">
+              <label for="mm-inventory-max">Max Deviation</label>
+              <input id="mm-inventory-max" type="number" min="0" step="any">
+            </div>
+          </div>
+        </details>
         <div class="form-divider">Actions</div>
         <div class="strategy-action-bar">
           <button id="mm-apply" class="ghost-button" type="submit">Save Settings</button>
           <button id="mm-start" class="control-button" type="button">Review &amp; Start Live</button>
           <button id="mm-stop" class="ghost-button danger" type="button">Stop</button>
-          <button id="mm-open-risk" class="ghost-button" type="button">Risk Controls</button>
+          <button id="mm-open-risk" class="ghost-button" type="button">Global Risk</button>
         </div>
       </form>
       <div id="mm-instance-status" class="instance-status-list"></div>
@@ -2599,8 +2612,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260720-mm-recovery1" defer></script>
-  <script src="/static/app.js?v=20260720-mm-recovery1" defer></script>
+  <script src="/static/i18n.js?v=20260720-mm-simple2" defer></script>
+  <script src="/static/app.js?v=20260720-mm-simple2" defer></script>
 
 </body>
 </html>

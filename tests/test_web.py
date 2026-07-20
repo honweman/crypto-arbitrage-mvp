@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260720-mm-recovery1" defer></script>',
+            '<script src="/static/app.js?v=20260720-mm-simple2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260720-mm-recovery1" defer></script>',
+            '<script src="/static/i18n.js?v=20260720-mm-simple2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -237,6 +237,25 @@ class WebMonitorTest(unittest.TestCase):
             'data-ui-feature="backtest" data-ui-hidden-default="true"',
             INDEX_HTML,
         )
+
+    def test_market_maker_keeps_core_controls_visible_and_advanced_controls_collapsed(self) -> None:
+        self.assertIn('<div class="form-divider">Core Settings</div>', INDEX_HTML)
+        self.assertIn('<div class="form-divider">Per-MM Limits</div>', INDEX_HTML)
+        self.assertEqual(INDEX_HTML.count('<details class="mm-advanced">'), 3)
+        self.assertIn('<summary>Advanced Ladder &amp; Execution</summary>', INDEX_HTML)
+        self.assertIn('<summary>Advanced Risk</summary>', INDEX_HTML)
+        self.assertIn('<summary>Inventory Control</summary>', INDEX_HTML)
+        self.assertNotIn('<details class="mm-advanced" open>', INDEX_HTML)
+        for field_id in (
+            "mm-max-order",
+            "mm-max-cycle",
+            "mm-max-open-orders",
+            "mm-max-cancels",
+            "mm-max-slippage",
+            "mm-max-gap",
+            "mm-max-book-age",
+        ):
+            self.assertEqual(INDEX_HTML.count(f'id="{field_id}"'), 1)
 
     def test_page_supports_korean_language_option(self) -> None:
         i18n_js = Path("src/arbitrage_bot/web/static/i18n.js").read_text(
@@ -312,7 +331,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260720-mm-recovery1"),
+            INDEX_HTML.index("/static/styles.css?v=20260720-mm-simple2"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -419,7 +438,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260720-mm-recovery1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260720-mm-simple2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
