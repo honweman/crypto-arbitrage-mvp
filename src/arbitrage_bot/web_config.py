@@ -737,6 +737,7 @@ def market_maker_config_from_payload(
     allowed_exchanges: set[str] | None = None,
     symbols_by_exchange: dict[str, list[str]] | None = None,
     repair_stale_identity_id: bool = False,
+    normalize_identity_id: bool = False,
 ) -> MarketMakerConfig:
     overrides = _market_maker_overrides_from_payload(
         payload,
@@ -763,7 +764,7 @@ def market_maker_config_from_payload(
             raise ValueError(
                 "inventory_band_base must be below inventory_max_deviation_base"
             )
-    if market_identity_changed:
+    if market_identity_changed or normalize_identity_id:
         expected_id = market_maker_expected_instance_id(config)
         if config.id and config.id != expected_id:
             config = replace(config, id="")
@@ -777,6 +778,7 @@ def market_maker_configs_from_payload(
     allowed_exchanges: set[str] | None = None,
     symbols_by_exchange: dict[str, list[str]] | None = None,
     repair_stale_identity_id: bool = False,
+    normalize_identity_id: bool = False,
 ) -> list[MarketMakerConfig]:
     if not isinstance(payload, list):
         raise ValueError("market_maker instances must be a list")
@@ -797,6 +799,7 @@ def market_maker_configs_from_payload(
                 allowed_exchanges=allowed_exchanges,
                 symbols_by_exchange=symbols_by_exchange,
                 repair_stale_identity_id=repair_stale_identity_id,
+                normalize_identity_id=normalize_identity_id,
             )
         )
     return market_maker_configs_with_ids(configs)

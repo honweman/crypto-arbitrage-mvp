@@ -30,6 +30,7 @@ LOGGER = logging.getLogger(__name__)
 
 BITHUMB_KRW_MIN_ORDER_COST = 5_000.0
 CLIENT_ORDER_ID_MAX_LENGTH = 36
+EXPLICIT_ABSENCE_MIN_AGE_SECONDS = 30.0
 
 
 REST_PROXY_ENV_OPTIONS = (
@@ -979,38 +980,78 @@ class ExchangeManager:
         symbol: str,
         client_order_id: str,
     ) -> dict[str, Any] | None:
+        search = await self._search_order_by_client_id(
+            cfg,
+            symbol=symbol,
+            client_order_id=client_order_id,
+        )
+        order = search.get("order")
+        return order if isinstance(order, dict) else None
+
+    async def _search_order_by_client_id(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        client_order_id: str,
+    ) -> dict[str, Any]:
         if (
             not client_order_id
             or not limit_order_features(cfg).recover_by_client_order_id
         ):
-            return None
+            return {
+                "order": None,
+                "successful_sources": [],
+                "errors": ["client order id recovery is unsupported"],
+            }
         client = self.client(cfg)
+        successful_sources: list[str] = []
+        errors: list[str] = []
         direct = getattr(client, "fetch_order_by_client_order_id", None)
         if callable(direct):
             try:
                 raw = await direct(client_order_id, symbol)
+                successful_sources.append("direct")
                 if isinstance(raw, dict) and raw.get("id"):
-                    return raw
-            except Exception:  # noqa: BLE001
-                pass
+                    return {
+                        "order": raw,
+                        "successful_sources": successful_sources,
+                        "errors": errors,
+                    }
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"direct: {exc.__class__.__name__}: {exc}"[:500])
         fetchers = (
-            (getattr(client, "fetch_open_orders", None), (symbol,)),
-            (getattr(client, "fetch_closed_orders", None), (symbol, None, 100)),
+            ("open_orders", getattr(client, "fetch_open_orders", None), (symbol,)),
+            (
+                "closed_orders",
+                getattr(client, "fetch_closed_orders", None),
+                (symbol, None, 100),
+            ),
         )
-        for fetcher, args in fetchers:
+        for source, fetcher, args in fetchers:
             if not callable(fetcher):
                 continue
             try:
                 rows = await fetcher(*args)
-            except Exception:  # noqa: BLE001
+                successful_sources.append(source)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{source}: {exc.__class__.__name__}: {exc}"[:500])
                 continue
             for raw in rows or []:
                 if (
                     isinstance(raw, dict)
                     and self._raw_client_order_id(raw) == client_order_id
                 ):
-                    return raw
-        return None
+                    return {
+                        "order": raw,
+                        "successful_sources": successful_sources,
+                        "errors": errors,
+                    }
+        return {
+            "order": None,
+            "successful_sources": successful_sources,
+            "errors": errors,
+        }
 
     @staticmethod
     def _terminal_create_error(exc: Exception) -> bool:
@@ -1618,6 +1659,8 @@ class ExchangeManager:
         *,
         exchange: str = "",
         symbol: str = "",
+        resolve_confirmed_absent: bool = False,
+        absent_min_age_seconds: float = EXPLICIT_ABSENCE_MIN_AGE_SECONDS,
     ) -> dict[str, Any]:
         if self._order_intents is None:
             return {
@@ -1633,6 +1676,7 @@ class ExchangeManager:
             symbol=symbol,
         )
         recovered_rows: list[dict[str, Any]] = []
+        absent_rows: list[dict[str, Any]] = []
         unresolved_rows: list[dict[str, Any]] = []
         for intent in self._order_intents.pending_for_market(
             limit=1000,
@@ -1646,7 +1690,7 @@ class ExchangeManager:
                 )
                 continue
             try:
-                raw = await self._recover_order_by_client_id(
+                search = await self._search_order_by_client_id(
                     cfg,
                     symbol=str(intent["symbol"]),
                     client_order_id=str(intent["client_order_id"]),
@@ -1659,9 +1703,56 @@ class ExchangeManager:
                     }
                 )
                 continue
+            raw = search.get("order")
             if raw is None:
+                sources = set(search.get("successful_sources") or [])
+                intent_age = max(0.0, time.time() - float(intent["created_at"]))
+                absence_confirmed = (
+                    resolve_confirmed_absent
+                    and intent_age >= max(0.0, float(absent_min_age_seconds))
+                    and "open_orders" in sources
+                    and ("closed_orders" in sources or "direct" in sources)
+                )
+                if absence_confirmed:
+                    evidence = {
+                        "resolution": "confirmed_absent",
+                        "successful_sources": sorted(sources),
+                        "search_errors": list(search.get("errors") or []),
+                        "intent_age_seconds": intent_age,
+                        "checked_at": time.time(),
+                    }
+                    self._order_intents.mark_reconciled_absent(
+                        str(intent["client_order_id"]),
+                        evidence=evidence,
+                    )
+                    absent_rows.append(
+                        {
+                            "client_order_id": intent["client_order_id"],
+                            "exchange": intent["exchange"],
+                            "symbol": intent["symbol"],
+                            **evidence,
+                        }
+                    )
+                    continue
+                recovery_error = "order was not found on the exchange"
+                if resolve_confirmed_absent:
+                    if intent_age < max(0.0, float(absent_min_age_seconds)):
+                        recovery_error = (
+                            "order absence is not old enough to confirm; retry after "
+                            f"{max(0.0, float(absent_min_age_seconds)) - intent_age:.1f}s"
+                        )
+                    else:
+                        recovery_error = (
+                            "order absence could not be confirmed by both current and "
+                            "historical order queries"
+                        )
                 unresolved_rows.append(
-                    {**intent, "recovery_error": "order was not found on the exchange"}
+                    {
+                        **intent,
+                        "recovery_error": recovery_error,
+                        "successful_sources": sorted(sources),
+                        "search_errors": list(search.get("errors") or []),
+                    }
                 )
                 continue
             self._order_intents.mark_submitted(
@@ -1683,6 +1774,8 @@ class ExchangeManager:
             "status": "blocked" if unresolved_rows else "ok",
             "recovered": recovered_rows,
             "recovered_count": len(recovered_rows),
+            "reconciled_absent": absent_rows,
+            "reconciled_absent_count": len(absent_rows),
             "reclassified": [
                 {
                     "client_order_id": row["client_order_id"],
@@ -1695,6 +1788,120 @@ class ExchangeManager:
             "reclassified_count": len(reclassified_rows),
             "unresolved": unresolved_rows,
             "unresolved_count": len(unresolved_rows),
+            "checked_at": time.time(),
+        }
+
+    async def cleanup_market_maker_market(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        client_order_prefix: str,
+        resolve_confirmed_absent: bool = True,
+    ) -> dict[str, Any]:
+        """Reconcile uncertain submissions and remove only managed MM orders."""
+        prefix = normalize_client_order_id(client_order_prefix).rstrip("-_")
+        if not prefix:
+            return {
+                "status": "blocked",
+                "reason": "market maker client order prefix is required for cleanup",
+                "exchange": cfg.key,
+                "symbol": symbol,
+                "remaining_order_ids": [],
+                "errors": [],
+            }
+        recovery = await self.recover_pending_order_intents(
+            [cfg],
+            exchange=cfg.key,
+            symbol=symbol,
+            resolve_confirmed_absent=resolve_confirmed_absent,
+        )
+        known_order_ids = (
+            self._order_intents.known_order_ids_for_market(
+                exchange=cfg.key,
+                symbol=symbol,
+                client_order_prefix=prefix,
+            )
+            if self._order_intents is not None
+            else set()
+        )
+        errors: list[dict[str, str]] = []
+        canceled_order_ids: list[str] = []
+
+        def managed_order_ids(rows: Iterable[Any]) -> list[str]:
+            managed: list[str] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                order_id = str(row.get("id") or row.get("order") or "").strip()
+                client_id = self._raw_client_order_id(row)
+                if order_id and (
+                    order_id in known_order_ids or client_id.startswith(prefix)
+                ):
+                    managed.append(order_id)
+            return list(dict.fromkeys(managed))
+
+        try:
+            open_orders = await self.fetch_open_orders(cfg, symbol=symbol)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "blocked",
+                "reason": "could not verify existing exchange orders",
+                "exchange": cfg.key,
+                "symbol": symbol,
+                "recovery": recovery,
+                "remaining_order_ids": [],
+                "errors": [
+                    {
+                        "scope": "open_orders",
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                ],
+            }
+        for order_id in managed_order_ids(open_orders):
+            try:
+                await self.cancel_order(cfg, symbol=symbol, order_id=order_id)
+                canceled_order_ids.append(order_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "scope": order_id,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
+        try:
+            remaining_orders = await self.fetch_open_orders(cfg, symbol=symbol)
+            remaining_order_ids = managed_order_ids(remaining_orders)
+        except Exception as exc:  # noqa: BLE001
+            remaining_order_ids = []
+            errors.append(
+                {
+                    "scope": "open_order_confirmation",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+        unresolved_count = int(recovery.get("unresolved_count") or 0)
+        status = "ok"
+        reason = "recoverable state cleared and managed orders confirmed absent"
+        if unresolved_count or remaining_order_ids or errors:
+            status = "blocked"
+            reason = (
+                "market maker cleanup still has unresolved order state"
+                if unresolved_count
+                else "managed market maker orders were not fully cleared"
+            )
+        return {
+            "status": status,
+            "reason": reason,
+            "exchange": cfg.key,
+            "symbol": symbol,
+            "client_order_prefix": prefix,
+            "recovery": recovery,
+            "canceled_order_ids": canceled_order_ids,
+            "canceled_count": len(canceled_order_ids),
+            "remaining_order_ids": remaining_order_ids,
+            "remaining_count": len(remaining_order_ids),
+            "errors": errors,
             "checked_at": time.time(),
         }
 

@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260719-polymarket-arb1" defer></script>',
+            '<script src="/static/app.js?v=20260720-mm-recovery1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260719-polymarket-arb1" defer></script>',
+            '<script src="/static/i18n.js?v=20260720-mm-recovery1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -312,7 +312,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260719-polymarket-arb1"),
+            INDEX_HTML.index("/static/styles.css?v=20260720-mm-recovery1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -419,7 +419,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260719-polymarket-arb1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260720-mm-recovery1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -2501,6 +2501,32 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(updated.symbol, "ACS/USDT")
         self.assertEqual(updated.levels, 10)
         self.assertEqual(updated.quote_per_level, 40.0)
+
+    def test_market_maker_restart_normalizes_stale_instance_id(self) -> None:
+        base = MarketMakerConfig(
+            id="coinbase-spot-acs-usdc-old",
+            enabled=False,
+            live_enabled=False,
+            exchange="coinbase-spot",
+            symbol="ACS/USDC",
+        )
+
+        updated = market_maker_config_from_payload(
+            {
+                "id": base.id,
+                "enabled": True,
+                "live_enabled": True,
+                "exchange": base.exchange,
+                "symbol": base.symbol,
+            },
+            base_config=base,
+            allowed_exchanges={"coinbase-spot"},
+            symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
+            repair_stale_identity_id=True,
+            normalize_identity_id=True,
+        )
+
+        self.assertEqual(updated.id, "coinbase-spot-acs-usdc")
 
     def test_market_maker_replace_list_repairs_only_changed_market_id(self) -> None:
         base_configs = [
@@ -4671,16 +4697,21 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 strategy_id="market_maker",
                 candidate=candidate,
             )
-            approved = await api_market_maker(
-                FakeRequest(  # type: ignore[arg-type]
-                    app,
-                    {
-                        **payload,
-                        "confirm_live": "ENABLE LIVE MARKET MAKER",
-                        "preflight_token": grant.token,
-                    },
+            with patch(
+                "arbitrage_bot.web._cleanup_market_maker_instance",
+                new=AsyncMock(return_value={"status": "ok", "canceled_count": 0}),
+            ) as cleanup:
+                approved = await api_market_maker(
+                    FakeRequest(  # type: ignore[arg-type]
+                        app,
+                        {
+                            **payload,
+                            "confirm_live": "ENABLE LIVE MARKET MAKER",
+                            "cleanup_recoverable_state": True,
+                            "preflight_token": grant.token,
+                        },
+                    )
                 )
-            )
             unchanged_live = await api_market_maker(
                 FakeRequest(app, payload)  # type: ignore[arg-type]
             )
@@ -4695,6 +4726,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.status, 400)
         self.assertIn("confirm_live", json.loads(denied.text)["error"])
         self.assertEqual(approved.status, 200, approved.text)
+        cleanup.assert_awaited_once()
         self.assertEqual(unchanged_live.status, 200, unchanged_live.text)
         self.assertEqual(live_change_denied.status, 400)
         self.assertIn("confirm_live", json.loads(live_change_denied.text)["error"])

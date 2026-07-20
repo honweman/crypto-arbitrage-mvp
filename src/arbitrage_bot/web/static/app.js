@@ -7098,6 +7098,7 @@ function balanceStatusClass(status) {
         return;
       }
       if (payload.enabled && payload.live_enabled) {
+        payload.cleanup_recoverable_state = true;
         const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
         if (!risk.ready) {
           setStrategyFeedback("mm-feedback", risk.detail, "error");
@@ -7126,7 +7127,13 @@ function balanceStatusClass(status) {
         const result = await postMarketMakerConfig(payload);
         applyMarketMakerMutationResult(result);
         mmFormDirty = false;
-        setStrategyFeedback("mm-feedback", "Market Maker settings saved.", "ok");
+        setStrategyFeedback(
+          "mm-feedback",
+          result.cleanup
+            ? uiText("Market Maker settings saved after order-state cleanup.")
+            : uiText("Market Maker settings saved."),
+          "ok",
+        );
         scheduleMutationRefresh();
       } catch (error) {
         setStrategyFeedback("mm-feedback", error.message || String(error), "error");
@@ -7144,6 +7151,7 @@ function balanceStatusClass(status) {
         enabled: true,
         live_enabled: true,
         confirm_live: LIVE_MARKET_MAKER_CONFIRMATION,
+        cleanup_recoverable_state: true,
       };
       const parameters = marketMakerFormReadiness(payload);
       const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
@@ -7179,7 +7187,13 @@ function balanceStatusClass(status) {
         const result = await postMarketMakerConfig(payload);
         applyMarketMakerMutationResult(result);
         mmFormDirty = false;
-        setStrategyFeedback("mm-feedback", "Live Market Maker started.", "ok");
+        const absentCount = Number(result.cleanup?.recovery?.reconciled_absent_count || 0);
+        const canceledCount = Number(result.cleanup?.canceled_count || 0);
+        setStrategyFeedback(
+          "mm-feedback",
+          `${uiText("Live Market Maker started.")} ${uiText("Order-state cleanup completed.")} · ${absentCount} ${uiText("uncertain resolved")} · ${canceledCount} ${uiText("old orders canceled")}`,
+          "ok",
+        );
         scheduleMutationRefresh();
       } catch (error) {
         document.getElementById("mm-enabled").checked = false;
@@ -7198,6 +7212,7 @@ function balanceStatusClass(status) {
         ...marketMakerPayloadFromForm(),
         enabled: false,
         live_enabled: false,
+        cleanup_recoverable_state: true,
       };
       if (!dangerConfirm(
         "Stop this Market Maker and cancel its managed orders?",
@@ -7213,7 +7228,11 @@ function balanceStatusClass(status) {
         const result = await postMarketMakerConfig(payload);
         applyMarketMakerMutationResult(result);
         mmFormDirty = false;
-        setStrategyFeedback("mm-feedback", "Market Maker stop requested.", "ok");
+        setStrategyFeedback(
+          "mm-feedback",
+          uiText("Market Maker stopped. Cleanup is running."),
+          "ok",
+        );
         scheduleMutationRefresh();
       } catch (error) {
         document.getElementById("mm-enabled").checked = true;

@@ -219,6 +219,90 @@ class IdempotentExchangeSubmissionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["reclassified_count"], 1)
             self.assertEqual(result["unresolved_count"], 0)
 
+    async def test_explicit_recovery_closes_intent_confirmed_absent(self) -> None:
+        class FakeClient:
+            async def fetch_open_orders(self, *_: object) -> list[dict[str, object]]:
+                return []
+
+            async def fetch_closed_orders(self, *_: object) -> list[dict[str, object]]:
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = ExchangeConfig(id="coinbase", label="coinbase-spot")
+            journal_path = Path(tmp) / "orders.sqlite3"
+            manager = ExchangeManager(order_journal_path=str(journal_path))
+            manager._clients[cfg.key] = FakeClient()
+            assert manager._order_intents is not None
+            manager._order_intents.reserve(
+                "missing-order",
+                {
+                    "exchange": cfg.key,
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                    "amount": 10.0,
+                    "price": 0.1,
+                },
+            )
+            manager._order_intents.mark_unknown("missing-order", "request timeout")
+
+            result = await manager.recover_pending_order_intents(
+                [cfg],
+                exchange=cfg.key,
+                symbol="ACS/USDC",
+                resolve_confirmed_absent=True,
+                absent_min_age_seconds=0,
+            )
+
+            intent = OrderIntentStore(journal_path).get("missing-order")
+            assert intent is not None
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["reconciled_absent_count"], 1)
+            self.assertEqual(result["unresolved_count"], 0)
+            self.assertEqual(intent["status"], "reconciled_absent")
+
+    async def test_mm_cleanup_cancels_only_orders_with_managed_identity(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.open_orders = [
+                    {
+                        "id": "mm-order",
+                        "clientOrderId": "crypto-arb-mm-123",
+                    },
+                    {"id": "manual-order", "clientOrderId": "phone-app-order"},
+                ]
+                self.canceled: list[str] = []
+
+            async def fetch_open_orders(self, *_: object) -> list[dict[str, str]]:
+                return list(self.open_orders)
+
+            async def fetch_closed_orders(self, *_: object) -> list[dict[str, str]]:
+                return []
+
+            async def cancel_order(
+                self, order_id: str, *_: object
+            ) -> dict[str, str]:
+                self.canceled.append(order_id)
+                self.open_orders = [
+                    row for row in self.open_orders if row["id"] != order_id
+                ]
+                return {"id": order_id, "status": "canceled"}
+
+        cfg = ExchangeConfig(id="coinbase", label="coinbase-spot")
+        manager = ExchangeManager(order_journal_path="")
+        client = FakeClient()
+        manager._clients[cfg.key] = client
+
+        result = await manager.cleanup_market_maker_market(
+            cfg,
+            symbol="ACS/USDC",
+            client_order_prefix="crypto-arb-mm",
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["canceled_order_ids"], ["mm-order"])
+        self.assertEqual(client.canceled, ["mm-order"])
+        self.assertEqual([row["id"] for row in client.open_orders], ["manual-order"])
+
     async def test_same_client_id_submits_once_and_replays_response(self) -> None:
         class FakeClient:
             def __init__(self) -> None:

@@ -259,6 +259,51 @@ class OrderIntentStore:
             connection.commit()
         return self.get(client_order_id) or {}
 
+    def mark_reconciled_absent(
+        self,
+        client_order_id: str,
+        *,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Close an uncertain intent after explicit exchange-side absence checks."""
+        self._ensure()
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE order_intents
+                SET status = 'reconciled_absent', order_id = '',
+                    response_json = ?, last_error = '', updated_at = ?, retry_after = 0
+                WHERE client_order_id = ? AND status IN ('reserved', 'unknown')
+                """,
+                (_canonical(evidence), now, client_order_id),
+            )
+            connection.commit()
+        return self.get(client_order_id) or {}
+
+    def known_order_ids_for_market(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        client_order_prefix: str = "",
+    ) -> set[str]:
+        self._ensure()
+        clauses = ["exchange = ?", "symbol = ?", "order_id != ''"]
+        params: list[Any] = [exchange, symbol]
+        if client_order_prefix:
+            clauses.append("client_order_id LIKE ?")
+            params.append(f"{client_order_prefix}%")
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT order_id FROM order_intents
+                WHERE {" AND ".join(clauses)}
+                """,
+                params,
+            ).fetchall()
+        return {str(row["order_id"]) for row in rows if row["order_id"]}
+
     def mark_canceled_by_order_id(
         self,
         *,

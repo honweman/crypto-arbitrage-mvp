@@ -5295,6 +5295,9 @@ async def _preflight_candidate_from_payload(
             },
             symbols_by_exchange=symbols_by_exchange,
             repair_stale_identity_id=True,
+            normalize_identity_id=bool(
+                payload.get("cleanup_recoverable_state") is True
+            ),
         )
         row = market_maker_config_to_dict(candidate)
         return row, [_base_asset_from_symbol(candidate.symbol)]
@@ -7549,14 +7552,71 @@ async def api_signal_webhook(request: web.Request) -> web.Response:
     )
 
 
+async def _cleanup_market_maker_instance(
+    cfg: BotConfig,
+    state: MonitorState,
+    instance: MarketMakerConfig,
+) -> dict[str, Any]:
+    runtime_cfg = await state.runtime_config(cfg)
+    exchange_cfg = next(
+        (
+            account
+            for account in _all_account_exchanges(runtime_cfg)
+            if account.key == instance.exchange
+        ),
+        None,
+    )
+    if exchange_cfg is None:
+        return {
+            "status": "blocked",
+            "reason": f"market maker account is not configured: {instance.exchange}",
+            "exchange": instance.exchange,
+            "symbol": instance.symbol,
+        }
+    manager = ExchangeManager()
+    try:
+        result = await manager.cleanup_market_maker_market(
+            exchange_cfg,
+            symbol=instance.symbol,
+            client_order_prefix=instance.client_order_prefix,
+        )
+        recovery = result.get("recovery")
+        if isinstance(recovery, dict):
+            await state.set_order_reliability(recovery)
+        return result
+    finally:
+        await manager.close()
+
+
+def _schedule_market_maker_cleanup(
+    request: web.Request,
+    *,
+    cfg: BotConfig,
+    state: MonitorState,
+    instances: list[MarketMakerConfig],
+) -> None:
+    tasks: set[asyncio.Task[Any]] = request.app.setdefault("config_guard_tasks", set())
+    for instance in instances:
+        task = asyncio.create_task(_cleanup_market_maker_instance(cfg, state, instance))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+
 async def api_market_maker(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     guard_baseline: dict[str, Any] | None = None
     guard_instance_id = ""
+    start_cleanup: dict[str, Any] | None = None
+    stopping_instances: list[MarketMakerConfig] = []
+    cleanup_recoverable_state = False
     try:
         _require_admin_user(_request_user(request))
         payload = await request.json()
+        cleanup_recoverable_state = bool(
+            isinstance(payload, dict)
+            and payload.get("cleanup_recoverable_state") is True
+        )
         runtime_cfg = await state.runtime_config(cfg)
         symbols_by_exchange = market_maker_symbols_for_accounts(
             runtime_cfg,
@@ -7574,6 +7634,7 @@ async def api_market_maker(request: web.Request) -> web.Response:
                 allowed_exchanges=allowed_exchanges,
                 symbols_by_exchange=symbols_by_exchange,
                 repair_stale_identity_id=True,
+                normalize_identity_id=cleanup_recoverable_state,
             )
             action = "replace"
         elif isinstance(payload, dict) and payload.get("copy_id"):
@@ -7621,6 +7682,7 @@ async def api_market_maker(request: web.Request) -> web.Response:
                 allowed_exchanges=allowed_exchanges,
                 symbols_by_exchange=symbols_by_exchange,
                 repair_stale_identity_id=True,
+                normalize_identity_id=cleanup_recoverable_state,
             )
             replaced_instance = False
             updated_instances = []
@@ -7635,6 +7697,26 @@ async def api_market_maker(request: web.Request) -> web.Response:
             if not replaced_instance:
                 updated_instances.append(updated_config)
         current_by_id = {instance.id: instance for instance in current_instances}
+        stopping_instances = [
+            instance
+            for instance_id, instance in current_by_id.items()
+            if instance.enabled
+            and instance.live_enabled
+            and (
+                not any(
+                    updated.enabled
+                    and updated.live_enabled
+                    and (
+                        updated.id == instance_id
+                        or (
+                            updated.exchange == instance.exchange
+                            and updated.symbol == instance.symbol
+                        )
+                    )
+                    for updated in updated_instances
+                )
+            )
+        ]
         live_changes_requiring_confirmation = [
             instance
             for instance in updated_instances
@@ -7654,6 +7736,11 @@ async def api_market_maker(request: web.Request) -> web.Response:
             raise ValueError(
                 "starting or changing live Market Maker requires "
                 f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
+            )
+        if live_changes_requiring_confirmation and not cleanup_recoverable_state:
+            raise ValueError(
+                "starting or changing live Market Maker requires "
+                "cleanup_recoverable_state=true"
             )
         if len(live_changes_requiring_confirmation) > 1:
             raise ValueError("start one live Market Maker instance at a time")
@@ -7681,12 +7768,37 @@ async def api_market_maker(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
+    if live_changes_requiring_confirmation and cleanup_recoverable_state:
+        start_cleanup = await _cleanup_market_maker_instance(
+            cfg,
+            state,
+            live_changes_requiring_confirmation[0],
+        )
+        if start_cleanup.get("status") != "ok":
+            return web.json_response(
+                {
+                    "error": str(
+                        start_cleanup.get("reason")
+                        or "market maker restart cleanup did not complete"
+                    ),
+                    "cleanup": start_cleanup,
+                },
+                status=409,
+            )
+
     update = await state.set_market_maker_instances(
         updated_instances,
         cfg=cfg,
         actor_email=_config_actor_email(request),
         action=f"market_maker_{action}",
     )
+    if stopping_instances and cleanup_recoverable_state:
+        _schedule_market_maker_cleanup(
+            request,
+            cfg=cfg,
+            state=state,
+            instances=stopping_instances,
+        )
     if guard_baseline is not None:
         current_version = await state.config_versions(limit=1)
         if current_version.get("current_version_id") != guard_baseline.get(
@@ -7723,6 +7835,7 @@ async def api_market_maker(request: web.Request) -> web.Response:
             "ok": True,
             "config": market_maker_config_to_dict(current_config),
             "instances": market_maker_configs_to_list(current_instances),
+            "cleanup": start_cleanup,
             **update,
         }
     )
