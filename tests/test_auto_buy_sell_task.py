@@ -405,6 +405,109 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(second_task["next_run_at"], before_cancel + 9.0)
         self.assertEqual(third["tasks"][0]["placed_count"], 1)
 
+    async def test_transient_error_is_retried_and_cleared_after_success(self) -> None:
+        class FlakyTaskManager(FakeTaskManager):
+            async def create_limit_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, object]:
+                if self.created == 0:
+                    self.created += 1
+                    raise TimeoutError("temporary exchange timeout")
+                return await super().create_limit_order()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg(interval_seconds=1.0))
+            manager = FlakyTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(interval_seconds=1.0),
+            )
+
+            failed = await service.run_due_tasks(cfg, manager)
+            failed_task = failed["tasks"][0]
+            service._tasks[0].next_run_at = 0.0
+            recovered = await service.run_due_tasks(cfg, manager)
+            recovered_task = recovered["tasks"][0]
+
+        self.assertEqual(failed_task["status"], "error")
+        self.assertTrue(failed_task["auto_retry_active"])
+        self.assertEqual(failed_task["consecutive_error_count"], 1)
+        self.assertIn("temporary exchange timeout", failed_task["last_error"])
+        self.assertEqual(recovered_task["status"], "waiting_for_fill")
+        self.assertIsNone(recovered_task["last_error"])
+        self.assertEqual(recovered_task["consecutive_error_count"], 0)
+        self.assertIsNotNone(recovered_task["last_recovered_at"])
+
+    async def test_uncertain_order_state_is_reconciled_before_retrying(self) -> None:
+        class RecoveringTaskManager(FakeTaskManager):
+            def __init__(self) -> None:
+                super().__init__()
+                self.recovery_calls: list[dict[str, object]] = []
+
+            def order_reliability_summary(self) -> dict[str, object]:
+                return {
+                    "pending_count": 1,
+                    "quarantined_resources": [
+                        {
+                            "exchange": "bybit-spot",
+                            "symbol": "ACS/USDT",
+                            "count": 1,
+                        }
+                    ],
+                }
+
+            async def recover_pending_order_intents(
+                self,
+                *_: object,
+                **kwargs: object,
+            ) -> dict[str, object]:
+                self.recovery_calls.append(kwargs)
+                if len(self.recovery_calls) == 1:
+                    return {
+                        "status": "blocked",
+                        "unresolved_count": 1,
+                        "unresolved": [
+                            {"recovery_error": "historical query is unavailable"}
+                        ],
+                        "checked_at": time.time(),
+                    }
+                return {
+                    "status": "ok",
+                    "recovered_count": 0,
+                    "reconciled_absent_count": 1,
+                    "unresolved_count": 0,
+                    "unresolved": [],
+                    "checked_at": time.time(),
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg(interval_seconds=1.0))
+            manager = RecoveringTaskManager()
+            cfg = self._cfg(
+                tmp,
+                slow_execution=self._slow_cfg(interval_seconds=1.0),
+            )
+
+            waiting = await service.run_due_tasks(cfg, manager)
+            waiting_task = waiting["tasks"][0]
+            service._tasks[0].next_run_at = 0.0
+            resumed = await service.run_due_tasks(cfg, manager)
+            resumed_task = resumed["tasks"][0]
+
+        self.assertEqual(waiting_task["status"], "recovering")
+        self.assertTrue(waiting_task["auto_retry_active"])
+        self.assertEqual(manager.recovery_calls[0]["exchange"], "bybit-spot")
+        self.assertEqual(manager.recovery_calls[0]["symbol"], "ACS/USDT")
+        self.assertTrue(manager.recovery_calls[0]["resolve_confirmed_absent"])
+        self.assertEqual(resumed_task["status"], "waiting_for_fill")
+        self.assertIsNone(resumed_task["last_error"])
+        self.assertEqual(resumed_task["consecutive_error_count"], 0)
+        self.assertEqual(manager.created, 1)
+
     async def test_stop_price_cancels_open_orders_before_waiting_for_fill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AutoBuySellTaskService(Path(tmp) / "tasks.json")

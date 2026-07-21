@@ -5686,7 +5686,7 @@ function balanceStatusClass(status) {
           ? (task.market_maker_coordination.ready ? "mm_coordinated" : "coordinating_mm")
           : status;
         const terminal = AUTO_TERMINAL_STATUSES.has(status);
-        const statusClass = status === "complete" ? "risk-ok" : status === "paused" || status === "stopped" ? "risk-off" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
+        const statusClass = status === "complete" ? "risk-ok" : status === "paused" || status === "stopped" ? "risk-off" : status === "recovering" ? "missing" : status === "blocked_by_risk" || status === "error" ? "risk-blocked" : "ok";
         const progressLabel = task.progress_label || (config.side === "buy" ? "Bought" : "Sold");
         const progressMode = task.progress_mode || ((config.total_quote || 0) > 0 ? "quote" : "base");
         const unlimited = progressMode === "unlimited" || config.unlimited_total;

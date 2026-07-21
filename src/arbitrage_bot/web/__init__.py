@@ -8452,7 +8452,8 @@ def create_app(
         try:
             startup_cfg = await state.runtime_config(cfg)
             startup_recovery = await startup_manager.recover_pending_order_intents(
-                _all_account_exchanges(startup_cfg)
+                _all_account_exchanges(startup_cfg),
+                resolve_confirmed_absent=True,
             )
             await state.set_order_reliability(startup_recovery)
             return startup_recovery

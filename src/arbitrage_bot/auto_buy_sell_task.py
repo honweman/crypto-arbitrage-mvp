@@ -18,6 +18,7 @@ from .trade_log import write_trade_event
 
 RUNNING_TASK_STATUSES = {
     "running",
+    "recovering",
     "waiting_for_start_price",
     "waiting_for_fill",
     "waiting_for_interval",
@@ -212,6 +213,10 @@ class AutoBuySellTask:
     last_cycle_at: float | None = None
     last_fill_at: float | None = None
     last_error: str | None = None
+    last_error_at: float | None = None
+    last_recovered_at: float | None = None
+    consecutive_error_count: int = 0
+    last_order_recovery: dict[str, Any] | None = None
     last_status: str | None = None
     last_plan: dict[str, Any] | None = None
     last_risk: dict[str, Any] | None = None
@@ -275,6 +280,8 @@ class AutoBuySellTask:
             "progress_pct": progress_pct,
             "progress_label": "Bought" if cfg.side == "buy" else "Sold",
             "open_order_count": len(self.open_order_ids),
+            "auto_retry_active": self.status in {"error", "recovering"}
+            and self.next_run_at > 0,
         }
 
 
@@ -687,7 +694,10 @@ class AutoBuySellTaskService:
             if task.status == "stop_cancel_pending":
                 await self._retry_pending_stop(task, runtime_cfg, manager)
                 return
+            if await self._recover_pending_order_state(task, runtime_cfg, manager):
+                return
             await self._refresh_task_activity(task, runtime_cfg, manager)
+            self._mark_recovered(task)
             if _task_is_complete(task, task_cfg):
                 task.status = "complete"
                 task.finished_at = time.time()
@@ -765,7 +775,76 @@ class AutoBuySellTaskService:
                 task.status = "error"
                 task.last_status = "error"
                 task.last_error = f"{exc.__class__.__name__}: {exc}"
+                task.last_error_at = time.time()
+                task.consecutive_error_count += 1
             task.next_run_at = time.time() + max(1.0, task_cfg.interval_seconds)
+
+    async def _recover_pending_order_state(
+        self,
+        task: AutoBuySellTask,
+        cfg: BotConfig,
+        manager: ExchangeManager,
+    ) -> bool:
+        summary_getter = getattr(manager, "order_reliability_summary", None)
+        recovery_runner = getattr(manager, "recover_pending_order_intents", None)
+        if not callable(summary_getter) or not callable(recovery_runner):
+            return False
+        summary = summary_getter()
+        quarantined = any(
+            str(row.get("exchange") or "") == task.exec_cfg.exchange
+            and str(row.get("symbol") or "") == task.exec_cfg.symbol
+            and int(row.get("count") or 0) > 0
+            for row in summary.get("quarantined_resources", [])
+            if isinstance(row, dict)
+        )
+        if not quarantined:
+            return False
+
+        exchange_cfg = _find_exchange(cfg, task.exec_cfg.exchange)
+        recovery = await recovery_runner(
+            [exchange_cfg],
+            exchange=task.exec_cfg.exchange,
+            symbol=task.exec_cfg.symbol,
+            resolve_confirmed_absent=True,
+        )
+        task.last_order_recovery = {
+            key: recovery.get(key)
+            for key in (
+                "status",
+                "recovered_count",
+                "reconciled_absent_count",
+                "unresolved_count",
+                "checked_at",
+            )
+        }
+        if int(recovery.get("unresolved_count") or 0) <= 0:
+            self._mark_recovered(task)
+            return False
+
+        unresolved = recovery.get("unresolved") or []
+        first = unresolved[0] if unresolved and isinstance(unresolved[0], dict) else {}
+        task.status = "recovering"
+        task.last_status = "recovering_order_state"
+        task.last_error = str(
+            first.get("recovery_error")
+            or first.get("last_error")
+            or "waiting for exchange order reconciliation"
+        )
+        task.last_error_at = time.time()
+        task.consecutive_error_count += 1
+        task.next_run_at = time.time() + max(
+            1.0,
+            min(10.0, task.exec_cfg.interval_seconds),
+        )
+        return True
+
+    @staticmethod
+    def _mark_recovered(task: AutoBuySellTask) -> None:
+        if task.last_error is not None or task.consecutive_error_count > 0:
+            task.last_recovered_at = time.time()
+        task.last_error = None
+        task.last_error_at = None
+        task.consecutive_error_count = 0
 
     async def _retry_pending_stop(
         self,

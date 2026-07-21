@@ -187,7 +187,8 @@ async def _refresh_uncertain_order_intents(
     if int(summary.get("pending_count") or 0) <= 0:
         return None
     recovery = await manager.recover_pending_order_intents(
-        _all_account_exchanges(cfg)
+        _all_account_exchanges(cfg),
+        resolve_confirmed_absent=True,
     )
     await state.set_order_reliability(recovery)
     return recovery
@@ -3369,6 +3370,7 @@ async def _market_maker_instance_task_loop(
                                 [exchange_cfg],
                                 exchange=maker_cfg.exchange,
                                 symbol=maker_cfg.symbol,
+                                resolve_confirmed_absent=True,
                             )
                         )
                     except Exception as exc:  # noqa: BLE001
