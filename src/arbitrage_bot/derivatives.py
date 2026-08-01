@@ -5,7 +5,44 @@ from typing import Any
 from .config import ExchangeConfig, RiskConfig
 
 
-STABLE_MARGIN_CURRENCIES = {"USD", "USDC", "USDT", "BUSD", "FDUSD"}
+STABLE_MARGIN_CURRENCIES = {
+    "USD",
+    "USDT",
+    "USDC",
+    "FDUSD",
+    "BUSD",
+    "TUSD",
+    "USDP",
+    "DAI",
+    "PYUSD",
+    "USDE",
+}
+
+
+def stable_linear_contract_currencies(symbol: str) -> tuple[str, str]:
+    normalized = str(symbol or "").strip().upper()
+    if "/" not in normalized or ":" not in normalized:
+        raise ValueError(
+            "perpetual symbol must use ccxt BASE/QUOTE:SETTLE format"
+        )
+    quote_and_settle = normalized.split("/", 1)[1]
+    quote, settle = quote_and_settle.split(":", 1)
+    if not quote or not settle:
+        raise ValueError(
+            "perpetual symbol must use ccxt BASE/QUOTE:SETTLE format"
+        )
+    unsupported = [
+        currency
+        for currency in (quote, settle)
+        if currency not in STABLE_MARGIN_CURRENCIES
+    ]
+    if unsupported:
+        supported = ", ".join(sorted(STABLE_MARGIN_CURRENCIES))
+        raise ValueError(
+            f"unsupported stable contract currency {unsupported[0]}; "
+            f"supported currencies: {supported}"
+        )
+    return quote, settle
 
 
 def _number_or_none(value: Any) -> float | None:

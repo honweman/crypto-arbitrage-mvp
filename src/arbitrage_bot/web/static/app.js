@@ -7256,9 +7256,13 @@ function balanceStatusClass(status) {
     }
 
     function selectedSlowSymbol() {
+      const customSymbol = document.getElementById("slow-custom-symbol")?.value.trim() || "";
+      if (selectedSlowInstrumentType() === "perpetual" && customSymbol) {
+        return customSymbol;
+      }
       return (
         symbolSelectorValue("slow-account") ||
-        document.getElementById("slow-custom-symbol")?.value.trim() ||
+        customSymbol ||
         ""
       );
     }
@@ -7289,11 +7293,10 @@ function balanceStatusClass(status) {
       const unlimited = document.getElementById("slow-unlimited");
       const sliceMode = document.getElementById("slow-slice-mode");
       const customSymbolField = document.getElementById("slow-custom-symbol-field");
-      const configuredSymbol = symbolSelectorValue("slow-account");
       if (instrument) instrument.value = instrumentType;
       if (fields) fields.hidden = instrumentType !== "perpetual";
       if (customSymbolField) {
-        customSymbolField.hidden = instrumentType !== "perpetual" || Boolean(configuredSymbol);
+        customSymbolField.hidden = instrumentType !== "perpetual";
       }
       if (side) side.disabled = instrumentType === "perpetual";
       if (instrumentType === "perpetual") {
@@ -7318,8 +7321,11 @@ function balanceStatusClass(status) {
     function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
       renderAccountSymbolSelectors("slow-accounts", "slow-account", accounts, selectedExchange, selectedSymbol, () => {
         markSlowFormDirty();
-        if (!symbolSelectorValue("slow-account")) {
-          document.getElementById("slow-custom-symbol").value = "";
+        const customSymbol = document.getElementById("slow-custom-symbol");
+        const configuredSymbol = symbolSelectorValue("slow-account");
+        const account = selectedSlowAccountConfig();
+        if (customSymbol) {
+          customSymbol.value = account?.market_type === "swap" ? configuredSymbol : "";
         }
         syncSlowInstrumentFields();
         updateSlowLabels();

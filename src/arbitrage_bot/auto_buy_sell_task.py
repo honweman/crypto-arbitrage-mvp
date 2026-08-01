@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, SlowExecutionConfig
+from .derivatives import stable_linear_contract_currencies
 from .exchanges import ExchangeManager
 from .slow_executor import build_plan, cancel_order_ids, run_cycle
 from .strategy_timeline import write_strategy_timeline_from_payload
@@ -96,6 +97,7 @@ def validate_task_config(cfg: SlowExecutionConfig) -> None:
     if cfg.max_position_quote < 0:
         raise ValueError("max_position_quote must be non-negative")
     if cfg.instrument_type == "perpetual":
+        stable_linear_contract_currencies(cfg.symbol)
         if cfg.unlimited_total:
             raise ValueError("perpetual Auto Buy/Sell requires a finite total target")
         if cfg.slice_mode != "configured":
@@ -168,8 +170,8 @@ def validate_task_exchange_config(
         return
     if exchange.id not in {"binanceusdm", "bybit"} or exchange.market_type != "swap":
         raise ValueError(
-            "perpetual Auto Buy/Sell supports Binance USDM and Bybit USDT "
-            "linear swap accounts only"
+            "perpetual Auto Buy/Sell supports Binance USDM and Bybit "
+            "stablecoin linear swap accounts only"
         )
 
 

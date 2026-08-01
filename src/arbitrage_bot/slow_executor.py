@@ -77,8 +77,8 @@ def _validate_instrument_exchange(
         return
     if exchange.id not in {"binanceusdm", "bybit"} or exchange.market_type != "swap":
         raise ValueError(
-            "perpetual Auto Buy/Sell supports Binance USDM and Bybit USDT "
-            "linear swap accounts only"
+            "perpetual Auto Buy/Sell supports Binance USDM and Bybit "
+            "stablecoin linear swap accounts only"
         )
 
 
@@ -471,6 +471,8 @@ async def place_plan(
         "contract_size": prepared.get("contract_size") if prepared else None,
         "contracts": prepared.get("contracts") if prepared else None,
         "base_amount": prepared.get("base_amount") if prepared else plan.order.amount,
+        "quote_currency": prepared.get("quote_currency") if prepared else None,
+        "settle_currency": prepared.get("settle_currency") if prepared else None,
         "order_params": order_params,
         "perpetual_configuration": configuration,
     }

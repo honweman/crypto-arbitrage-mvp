@@ -876,6 +876,39 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    def test_validate_task_config_accepts_usdc_perpetual(self) -> None:
+        validate_task_config(
+            SlowExecutionConfig(
+                enabled=True,
+                exchange="bybit-perp",
+                symbol="BTC/USDC:USDC",
+                side="sell",
+                total_quote=100.0,
+                slice_base_min=0.001,
+                slice_base_max=0.001,
+                instrument_type="perpetual",
+                position_effect="reduce_only",
+                position_side="long",
+            )
+        )
+
+    def test_validate_task_config_rejects_non_stable_perpetual(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported stable contract currency"):
+            validate_task_config(
+                SlowExecutionConfig(
+                    enabled=True,
+                    exchange="bybit-perp",
+                    symbol="BTC/BTC:BTC",
+                    side="sell",
+                    total_quote=100.0,
+                    slice_base_min=0.001,
+                    slice_base_max=0.001,
+                    instrument_type="perpetual",
+                    position_effect="reduce_only",
+                    position_side="long",
+                )
+            )
+
     def _slow_cfg(
         self,
         *,

@@ -20,6 +20,7 @@ from uuid import uuid4
 from eth_account import Account
 
 from .config import ExchangeConfig
+from .derivatives import STABLE_MARGIN_CURRENCIES, stable_linear_contract_currencies
 from .models import OrderBookSnapshot, Side
 from .order_reliability import OrderIntentStore, is_confirmed_order_rejection
 from .order_validation import validate_prepared_limit_order
@@ -1361,9 +1362,10 @@ class ExchangeManager:
     ) -> dict[str, Any]:
         if cfg.id not in {"binanceusdm", "bybit"} or cfg.market_type != "swap":
             raise ValueError(
-                "perpetual Auto Buy/Sell supports Binance USDM and Bybit USDT "
-                "linear swaps only"
+                "perpetual Auto Buy/Sell supports Binance USDM and Bybit "
+                "stablecoin linear swaps only"
             )
+        symbol_quote, symbol_settle = stable_linear_contract_currencies(symbol)
         client = self.client(cfg)
         markets = await client.load_markets()
         market = _market_from_loaded_markets(client, markets, symbol)
@@ -1372,7 +1374,29 @@ class ExchangeManager:
         if not bool(market.get("swap")) or not bool(market.get("contract")):
             raise ValueError(f"market is not a perpetual swap: {cfg.key} {symbol}")
         if market.get("linear") is not True or bool(market.get("inverse")):
-            raise ValueError(f"market is not a linear USDT perpetual: {cfg.key} {symbol}")
+            raise ValueError(
+                f"market is not a stablecoin linear perpetual: {cfg.key} {symbol}"
+            )
+        market_info = market.get("info") if isinstance(market.get("info"), dict) else {}
+        quote_currency = str(market.get("quote") or symbol_quote).upper()
+        settle_currency = str(
+            market.get("settle")
+            or market_info.get("settleCoin")
+            or symbol_settle
+        ).upper()
+        if quote_currency != symbol_quote or settle_currency != symbol_settle:
+            raise ValueError(
+                "contract symbol currencies do not match exchange market metadata: "
+                f"{symbol_quote}/{symbol_settle} != "
+                f"{quote_currency}/{settle_currency}"
+            )
+        if (
+            quote_currency not in STABLE_MARGIN_CURRENCIES
+            or settle_currency not in STABLE_MARGIN_CURRENCIES
+        ):
+            raise ValueError(
+                f"market is not stablecoin settled: {cfg.key} {symbol}"
+            )
         contract_size = float(market.get("contractSize") or 0.0)
         if contract_size <= 0:
             raise ValueError(f"invalid contractSize for {cfg.key} {symbol}")
@@ -1403,6 +1427,8 @@ class ExchangeManager:
                 "instrument_type": "perpetual",
                 "linear": True,
                 "contract_size": contract_size,
+                "quote_currency": quote_currency,
+                "settle_currency": settle_currency,
                 "requested_base_amount": float(base_amount),
                 "base_amount": adjusted_base_amount,
                 "requested_contracts": requested_contracts,

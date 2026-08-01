@@ -1689,13 +1689,13 @@
           <label for="slow-instrument-type">Instrument</label>
           <select id="slow-instrument-type" disabled>
             <option value="spot">Spot</option>
-            <option value="perpetual">USDT Perpetual</option>
+            <option value="perpetual">Stablecoin Perpetual</option>
           </select>
         </div>
         <div id="slow-perpetual-fields" class="perpetual-controls wide-field" hidden>
           <div id="slow-custom-symbol-field" class="field" hidden>
-            <label for="slow-custom-symbol">Perpetual Symbol</label>
-            <input id="slow-custom-symbol" type="text" placeholder="BTC/USDT:USDT" autocomplete="off">
+            <label for="slow-custom-symbol">Stablecoin Perpetual Symbol</label>
+            <input id="slow-custom-symbol" type="text" placeholder="BTC/USDC:USDC" autocomplete="off">
           </div>
           <div class="field">
             <label for="slow-position-effect">Position Action</label>
@@ -1727,7 +1727,7 @@
             <input id="slow-max-position" type="number" min="0" step="any">
           </div>
           <div class="field-hint perpetual-safety-hint">
-            One-way linear perpetual only. Reduce Only is the default and is checked against the live position before every order.
+            One-way stablecoin linear perpetual only. Use BASE/QUOTE:SETTLE format. A quote conversion rate is required for live risk checks.
           </div>
         </div>
         <div class="field">

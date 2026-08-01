@@ -2258,6 +2258,22 @@ class WebMonitorTest(unittest.TestCase):
                 symbols_by_exchange={"coinbase-spot": ["ACS/USDC"]},
             )
 
+    def test_slow_execution_update_payload_allows_custom_perpetual_symbol(
+        self,
+    ) -> None:
+        overrides = _slow_execution_overrides_from_payload(
+            {
+                "exchange": "bybit-perp",
+                "symbol": "btc/usdc:usdc",
+                "instrument_type": "perpetual",
+            },
+            allowed_exchanges={"bybit-perp"},
+            symbols_by_exchange={"bybit-perp": ["BTC/USDT:USDT"]},
+        )
+
+        self.assertEqual(overrides["symbol"], "BTC/USDC:USDC")
+        self.assertEqual(overrides["instrument_type"], "perpetual")
+
     def test_spot_grid_update_payload_is_sanitized(self) -> None:
         overrides = _spot_grid_overrides_from_payload(
             {
@@ -6197,6 +6213,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                             "contract_size": 10.0,
                             "contracts": 100.0,
                             "base_amount": 1000.0,
+                            "quote_currency": "USDC",
+                            "settle_currency": "USDC",
                             "order_params": {"reduceOnly": True},
                         },
                         "placed_order_ids": [f"order-{i}" for i in range(100)],
@@ -6227,6 +6245,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("total_quote", view_task["config"])
         self.assertEqual(view_task["last_execution"]["contract_size"], 10.0)
         self.assertEqual(view_task["last_execution"]["contracts"], 100.0)
+        self.assertEqual(view_task["last_execution"]["quote_currency"], "USDC")
+        self.assertEqual(view_task["last_execution"]["settle_currency"], "USDC")
         self.assertTrue(view_task["last_execution"]["order_params"]["reduceOnly"])
 
     async def test_trading_view_includes_compact_market_limits(self) -> None:

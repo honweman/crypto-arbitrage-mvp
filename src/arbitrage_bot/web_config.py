@@ -415,10 +415,14 @@ def _slow_execution_overrides_from_payload(
         symbol = str(payload["symbol"]).strip()
         if not symbol:
             raise ValueError("symbol is required")
+        instrument_type = str(payload.get("instrument_type") or "spot").lower()
+        if instrument_type == "perpetual":
+            symbol = symbol.upper()
         selected_exchange = overrides.get("exchange")
         if selected_exchange and symbols_by_exchange.get(selected_exchange):
             if symbol not in symbols_by_exchange[selected_exchange]:
-                raise ValueError(f"symbol is not configured for account: {symbol}")
+                if instrument_type != "perpetual":
+                    raise ValueError(f"symbol is not configured for account: {symbol}")
         overrides["symbol"] = symbol
     elif "exchange" in overrides and symbols_by_exchange.get(overrides["exchange"]):
         overrides["symbol"] = symbols_by_exchange[overrides["exchange"]][0]

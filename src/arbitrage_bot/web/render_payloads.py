@@ -238,6 +238,8 @@ def _compact_slow_execution_payload(
                 "contract_size",
                 "contracts",
                 "base_amount",
+                "quote_currency",
+                "settle_currency",
                 "order_params",
                 "perpetual_configuration",
                 "errors",

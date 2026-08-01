@@ -375,11 +375,13 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         class FakeClient:
             async def load_markets(self) -> dict[str, object]:
                 return {
-                    "BTC/USDT:USDT": {
+                    "BTC/USDC:USDC": {
                         "swap": True,
                         "contract": True,
                         "linear": True,
                         "inverse": False,
+                        "quote": "USDC",
+                        "settle": "USDC",
                         "contractSize": 0.001,
                         "limits": {
                             "amount": {"min": 1.0, "max": None},
@@ -406,7 +408,7 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         prepared = await manager.prepare_linear_contract_order(
             cfg,
-            symbol="BTC/USDT:USDT",
+            symbol="BTC/USDC:USDC",
             side="buy",
             base_amount=0.0124,
             price=50_000.04,
@@ -415,8 +417,34 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared["status"], "ok")
         self.assertEqual(prepared["contracts"], 12.0)
         self.assertEqual(prepared["contract_size"], 0.001)
+        self.assertEqual(prepared["quote_currency"], "USDC")
+        self.assertEqual(prepared["settle_currency"], "USDC")
         self.assertAlmostEqual(prepared["base_amount"], 0.012)
         self.assertAlmostEqual(prepared["cost"], 600.0)
+
+    async def test_prepare_linear_contract_order_rejects_non_stable_settlement(
+        self,
+    ) -> None:
+        class FakeClient:
+            async def load_markets(self) -> dict[str, object]:
+                return {}
+
+        cfg = ExchangeConfig(
+            id="binanceusdm",
+            label="binance-perp",
+            market_type="swap",
+        )
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = FakeClient()  # noqa: SLF001
+
+        with self.assertRaisesRegex(ValueError, "unsupported stable contract currency"):
+            await manager.prepare_linear_contract_order(
+                cfg,
+                symbol="BTC/BTC:BTC",
+                side="buy",
+                base_amount=0.01,
+                price=50_000.0,
+            )
 
     async def test_create_prepared_contract_order_forwards_reduce_only(self) -> None:
         class FakeClient:
