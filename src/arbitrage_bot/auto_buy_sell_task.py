@@ -44,6 +44,9 @@ TASK_DUPLICATE_FIELDS = (
     "price_offset_bps",
     "unlimited_total",
     "slice_mode",
+    "instrument_type",
+    "position_effect",
+    "position_side",
 )
 
 
@@ -78,6 +81,37 @@ def validate_task_config(cfg: SlowExecutionConfig) -> None:
         raise ValueError("price_offset_bps must be non-negative")
     if cfg.slice_mode not in {"configured", "top_level"}:
         raise ValueError("slice_mode must be configured or top_level")
+    if cfg.instrument_type not in {"spot", "perpetual"}:
+        raise ValueError("instrument_type must be spot or perpetual")
+    if cfg.position_effect not in {"open", "reduce_only"}:
+        raise ValueError("position_effect must be open or reduce_only")
+    if cfg.position_side not in {"long", "short"}:
+        raise ValueError("position_side must be long or short")
+    if cfg.position_mode != "one_way":
+        raise ValueError("only one_way perpetual position mode is supported")
+    if cfg.margin_mode not in {"isolated", "cross"}:
+        raise ValueError("margin_mode must be isolated or cross")
+    if cfg.leverage <= 0:
+        raise ValueError("leverage must be positive")
+    if cfg.max_position_quote < 0:
+        raise ValueError("max_position_quote must be non-negative")
+    if cfg.instrument_type == "perpetual":
+        if cfg.unlimited_total:
+            raise ValueError("perpetual Auto Buy/Sell requires a finite total target")
+        if cfg.slice_mode != "configured":
+            raise ValueError("perpetual Auto Buy/Sell requires configured order size")
+        expected_side = (
+            "buy"
+            if (cfg.position_effect, cfg.position_side)
+            in {("open", "long"), ("reduce_only", "short")}
+            else "sell"
+        )
+        if cfg.side != expected_side:
+            raise ValueError(
+                f"{cfg.position_effect} {cfg.position_side} requires side={expected_side}"
+            )
+        if cfg.position_effect == "open" and cfg.max_position_quote <= 0:
+            raise ValueError("opening perpetual positions requires max_position_quote")
     if not cfg.unlimited_total and cfg.total_base <= 0 and cfg.total_quote <= 0:
         raise ValueError("total_base or total_quote must be positive")
     if cfg.interval_seconds <= 0:
@@ -121,6 +155,24 @@ def _find_exchange(cfg: BotConfig, key: str) -> ExchangeConfig:
     raise ValueError(f"Auto Buy/Sell exchange is not configured: {key}")
 
 
+def validate_task_exchange_config(
+    cfg: BotConfig,
+    task_cfg: SlowExecutionConfig,
+) -> None:
+    exchange = _find_exchange(cfg, task_cfg.exchange)
+    if task_cfg.instrument_type == "spot":
+        if exchange.market_type != "spot":
+            raise ValueError(
+                f"spot Auto Buy/Sell requires a spot account: {exchange.key}"
+            )
+        return
+    if exchange.id not in {"binanceusdm", "bybit"} or exchange.market_type != "swap":
+        raise ValueError(
+            "perpetual Auto Buy/Sell supports Binance USDM and Bybit USDT "
+            "linear swap accounts only"
+        )
+
+
 def _float_value(value: Any) -> float:
     try:
         return float(value)
@@ -128,13 +180,13 @@ def _float_value(value: Any) -> float:
         return 0.0
 
 
-def _trade_cost(raw: dict[str, Any]) -> float:
+def _trade_cost(raw: dict[str, Any], *, contract_size: float = 1.0) -> float:
     cost = _float_value(raw.get("cost"))
     if cost > 0:
         return cost
     amount = _float_value(raw.get("amount"))
     price = _float_value(raw.get("price"))
-    return amount * price if amount > 0 and price > 0 else 0.0
+    return amount * contract_size * price if amount > 0 and price > 0 else 0.0
 
 
 def _order_id(raw: dict[str, Any]) -> str:
@@ -172,12 +224,18 @@ def _trade_order_id(raw: dict[str, Any]) -> str:
     return str(raw.get("order") or raw.get("order_id") or "")
 
 
-def _order_fill_amounts(raw: dict[str, Any]) -> tuple[float, float]:
+def _order_fill_amounts(
+    raw: dict[str, Any],
+    *,
+    contract_size: float = 1.0,
+) -> tuple[float, float]:
     amount = _float_value(raw.get("filled"))
     cost = _float_value(raw.get("cost"))
     if cost <= 0:
         price = _float_value(raw.get("price"))
-        cost = amount * price if amount > 0 and price > 0 else 0.0
+        cost = (
+            amount * contract_size * price if amount > 0 and price > 0 else 0.0
+        )
     return amount, cost
 
 
@@ -226,6 +284,7 @@ class AutoBuySellTask:
     known_trade_ids: list[str] = field(default_factory=list)
     known_filled_order_ids: list[str] = field(default_factory=list)
     order_created_at: dict[str, float] = field(default_factory=dict)
+    order_contract_sizes: dict[str, float] = field(default_factory=dict)
     filled_base: float = 0.0
     filled_quote: float = 0.0
     start_price_triggered: bool = False
@@ -358,6 +417,12 @@ class AutoBuySellTaskStore:
                     -TERMINAL_TASK_RETAINED_ORDER_IDS:
                 ]
                 row["open_order_ids"] = []
+                retained_ids = set(row["placed_order_ids"])
+                row["order_contract_sizes"] = {
+                    order_id: contract_size
+                    for order_id, contract_size in task.order_contract_sizes.items()
+                    if order_id in retained_ids
+                }
                 row["last_execution"] = {
                     "history_compacted": True,
                     "compacted_at": now,
@@ -755,6 +820,9 @@ class AutoBuySellTaskService:
                     task.placed_order_ids.append(order_id)
                     task.open_order_ids.append(order_id)
                     task.order_created_at[order_id] = time.time()
+                    contract_size = _float_value(execution.get("contract_size"))
+                    if contract_size > 0:
+                        task.order_contract_sizes[order_id] = contract_size
             task.placed_count += int(execution.get("placed_count", 0) or 0)
             task.canceled_count += int(execution.get("canceled_count", 0) or 0)
             write_trade_event(cfg.trade_log, payload)
@@ -1102,8 +1170,11 @@ class AutoBuySellTaskService:
             order_id = _trade_order_id(trade)
             if order_id not in tracked:
                 continue
-            amount = _float_value(trade.get("amount"))
-            cost = _trade_cost(trade)
+            contract_size = (
+                _float_value(task.order_contract_sizes.get(order_id)) or 1.0
+            )
+            amount = _float_value(trade.get("amount")) * contract_size
+            cost = _trade_cost(trade, contract_size=contract_size)
             row = trade_fills.setdefault(order_id, {"amount": 0.0, "cost": 0.0})
             row["amount"] += amount
             row["cost"] += cost
@@ -1124,7 +1195,14 @@ class AutoBuySellTaskService:
             order_id = _order_id(order)
             if order_id not in tracked:
                 continue
-            amount, cost = _order_fill_amounts(order)
+            contract_size = (
+                _float_value(task.order_contract_sizes.get(order_id)) or 1.0
+            )
+            raw_amount, cost = _order_fill_amounts(
+                order,
+                contract_size=contract_size,
+            )
+            amount = raw_amount * contract_size
             existing = order_fills.get(order_id, {"amount": 0.0, "cost": 0.0})
             order_fills[order_id] = {
                 "amount": max(existing["amount"], amount),
@@ -1136,8 +1214,18 @@ class AutoBuySellTaskService:
                     latest_fill_at = max(latest_fill_at, fill_timestamp)
                 if order_id not in previous_known_filled_order_ids:
                     if not bootstrap_order_fills:
-                        new_order_fill_base += amount
-                        new_order_fill_quote += cost
+                        trade_fill = trade_fills.get(
+                            order_id,
+                            {"amount": 0.0, "cost": 0.0},
+                        )
+                        new_order_fill_base += max(
+                            0.0,
+                            amount - trade_fill["amount"],
+                        )
+                        new_order_fill_quote += max(
+                            0.0,
+                            cost - trade_fill["cost"],
+                        )
                     known_filled_order_ids.add(order_id)
 
         filled_base = 0.0

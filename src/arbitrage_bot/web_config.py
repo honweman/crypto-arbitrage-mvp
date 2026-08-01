@@ -206,6 +206,29 @@ def _derivative_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
     return {exchange: sorted(items) for exchange, items in symbols.items()}
 
 
+def _auto_buy_sell_symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
+    symbols = _merge_symbols_by_exchange(
+        _spot_symbols_by_exchange(cfg),
+        _derivative_symbols_by_exchange(cfg),
+    )
+    slow = cfg.slow_execution
+    if slow.exchange and slow.symbol:
+        symbols.setdefault(slow.exchange, []).append(slow.symbol)
+    return {
+        exchange: sorted(set(items))
+        for exchange, items in symbols.items()
+    }
+
+
+def auto_buy_sell_exchanges(cfg: BotConfig) -> list[ExchangeConfig]:
+    supported_derivatives = [
+        exchange
+        for exchange in cfg.derivative_exchanges
+        if exchange.market_type == "swap" and exchange.id in {"binanceusdm", "bybit"}
+    ]
+    return [*cfg.spot_exchanges, *supported_derivatives]
+
+
 def _merge_symbols_by_exchange(
     *items: dict[str, list[str]],
 ) -> dict[str, list[str]]:
@@ -460,6 +483,31 @@ def _slow_execution_overrides_from_payload(
         if not isinstance(payload["randomize_slice"], bool):
             raise ValueError("randomize_slice must be a boolean")
         overrides["randomize_slice"] = payload["randomize_slice"]
+
+    enum_fields = {
+        "instrument_type": {"spot", "perpetual"},
+        "position_effect": {"open", "reduce_only"},
+        "position_side": {"long", "short"},
+        "position_mode": {"one_way"},
+        "margin_mode": {"isolated", "cross"},
+    }
+    for field, allowed in enum_fields.items():
+        if field not in payload:
+            continue
+        value = str(payload[field]).strip().lower()
+        if value not in allowed:
+            raise ValueError(f"{field} must be one of: {', '.join(sorted(allowed))}")
+        overrides[field] = value
+
+    for field in ("leverage", "max_position_quote"):
+        if field not in payload:
+            continue
+        value = float(payload[field])
+        if field == "leverage" and value <= 0:
+            raise ValueError("leverage must be positive")
+        if field == "max_position_quote" and value < 0:
+            raise ValueError("max_position_quote must be non-negative")
+        overrides[field] = value
 
     if "interval_seconds" in overrides and overrides["interval_seconds"] <= 0:
         raise ValueError("interval_seconds must be positive")

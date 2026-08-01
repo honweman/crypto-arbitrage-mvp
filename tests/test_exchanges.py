@@ -369,6 +369,91 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_linear_contract_order_converts_base_to_contracts(
+        self,
+    ) -> None:
+        class FakeClient:
+            async def load_markets(self) -> dict[str, object]:
+                return {
+                    "BTC/USDT:USDT": {
+                        "swap": True,
+                        "contract": True,
+                        "linear": True,
+                        "inverse": False,
+                        "contractSize": 0.001,
+                        "limits": {
+                            "amount": {"min": 1.0, "max": None},
+                            "price": {"min": None, "max": None},
+                            "cost": {"min": 5.0, "max": None},
+                        },
+                        "precision": {"amount": 1.0, "price": 0.1},
+                    }
+                }
+
+            def amount_to_precision(self, _: str, amount: float) -> str:
+                return f"{amount:.0f}"
+
+            def price_to_precision(self, _: str, price: float) -> str:
+                return f"{price:.1f}"
+
+        cfg = ExchangeConfig(
+            id="binanceusdm",
+            label="binance-perp",
+            market_type="swap",
+        )
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = FakeClient()  # noqa: SLF001
+
+        prepared = await manager.prepare_linear_contract_order(
+            cfg,
+            symbol="BTC/USDT:USDT",
+            side="buy",
+            base_amount=0.0124,
+            price=50_000.04,
+        )
+
+        self.assertEqual(prepared["status"], "ok")
+        self.assertEqual(prepared["contracts"], 12.0)
+        self.assertEqual(prepared["contract_size"], 0.001)
+        self.assertAlmostEqual(prepared["base_amount"], 0.012)
+        self.assertAlmostEqual(prepared["cost"], 600.0)
+
+    async def test_create_prepared_contract_order_forwards_reduce_only(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.params: dict[str, object] = {}
+
+            async def create_order(
+                self,
+                _symbol: str,
+                _order_type: str,
+                _side: str,
+                _amount: float,
+                _price: float,
+                params: dict[str, object],
+            ) -> dict[str, str]:
+                self.params = params
+                return {"id": "perp-order"}
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-perp", market_type="swap")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        await manager.create_prepared_limit_order(
+            cfg,
+            symbol="BTC/USDT:USDT",
+            side="sell",
+            prepared={"amount": 10.0, "price": 50_000.0, "errors": []},
+            post_only=False,
+            order_params={"reduceOnly": True, "positionIdx": 0},
+        )
+
+        self.assertEqual(
+            client.params,
+            {"reduceOnly": True, "positionIdx": 0},
+        )
+
     async def test_fetch_ohlcv_uses_public_ccxt_capability(self) -> None:
         class FakeClient:
             has = {"fetchOHLCV": True}

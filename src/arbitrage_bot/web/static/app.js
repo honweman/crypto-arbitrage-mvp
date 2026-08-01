@@ -5459,6 +5459,12 @@ function balanceStatusClass(status) {
     const AUTO_CONFIG_COMPARE_FIELDS = [
       ["exchange", "Account", "string"],
       ["symbol", "Symbol", "string"],
+      ["instrument_type", "Instrument", "string"],
+      ["position_effect", "Position Action", "string"],
+      ["position_side", "Position Side", "string"],
+      ["margin_mode", "Margin Mode", "string"],
+      ["leverage", "Leverage", "number"],
+      ["max_position_quote", "Max Position", "number"],
       ["side", "Side", "string"],
       ["price_mode", "Price", "string"],
       ["price_offset_bps", "Offset", "number"],
@@ -7250,12 +7256,72 @@ function balanceStatusClass(status) {
     }
 
     function selectedSlowSymbol() {
-      return symbolSelectorValue("slow-account");
+      return (
+        symbolSelectorValue("slow-account") ||
+        document.getElementById("slow-custom-symbol")?.value.trim() ||
+        ""
+      );
+    }
+
+    function selectedSlowAccountConfig() {
+      return accountForKey(
+        lastState?.slow_execution?.accounts || [],
+        selectedSlowAccount(),
+      );
+    }
+
+    function selectedSlowInstrumentType() {
+      return selectedSlowAccountConfig()?.market_type === "swap" ? "perpetual" : "spot";
+    }
+
+    function expectedPerpetualOrderSide(effect, positionSide) {
+      return (
+        (effect === "open" && positionSide === "long") ||
+        (effect === "reduce_only" && positionSide === "short")
+      ) ? "buy" : "sell";
+    }
+
+    function syncSlowInstrumentFields() {
+      const instrumentType = selectedSlowInstrumentType();
+      const instrument = document.getElementById("slow-instrument-type");
+      const fields = document.getElementById("slow-perpetual-fields");
+      const side = document.getElementById("slow-side");
+      const unlimited = document.getElementById("slow-unlimited");
+      const sliceMode = document.getElementById("slow-slice-mode");
+      const customSymbolField = document.getElementById("slow-custom-symbol-field");
+      const configuredSymbol = symbolSelectorValue("slow-account");
+      if (instrument) instrument.value = instrumentType;
+      if (fields) fields.hidden = instrumentType !== "perpetual";
+      if (customSymbolField) {
+        customSymbolField.hidden = instrumentType !== "perpetual" || Boolean(configuredSymbol);
+      }
+      if (side) side.disabled = instrumentType === "perpetual";
+      if (instrumentType === "perpetual") {
+        if (unlimited) {
+          unlimited.checked = false;
+          unlimited.disabled = true;
+        }
+        if (sliceMode) {
+          sliceMode.value = "configured";
+          sliceMode.disabled = true;
+        }
+        const effect = document.getElementById("slow-position-effect")?.value || "reduce_only";
+        const positionSide = document.getElementById("slow-position-side")?.value || "long";
+        if (side) side.value = expectedPerpetualOrderSide(effect, positionSide);
+      } else {
+        if (unlimited) unlimited.disabled = false;
+        if (sliceMode) sliceMode.disabled = false;
+      }
+      updateSlowLabels();
     }
 
     function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
       renderAccountSymbolSelectors("slow-accounts", "slow-account", accounts, selectedExchange, selectedSymbol, () => {
         markSlowFormDirty();
+        if (!symbolSelectorValue("slow-account")) {
+          document.getElementById("slow-custom-symbol").value = "";
+        }
+        syncSlowInstrumentFields();
         updateSlowLabels();
       });
     }
@@ -7279,6 +7345,7 @@ function balanceStatusClass(status) {
       setSlowLabel("slow-total-quote-label", `${uiText("Total Quote")} (${quote})`);
       setSlowLabel("slow-slice-min-label", `${uiText("Min Base/Order")} (${base})`);
       setSlowLabel("slow-slice-max-label", `${uiText("Max Base/Order")} (${base})`);
+      setSlowLabel("slow-max-position-label", `${uiText("Max Position")} (${quote})`);
     }
 
     function updateSlowGateLabels() {
@@ -7377,6 +7444,14 @@ function balanceStatusClass(status) {
         }
       }
       if (!(payload.interval_seconds > 0)) missing.push(uiText("interval"));
+      if (payload.instrument_type === "perpetual") {
+        if (payload.unlimited_total) missing.push(uiText("finite total target"));
+        if (payload.slice_mode !== "configured") missing.push(uiText("configured order size"));
+        if (payload.position_effect === "open" && !(payload.max_position_quote > 0)) {
+          missing.push(uiText("max position"));
+        }
+        if (!(payload.leverage > 0)) missing.push(uiText("leverage"));
+      }
       return {
         ready: missing.length === 0,
         detail: missing.length
@@ -7449,9 +7524,10 @@ function balanceStatusClass(status) {
       const gatePrice = side === "buy" ? "Ask" : "Bid";
       const startOperator = side === "buy" ? "<=" : ">=";
       const stopOperator = side === "buy" ? ">=" : "<=";
-      return [
+      const details = [
         `${uiText("Account")}: ${payload.exchange}`,
         `${uiText("Trading pair")}: ${payload.symbol}`,
+        `${uiText("Instrument")}: ${payload.instrument_type}`,
         `${uiText("Side")}: ${side.toUpperCase()}`,
         `${uiText("Total target")}: ${total}`,
         `${uiText("Each order")}: ${size}`,
@@ -7460,7 +7536,19 @@ function balanceStatusClass(status) {
         `${uiText("Start Gate")}: ${payload.start_price > 0 ? `${gatePrice} ${startOperator} ${fmt.format(payload.start_price)} ${quote}` : uiText("Immediate")}`,
         `${uiText("Stop Gate")}: ${payload.stop_price > 0 ? `${gatePrice} ${stopOperator} ${fmt.format(payload.stop_price)} ${quote}` : uiText("None")}`,
         `${uiText("MM Coordination")}: ${payload.coordinate_market_maker ? uiText("On") : uiText("Off")}`,
-      ].join("\n");
+      ];
+      if (payload.instrument_type === "perpetual") {
+        details.splice(
+          3,
+          0,
+          `${uiText("Position Action")}: ${payload.position_effect}`,
+          `${uiText("Position Side")}: ${payload.position_side}`,
+          `${uiText("Margin Mode")}: ${payload.margin_mode}`,
+          `${uiText("Leverage")}: ${fmt.format(payload.leverage)}x`,
+          `${uiText("Max Position")}: ${quote} ${fmt.format(payload.max_position_quote)}`,
+        );
+      }
+      return details.join("\n");
     }
 
     function renderSlowExecutionConfig(config, accounts) {
@@ -7473,6 +7561,15 @@ function balanceStatusClass(status) {
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
+      document.getElementById("slow-custom-symbol").value = config.instrument_type === "perpetual"
+        ? (config.symbol || "")
+        : "";
+      document.getElementById("slow-position-effect").value = config.position_effect || "reduce_only";
+      document.getElementById("slow-position-side").value = config.position_side || "long";
+      document.getElementById("slow-margin-mode").value = config.margin_mode || "isolated";
+      setNumericField("slow-leverage", config.leverage || 1);
+      setNumericField("slow-max-position", config.max_position_quote || 0);
+      syncSlowInstrumentFields();
       updateSlowLabels();
       document.getElementById("slow-price-mode").value = config.price_mode || "taker";
       setNumericField("slow-offset-bps", config.price_offset_bps || 0);
@@ -7499,6 +7596,13 @@ function balanceStatusClass(status) {
         exchange: selectedSlowAccount(),
         symbol: selectedSlowSymbol(),
         side: document.getElementById("slow-side").value,
+        instrument_type: selectedSlowInstrumentType(),
+        position_effect: document.getElementById("slow-position-effect").value,
+        position_side: document.getElementById("slow-position-side").value,
+        position_mode: "one_way",
+        margin_mode: document.getElementById("slow-margin-mode").value,
+        leverage: numericValue("slow-leverage"),
+        max_position_quote: numericValue("slow-max-position"),
         price_mode: document.getElementById("slow-price-mode").value,
         price_offset_bps: numericValue("slow-offset-bps"),
         unlimited_total: document.getElementById("slow-unlimited").checked,
@@ -9077,6 +9181,9 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("input", markSlowFormDirty);
     document.getElementById("slow-form").addEventListener("change", markSlowFormDirty);
     document.getElementById("slow-side").addEventListener("change", updateSlowLabels);
+    document.getElementById("slow-position-effect").addEventListener("change", syncSlowInstrumentFields);
+    document.getElementById("slow-position-side").addEventListener("change", syncSlowInstrumentFields);
+    document.getElementById("slow-custom-symbol").addEventListener("input", updateSlowLabels);
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     document.getElementById("rebalance-form").addEventListener("input", () => {
       rebalanceFormDirty = true;

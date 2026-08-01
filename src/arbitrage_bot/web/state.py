@@ -39,7 +39,7 @@ from ..web_config import (
     _grid_symbols_by_exchange,
     _rebalance_symbols_by_exchange,
     _spot_markets_from_payload,
-    _spot_symbols_by_exchange,
+    _auto_buy_sell_symbols_by_exchange,
     backtest_config_to_dict,
     cash_and_carry_pairs_to_list,
     contract_strategies_config_to_dict,
@@ -57,6 +57,7 @@ from ..web_config import (
     risk_config_to_dict,
     slow_execution_config_to_dict,
     slow_execution_accounts,
+    auto_buy_sell_exchanges,
     spot_markets_to_list,
     spot_grid_config_to_dict,
     strategy_universe_to_dict,
@@ -534,13 +535,13 @@ class MonitorState:
                 ),
                 spot_markets=runtime_cfg.spot_markets,
             )
-        symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+        symbols_by_exchange = _auto_buy_sell_symbols_by_exchange(runtime_cfg)
         if "slow_execution" in self._payload:
             self._payload["slow_execution"]["config"] = slow_execution_config_to_dict(
                 runtime_cfg.slow_execution
             )
             self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
-                runtime_cfg.spot_exchanges,
+                auto_buy_sell_exchanges(runtime_cfg),
                 symbols_by_exchange,
                 spot_markets=runtime_cfg.spot_markets,
             )
@@ -1375,8 +1376,8 @@ class MonitorState:
                 if runtime_cfg is not None:
                     self._payload["slow_execution"]["accounts"] = (
                         slow_execution_accounts(
-                            runtime_cfg.spot_exchanges,
-                            _spot_symbols_by_exchange(runtime_cfg),
+                            auto_buy_sell_exchanges(runtime_cfg),
+                            _auto_buy_sell_symbols_by_exchange(runtime_cfg),
                             spot_markets=runtime_cfg.spot_markets,
                         )
                     )
@@ -1396,7 +1397,7 @@ class MonitorState:
         async with self._lock:
             self._spot_markets_override = markets
             runtime_cfg = self._runtime_config_unlocked(cfg)
-            symbols_by_exchange = _spot_symbols_by_exchange(runtime_cfg)
+            symbols_by_exchange = _auto_buy_sell_symbols_by_exchange(runtime_cfg)
             if "config" in self._payload:
                 self._payload["config"]["spot_markets"] = spot_markets_to_list(
                     runtime_cfg.spot_markets
@@ -1423,7 +1424,7 @@ class MonitorState:
                 )
             if "slow_execution" in self._payload:
                 self._payload["slow_execution"]["accounts"] = slow_execution_accounts(
-                    runtime_cfg.spot_exchanges,
+                    auto_buy_sell_exchanges(runtime_cfg),
                     symbols_by_exchange,
                     spot_markets=runtime_cfg.spot_markets,
                 )

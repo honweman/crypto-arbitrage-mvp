@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, load_config
+from .derivatives import normalize_derivative_position
 from .exchanges import ExchangeManager
 from .order_validation import summarize_order_validations
 from .risk import (
@@ -57,6 +58,169 @@ def _quote_conversion(cfg: BotConfig, symbol: str) -> dict[str, Any]:
         "quote_to_common_rate": rate,
         "available": rate is not None,
     }
+
+
+def _is_perpetual(cfg: BotConfig) -> bool:
+    return cfg.slow_execution.instrument_type == "perpetual"
+
+
+def _validate_instrument_exchange(
+    exchange: ExchangeConfig,
+    *,
+    instrument_type: str,
+) -> None:
+    if instrument_type == "spot":
+        if exchange.market_type != "spot":
+            raise ValueError(
+                f"Auto Buy/Sell spot mode requires a spot account: {exchange.key}"
+            )
+        return
+    if exchange.id not in {"binanceusdm", "bybit"} or exchange.market_type != "swap":
+        raise ValueError(
+            "perpetual Auto Buy/Sell supports Binance USDM and Bybit USDT "
+            "linear swap accounts only"
+        )
+
+
+def _perpetual_order_params(
+    exchange: ExchangeConfig,
+    cfg: BotConfig,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "reduceOnly": cfg.slow_execution.position_effect == "reduce_only",
+    }
+    if exchange.id == "bybit":
+        params["positionIdx"] = 0
+    return params
+
+
+async def _perpetual_execution_protection(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    plan: SlowExecutionPlan,
+    *,
+    live: bool,
+) -> dict[str, Any]:
+    exec_cfg = cfg.slow_execution
+    exchange = _find_exchange(cfg, exec_cfg.exchange)
+    if not _is_perpetual(cfg):
+        return {"enabled": False, "approved": True, "reasons": [], "positions": []}
+
+    reasons: list[str] = []
+    try:
+        _validate_instrument_exchange(
+            exchange,
+            instrument_type=exec_cfg.instrument_type,
+        )
+    except ValueError as exc:
+        reasons.append(str(exc))
+    if exec_cfg.position_mode != "one_way":
+        reasons.append("only one-way perpetual position mode is supported")
+    if (
+        exec_cfg.position_effect == "open"
+        and cfg.risk.max_derivative_leverage <= 0
+    ):
+        reasons.append("risk.max_derivative_leverage must be configured before opening")
+    elif (
+        exec_cfg.position_effect == "open"
+        and exec_cfg.leverage > cfg.risk.max_derivative_leverage
+    ):
+        reasons.append(
+            f"requested leverage {exec_cfg.leverage:.4g} exceeds risk limit "
+            f"{cfg.risk.max_derivative_leverage:.4g}"
+        )
+
+    positions: list[dict[str, Any]] = []
+    if live and not reasons:
+        try:
+            raw_positions = await manager.fetch_positions(exchange, [exec_cfg.symbol])
+            positions = [
+                normalized
+                for raw in raw_positions
+                if isinstance(raw, dict)
+                for normalized in [
+                    normalize_derivative_position(exchange, raw, risk=cfg.risk)
+                ]
+                if normalized is not None
+                and _symbol_matches(normalized.get("symbol", ""), exec_cfg.symbol)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            reasons.append(
+                "could not verify perpetual position: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+
+    order_base = float(plan.order.amount if plan.order is not None else 0.0)
+    order_quote = float(plan.order.quote_notional if plan.order is not None else 0.0)
+    same_side = [row for row in positions if row.get("side") == exec_cfg.position_side]
+    opposite_side = [
+        row
+        for row in positions
+        if row.get("side") in {"long", "short"}
+        and row.get("side") != exec_cfg.position_side
+    ]
+    current_base = sum(float(row.get("base_amount") or 0.0) for row in same_side)
+    current_quote = sum(float(row.get("notional_quote") or 0.0) for row in same_side)
+    if live and exec_cfg.position_effect == "reduce_only":
+        if current_base <= 0:
+            reasons.append(
+                f"no {exec_cfg.position_side} position is available to reduce"
+            )
+        elif order_base > current_base + max(current_base, 1.0) * 1e-9:
+            reasons.append(
+                f"reduce order base {order_base:.12g} exceeds current "
+                f"{exec_cfg.position_side} position {current_base:.12g}"
+            )
+    if live and exec_cfg.position_effect == "open":
+        if opposite_side:
+            reasons.append(
+                "one-way account has an opposite position; opening would first reduce it"
+            )
+        projected_quote = current_quote + order_quote
+        if projected_quote > exec_cfg.max_position_quote + max(
+            exec_cfg.max_position_quote, 1.0
+        ) * 1e-9:
+            reasons.append(
+                f"projected position {projected_quote:.12g} exceeds task limit "
+                f"{exec_cfg.max_position_quote:.12g} {_quote_currency(exec_cfg.symbol)}"
+            )
+
+    return {
+        "enabled": True,
+        "approved": not reasons,
+        "checked": live,
+        "exchange": exchange.key,
+        "symbol": exec_cfg.symbol,
+        "position_effect": exec_cfg.position_effect,
+        "position_side": exec_cfg.position_side,
+        "position_mode": exec_cfg.position_mode,
+        "margin_mode": exec_cfg.margin_mode,
+        "leverage": exec_cfg.leverage,
+        "max_position_quote": exec_cfg.max_position_quote,
+        "current_position_base": current_base,
+        "current_position_quote": current_quote,
+        "order_base": order_base,
+        "order_quote": order_quote,
+        "positions": positions,
+        "reasons": reasons,
+    }
+
+
+def _apply_perpetual_protection(
+    risk: dict[str, Any],
+    protection: dict[str, Any],
+) -> dict[str, Any]:
+    risk["derivative_protection"] = protection
+    if protection.get("approved", True):
+        return risk
+    reasons = [str(reason) for reason in protection.get("reasons", []) if reason]
+    risk["approved"] = False
+    risk["level"] = "blocked"
+    risk["reasons"] = [
+        *list(risk.get("reasons", [])),
+        *[reason for reason in reasons if reason not in risk.get("reasons", [])],
+    ]
+    return risk
 
 
 def _raw_client_order_id(raw: Any) -> str:
@@ -213,6 +377,10 @@ async def build_plan(
         raise ValueError("slow_execution.symbol is required")
 
     exchange_cfg = _find_exchange(cfg, exec_cfg.exchange)
+    _validate_instrument_exchange(
+        exchange_cfg,
+        instrument_type=exec_cfg.instrument_type,
+    )
     book = await manager.fetch_order_book(
         exchange_cfg,
         exec_cfg.symbol,
@@ -256,19 +424,55 @@ async def place_plan(
         if exec_cfg.client_order_prefix
         else None
     )
-    raw = await manager.create_limit_order(
-        exchange_cfg,
-        symbol=exec_cfg.symbol,
-        side=plan.order.side,
-        amount=plan.order.amount,
-        price=plan.order.price,
-        post_only=exec_cfg.post_only,
-        client_order_id=client_order_id,
-    )
+    if _is_perpetual(cfg):
+        prepared = await manager.prepare_linear_contract_order(
+            exchange_cfg,
+            symbol=exec_cfg.symbol,
+            side=plan.order.side,
+            base_amount=plan.order.amount,
+            price=plan.order.price,
+        )
+        configuration = None
+        if exec_cfg.position_effect == "open":
+            configuration = await manager.configure_linear_perpetual(
+                exchange_cfg,
+                symbol=exec_cfg.symbol,
+                leverage=exec_cfg.leverage,
+                margin_mode=exec_cfg.margin_mode,
+            )
+        order_params = _perpetual_order_params(exchange_cfg, cfg)
+        raw = await manager.create_prepared_limit_order(
+            exchange_cfg,
+            symbol=exec_cfg.symbol,
+            side=plan.order.side,
+            prepared=prepared,
+            post_only=exec_cfg.post_only,
+            client_order_id=client_order_id,
+            order_params=order_params,
+        )
+    else:
+        prepared = None
+        configuration = None
+        order_params = {}
+        raw = await manager.create_limit_order(
+            exchange_cfg,
+            symbol=exec_cfg.symbol,
+            side=plan.order.side,
+            amount=plan.order.amount,
+            price=plan.order.price,
+            post_only=exec_cfg.post_only,
+            client_order_id=client_order_id,
+        )
     return {
         "canceled_count": len(canceled),
         "placed_count": 1,
         "placed_order_ids": [raw.get("id")] if isinstance(raw, dict) else [],
+        "instrument_type": exec_cfg.instrument_type,
+        "contract_size": prepared.get("contract_size") if prepared else None,
+        "contracts": prepared.get("contracts") if prepared else None,
+        "base_amount": prepared.get("base_amount") if prepared else plan.order.amount,
+        "order_params": order_params,
+        "perpetual_configuration": configuration,
     }
 
 
@@ -283,13 +487,22 @@ async def validate_plan_order(
     exec_cfg = cfg.slow_execution
     exchange_cfg = _find_exchange(cfg, exec_cfg.exchange)
     try:
-        row = await manager.prepare_limit_order(
-            exchange_cfg,
-            symbol=exec_cfg.symbol,
-            side=plan.order.side,
-            amount=plan.order.amount,
-            price=plan.order.price,
-        )
+        if _is_perpetual(cfg):
+            row = await manager.prepare_linear_contract_order(
+                exchange_cfg,
+                symbol=exec_cfg.symbol,
+                side=plan.order.side,
+                base_amount=plan.order.amount,
+                price=plan.order.price,
+            )
+        else:
+            row = await manager.prepare_limit_order(
+                exchange_cfg,
+                symbol=exec_cfg.symbol,
+                side=plan.order.side,
+                amount=plan.order.amount,
+                price=plan.order.price,
+            )
     except Exception as exc:  # noqa: BLE001
         row = {
             "exchange": exchange_cfg.key,
@@ -475,6 +688,16 @@ async def run_cycle(
         market_maker_paused=market_maker_paused,
     )
     payload["risk"] = _apply_self_trade_guard(risk.to_dict(), guard)
+    perpetual_protection = await _perpetual_execution_protection(
+        cfg,
+        manager,
+        plan,
+        live=live,
+    )
+    payload["risk"] = _apply_perpetual_protection(
+        payload["risk"],
+        perpetual_protection,
+    )
     payload["risk"]["currency"] = cfg.common_quote_currency
     payload["risk"]["quote_conversion"] = conversion
     if quote_rate is None:

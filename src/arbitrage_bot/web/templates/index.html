@@ -1686,6 +1686,51 @@
           <div id="slow-accounts" class="account-options"></div>
         </div>
         <div class="field">
+          <label for="slow-instrument-type">Instrument</label>
+          <select id="slow-instrument-type" disabled>
+            <option value="spot">Spot</option>
+            <option value="perpetual">USDT Perpetual</option>
+          </select>
+        </div>
+        <div id="slow-perpetual-fields" class="perpetual-controls wide-field" hidden>
+          <div id="slow-custom-symbol-field" class="field" hidden>
+            <label for="slow-custom-symbol">Perpetual Symbol</label>
+            <input id="slow-custom-symbol" type="text" placeholder="BTC/USDT:USDT" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="slow-position-effect">Position Action</label>
+            <select id="slow-position-effect">
+              <option value="reduce_only">Reduce Only</option>
+              <option value="open">Open / Increase</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="slow-position-side">Position Side</label>
+            <select id="slow-position-side">
+              <option value="long">Long</option>
+              <option value="short">Short</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="slow-margin-mode">Margin Mode</label>
+            <select id="slow-margin-mode">
+              <option value="isolated">Isolated</option>
+              <option value="cross">Cross</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="slow-leverage">Leverage</label>
+            <input id="slow-leverage" type="number" min="1" step="any">
+          </div>
+          <div class="field">
+            <label id="slow-max-position-label" for="slow-max-position">Max Position (Quote)</label>
+            <input id="slow-max-position" type="number" min="0" step="any">
+          </div>
+          <div class="field-hint perpetual-safety-hint">
+            One-way linear perpetual only. Reduce Only is the default and is checked against the live position before every order.
+          </div>
+        </div>
+        <div class="field">
           <label for="slow-side">Side</label>
           <select id="slow-side">
             <option value="buy">Buy</option>

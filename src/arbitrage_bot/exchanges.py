@@ -1080,6 +1080,7 @@ class ExchangeManager:
         prepared: dict[str, Any],
         post_only: bool,
         client_order_id: str,
+        order_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         store = self._order_intents
         if store is None:
@@ -1091,6 +1092,7 @@ class ExchangeManager:
             "amount": float(prepared["amount"]),
             "price": float(prepared["price"]),
             "post_only": bool(post_only),
+            "order_params": dict(order_params or {}),
         }
         quarantined = store.first_uncertain(
             exchange=cfg.key,
@@ -1131,7 +1133,7 @@ class ExchangeManager:
             return {**recovered, "idempotent_recovery": True}
 
         client = self.client(cfg)
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = dict(order_params or {})
         if post_only:
             params["postOnly"] = True
         if limit_order_features(cfg).client_order_id:
@@ -1191,6 +1193,7 @@ class ExchangeManager:
         prepared: dict[str, Any],
         post_only: bool = True,
         client_order_id: str | None = None,
+        order_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         capability_errors = limit_order_capability_errors(
             cfg,
@@ -1217,9 +1220,10 @@ class ExchangeManager:
                 prepared=prepared,
                 post_only=post_only,
                 client_order_id=normalized_client_order_id,
+                order_params=order_params,
             )
         client = self.client(cfg)
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = dict(order_params or {})
         if post_only:
             params["postOnly"] = True
         if normalized_client_order_id and limit_order_features(cfg).client_order_id:
@@ -1345,6 +1349,119 @@ class ExchangeManager:
             price=order_price,
             market=market,
         )
+
+    async def prepare_linear_contract_order(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        side: Side,
+        base_amount: float,
+        price: float,
+    ) -> dict[str, Any]:
+        if cfg.id not in {"binanceusdm", "bybit"} or cfg.market_type != "swap":
+            raise ValueError(
+                "perpetual Auto Buy/Sell supports Binance USDM and Bybit USDT "
+                "linear swaps only"
+            )
+        client = self.client(cfg)
+        markets = await client.load_markets()
+        market = _market_from_loaded_markets(client, markets, symbol)
+        if not market:
+            raise ValueError(f"perpetual market is unavailable: {cfg.key} {symbol}")
+        if not bool(market.get("swap")) or not bool(market.get("contract")):
+            raise ValueError(f"market is not a perpetual swap: {cfg.key} {symbol}")
+        if market.get("linear") is not True or bool(market.get("inverse")):
+            raise ValueError(f"market is not a linear USDT perpetual: {cfg.key} {symbol}")
+        contract_size = float(market.get("contractSize") or 0.0)
+        if contract_size <= 0:
+            raise ValueError(f"invalid contractSize for {cfg.key} {symbol}")
+
+        requested_contracts = float(base_amount) / contract_size
+        contracts = float(client.amount_to_precision(symbol, requested_contracts))
+        exchange_price = _limit_price_to_exchange_tick(
+            cfg,
+            symbol=symbol,
+            side=side,
+            price=price,
+        )
+        order_price = float(client.price_to_precision(symbol, exchange_price))
+        adjusted_base_amount = contracts * contract_size
+        row = validate_prepared_limit_order(
+            exchange=cfg.key,
+            symbol=symbol,
+            side=side,
+            requested_amount=requested_contracts,
+            requested_price=price,
+            amount=contracts,
+            price=order_price,
+            market=market,
+            cost_override=adjusted_base_amount * order_price,
+        )
+        row.update(
+            {
+                "instrument_type": "perpetual",
+                "linear": True,
+                "contract_size": contract_size,
+                "requested_base_amount": float(base_amount),
+                "base_amount": adjusted_base_amount,
+                "requested_contracts": requested_contracts,
+                "contracts": contracts,
+            }
+        )
+        if abs(adjusted_base_amount - float(base_amount)) > max(
+            abs(float(base_amount)), 1.0
+        ) * 1e-12:
+            row["warnings"].append(
+                "base amount rounded from "
+                f"{float(base_amount):.12g} to {adjusted_base_amount:.12g} "
+                f"({contracts:.12g} contracts x {contract_size:.12g})"
+            )
+        return row
+
+    async def configure_linear_perpetual(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        symbol: str,
+        leverage: float,
+        margin_mode: str,
+    ) -> dict[str, Any]:
+        if cfg.id not in {"binanceusdm", "bybit"} or cfg.market_type != "swap":
+            raise ValueError("unsupported perpetual exchange configuration")
+        if leverage <= 0:
+            raise ValueError("leverage must be positive")
+        if margin_mode not in {"isolated", "cross"}:
+            raise ValueError("margin_mode must be isolated or cross")
+
+        client = self.client(cfg)
+        results: dict[str, Any] = {
+            "exchange": cfg.key,
+            "symbol": symbol,
+            "margin_mode": margin_mode,
+            "leverage": leverage,
+        }
+        ignored_tokens = (
+            "already",
+            "not modified",
+            "no need to change",
+            "same margin mode",
+        )
+        for name, method_name, args in (
+            ("margin", "set_margin_mode", (margin_mode, symbol)),
+            ("leverage", "set_leverage", (leverage, symbol)),
+        ):
+            setter = getattr(client, method_name, None)
+            if not callable(setter):
+                raise ValueError(f"{cfg.key} does not support {method_name}")
+            try:
+                results[name] = await setter(*args)
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc).lower()
+                if not any(token in message for token in ignored_tokens):
+                    raise
+                results[name] = {"status": "unchanged", "message": str(exc)}
+        return results
 
     async def prepare_limit_orders(
         self,

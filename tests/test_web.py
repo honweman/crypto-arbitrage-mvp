@@ -2197,6 +2197,13 @@ class WebMonitorTest(unittest.TestCase):
                 "price_offset_bps": "1",
                 "unlimited_total": True,
                 "slice_mode": "top_level",
+                "instrument_type": "perpetual",
+                "position_effect": "open",
+                "position_side": "short",
+                "position_mode": "one_way",
+                "margin_mode": "cross",
+                "leverage": "2",
+                "max_position_quote": "500",
             },
             allowed_exchanges={"bybit-spot"},
             symbols_by_exchange={"bybit-spot": ["ACS/USDT"]},
@@ -2218,6 +2225,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(overrides["slice_base_min"], 10.0)
         self.assertEqual(overrides["slice_base_max"], 20.0)
         self.assertTrue(overrides["randomize_slice"])
+        self.assertEqual(overrides["instrument_type"], "perpetual")
+        self.assertEqual(overrides["position_effect"], "open")
+        self.assertEqual(overrides["position_side"], "short")
+        self.assertEqual(overrides["position_mode"], "one_way")
+        self.assertEqual(overrides["margin_mode"], "cross")
+        self.assertEqual(overrides["leverage"], 2.0)
+        self.assertEqual(overrides["max_position_quote"], 500.0)
 
     def test_slow_execution_update_payload_rejects_unknown_account(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown exchange account"):
@@ -6161,9 +6175,16 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         "id": "task-1",
                         "status": "running",
                         "config": {
-                            "exchange": "coinbase-spot",
-                            "symbol": "ACS/USDC",
+                            "exchange": "binance-usdm",
+                            "symbol": "ACS/USDT:USDT",
+                            "instrument_type": "perpetual",
                             "side": "buy",
+                            "position_effect": "reduce_only",
+                            "position_side": "short",
+                            "position_mode": "one_way",
+                            "margin_mode": "isolated",
+                            "leverage": 1.0,
+                            "max_position_quote": 25.0,
                             "total_quote": 10.0,
                             "price_mode": "taker",
                         },
@@ -6171,6 +6192,13 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         "remaining_quote": 8.5,
                         "progress_pct": 15.0,
                         "open_order_count": 1,
+                        "last_execution": {
+                            "placed_count": 1,
+                            "contract_size": 10.0,
+                            "contracts": 100.0,
+                            "base_amount": 1000.0,
+                            "order_params": {"reduceOnly": True},
+                        },
                         "placed_order_ids": [f"order-{i}" for i in range(100)],
                         "known_trade_ids": [f"trade-{i}" for i in range(100)],
                         "order_created_at": {f"order-{i}": 123.0 for i in range(100)},
@@ -6189,9 +6217,17 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("placed_order_ids", view_task)
         self.assertNotIn("known_trade_ids", view_task)
         self.assertNotIn("order_created_at", view_task)
-        self.assertEqual(view_task["config"]["exchange"], "coinbase-spot")
+        self.assertEqual(view_task["config"]["exchange"], "binance-usdm")
         self.assertEqual(view_task["config"]["price_mode"], "taker")
+        self.assertEqual(view_task["config"]["instrument_type"], "perpetual")
+        self.assertEqual(view_task["config"]["position_effect"], "reduce_only")
+        self.assertEqual(view_task["config"]["position_side"], "short")
+        self.assertEqual(view_task["config"]["margin_mode"], "isolated")
+        self.assertEqual(view_task["config"]["max_position_quote"], 25.0)
         self.assertIn("total_quote", view_task["config"])
+        self.assertEqual(view_task["last_execution"]["contract_size"], 10.0)
+        self.assertEqual(view_task["last_execution"]["contracts"], 100.0)
+        self.assertTrue(view_task["last_execution"]["order_params"]["reduceOnly"])
 
     async def test_trading_view_includes_compact_market_limits(self) -> None:
         payload = {

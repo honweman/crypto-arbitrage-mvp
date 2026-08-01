@@ -71,8 +71,9 @@ def validate_prepared_limit_order(
     amount: float,
     price: float,
     market: dict[str, Any] | None = None,
+    cost_override: float | None = None,
 ) -> dict[str, Any]:
-    cost = amount * price
+    cost = amount * price if cost_override is None else float(cost_override)
     errors: list[str] = []
     warnings: list[str] = []
 

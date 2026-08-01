@@ -775,6 +775,66 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager.closed_order_limits[-1], 250)
 
+    async def test_refresh_converts_contract_fills_to_base_and_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg())
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp)
+            task = service._tasks[0]
+            task.placed_order_ids = ["perp-order"]
+            task.order_contract_sizes = {"perp-order": 0.001}
+            manager.closed_orders = [
+                {
+                    "id": "perp-order",
+                    "status": "closed",
+                    "filled": 4.0,
+                    "remaining": 0.0,
+                    "price": 50_000.0,
+                    "timestamp": 1_000_000,
+                }
+            ]
+
+            await service._refresh_task_activity(task, cfg, manager)
+            refreshed = task.to_dict()
+
+        self.assertAlmostEqual(refreshed["filled_base"], 0.004)
+        self.assertAlmostEqual(refreshed["filled_quote"], 200.0)
+
+    async def test_refresh_does_not_double_count_trade_and_closed_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(self._slow_cfg())
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp)
+            task = service._tasks[0]
+            task.placed_order_ids = ["order-1"]
+            manager.trades = [
+                {
+                    "id": "trade-1",
+                    "order": "order-1",
+                    "amount": 2.0,
+                    "cost": 0.3,
+                    "timestamp": 1_000_000,
+                }
+            ]
+            manager.closed_orders = [
+                {
+                    "id": "order-1",
+                    "status": "closed",
+                    "filled": 2.0,
+                    "remaining": 0.0,
+                    "cost": 0.3,
+                    "timestamp": 1_000_000,
+                }
+            ]
+
+            await service._refresh_task_activity(task, cfg, manager)
+            refreshed = task.to_dict()
+
+        self.assertAlmostEqual(refreshed["filled_base"], 2.0)
+        self.assertAlmostEqual(refreshed["filled_quote"], 0.3)
+
     def test_validate_task_config_requires_one_slice_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "configure exactly one"):
             validate_task_config(self._slow_cfg(slice_base=1.0, slice_base_min=1.0))
@@ -796,6 +856,25 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
                 price_offset_bps=1.0,
             )
         )
+
+    def test_validate_task_config_requires_position_limit_for_perpetual_open(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "max_position_quote"):
+            validate_task_config(
+                SlowExecutionConfig(
+                    enabled=True,
+                    exchange="bybit-perp",
+                    symbol="BTC/USDT:USDT",
+                    side="buy",
+                    total_base=0.01,
+                    slice_base_min=0.001,
+                    slice_base_max=0.001,
+                    instrument_type="perpetual",
+                    position_effect="open",
+                    position_side="long",
+                )
+            )
 
     def _slow_cfg(
         self,

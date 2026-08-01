@@ -137,6 +137,13 @@ class SlowExecutionConfig:
     client_order_prefix: str = "crypto-arb-slow"
     block_conflicting_market_maker: bool = True
     coordinate_market_maker: bool = False
+    instrument_type: str = "spot"
+    position_effect: str = "reduce_only"
+    position_side: str = "long"
+    position_mode: str = "one_way"
+    margin_mode: str = "isolated"
+    leverage: float = 1.0
+    max_position_quote: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -867,6 +874,25 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             coordinate_market_maker=bool(
                 slow_execution_raw.get("coordinate_market_maker", False)
+            ),
+            instrument_type=str(
+                slow_execution_raw.get("instrument_type", "spot")
+            ).lower(),
+            position_effect=str(
+                slow_execution_raw.get("position_effect", "reduce_only")
+            ).lower(),
+            position_side=str(
+                slow_execution_raw.get("position_side", "long")
+            ).lower(),
+            position_mode=str(
+                slow_execution_raw.get("position_mode", "one_way")
+            ).lower(),
+            margin_mode=str(
+                slow_execution_raw.get("margin_mode", "isolated")
+            ).lower(),
+            leverage=float(slow_execution_raw.get("leverage", 1.0)),
+            max_position_quote=float(
+                slow_execution_raw.get("max_position_quote", 0.0)
             ),
         ),
         cross_exchange_rebalance=CrossExchangeRebalanceConfig(

@@ -2254,3 +2254,18 @@ tbody tr:last-child td {
     transform: translateY(0);
   }
 }
+.perpetual-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.perpetual-controls[hidden] {
+  display: none;
+}
+
+.perpetual-safety-hint {
+  align-self: center;
+  line-height: 1.45;
+}

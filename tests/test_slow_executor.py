@@ -382,6 +382,200 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(payload["risk"]["total_quote_notional"], 31.0)
         self.assertAlmostEqual(submitted_base, 100_000.0)
 
+    async def test_perpetual_reduce_only_checks_position_and_places_contracts(
+        self,
+    ) -> None:
+        class FakeManager:
+            created_params: dict[str, object] | None = None
+
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="bybit-perp",
+                    symbol="BTC/USDT:USDT",
+                    bids=[BookLevel(price=50_000.0, amount=10.0)],
+                    asks=[BookLevel(price=50_001.0, amount=10.0)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def fetch_positions(
+                self,
+                *_: object,
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 10.0,
+                        "contractSize": 0.001,
+                        "notional": 500.0,
+                        "markPrice": 50_000.0,
+                    }
+                ]
+
+            async def prepare_linear_contract_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> dict[str, object]:
+                return {
+                    "exchange": "bybit-perp",
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "sell",
+                    "status": "ok",
+                    "amount": 5.0,
+                    "contracts": 5.0,
+                    "contract_size": 0.001,
+                    "base_amount": 0.005,
+                    "price": 50_000.0,
+                    "cost": 250.0,
+                    "errors": [],
+                    "warnings": [],
+                }
+
+            async def create_prepared_limit_order(
+                self,
+                *_: object,
+                **kwargs: object,
+            ) -> dict[str, str]:
+                self.created_params = kwargs["order_params"]  # type: ignore[assignment]
+                return {"id": "reduce-order"}
+
+        manager = FakeManager()
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                slow_execution=SlowExecutionConfig(
+                    enabled=True,
+                    exchange="bybit-perp",
+                    symbol="BTC/USDT:USDT",
+                    side="sell",
+                    total_base=0.01,
+                    slice_base_min=0.005,
+                    slice_base_max=0.005,
+                    instrument_type="perpetual",
+                    position_effect="reduce_only",
+                    position_side="long",
+                ),
+                derivative_exchanges=[
+                    ExchangeConfig(
+                        id="bybit",
+                        label="bybit-perp",
+                        market_type="swap",
+                    )
+                ],
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_order_quote=1_000.0,
+                    max_cycle_quote=1_000.0,
+                    max_open_orders=50,
+                    max_derivative_leverage=3.0,
+                ),
+            ),
+            manager,  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "placed")
+        self.assertTrue(payload["risk"]["derivative_protection"]["approved"])
+        self.assertEqual(manager.created_params, {"reduceOnly": True, "positionIdx": 0})
+        self.assertAlmostEqual(submitted_base, 0.005)
+
+    async def test_perpetual_open_blocks_projected_position_above_task_limit(
+        self,
+    ) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="binance-perp",
+                    symbol="BTC/USDT:USDT",
+                    bids=[BookLevel(price=50_000.0, amount=10.0)],
+                    asks=[BookLevel(price=50_001.0, amount=10.0)],
+                )
+
+            async def fetch_open_orders(self, *_: object, **__: object) -> list[object]:
+                return []
+
+            async def fetch_positions(
+                self,
+                *_: object,
+                **__: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 8.0,
+                        "contractSize": 0.001,
+                        "notional": 400.0,
+                        "markPrice": 50_000.0,
+                    }
+                ]
+
+            async def prepare_linear_contract_order(
+                self,
+                *_: object,
+                **__: object,
+            ) -> None:
+                raise AssertionError("position protection must block before validation")
+
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                slow_execution=SlowExecutionConfig(
+                    enabled=True,
+                    exchange="binance-perp",
+                    symbol="BTC/USDT:USDT",
+                    side="buy",
+                    total_base=0.01,
+                    slice_base_min=0.005,
+                    slice_base_max=0.005,
+                    instrument_type="perpetual",
+                    position_effect="open",
+                    position_side="long",
+                    leverage=2.0,
+                    max_position_quote=500.0,
+                ),
+                derivative_exchanges=[
+                    ExchangeConfig(
+                        id="binanceusdm",
+                        label="binance-perp",
+                        market_type="swap",
+                    )
+                ],
+                risk=RiskConfig(
+                    allow_live_trading=True,
+                    require_post_only=False,
+                    max_order_quote=1_000.0,
+                    max_cycle_quote=1_000.0,
+                    max_open_orders=50,
+                    max_derivative_leverage=3.0,
+                ),
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=True,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_risk")
+        self.assertFalse(payload["risk"]["derivative_protection"]["approved"])
+        self.assertTrue(
+            any("projected position" in reason for reason in payload["risk"]["reasons"])
+        )
+        self.assertEqual(submitted_base, 0.0)
+
     def _cfg(
         self,
         *,
@@ -389,6 +583,7 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
         quote_rates: dict[str, float] | None = None,
         slow_execution: SlowExecutionConfig | None = None,
         spot_exchanges: list[ExchangeConfig] | None = None,
+        derivative_exchanges: list[ExchangeConfig] | None = None,
         market_maker: MarketMakerConfig | None = None,
     ) -> BotConfig:
         return BotConfig(
@@ -418,7 +613,7 @@ class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
             spot_exchanges=spot_exchanges or [
                 ExchangeConfig(id="bybit", label="bybit-spot")
             ],
-            derivative_exchanges=[],
+            derivative_exchanges=derivative_exchanges or [],
             risk=risk or RiskConfig(allow_live_trading=False),
         )
 

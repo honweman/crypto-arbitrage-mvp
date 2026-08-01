@@ -86,10 +86,11 @@ from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..strategies.triangular import find_triangular_arbitrage_opportunities
 from ..trade_log import write_trade_event
 from ..web_config import (
+    _auto_buy_sell_symbols_by_exchange,
     _execution_symbols_by_exchange,
     _grid_symbols_by_exchange,
-    _spot_symbols_by_exchange,
     backtest_config_to_dict,
+    auto_buy_sell_exchanges,
     dca_config_to_dict,
     execution_algo_config_to_dict,
     market_maker_config_to_dict,
@@ -611,18 +612,30 @@ async def monitor_loop(
                     derivative_keys = {
                         exchange.key for exchange in runtime_cfg.derivative_exchanges
                     }
+                    derivative_targets: dict[str, set[str]] = {}
+                    if (
+                        runtime_slow_execution.enabled
+                        and runtime_slow_execution.instrument_type == "perpetual"
+                        and runtime_slow_execution.exchange in derivative_keys
+                        and runtime_slow_execution.symbol
+                    ):
+                        derivative_targets.setdefault(
+                            runtime_slow_execution.exchange,
+                            set(),
+                        ).add(runtime_slow_execution.symbol)
                     if (
                         runtime_cfg.market_maker.enabled
                         and runtime_cfg.market_maker.exchange in derivative_keys
                         and runtime_cfg.market_maker.symbol
                     ):
+                        derivative_targets.setdefault(
+                            runtime_cfg.market_maker.exchange,
+                            set(),
+                        ).add(runtime_cfg.market_maker.symbol)
+                    if derivative_targets:
                         derivative_books = await manager.fetch_order_books(
                             runtime_cfg.derivative_exchanges,
-                            {
-                                runtime_cfg.market_maker.exchange: {
-                                    runtime_cfg.market_maker.symbol
-                                }
-                            },
+                            derivative_targets,
                             runtime_cfg.order_book_depth,
                         )
                         books.update(derivative_books)
@@ -793,8 +806,8 @@ async def monitor_loop(
                                 runtime_slow_execution
                             ),
                             "accounts": slow_execution_accounts(
-                                runtime_cfg.spot_exchanges,
-                                _spot_symbols_by_exchange(runtime_cfg),
+                                auto_buy_sell_exchanges(runtime_cfg),
+                                _auto_buy_sell_symbols_by_exchange(runtime_cfg),
                                 spot_markets=runtime_cfg.spot_markets,
                             ),
                             "error": None,
@@ -896,8 +909,8 @@ async def monitor_loop(
                         "plan": None,
                         "config": slow_execution_config_to_dict(runtime_slow_execution),
                         "accounts": slow_execution_accounts(
-                            runtime_cfg.spot_exchanges,
-                            _spot_symbols_by_exchange(runtime_cfg),
+                            auto_buy_sell_exchanges(runtime_cfg),
+                            _auto_buy_sell_symbols_by_exchange(runtime_cfg),
                             spot_markets=runtime_cfg.spot_markets,
                         ),
                         "error": None,
