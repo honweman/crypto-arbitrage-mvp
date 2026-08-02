@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import secrets
@@ -48,6 +49,42 @@ SYMBOL_RE = re.compile(
     r"(?::[A-Z0-9][A-Z0-9._-]{0,29})?$"
 )
 CREDENTIAL_FIELDS = {"api_key", "secret", "passphrase", "password"}
+
+
+def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        return ()
+    rows: list[dict[str, Any]] = []
+    for item in value[:100]:
+        if not isinstance(item, dict):
+            continue
+        currency = str(item.get("currency") or "").strip().upper()[:20]
+        if not currency:
+            continue
+        row: dict[str, Any] = {"currency": currency}
+        for field_name in ("free", "used", "total"):
+            try:
+                numeric = float(item.get(field_name) or 0.0)
+            except (TypeError, ValueError):
+                numeric = 0.0
+            row[field_name] = numeric if math.isfinite(numeric) else 0.0
+        rows.append(row)
+    return tuple(rows)
+
+
+def _optional_non_negative_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, numeric) if math.isfinite(numeric) else None
+
+
+def _optional_non_negative_int(value: Any) -> int | None:
+    numeric = _optional_non_negative_float(value)
+    return int(numeric) if numeric is not None else None
 
 EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
     {
@@ -496,6 +533,9 @@ class UserExchangeAccount:
     connection_status: str = "unverified"
     connection_checked_at: float | None = None
     connection_error: str = ""
+    balance_snapshot: tuple[dict[str, Any], ...] = ()
+    open_order_count: int | None = None
+    connection_latency_ms: float | None = None
     wallet_id: str = ""
     agent_address: str = ""
     agent_name: str = ""
@@ -579,6 +619,13 @@ class UserExchangeAccount:
                 raw.get("connection_error"),
                 max_length=240,
             ),
+            balance_snapshot=_clean_balance_snapshot(raw.get("balance_snapshot")),
+            open_order_count=_optional_non_negative_int(
+                raw.get("open_order_count")
+            ),
+            connection_latency_ms=_optional_non_negative_float(
+                raw.get("connection_latency_ms")
+            ),
             wallet_id=str(raw.get("wallet_id") or "").strip(),
             agent_address=(
                 _normalize_evm_address(raw.get("agent_address"))
@@ -612,6 +659,9 @@ class UserExchangeAccount:
             "connection_status": self.connection_status,
             "connection_checked_at": self.connection_checked_at,
             "connection_error": self.connection_error,
+            "balance_snapshot": [dict(row) for row in self.balance_snapshot],
+            "open_order_count": self.open_order_count,
+            "connection_latency_ms": self.connection_latency_ms,
             "wallet_id": self.wallet_id,
             "agent_address": self.agent_address,
             "agent_name": self.agent_name,
@@ -2152,6 +2202,7 @@ class UserWorkspaceStore:
         *,
         status: str,
         error: str = "",
+        check: dict[str, Any] | None = None,
     ) -> UserExchangeAccount:
         normalized_status = str(status or "").strip().lower()
         if normalized_status not in CONNECTION_STATUSES:
@@ -2165,6 +2216,21 @@ class UserWorkspaceStore:
             connection_status=normalized_status,
             connection_checked_at=_now(),
             connection_error=_clean_text(error, max_length=240),
+            balance_snapshot=(
+                _clean_balance_snapshot(check.get("balances"))
+                if check is not None and normalized_status == "healthy"
+                else account.balance_snapshot
+            ),
+            open_order_count=(
+                _optional_non_negative_int(check.get("open_order_count")) or 0
+                if check is not None and normalized_status == "healthy"
+                else account.open_order_count
+            ),
+            connection_latency_ms=(
+                _optional_non_negative_float(check.get("latency_ms")) or 0.0
+                if check is not None
+                else account.connection_latency_ms
+            ),
         )
         return self.upsert_account(updated)
 
@@ -3034,6 +3100,10 @@ class UserWorkspaceStore:
                     "healthy_count": 0,
                     "error_count": 0,
                     "credentials_configured": True,
+                    "balances": list(row.get("balance_snapshot") or []),
+                    "open_order_count": row.get("open_order_count"),
+                    "latency_ms": row.get("connection_latency_ms"),
+                    "checked_at": row.get("connection_checked_at"),
                     "updated_at": 0.0,
                 },
             )

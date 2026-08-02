@@ -26,6 +26,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const PAGE_SECTION_IDS = {
 	      status: [
 	        "overview",
+	        "user-account-monitor-rows",
 	        "readiness-actions",
 	        "markets",
 	        "account-balances",
@@ -34,6 +35,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "holders",
 	      ],
 	      trading: [
+	        "user-account-trading-rows",
 	        "strategy-settings-cards",
 	        "mm-orders",
 	        "slow-orders",
@@ -41,6 +43,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "markets-config",
 	      ],
 	      quant: [
+	        "user-account-quant-rows",
 	        "backtest-points",
 	        "grid-orders",
 	        "dca-orders",
@@ -81,6 +84,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const PAGE_DOM_ORDER = {
 	      trading: [
 	        "trading-page-heading",
+	        "user-account-trading-section",
 	        "strategy-settings-section",
 	        "mm-section",
 	        "slow-section",
@@ -89,6 +93,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	      ],
 	      quant: [
 	        "quant-page-heading",
+	        "user-account-quant-section",
 	        "backtest-section",
 	        "spot-grid-section",
 	        "dca-section",
@@ -1222,6 +1227,108 @@ function balanceStatusClass(status) {
         ? previous
         : "";
       select.disabled = connections.length === 0;
+    }
+
+    function selectedUserConnections(workspace) {
+      const connections = workspace?.connections || [];
+      const selectedId = document.getElementById("profile-account")?.value || "";
+      return selectedId
+        ? connections.filter((connection) => connection.id === selectedId)
+        : connections;
+    }
+
+    function userConnectionBalanceText(connection) {
+      const balances = sortBalanceCurrencies(connection?.balances || [])
+        .filter((row) => Number(row.total || 0) !== 0);
+      if (!balances.length) return uiText("Refresh to load balances");
+      return balances
+        .slice(0, 5)
+        .map((row) => `${row.currency} ${formatBalanceAmount(row.total)}`)
+        .join(" · ");
+    }
+
+    async function refreshUserConnectionFromPanel(connection, button) {
+      button.disabled = true;
+      try {
+        const result = await postUserWorkspace({
+          action: "test_connection",
+          connection_id: connection.id,
+        });
+        const check = result.connection_test || {};
+        if (check.status !== "healthy") {
+          const failed = (check.results || []).find((row) => row.status !== "healthy");
+          throw new Error(failed?.error || "connection test failed");
+        }
+        renderUserConnectionPanels(result.workspace);
+        showToast(
+          `${connection.label} · ${check.healthy_count || 0}/${check.market_count || 0} ${uiText("markets healthy")}`
+        );
+      } catch (error) {
+        showToast(error?.message || String(error), "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function renderUserConnectionTable(workspace, bodyId, mode) {
+      const body = document.getElementById(bodyId);
+      if (!body) return;
+      body.innerHTML = "";
+      const connections = selectedUserConnections(workspace);
+      if (!connections.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6">${escapeHtml(uiText("No connected user accounts."))}</td>`;
+        body.appendChild(tr);
+        return;
+      }
+      for (const connection of connections) {
+        const marketLabels = (connection.markets || [])
+          .map((market) => market.symbol)
+          .filter(Boolean);
+        const healthy = connection.status === "healthy";
+        const configured = Boolean(connection.credentials_configured);
+        const accessText = mode === "monitor"
+          ? `${uiText(healthy ? "Healthy" : "Needs connection test")} · ${connection.open_order_count ?? "--"} ${uiText("open orders")}`
+          : healthy && configured
+            ? mode === "trading"
+              ? uiText("Ready for strategy binding · live remains off")
+              : uiText("Available to paper and quant strategies")
+            : uiText("Test the connection before using this account");
+        const detail = connection.checked_at
+          ? `${formatAge(connection.checked_at)}${connection.latency_ms == null ? "" : ` · ${Number(connection.latency_ms).toFixed(0)}ms`}`
+          : uiText("Never checked");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(connection.label || connection.id)}</td>
+          <td>${escapeHtml(connection.exchange || "--")}<br><span class="subtle">${escapeHtml(connection.market_type || "spot")}</span></td>
+          <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketLabels.slice(0, 4).join(" · ") || "--")}</td>
+          <td>${escapeHtml(userConnectionBalanceText(connection))}</td>
+          <td class="${healthy && configured ? "ok" : "missing"}">${escapeHtml(accessText)}<br><span class="subtle">${escapeHtml(detail)}</span></td>
+          <td><div class="workspace-table-actions"></div></td>
+        `;
+        const refreshButton = document.createElement("button");
+        refreshButton.type = "button";
+        refreshButton.className = "ghost-button";
+        refreshButton.textContent = uiText("Refresh");
+        refreshButton.addEventListener("click", () => (
+          refreshUserConnectionFromPanel(connection, refreshButton)
+        ));
+        tr.querySelector(".workspace-table-actions").appendChild(refreshButton);
+        body.appendChild(tr);
+      }
+    }
+
+    function renderUserConnectionPanels(workspace) {
+      const connections = selectedUserConnections(workspace);
+      const total = workspace?.connections?.length || 0;
+      const healthy = connections.filter((connection) => connection.status === "healthy").length;
+      const meta = `${healthy}/${connections.length || 0} ${uiText("healthy")} · ${total} ${uiText("total accounts")}`;
+      text("user-account-monitor-meta", meta);
+      text("user-account-trading-meta", meta);
+      text("user-account-quant-meta", meta);
+      renderUserConnectionTable(workspace, "user-account-monitor-rows", "monitor");
+      renderUserConnectionTable(workspace, "user-account-trading-rows", "trading");
+      renderUserConnectionTable(workspace, "user-account-quant-rows", "quant");
     }
 
     async function updateProfileAsset(event) {
@@ -4603,6 +4710,7 @@ function balanceStatusClass(status) {
       if (lastState) lastState.user_workspace = workspace;
       if (pageStateCache.settings) pageStateCache.settings.user_workspace = workspace;
       renderUserWorkspace(workspace);
+      renderUserConnectionPanels(workspace);
     }
 
     function setUserWorkspaceNotice(value, durationMs = 12000) {
@@ -8912,6 +9020,7 @@ function balanceStatusClass(status) {
       setHeaderStatus(data.status || "starting");
       renderAuthProfile(data.auth);
       renderProfileAccounts(data.user_workspace);
+      renderUserConnectionPanels(data.user_workspace);
       document.getElementById("program-toggle").checked = data.program?.running !== false;
 
       text("scan-count", data.scan?.count ?? 0);
@@ -9239,6 +9348,7 @@ function balanceStatusClass(status) {
     document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
     document.getElementById("profile-account").addEventListener("change", (event) => {
       localStorage.setItem("profile-account", event.target.value || "");
+      renderUserConnectionPanels(lastState?.user_workspace);
     });
 	    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
 	    document.getElementById("user-risk-profile-form").addEventListener("input", () => {

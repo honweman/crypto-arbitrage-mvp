@@ -6374,6 +6374,10 @@ async def _sync_workspace_connection(
 ) -> tuple[str, list[UserExchangeAccount], list[str]]:
     store = _user_workspace_store(request)
     connection_id = str(raw.get("connection_id") or "").strip()
+    exchange = str(raw.get("exchange") or "").strip().lower()
+    market_type = str(raw.get("market_type") or "spot").strip().lower()
+    api_variant = str(raw.get("api_variant") or "").strip().lower()
+    label = str(raw.get("label") or "").strip()
     existing_rows = (
         _workspace_connection_accounts(
             store,
@@ -6385,6 +6389,26 @@ async def _sync_workspace_connection(
     )
     if connection_id and not existing_rows:
         raise ValueError(f"API connection not found: {connection_id}")
+    if not connection_id and label:
+        candidates = [
+            account
+            for account in store.list_accounts(
+                owner_email=user.email,
+                is_admin=False,
+            )
+            if account.exchange == exchange
+            and account.market_type == market_type
+            and (not api_variant or account.api_variant == api_variant)
+            and account.label.casefold() == label.casefold()
+        ]
+        if candidates:
+            newest = max(candidates, key=lambda account: account.updated_at)
+            connection_id = newest.connection_id
+            existing_rows = _workspace_connection_accounts(
+                store,
+                user=user,
+                connection_id=connection_id,
+            )
     if not connection_id:
         connection_id = f"connection-{secrets.token_hex(6)}"
 
@@ -6394,10 +6418,6 @@ async def _sync_workspace_connection(
             "create at least one project before connecting an exchange account"
         )
 
-    exchange = str(raw.get("exchange") or "").strip().lower()
-    market_type = str(raw.get("market_type") or "spot").strip().lower()
-    api_variant = str(raw.get("api_variant") or "").strip().lower()
-    label = str(raw.get("label") or "").strip()
     if exchange == "hyperliquid":
         raise ValueError(
             "connect Hyperliquid from Wallets & Decentralized Venues so its "
@@ -6979,6 +6999,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     account.id,
                     status=str(check_result.get("status") or "error"),
                     error=str(check_result.get("error") or ""),
+                    check=check_result,
                 )
                 updated_accounts.append(updated)
                 results.append(
@@ -7233,6 +7254,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 account.id,
                 status=str(check_result.get("status") or "error"),
                 error=str(check_result.get("error") or ""),
+                check=check_result,
             )
             audit_target = account.id
             audit_detail = (

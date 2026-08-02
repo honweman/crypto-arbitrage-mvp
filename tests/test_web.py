@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-account-sync1" defer></script>',
+            '<script src="/static/app.js?v=20260802-account-sync2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-account-sync1" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-account-sync2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -235,6 +235,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('<summary>Connected Accounts</summary>', INDEX_HTML)
         self.assertIn('<summary>Project Management</summary>', INDEX_HTML)
         self.assertIn('id="profile-account"', INDEX_HTML)
+        self.assertIn('id="user-account-monitor-rows"', INDEX_HTML)
+        self.assertIn('id="user-account-trading-rows"', INDEX_HTML)
+        self.assertIn('id="user-account-quant-rows"', INDEX_HTML)
         self.assertIn('id="user-exchange-project"></select>', INDEX_HTML)
         self.assertNotIn('id="user-exchange-project" required', INDEX_HTML)
         self.assertNotIn('id="user-exchange-symbol" required', INDEX_HTML)
@@ -342,7 +345,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260802-account-sync1"),
+            INDEX_HTML.index("/static/styles.css?v=20260802-account-sync2"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -449,7 +452,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -8493,14 +8496,45 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         1,
                     )
 
+                    with patch.object(
+                        app["workspace_market_discovery"],
+                        "discover",
+                        side_effect=discover_markets,
+                    ):
+                        resync_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "sync_account",
+                                "account": {
+                                    "label": "Coinbase Main",
+                                    "exchange": "coinbase",
+                                    "market_type": "spot",
+                                    "api_variant": "default",
+                                    "withdrawal_disabled_confirmed": True,
+                                    "trade_permission_confirmed": True,
+                                },
+                            },
+                        )
+                    resync_payload = await resync_response.json()
+                    self.assertEqual(resync_response.status, 200, resync_payload)
+                    self.assertEqual(resync_payload["connection_id"], connection_id)
+                    self.assertEqual(len(resync_payload["workspace"]["accounts"]), 2)
+
                     async def check_account(*, account, **_kwargs):
                         return {
                             "status": "healthy",
                             "checked_at": time.time(),
                             "latency_ms": 9.0,
                             "symbol": account.symbol,
-                            "balances": [],
-                            "open_order_count": 0,
+                            "balances": [
+                                {
+                                    "currency": "USDC",
+                                    "free": 98.0,
+                                    "used": 2.0,
+                                    "total": 100.0,
+                                }
+                            ],
+                            "open_order_count": 2,
                         }
 
                     with patch.object(
@@ -8521,6 +8555,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         test_payload["connection_test"]["healthy_count"],
                         2,
                     )
+                    tested_connection = test_payload["workspace"]["connections"][0]
+                    self.assertEqual(tested_connection["balances"][0]["total"], 100.0)
+                    self.assertEqual(tested_connection["open_order_count"], 2)
+                    self.assertEqual(tested_connection["latency_ms"], 9.0)
                     trading_state = await (
                         await client.get("/api/state?view=trading")
                     ).json()

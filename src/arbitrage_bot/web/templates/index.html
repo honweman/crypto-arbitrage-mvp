@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260713-ux1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync2">
 
 </head>
 <body>
@@ -64,6 +64,45 @@
       <h2>Quant Strategies</h2>
       <span class="page-mode-badge research">Paper by default</span>
     </div>
+
+    <section id="user-account-monitor-section" data-page="status" class="compact-section section-open">
+      <div class="section-title">
+        <h2>My Exchange Accounts</h2>
+        <span id="user-account-monitor-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="mobile-card-table">
+          <thead><tr><th>Account</th><th>Exchange</th><th>Synced Markets</th><th>Balances</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody id="user-account-monitor-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="user-account-trading-section" data-page="trading" class="compact-section section-open">
+      <div class="section-title">
+        <h2>My Trading Accounts</h2>
+        <span id="user-account-trading-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="mobile-card-table">
+          <thead><tr><th>Account</th><th>Exchange</th><th>Synced Markets</th><th>Balances</th><th>Strategy Access</th><th>Action</th></tr></thead>
+          <tbody id="user-account-trading-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="user-account-quant-section" data-page="quant" class="compact-section section-open">
+      <div class="section-title">
+        <h2>My Quant Accounts</h2>
+        <span id="user-account-quant-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="mobile-card-table">
+          <thead><tr><th>Account</th><th>Exchange</th><th>Synced Markets</th><th>Balances</th><th>Strategy Access</th><th>Action</th></tr></thead>
+          <tbody id="user-account-quant-rows"></tbody>
+        </table>
+      </div>
+    </section>
 
     <div class="portfolio-bar" data-page="status">
       <div class="metric">
@@ -2625,8 +2664,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260802-account-sync1" defer></script>
-  <script src="/static/app.js?v=20260802-account-sync1" defer></script>
+  <script src="/static/i18n.js?v=20260802-account-sync2" defer></script>
+  <script src="/static/app.js?v=20260802-account-sync2" defer></script>
 
 </body>
 </html>
