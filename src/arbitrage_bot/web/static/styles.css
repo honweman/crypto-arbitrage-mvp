@@ -1721,6 +1721,16 @@ tbody tr:last-child td {
   width: 100%;
 }
 
+.perpetual-account-options .account-selector {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.perpetual-account-options [data-project-selector="slow-account"],
+.perpetual-account-options [data-exchange-selector="slow-account"],
+.perpetual-account-options [data-symbol-selector="slow-account"] {
+  display: none;
+}
+
 .account-select {
   width: 100%;
   min-height: 30px;

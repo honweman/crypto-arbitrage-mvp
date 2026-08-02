@@ -7516,29 +7516,44 @@ function balanceStatusClass(status) {
     }
 
     function selectedSlowInstrumentType() {
-      return selectedSlowAccountConfig()?.market_type === "swap" ? "perpetual" : "spot";
+      return document.getElementById("slow-instrument-type")?.value === "perpetual"
+        ? "perpetual"
+        : "spot";
     }
 
-    function expectedPerpetualOrderSide(effect, positionSide) {
-      return (
-        (effect === "open" && positionSide === "long") ||
-        (effect === "reduce_only" && positionSide === "short")
-      ) ? "buy" : "sell";
+    function perpetualActionFields(action) {
+      const value = String(action || "close_long");
+      return {
+        position_effect: value.startsWith("open_") ? "open" : "reduce_only",
+        position_side: value.endsWith("_short") ? "short" : "long",
+        side: ["open_long", "close_short"].includes(value) ? "buy" : "sell",
+      };
+    }
+
+    function perpetualActionFromConfig(config = {}) {
+      const effect = config.position_effect === "open" ? "open" : "close";
+      const positionSide = config.position_side === "short" ? "short" : "long";
+      return `${effect}_${positionSide}`;
+    }
+
+    function perpetualActionLabel(action) {
+      return {
+        open_long: uiText("Open / Increase Long"),
+        close_long: uiText("Close Long (Reduce Only)"),
+        open_short: uiText("Open / Increase Short"),
+        close_short: uiText("Close Short (Reduce Only)"),
+      }[action] || action;
     }
 
     function syncSlowInstrumentFields() {
       const instrumentType = selectedSlowInstrumentType();
-      const instrument = document.getElementById("slow-instrument-type");
       const fields = document.getElementById("slow-perpetual-fields");
       const side = document.getElementById("slow-side");
+      const sideField = document.getElementById("slow-side-field");
       const unlimited = document.getElementById("slow-unlimited");
       const sliceMode = document.getElementById("slow-slice-mode");
-      const customSymbolField = document.getElementById("slow-custom-symbol-field");
-      if (instrument) instrument.value = instrumentType;
       if (fields) fields.hidden = instrumentType !== "perpetual";
-      if (customSymbolField) {
-        customSymbolField.hidden = instrumentType !== "perpetual";
-      }
+      if (sideField) sideField.hidden = instrumentType === "perpetual";
       if (side) side.disabled = instrumentType === "perpetual";
       if (instrumentType === "perpetual") {
         if (unlimited) {
@@ -7549,9 +7564,8 @@ function balanceStatusClass(status) {
           sliceMode.value = "configured";
           sliceMode.disabled = true;
         }
-        const effect = document.getElementById("slow-position-effect")?.value || "reduce_only";
-        const positionSide = document.getElementById("slow-position-side")?.value || "long";
-        if (side) side.value = expectedPerpetualOrderSide(effect, positionSide);
+        const action = document.getElementById("slow-contract-action")?.value || "close_long";
+        if (side) side.value = perpetualActionFields(action).side;
       } else {
         if (unlimited) unlimited.disabled = false;
         if (sliceMode) sliceMode.disabled = false;
@@ -7560,13 +7574,33 @@ function balanceStatusClass(status) {
     }
 
     function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
-      renderAccountSymbolSelectors("slow-accounts", "slow-account", accounts, selectedExchange, selectedSymbol, () => {
+      const instrumentType = selectedSlowInstrumentType();
+      const list = (Array.isArray(accounts) ? accounts : []).filter((account) => (
+        instrumentType === "perpetual"
+          ? account.market_type === "swap"
+          : account.market_type !== "swap"
+      ));
+      const compatibleExchange = list.some((account) => account.key === selectedExchange)
+        ? selectedExchange
+        : (list[0]?.key || "");
+      const compatibleSymbol = compatibleExchange === selectedExchange ? selectedSymbol : "";
+      const body = document.getElementById("slow-accounts");
+      if (body) body.classList.toggle("perpetual-account-options", instrumentType === "perpetual");
+      const accountLabel = document.getElementById("slow-account-label");
+      if (accountLabel) {
+        accountLabel.textContent = instrumentType === "perpetual"
+          ? uiText("Perpetual account")
+          : uiText("Account / Currency / Exchange / Pair");
+      }
+      renderAccountSymbolSelectors("slow-accounts", "slow-account", list, compatibleExchange, compatibleSymbol, () => {
         markSlowFormDirty();
         const customSymbol = document.getElementById("slow-custom-symbol");
         const configuredSymbol = symbolSelectorValue("slow-account");
         const account = selectedSlowAccountConfig();
         if (customSymbol) {
-          customSymbol.value = account?.market_type === "swap" ? configuredSymbol : "";
+          customSymbol.value = account?.market_type === "swap" && configuredSymbol
+            ? configuredSymbol
+            : customSymbol.value;
         }
         syncSlowInstrumentFields();
         updateSlowLabels();
@@ -7785,11 +7819,11 @@ function balanceStatusClass(status) {
         `${uiText("MM Coordination")}: ${payload.coordinate_market_maker ? uiText("On") : uiText("Off")}`,
       ];
       if (payload.instrument_type === "perpetual") {
+        const contractAction = perpetualActionFromConfig(payload);
         details.splice(
           3,
           0,
-          `${uiText("Position Action")}: ${payload.position_effect}`,
-          `${uiText("Position Side")}: ${payload.position_side}`,
+          `${uiText("Contract Action")}: ${perpetualActionLabel(contractAction)}`,
           `${uiText("Margin Mode")}: ${payload.margin_mode}`,
           `${uiText("Leverage")}: ${fmt.format(payload.leverage)}x`,
           `${uiText("Max Position")}: ${quote} ${fmt.format(payload.max_position_quote)}`,
@@ -7806,13 +7840,15 @@ function balanceStatusClass(status) {
         return;
       }
       document.getElementById("slow-enabled").checked = Boolean(config.enabled);
+      document.getElementById("slow-instrument-type").value = config.instrument_type === "perpetual"
+        ? "perpetual"
+        : "spot";
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
       document.getElementById("slow-custom-symbol").value = config.instrument_type === "perpetual"
         ? (config.symbol || "")
         : "";
-      document.getElementById("slow-position-effect").value = config.position_effect || "reduce_only";
-      document.getElementById("slow-position-side").value = config.position_side || "long";
+      document.getElementById("slow-contract-action").value = perpetualActionFromConfig(config);
       document.getElementById("slow-margin-mode").value = config.margin_mode || "isolated";
       setNumericField("slow-leverage", config.leverage || 1);
       setNumericField("slow-max-position", config.max_position_quote || 0);
@@ -7838,14 +7874,18 @@ function balanceStatusClass(status) {
     }
 
     function slowExecutionPayloadFromForm() {
+      const instrumentType = selectedSlowInstrumentType();
+      const contract = perpetualActionFields(
+        document.getElementById("slow-contract-action").value,
+      );
       return {
         enabled: document.getElementById("slow-enabled").checked,
         exchange: selectedSlowAccount(),
         symbol: selectedSlowSymbol(),
-        side: document.getElementById("slow-side").value,
-        instrument_type: selectedSlowInstrumentType(),
-        position_effect: document.getElementById("slow-position-effect").value,
-        position_side: document.getElementById("slow-position-side").value,
+        side: instrumentType === "perpetual" ? contract.side : document.getElementById("slow-side").value,
+        instrument_type: instrumentType,
+        position_effect: contract.position_effect,
+        position_side: contract.position_side,
         position_mode: "one_way",
         margin_mode: document.getElementById("slow-margin-mode").value,
         leverage: numericValue("slow-leverage"),
@@ -9436,8 +9476,13 @@ function balanceStatusClass(status) {
     document.getElementById("slow-form").addEventListener("input", markSlowFormDirty);
     document.getElementById("slow-form").addEventListener("change", markSlowFormDirty);
     document.getElementById("slow-side").addEventListener("change", updateSlowLabels);
-    document.getElementById("slow-position-effect").addEventListener("change", syncSlowInstrumentFields);
-    document.getElementById("slow-position-side").addEventListener("change", syncSlowInstrumentFields);
+    document.getElementById("slow-instrument-type").addEventListener("change", () => {
+      renderSlowExecutionAccounts(lastState?.slow_execution?.accounts || [], "", "");
+      syncSlowInstrumentFields();
+      updateSlowLabels();
+      renderSlowExecutionWorkflow(lastState?.slow_execution);
+    });
+    document.getElementById("slow-contract-action").addEventListener("change", syncSlowInstrumentFields);
     document.getElementById("slow-custom-symbol").addEventListener("input", updateSlowLabels);
     document.getElementById("slow-form").addEventListener("submit", applySlowExecutionConfig);
     document.getElementById("rebalance-form").addEventListener("input", () => {

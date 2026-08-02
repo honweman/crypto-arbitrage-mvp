@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260713-ux1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260802-unified-account1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-contract-auto1">
 
 </head>
 <body>
@@ -1654,34 +1654,29 @@
           <input id="slow-enabled" type="checkbox">
           Enabled
         </label>
-        <div class="field account-field">
-          <label>Account / Currency / Exchange / Pair</label>
-          <div id="slow-accounts" class="account-options"></div>
-        </div>
         <div class="field">
           <label for="slow-instrument-type">Instrument</label>
-          <select id="slow-instrument-type" disabled>
+          <select id="slow-instrument-type">
             <option value="spot">Spot</option>
             <option value="perpetual">Stablecoin Perpetual</option>
           </select>
         </div>
+        <div class="field account-field">
+          <label id="slow-account-label">Account / Currency / Exchange / Pair</label>
+          <div id="slow-accounts" class="account-options"></div>
+        </div>
         <div id="slow-perpetual-fields" class="perpetual-controls wide-field" hidden>
-          <div id="slow-custom-symbol-field" class="field" hidden>
+          <div id="slow-custom-symbol-field" class="field">
             <label for="slow-custom-symbol">Stablecoin Perpetual Symbol</label>
             <input id="slow-custom-symbol" type="text" placeholder="BTC/USDC:USDC" autocomplete="off">
           </div>
           <div class="field">
-            <label for="slow-position-effect">Position Action</label>
-            <select id="slow-position-effect">
-              <option value="reduce_only">Reduce Only</option>
-              <option value="open">Open / Increase</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="slow-position-side">Position Side</label>
-            <select id="slow-position-side">
-              <option value="long">Long</option>
-              <option value="short">Short</option>
+            <label for="slow-contract-action">Contract Action</label>
+            <select id="slow-contract-action">
+              <option value="close_long">Close Long (Reduce Only)</option>
+              <option value="close_short">Close Short (Reduce Only)</option>
+              <option value="open_long">Open / Increase Long</option>
+              <option value="open_short">Open / Increase Short</option>
             </select>
           </div>
           <div class="field">
@@ -1700,10 +1695,10 @@
             <input id="slow-max-position" type="number" min="0" step="any">
           </div>
           <div class="field-hint perpetual-safety-hint">
-            One-way stablecoin linear perpetual only. Use BASE/QUOTE:SETTLE format. A quote conversion rate is required for live risk checks.
+            One-way stablecoin linear perpetual only. Closing always uses Reduce Only. Use BASE/QUOTE:SETTLE format. A quote conversion rate is required for live risk checks.
           </div>
         </div>
-        <div class="field">
+        <div id="slow-side-field" class="field">
           <label for="slow-side">Side</label>
           <select id="slow-side">
             <option value="buy">Buy</option>
@@ -2630,8 +2625,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260802-binance-sync1" defer></script>
-  <script src="/static/app.js?v=20260802-binance-sync1" defer></script>
+  <script src="/static/i18n.js?v=20260802-contract-auto1" defer></script>
+  <script src="/static/app.js?v=20260802-contract-auto1" defer></script>
 
 </body>
 </html>
