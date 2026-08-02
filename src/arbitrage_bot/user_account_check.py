@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from .config import ExchangeConfig
 from .exchanges import ExchangeManager
-from .user_workspace import UserExchangeAccount, UserProject
+from .user_workspace import UserApiConnection, UserExchangeAccount, UserProject
 
 
 DEFAULT_CHECK_TIMEOUT_SECONDS = 20.0
@@ -343,6 +343,138 @@ async def check_workspace_account(
         await manager.close()
 
 
+async def check_workspace_api_connection(
+    *,
+    api_connection: UserApiConnection,
+    credentials: dict[str, str],
+    timeout_seconds: float = DEFAULT_CHECK_TIMEOUT_SECONDS,
+    manager_factory: Callable[..., ExchangeManager] = ExchangeManager,
+) -> dict[str, Any]:
+    cfg = workspace_exchange_config(
+        exchange=api_connection.exchange,
+        market_type=api_connection.market_type,
+        api_variant=api_connection.api_variant,
+        runtime_key=api_connection.id,
+    )
+    manager = manager_factory(credentials_by_key={cfg.key: credentials})
+    started = time.perf_counter()
+    try:
+        client = manager.client(cfg)
+        markets = await asyncio.wait_for(
+            client.load_markets(),
+            timeout=max(1.0, timeout_seconds),
+        )
+        balance = await asyncio.wait_for(
+            manager.fetch_balance(cfg),
+            timeout=max(1.0, timeout_seconds),
+        )
+        currencies: set[str] = set()
+        for field in ("free", "used", "total"):
+            values = balance.get(field)
+            if isinstance(values, dict):
+                currencies.update(str(key).upper() for key in values)
+        currencies.update(
+            str(key).upper()
+            for key, value in balance.items()
+            if isinstance(value, dict)
+            and any(name in value for name in ("free", "used", "total"))
+        )
+        balances = _balance_rows(balance, currencies)
+        warnings: list[str] = []
+        open_orders: list[dict[str, Any]] = []
+        try:
+            fetched = await asyncio.wait_for(
+                client.fetch_open_orders(),
+                timeout=max(1.0, timeout_seconds),
+            )
+            open_orders = list(fetched or [])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                "Account-wide open orders unavailable: "
+                + _safe_error(exc, credentials)
+            )
+        if api_connection.exchange == "bybit":
+            try:
+                funding_balance = await asyncio.wait_for(
+                    client.fetch_balance({"type": "funding"}),
+                    timeout=max(1.0, timeout_seconds),
+                )
+                funding_currencies = {
+                    str(key).upper()
+                    for key, value in funding_balance.items()
+                    if isinstance(value, dict)
+                    and any(name in value for name in ("free", "used", "total"))
+                }
+                balances.extend(
+                    _balance_rows(
+                        funding_balance,
+                        funding_currencies,
+                        wallet="funding",
+                        tradable=False,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(
+                    f"Bybit funding wallet unavailable: {_safe_error(exc, credentials)}"
+                )
+        active_markets = sum(
+            1
+            for market in (markets or {}).values()
+            if isinstance(market, dict)
+            and _market_matches_type(market, api_connection.market_type)
+            and market.get("active") is not False
+        )
+        return {
+            "status": "healthy",
+            "checked_at": time.time(),
+            "latency_ms": (time.perf_counter() - started) * 1000,
+            "exchange": api_connection.exchange,
+            "market_type": api_connection.market_type,
+            "api_variant": api_connection.api_variant,
+            "market_count": active_markets,
+            "balances": balances,
+            "balance_warnings": warnings,
+            "open_order_count": len(open_orders),
+            "permissions": {
+                "private_account_read": "verified",
+                "open_order_read": (
+                    "verified" if not warnings else "partially_verified"
+                ),
+                "trade_endpoint": "supported_not_exercised",
+                "trade_permission": (
+                    "user_confirmed"
+                    if api_connection.trade_permission_confirmed
+                    else "not_confirmed"
+                ),
+                "withdrawal_disabled": (
+                    "user_confirmed"
+                    if api_connection.withdrawal_disabled_confirmed
+                    else "not_confirmed"
+                ),
+                "safe_for_strategy_setup": bool(
+                    api_connection.trade_permission_confirmed
+                    and api_connection.withdrawal_disabled_confirmed
+                ),
+            },
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "checked_at": time.time(),
+            "latency_ms": (time.perf_counter() - started) * 1000,
+            "exchange": api_connection.exchange,
+            "market_type": api_connection.market_type,
+            "api_variant": api_connection.api_variant,
+            "error": _safe_error(exc, credentials),
+        }
+    finally:
+        await manager.close()
+
+
 class WorkspaceMarketDiscoveryService:
     def __init__(
         self, *, cache_seconds: float = DEFAULT_DISCOVERY_CACHE_SECONDS
@@ -425,3 +557,33 @@ class WorkspaceAccountCheckService:
             async with self._lock:
                 self._active.discard(account.id)
                 self._last_finished[account.id] = time.monotonic()
+
+    async def check_api_connection(
+        self,
+        *,
+        api_connection: UserApiConnection,
+        credentials: dict[str, str],
+    ) -> dict[str, Any]:
+        now = time.monotonic()
+        async with self._lock:
+            if api_connection.id in self._active:
+                raise RuntimeError("API connection test is already running")
+            last_finished = self._last_finished.get(api_connection.id)
+            if (
+                last_finished is not None
+                and now - last_finished < self.cooldown_seconds
+            ):
+                remaining = self.cooldown_seconds - (now - last_finished)
+                raise RuntimeError(
+                    f"wait {remaining:.1f}s before testing this connection again"
+                )
+            self._active.add(api_connection.id)
+        try:
+            return await check_workspace_api_connection(
+                api_connection=api_connection,
+                credentials=credentials,
+            )
+        finally:
+            async with self._lock:
+                self._active.discard(api_connection.id)
+                self._last_finished[api_connection.id] = time.monotonic()

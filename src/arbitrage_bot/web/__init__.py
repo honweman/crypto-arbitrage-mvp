@@ -256,11 +256,13 @@ from ..user_paper_engine import (
 from ..user_paper_store import UserPaperTradingStore
 from ..user_strategies import UserStrategy
 from ..user_workspace import (
+    UserApiConnection,
     UserExchangeAccount,
     UserProject,
     UserRiskProfile,
     UserWorkspaceStore,
     account_connection_is_fresh,
+    api_connection_is_fresh,
     required_credentials_for_exchange,
 )
 from ..web_config import (
@@ -6736,6 +6738,9 @@ async def _sync_workspace_connection(
     market_type = str(raw.get("market_type") or "spot").strip().lower()
     api_variant = str(raw.get("api_variant") or "").strip().lower()
     label = str(raw.get("label") or "").strip()
+    existing_connection = (
+        store.get_api_connection(connection_id) if connection_id else None
+    )
     existing_rows = (
         _workspace_connection_accounts(
             store,
@@ -6745,68 +6750,125 @@ async def _sync_workspace_connection(
         if connection_id
         else []
     )
-    if connection_id and not existing_rows:
+    if connection_id and existing_connection is None and not existing_rows:
         raise ValueError(f"API connection not found: {connection_id}")
     if not connection_id and label:
-        candidates = [
-            account
-            for account in store.list_accounts(
+        connection_candidates = [
+            item
+            for item in store.list_api_connections(
                 owner_email=user.email,
                 is_admin=False,
             )
-            if account.exchange == exchange
-            and account.market_type == market_type
-            and (not api_variant or account.api_variant == api_variant)
-            and account.label.casefold() == label.casefold()
+            if item.exchange == exchange
+            and item.market_type == market_type
+            and (not api_variant or item.api_variant == api_variant)
+            and item.label.casefold() == label.casefold()
         ]
-        if candidates:
-            newest = max(candidates, key=lambda account: account.updated_at)
-            connection_id = newest.connection_id
+        if connection_candidates:
+            newest = max(connection_candidates, key=lambda item: item.updated_at)
+            existing_connection = newest
+            connection_id = newest.id
             existing_rows = _workspace_connection_accounts(
                 store,
                 user=user,
                 connection_id=connection_id,
             )
+        else:
+            candidates = [
+                account
+                for account in store.list_accounts(
+                    owner_email=user.email,
+                    is_admin=False,
+                )
+                if account.exchange == exchange
+                and account.market_type == market_type
+                and (not api_variant or account.api_variant == api_variant)
+                and account.label.casefold() == label.casefold()
+            ]
+            newest = max(candidates, key=lambda account: account.updated_at) if candidates else None
+            if newest is not None:
+                connection_id = newest.connection_id
+                existing_connection = store.get_api_connection(connection_id)
+                existing_rows = _workspace_connection_accounts(
+                    store,
+                    user=user,
+                    connection_id=connection_id,
+                )
     if not connection_id:
         connection_id = f"connection-{secrets.token_hex(6)}"
 
     projects = store.list_projects(owner_email=user.email, is_admin=False)
-    if not projects:
-        raise ValueError(
-            "create at least one project before connecting an exchange account"
-        )
 
     if exchange == "hyperliquid":
         raise ValueError(
             "connect Hyperliquid from Wallets & Decentralized Venues so its "
             "agent authorization can be verified"
         )
-    if existing_rows and any(
-        account.exchange != exchange
-        or account.market_type != market_type
-        or (api_variant and account.api_variant != api_variant)
-        for account in existing_rows
+    if existing_connection is not None and (
+        existing_connection.exchange != exchange
+        or existing_connection.market_type != market_type
+        or (api_variant and existing_connection.api_variant != api_variant)
     ):
         raise ValueError(
             "exchange, market, and API region cannot be changed on an existing "
             "connection; add a new connection instead"
         )
-    if existing_rows and not api_variant:
+    if existing_connection is not None and not api_variant:
+        api_variant = existing_connection.api_variant
+    elif existing_rows and not api_variant:
         api_variant = existing_rows[0].api_variant
     supplied = {
         str(key): str(value).strip()
         for key, value in (credentials or {}).items()
         if str(value or "").strip()
     }
+    connection_raw = existing_connection.to_dict() if existing_connection else {}
+    connection_raw.update(
+        {
+            "id": connection_id,
+            "owner_email": user.email,
+            "label": label
+            or (existing_connection.label if existing_connection else exchange.title()),
+            "exchange": exchange,
+            "market_type": market_type,
+            "api_variant": api_variant,
+            "withdrawal_disabled_confirmed": bool(
+                raw.get(
+                    "withdrawal_disabled_confirmed",
+                    existing_connection.withdrawal_disabled_confirmed
+                    if existing_connection
+                    else False,
+                )
+            ),
+            "trade_permission_confirmed": bool(
+                raw.get(
+                    "trade_permission_confirmed",
+                    existing_connection.trade_permission_confirmed
+                    if existing_connection
+                    else False,
+                )
+            ),
+        }
+    )
+    api_connection = store.upsert_api_connection(
+        UserApiConnection.from_dict(connection_raw),
+        credentials=supplied or None,
+    )
     matches: list[tuple[UserProject, dict[str, Any]]] = []
     warnings: list[str] = []
     for project in projects:
-        markets, _ = await _workspace_market_discovery(request).discover(
-            exchange=exchange,
-            market_type=market_type,
-            api_variant=api_variant,
-            asset=project.asset,
-        )
+        if project.status != "active":
+            continue
+        try:
+            markets, _ = await _workspace_market_discovery(request).discover(
+                exchange=exchange,
+                market_type=market_type,
+                api_variant=api_variant,
+                asset=project.asset,
+            )
+        except RuntimeError as exc:
+            warnings.append(f"{project.symbol} discovery failed: {exc}")
+            continue
         exact = [
             market
             for market in markets
@@ -6820,9 +6882,11 @@ async def _sync_workspace_connection(
             continue
         exact.sort(key=lambda market: str(market.get("symbol") or ""))
         matches.append((project, exact[0]))
-    if not matches and not existing_rows:
-        raise ValueError(
-            "none of this user's projects has a matching active trading pair on "
+    if not projects:
+        warnings.append("API saved globally; add a project to create trading bindings")
+    elif not matches and not existing_rows:
+        warnings.append(
+            "no current project has a matching active trading pair on "
             f"{exchange} {market_type}"
         )
 
@@ -6841,10 +6905,10 @@ async def _sync_workspace_connection(
         )
 
     existing_by_project = {account.project_id: account for account in existing_rows}
-    credential_copy: dict[str, str] = {}
-    if not supplied and existing_rows:
+    credential_copy: dict[str, str] = dict(supplied)
+    if not credential_copy:
         credential_copy = store.decrypt_credentials(
-            account_id=existing_rows[0].id,
+            account_id=api_connection.id,
             owner_email=user.email,
         )
     saved: list[UserExchangeAccount] = []
@@ -6862,35 +6926,42 @@ async def _sync_workspace_connection(
                     "owner_email": user.email,
                     "project_id": project.id,
                     "connection_id": connection_id,
-                    "label": label or (existing.label if existing is not None else exchange.title()),
+                    "label": api_connection.label,
                     "exchange": exchange,
                     "market_type": market_type,
                     "api_variant": api_variant,
                     "symbol": str(market.get("symbol") or "").upper(),
                     "enabled": bool(existing.enabled) if existing is not None else False,
                     "withdrawal_disabled_confirmed": bool(
-                        raw.get("withdrawal_disabled_confirmed")
+                        api_connection.withdrawal_disabled_confirmed
                     ),
                     "trade_permission_confirmed": bool(
-                        raw.get("trade_permission_confirmed")
+                        api_connection.trade_permission_confirmed
                     ),
                 }
             )
             account = UserExchangeAccount.from_dict(account_raw)
             account_credentials: dict[str, str] | None = None
-            if supplied:
-                account_credentials = supplied
-            elif existing is None:
+            if supplied or existing is None:
                 account_credentials = credential_copy
-            saved.append(
-                store.upsert_account(
-                    account,
-                    credentials=account_credentials,
-                    replace_credentials=bool(
-                        existing is not None and existing.exchange != exchange
-                    ),
-                )
+            saved_account = store.upsert_account(
+                account,
+                credentials=account_credentials,
+                replace_credentials=bool(
+                    existing is not None and existing.exchange != exchange
+                ),
             )
+            if existing is None and api_connection_is_fresh(api_connection):
+                saved_account = store.update_account_connection(
+                    saved_account.id,
+                    status="healthy",
+                    check={
+                        "balances": api_connection.balance_snapshot,
+                        "open_order_count": api_connection.open_order_count or 0,
+                        "latency_ms": api_connection.connection_latency_ms or 0.0,
+                    },
+                )
+            saved.append(saved_account)
     finally:
         credential_copy.clear()
         supplied.clear()
@@ -7217,10 +7288,47 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     asset=project.asset,
                 )
             project = store.upsert_project(project)
+            connection_sync: list[dict[str, Any]] = []
+            api_connections = (
+                store.list_api_connections(
+                    owner_email=project.owner_email,
+                    is_admin=False,
+                )
+                if project.owner_email == user.email
+                else []
+            )
+            for api_connection in api_connections:
+                try:
+                    _, synced_accounts, sync_warnings = (
+                        await _sync_workspace_connection(
+                            request,
+                            user=user,
+                            raw=api_connection.to_dict(),
+                            credentials=None,
+                        )
+                    )
+                    connection_sync.append(
+                        {
+                            "connection_id": api_connection.id,
+                            "account_ids": [row.id for row in synced_accounts],
+                            "warnings": sync_warnings,
+                        }
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    connection_sync.append(
+                        {
+                            "connection_id": api_connection.id,
+                            "account_ids": [],
+                            "warnings": [str(exc)],
+                        }
+                    )
             audit_target = project.id
             audit_detail = f"saved self-service user project {project.name}"
             audit_payload = project.to_dict()
-            response_extra = {"project": project.to_dict()}
+            response_extra = {
+                "project": project.to_dict(),
+                "connection_sync": connection_sync,
+            }
         elif action == "activate_project":
             project_id = str(
                 payload.get("project_id") or payload.get("id") or ""
@@ -7291,15 +7399,18 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raw=raw,
                 credentials=credentials if isinstance(credentials, dict) else None,
             )
+            api_connection = store.get_api_connection(connection_id)
+            if api_connection is None:
+                raise RuntimeError("global API connection was not persisted")
             audit_target = connection_id
             audit_detail = (
-                f"synced {accounts[0].exchange} API connection to "
+                f"synced {api_connection.exchange} API connection to "
                 f"{len(accounts)} project market(s)"
             )
             audit_payload = {
                 "connection_id": connection_id,
-                "exchange": accounts[0].exchange,
-                "market_type": accounts[0].market_type,
+                "exchange": api_connection.exchange,
+                "market_type": api_connection.market_type,
                 "account_ids": [account.id for account in accounts],
                 "project_ids": [account.project_id for account in accounts],
                 "symbols": [account.symbol for account in accounts],
@@ -7319,10 +7430,36 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 user=user,
                 connection_id=connection_id,
             )
-            if not accounts:
+            api_connection = store.get_api_connection(connection_id)
+            if api_connection is None:
                 raise ValueError(f"API connection not found: {connection_id}")
+            _require_workspace_owner(user, api_connection.owner_email)
             results: list[dict[str, Any]] = []
             updated_accounts: list[UserExchangeAccount] = []
+            if not accounts:
+                credential_status = store.credential_status(api_connection.id)
+                if not credential_status["configured"]:
+                    raise ValueError("configure required credentials before testing")
+                credentials = store.decrypt_credentials(
+                    account_id=api_connection.id,
+                    owner_email=api_connection.owner_email,
+                )
+                try:
+                    check_result = await _workspace_account_checker(
+                        request
+                    ).check_api_connection(
+                        api_connection=api_connection,
+                        credentials=credentials,
+                    )
+                finally:
+                    credentials.clear()
+                api_connection = store.update_api_connection_check(
+                    api_connection.id,
+                    status=str(check_result.get("status") or "error"),
+                    error=str(check_result.get("error") or ""),
+                    check=check_result,
+                )
+                results.append(check_result)
             for account in accounts:
                 project = store.get_project(account.project_id)
                 if project is None:
@@ -7377,14 +7514,62 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             connection_status = (
                 "healthy" if healthy_count == len(results) else "error"
             )
+            if accounts:
+                representative = next(
+                    (result for result in results if result.get("status") == "healthy"),
+                    results[0] if results else {},
+                )
+                balance_rows: dict[tuple[str, str], dict[str, Any]] = {}
+                open_orders_by_symbol: dict[str, int] = {}
+                for result in results:
+                    symbol_key = str(result.get("symbol") or "").upper()
+                    if symbol_key:
+                        open_orders_by_symbol[symbol_key] = max(
+                            open_orders_by_symbol.get(symbol_key, 0),
+                            int(result.get("open_order_count") or 0),
+                        )
+                    for row in result.get("balances") or []:
+                        if not isinstance(row, dict) or not row.get("currency"):
+                            continue
+                        key = (
+                            str(row.get("currency") or "").upper(),
+                            str(row.get("wallet") or "trading"),
+                        )
+                        current = balance_rows.get(key)
+                        if current is None or float(row.get("total") or 0.0) > float(
+                            current.get("total") or 0.0
+                        ):
+                            balance_rows[key] = dict(row)
+                aggregate_check = {
+                    **representative,
+                    "balances": list(balance_rows.values()),
+                    "latency_ms": max(
+                        (float(result.get("latency_ms") or 0.0) for result in results),
+                        default=0.0,
+                    ),
+                    "open_order_count": sum(open_orders_by_symbol.values()),
+                }
+                api_connection = store.update_api_connection_check(
+                    api_connection.id,
+                    status=connection_status,
+                    error=next(
+                        (
+                            str(result.get("error") or "")
+                            for result in results
+                            if result.get("status") != "healthy"
+                        ),
+                        "",
+                    ),
+                    check=aggregate_check,
+                )
             audit_target = connection_id
             audit_detail = (
-                f"tested {accounts[0].exchange} API connection: "
+                f"tested {api_connection.exchange} API connection: "
                 f"{healthy_count}/{len(results)} markets healthy"
             )
             audit_payload = {
                 "connection_id": connection_id,
-                "exchange": accounts[0].exchange,
+                "exchange": api_connection.exchange,
                 "status": connection_status,
                 "healthy_count": healthy_count,
                 "market_count": len(results),
@@ -7767,8 +7952,10 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 user=user,
                 connection_id=connection_id,
             )
-            if not accounts:
+            api_connection = store.get_api_connection(connection_id)
+            if api_connection is None:
                 raise ValueError(f"API connection not found: {connection_id}")
+            _require_workspace_owner(user, api_connection.owner_email)
             for account in accounts:
                 if account.enabled:
                     store.upsert_account(replace(account, enabled=False))
@@ -7778,7 +7965,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             )
             audit_target = connection_id
             audit_detail = (
-                f"deleted {accounts[0].exchange} API connection and "
+                f"deleted {api_connection.exchange} API connection and "
                 f"{deleted_count} market binding(s)"
             )
             audit_payload = {

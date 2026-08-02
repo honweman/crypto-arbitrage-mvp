@@ -4247,38 +4247,35 @@ function balanceStatusClass(status) {
       setCheckedValue("user-exchange-enabled", false);
       setCheckedValue("user-exchange-no-withdraw", false);
       setCheckedValue("user-exchange-trade-permission", false);
-      const projects = currentUserWorkspace?.projects || [];
-      const defaultProject = projects.find((project) => project.status === "active") || projects[0];
       const defaultExchange = currentUserWorkspace?.exchange_catalog?.[0];
-      setFieldValue("user-exchange-project", defaultProject?.id || "");
+      setFieldValue("user-exchange-project", "");
       setFieldValue("user-exchange-id", defaultExchange?.id || "");
-      syncUserExchangeMarketTypes("", "", defaultProject?.symbol || "");
+      syncUserExchangeMarketTypes();
     }
 
-    function fillUserExchangeAccountForm(account) {
-      const connectionId = account?.connection_id || account?.id || "";
+    function fillUserExchangeAccountForm(connection) {
+      const connectionId = connection?.connection_id || connection?.id || "";
       selectedUserExchangeAccountId = connectionId;
       userExchangeAccountFormDirty = false;
       setFieldValue("user-exchange-account-id", connectionId);
-      setFieldValue("user-exchange-project", account?.project_id || "");
-      setFieldValue("user-exchange-label", account?.label || "");
-      setFieldValue("user-exchange-id", account?.exchange || "");
+      setFieldValue("user-exchange-project", "");
+      setFieldValue("user-exchange-label", connection?.label || "");
+      setFieldValue("user-exchange-id", connection?.exchange || "");
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
-      setCheckedValue("user-exchange-enabled", account?.enabled);
+      setCheckedValue("user-exchange-enabled", connection?.live_enabled);
       setCheckedValue(
         "user-exchange-no-withdraw",
-        account?.withdrawal_disabled_confirmed
+        connection?.withdrawal_disabled_confirmed
       );
       setCheckedValue(
         "user-exchange-trade-permission",
-        account?.trade_permission_confirmed
+        connection?.trade_permission_confirmed
       );
       syncUserExchangeMarketTypes(
-        account?.market_type || "spot",
-        account?.api_variant || "",
-        account?.symbol || ""
+        connection?.market_type || "spot",
+        connection?.api_variant || ""
       );
       document.getElementById("user-exchange-label")?.focus();
     }
@@ -4395,31 +4392,26 @@ function balanceStatusClass(status) {
         tradePermission.disabled = isHyperliquid;
       }
 
-      const selectedAccount = workspaceSelectedAccount();
-      const sameConnection = Boolean(
-        selectedAccount
-        && selectedAccount.project_id === projectId
-        && selectedAccount.exchange === exchangeId
-        && selectedAccount.market_type === selectedMarketType
-        && selectedAccount.api_variant === selectedVariant
-        && selectedAccount.symbol === currentSymbol
+      const selectedConnection = workspaceConnection(
+        document.getElementById("user-exchange-account-id")?.value || ""
       );
-      const connectionReady = sameConnection && workspaceConnectionFresh(selectedAccount);
-      const projectReady = project?.status === "active";
+      const sameConnection = Boolean(
+        selectedConnection
+        && selectedConnection.exchange === exchangeId
+        && selectedConnection.market_type === selectedMarketType
+        && selectedConnection.api_variant === selectedVariant
+      );
+      const connectionReady = sameConnection && selectedConnection.status === "healthy";
       const enabled = document.getElementById("user-exchange-enabled");
       if (enabled) {
-        enabled.disabled = !projectReady || (!connectionReady && !selectedAccount?.enabled);
+        enabled.disabled = true;
         if (!connectionReady) enabled.checked = false;
-        enabled.title = !projectReady
-          ? uiText("The project must be active before this account can be enabled.")
-          : !connectionReady
-            ? uiText("Run a successful connection test before enabling this account.")
-            : "";
+        enabled.title = "";
       }
       const testButton = document.getElementById("user-exchange-test");
       if (testButton) {
-        const credentialsConfigured = Boolean(selectedAccount?.credentials?.configured);
-        testButton.disabled = !sameConnection || !credentialsConfigured || !currentSymbol;
+        const credentialsConfigured = Boolean(selectedConnection?.credentials_configured);
+        testButton.disabled = !sameConnection || !credentialsConfigured;
         testButton.title = testButton.disabled
           ? uiText("Save the account and credentials before testing the connection.")
           : uiText("This test reads account data and never places or cancels orders.");
@@ -4512,41 +4504,26 @@ function balanceStatusClass(status) {
 
     function renderUserExchangeAccountForm(workspace) {
       if (userExchangeAccountFormDirty || userExchangeAccountFormBusy) return;
-      const projectRows = workspace?.projects || [];
-      const projects = projectRows.map((project) => ({
-        value: project.id,
-        label: workspaceProjectLabel(project),
-        title: `${project.status} · ${project.owner_email}`,
-      }));
       const exchanges = (workspace?.exchange_catalog || []).map((exchange) => ({
         value: exchange.id,
         label: exchange.label || exchange.id,
         title: (exchange.market_types || []).join(", "),
       }));
-      const selected = (workspace?.accounts || []).find(
-        (account) => (
-          account.id === selectedUserExchangeAccountId
-          || account.connection_id === selectedUserExchangeAccountId
-        )
+      const selected = (workspace?.connections || []).find(
+        (connection) => connection.id === selectedUserExchangeAccountId
       );
-      const projectValue = selected?.project_id
-        || document.getElementById("user-exchange-project")?.value
-        || projects.find((row) => projectRows.find((project) => project.id === row.value)?.status === "active")?.value
-        || projects[0]?.value
-        || "";
       const exchangeValue = selected?.exchange
         || document.getElementById("user-exchange-id")?.value
         || exchanges[0]?.value
         || "";
-      setSelectOptions("user-exchange-project", projects, projectValue, "Select project");
       setSelectOptions("user-exchange-id", exchanges, exchangeValue, "Select exchange");
       if (selected) {
         setFieldValue(
           "user-exchange-account-id",
-          selected.connection_id || selected.id
+          selected.id
         );
         setFieldValue("user-exchange-label", selected.label);
-        setCheckedValue("user-exchange-enabled", selected.enabled);
+        setCheckedValue("user-exchange-enabled", selected.live_enabled);
         setCheckedValue(
           "user-exchange-no-withdraw",
           selected.withdrawal_disabled_confirmed
@@ -4568,7 +4545,7 @@ function balanceStatusClass(status) {
       syncUserExchangeMarketTypes(
         selected?.market_type || "",
         selected?.api_variant || "",
-        selected?.symbol || ""
+        ""
       );
     }
 
@@ -4581,13 +4558,12 @@ function balanceStatusClass(status) {
       const connections = workspace?.connections || [];
       if (connections.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="6">${escapeHtml(uiText("No exchange accounts yet."))}</td>`;
+        tr.innerHTML = `<td colspan="6">${escapeHtml(uiText("No API connections yet."))}</td>`;
         body.appendChild(tr);
         return;
       }
       for (const connection of connections) {
         const firstAccount = accountMap.get(connection.account_ids?.[0]);
-        if (!firstAccount) continue;
         const marketLabels = (connection.markets || []).map((market) => (
           `${market.project || market.asset || "Project"}: ${market.symbol || "--"}`
         ));
@@ -4614,7 +4590,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.dataset.workspaceConnectionId = connection.id || "";
         tr.innerHTML = `
-          <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">${escapeHtml(firstAccount.owner_email || "--")}</span></td>
+          <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">${escapeHtml(connection.owner_email || firstAccount?.owner_email || "--")}</span></td>
           <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${connection.market_type || "spot"}${variantText}`)}</span></td>
           <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
           <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
@@ -4626,7 +4602,7 @@ function balanceStatusClass(status) {
         editButton.className = "control-button";
         editButton.type = "button";
         editButton.textContent = "Edit";
-        editButton.addEventListener("click", () => fillUserExchangeAccountForm(firstAccount));
+        editButton.addEventListener("click", () => fillUserExchangeAccountForm(connection));
         actions.appendChild(editButton);
         const testButton = document.createElement("button");
         testButton.className = "ghost-button workspace-account-test";
@@ -4825,8 +4801,13 @@ function balanceStatusClass(status) {
           0,
           ...(check.results || []).map((row) => Number(row.latency_ms || 0))
         );
+        const refreshedConnection = workspaceConnection(connection.id) || connection;
+        const bindingCount = (refreshedConnection.markets || []).length;
+        const readinessText = refreshedConnection.live_enabled
+          ? uiText("Live enabled")
+          : uiText("API ready");
         setUserWorkspaceNotice(
-          `${uiText("Connection healthy")} · ${uiText("Live enabled")} · ${check.healthy_count || 0}/${check.market_count || 0} ${uiText("synced markets")} · ${latency.toFixed(0)}ms max`
+          `${uiText("Connection healthy")} · ${readinessText} · ${bindingCount} ${uiText("synced markets")} · ${latency.toFixed(0)}ms max`
         );
       } catch (error) {
         setUserWorkspaceNotice(`connection test failed: ${error.message || error}`);
@@ -4836,12 +4817,9 @@ function balanceStatusClass(status) {
     }
 
     async function testSelectedUserExchangeAccount(event) {
-      const account = workspaceSelectedAccount();
-      if (!account) {
-        setUserWorkspaceNotice(uiText("Save an exchange account before testing it."));
-        return;
-      }
-      const connection = workspaceConnection(account.connection_id || account.id);
+      const connection = workspaceConnection(
+        document.getElementById("user-exchange-account-id")?.value || ""
+      );
       if (!connection) {
         setUserWorkspaceNotice(uiText("Save an exchange account before testing it."));
         return;
@@ -4954,18 +4932,6 @@ function balanceStatusClass(status) {
       return account;
     }
 
-    function findSavedUserExchangeAccount(workspace, draft) {
-      const accounts = workspace?.accounts || [];
-      if (draft.id) return accounts.find((row) => row.id === draft.id) || null;
-      return accounts.find((row) => (
-        row.project_id === draft.project_id
-        && row.exchange === draft.exchange
-        && row.market_type === draft.market_type
-        && row.api_variant === draft.api_variant
-        && row.symbol === draft.symbol
-      )) || null;
-    }
-
     async function saveUserExchangeAccount({ testAfterSave = false } = {}) {
       if (userExchangeAccountFormBusy) return;
       userExchangeAccountFormBusy = true;
@@ -4976,22 +4942,13 @@ function balanceStatusClass(status) {
       const account = collectUserExchangeAccount();
       try {
         const result = await postUserWorkspace({ action: "sync_account", account });
-        const savedAccount = (result.accounts || [])[0]
-          || (result.workspace?.accounts || []).find(
-            (row) => row.connection_id === result.connection_id
-          );
-        if (!savedAccount) throw new Error("saved account was not returned by the server");
+        const savedConnection = workspaceConnection(result.connection_id);
+        if (!savedConnection) throw new Error("saved API connection was not returned by the server");
         if (testAfterSave) {
-          selectedUserExchangeAccountId = result.connection_id || savedAccount.connection_id;
-          fillUserExchangeAccountForm(savedAccount);
-          const connection = workspaceConnection(
-            result.connection_id || savedAccount.connection_id || savedAccount.id
-          );
-          if (!connection) throw new Error("synced connection was not returned by the server");
-          await testUserExchangeConnection(connection, saveTestButton);
-          const refreshed = (currentUserWorkspace?.accounts || []).find(
-            (row) => row.connection_id === connection.id
-          );
+          selectedUserExchangeAccountId = savedConnection.id;
+          fillUserExchangeAccountForm(savedConnection);
+          await testUserExchangeConnection(savedConnection, saveTestButton);
+          const refreshed = workspaceConnection(savedConnection.id);
           if (refreshed) fillUserExchangeAccountForm(refreshed);
         } else {
           resetUserExchangeAccountForm();
@@ -5017,7 +4974,7 @@ function balanceStatusClass(status) {
 
     async function applyUserExchangeAccount(event) {
       event.preventDefault();
-      await saveUserExchangeAccount({ testAfterSave: true });
+      await saveUserExchangeAccount({ testAfterSave: false });
     }
 
     async function saveAndTestUserExchangeAccount() {

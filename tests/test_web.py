@@ -336,11 +336,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-overview-wallet1" defer></script>',
+            '<script src="/static/app.js?v=20260802-global-api1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-overview-wallet1" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-global-api1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -351,7 +351,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
         self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
-        self.assertIn('<summary>Connected Accounts</summary>', INDEX_HTML)
+        self.assertIn('<summary>Global API Connections</summary>', INDEX_HTML)
         self.assertIn('<summary>Project Management</summary>', INDEX_HTML)
         self.assertIn('id="profile-account"', INDEX_HTML)
         self.assertNotIn('id="user-account-monitor-rows"', INDEX_HTML)
@@ -8753,7 +8753,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     )
                     tested_connection = test_payload["workspace"]["connections"][0]
                     self.assertEqual(tested_connection["balances"][0]["total"], 100.0)
-                    self.assertEqual(tested_connection["open_order_count"], 2)
+                    self.assertEqual(tested_connection["open_order_count"], 4)
                     self.assertEqual(tested_connection["latency_ms"], 9.0)
                     self.assertEqual(tested_connection["enabled_count"], 2)
                     self.assertTrue(tested_connection["live_enabled"])
@@ -8786,6 +8786,159 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(delete_payload["workspace"]["connections"], [])
                 finally:
                     await client.close()
+
+    async def test_global_api_connection_can_precede_projects_and_auto_bind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            member = user_store.create_user(
+                email="global-api@example.com",
+                username="globalapi",
+                password="Strong-pass-4!",
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(data_dir / "user_workspace.sqlite3"),
+                    credential_master_key_env="TEST_CREDENTIAL_MASTER_KEY",
+                )
+            )
+            master_key = base64.urlsafe_b64encode(b"g" * 32).decode("ascii")
+            with patch.dict(
+                os.environ,
+                {"TEST_CREDENTIAL_MASTER_KEY": master_key},
+                clear=False,
+            ):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": member.username,
+                            "password": "Strong-pass-4!",
+                        },
+                    )
+                    save_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "sync_account",
+                            "account": {
+                                "label": "Coinbase Global",
+                                "exchange": "coinbase",
+                                "market_type": "spot",
+                                "api_variant": "default",
+                                "withdrawal_disabled_confirmed": True,
+                                "trade_permission_confirmed": True,
+                                "credentials": {
+                                    "api_key": "global-api-key",
+                                    "secret": "global-api-secret",
+                                },
+                            },
+                        },
+                    )
+                    save_payload = await save_response.json()
+                    connection_id = save_payload["connection_id"]
+
+                    with patch.object(
+                        app["workspace_account_checker"],
+                        "check_api_connection",
+                        new_callable=AsyncMock,
+                    ) as check_mock:
+                        check_mock.return_value = {
+                            "status": "healthy",
+                            "checked_at": time.time(),
+                            "latency_ms": 7.0,
+                            "balances": [
+                                {
+                                    "currency": "USDC",
+                                    "free": 100.0,
+                                    "used": 0.0,
+                                    "total": 100.0,
+                                }
+                            ],
+                            "open_order_count": 0,
+                            "market_count": 100,
+                        }
+                        test_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "test_connection",
+                                "connection_id": connection_id,
+                            },
+                        )
+                    test_payload = await test_response.json()
+                    trading_state = await (
+                        await client.get("/api/state?view=trading")
+                    ).json()
+
+                    with patch.object(
+                        app["workspace_market_discovery"],
+                        "discover",
+                        new_callable=AsyncMock,
+                    ) as discovery_mock:
+                        discovery_mock.return_value = (
+                            [
+                                {
+                                    "symbol": "ACS/USDC",
+                                    "base": "ACS",
+                                    "quote": "USDC",
+                                    "active": True,
+                                    "type": "spot",
+                                }
+                            ],
+                            False,
+                        )
+                        project_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "upsert_project",
+                                "project": {
+                                    "name": "ACS Project",
+                                    "asset": "ACS",
+                                    "quote_currency": "USDC",
+                                },
+                            },
+                        )
+                    project_payload = await project_response.json()
+                finally:
+                    await client.close()
+
+            database_bytes = (data_dir / "user_workspace.sqlite3").read_bytes()
+
+        self.assertEqual(save_response.status, 200, save_payload)
+        self.assertEqual(save_payload["accounts"], [])
+        self.assertEqual(len(save_payload["workspace"]["connections"]), 1)
+        self.assertTrue(
+            save_payload["workspace"]["connections"][0]["credentials_configured"]
+        )
+        self.assertEqual(test_response.status, 200, test_payload)
+        self.assertEqual(test_payload["connection_test"]["status"], "healthy")
+        self.assertEqual(trading_state["account_balances"]["total_account_count"], 1)
+        self.assertEqual(
+            trading_state["account_balances"]["totals"][0]["currency"],
+            "USDC",
+        )
+        self.assertEqual(project_response.status, 200, project_payload)
+        self.assertEqual(len(project_payload["workspace"]["accounts"]), 1)
+        bound_account = project_payload["workspace"]["accounts"][0]
+        self.assertEqual(bound_account["connection_id"], connection_id)
+        self.assertEqual(bound_account["symbol"], "ACS/USDC")
+        self.assertTrue(bound_account["enabled"])
+        self.assertEqual(
+            project_payload["workspace"]["connections"][0]["markets"][0][
+                "symbol"
+            ],
+            "ACS/USDC",
+        )
+        self.assertNotIn(b"global-api-key", database_bytes)
+        self.assertNotIn(b"global-api-secret", database_bytes)
 
 
 class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):

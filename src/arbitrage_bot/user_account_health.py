@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from .user_account_check import WorkspaceAccountCheckService
-from .user_workspace import UserExchangeAccount, UserWorkspaceStore
+from .user_workspace import UserApiConnection, UserExchangeAccount, UserWorkspaceStore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ DEFAULT_MAX_BATCH = 20
 
 
 def workspace_account_check_due(
-    account: UserExchangeAccount,
+    account: UserExchangeAccount | UserApiConnection,
     *,
     now: float | None = None,
 ) -> bool:
@@ -32,6 +32,91 @@ def workspace_account_check_due(
         else ERROR_RETRY_SECONDS
     )
     return current >= checked_at + interval
+
+
+async def refresh_workspace_api_connection(
+    store: UserWorkspaceStore,
+    checker: WorkspaceAccountCheckService,
+    api_connection: UserApiConnection,
+) -> UserApiConnection | None:
+    credentials = store.decrypt_credentials(
+        account_id=api_connection.id,
+        owner_email=api_connection.owner_email,
+    )
+    try:
+        try:
+            check = await checker.check_api_connection(
+                api_connection=api_connection,
+                credentials=credentials,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            check = {
+                "status": "error",
+                "error": _redacted_error(exc, credentials),
+                "latency_ms": 0.0,
+            }
+    finally:
+        credentials.clear()
+    current = store.get_api_connection(api_connection.id)
+    if current is None or current.updated_at != api_connection.updated_at:
+        return None
+    return store.update_api_connection_check(
+        api_connection.id,
+        status=str(check.get("status") or "error"),
+        error=str(check.get("error") or ""),
+        check=check,
+    )
+
+
+async def refresh_workspace_api_connections(
+    store: UserWorkspaceStore,
+    checker: WorkspaceAccountCheckService,
+    *,
+    force: bool = False,
+    now: float | None = None,
+    max_batch: int = DEFAULT_MAX_BATCH,
+) -> dict[str, Any]:
+    candidates = store.list_api_connections(owner_email="", is_admin=True)
+    credential_statuses = store.credential_statuses(
+        [api_connection.id for api_connection in candidates]
+    )
+    current = float(now if now is not None else time.time())
+    due = [
+        api_connection
+        for api_connection in sorted(
+            candidates,
+            key=lambda item: float(item.connection_checked_at or 0.0),
+        )
+        if (force or workspace_account_check_due(api_connection, now=current))
+        and api_connection.connection_status in {"healthy", "error"}
+        and api_connection.withdrawal_disabled_confirmed
+        and api_connection.trade_permission_confirmed
+        and credential_statuses.get(api_connection.id, {}).get("configured")
+    ][: max(1, int(max_batch))]
+    refreshed = [
+        item
+        for item in await asyncio.gather(
+            *(
+                refresh_workspace_api_connection(store, checker, api_connection)
+                for api_connection in due
+            )
+        )
+        if item is not None
+    ]
+    return {
+        "candidate_count": len(candidates),
+        "due_count": len(due),
+        "refreshed_count": len(refreshed),
+        "healthy_count": sum(
+            1 for item in refreshed if item.connection_status == "healthy"
+        ),
+        "error_count": sum(
+            1 for item in refreshed if item.connection_status == "error"
+        ),
+        "checked_at": time.time(),
+    }
 
 
 def _redacted_error(exc: Exception, credentials: dict[str, str]) -> str:
@@ -168,13 +253,17 @@ async def workspace_account_health_loop(
     while True:
         try:
             if leader_check():
-                result = await refresh_workspace_accounts(store, checker)
-                if result["error_count"]:
+                connection_result = await refresh_workspace_api_connections(
+                    store,
+                    checker,
+                )
+                account_result = await refresh_workspace_accounts(store, checker)
+                if connection_result["error_count"] or account_result["error_count"]:
                     LOGGER.warning(
                         "workspace account health refresh completed with errors: %s",
                         {
-                            "refreshed_count": result["refreshed_count"],
-                            "error_count": result["error_count"],
+                            "connection_errors": connection_result["error_count"],
+                            "market_binding_errors": account_result["error_count"],
                         },
                     )
         except asyncio.CancelledError:

@@ -520,6 +520,122 @@ class UserProject:
 
 
 @dataclass(frozen=True)
+class UserApiConnection:
+    id: str
+    owner_email: str
+    label: str
+    exchange: str
+    market_type: str = "spot"
+    api_variant: str = "default"
+    withdrawal_disabled_confirmed: bool = False
+    trade_permission_confirmed: bool = False
+    connection_status: str = "unverified"
+    connection_checked_at: float | None = None
+    connection_error: str = ""
+    balance_snapshot: tuple[dict[str, Any], ...] = ()
+    open_order_count: int | None = None
+    connection_latency_ms: float | None = None
+    created_at: float = field(default_factory=_now)
+    updated_at: float = field(default_factory=_now)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "UserApiConnection":
+        if not isinstance(raw, dict):
+            raise ValueError("API connection must be an object")
+        exchange = str(raw.get("exchange") or "").strip().lower()
+        exchange_row = EXCHANGES_BY_ID.get(exchange)
+        if exchange_row is None:
+            raise ValueError(f"unsupported exchange: {exchange}")
+        market_type = str(raw.get("market_type") or "spot").strip().lower()
+        if (
+            market_type not in MARKET_TYPES
+            or market_type not in exchange_row["market_types"]
+        ):
+            raise ValueError(f"{exchange} does not support {market_type} accounts")
+        variants = {
+            str(item.get("id") or "")
+            for item in exchange_row.get("variants", [])
+            if isinstance(item, dict)
+        }
+        api_variant = str(
+            raw.get("api_variant")
+            or exchange_row.get("default_variant")
+            or "default"
+        ).strip().lower()
+        if api_variant not in variants:
+            raise ValueError(f"{exchange} does not support API variant {api_variant}")
+        status = str(raw.get("connection_status") or "unverified").strip().lower()
+        if status not in CONNECTION_STATUSES:
+            status = "unverified"
+        now = _now()
+        return cls(
+            id=_clean_id(raw.get("id"), prefix="connection"),
+            owner_email=_clean_email(raw.get("owner_email")),
+            label=_clean_text(raw.get("label") or exchange_row["label"]),
+            exchange=exchange,
+            market_type=market_type,
+            api_variant=api_variant,
+            withdrawal_disabled_confirmed=_strict_bool(
+                raw.get("withdrawal_disabled_confirmed"),
+                label="withdrawal-disabled confirmation",
+                default=False,
+            ),
+            trade_permission_confirmed=_strict_bool(
+                raw.get("trade_permission_confirmed"),
+                label="trade permission confirmation",
+                default=bool(raw.get("withdrawal_disabled_confirmed", False)),
+            ),
+            connection_status=status,
+            connection_checked_at=(
+                float(raw["connection_checked_at"])
+                if raw.get("connection_checked_at") is not None
+                else None
+            ),
+            connection_error=_clean_text(raw.get("connection_error"), max_length=240),
+            balance_snapshot=_clean_balance_snapshot(raw.get("balance_snapshot")),
+            open_order_count=_optional_non_negative_int(raw.get("open_order_count")),
+            connection_latency_ms=_optional_non_negative_float(
+                raw.get("connection_latency_ms")
+            ),
+            created_at=float(raw.get("created_at") or now),
+            updated_at=float(raw.get("updated_at") or now),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "owner_email": self.owner_email,
+            "label": self.label,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "api_variant": self.api_variant,
+            "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
+            "trade_permission_confirmed": self.trade_permission_confirmed,
+            "connection_status": self.connection_status,
+            "connection_checked_at": self.connection_checked_at,
+            "connection_error": self.connection_error,
+            "balance_snapshot": [dict(row) for row in self.balance_snapshot],
+            "open_order_count": self.open_order_count,
+            "connection_latency_ms": self.connection_latency_ms,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+def api_connection_is_fresh(
+    connection: UserApiConnection,
+    *,
+    now: float | None = None,
+) -> bool:
+    if connection.connection_status != "healthy":
+        return False
+    if connection.connection_checked_at is None:
+        return False
+    age = (now if now is not None else _now()) - connection.connection_checked_at
+    return 0.0 <= age <= CONNECTION_MAX_AGE_SECONDS
+
+
+@dataclass(frozen=True)
 class UserExchangeAccount:
     id: str
     owner_email: str
@@ -873,6 +989,15 @@ class UserWorkspaceStore:
                     ON user_exchange_accounts(owner_email);
                 CREATE INDEX IF NOT EXISTS idx_user_exchange_accounts_project
                     ON user_exchange_accounts(project_id);
+                CREATE TABLE IF NOT EXISTS user_api_connections (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_api_connections_owner
+                    ON user_api_connections(owner_email, updated_at);
                 CREATE TABLE IF NOT EXISTS user_strategies (
                     id TEXT PRIMARY KEY,
                     owner_email TEXT NOT NULL,
@@ -950,6 +1075,7 @@ class UserWorkspaceStore:
                 """
             )
             self._migrate_legacy_accounts(connection)
+            self._migrate_global_api_connections(connection)
             connection.commit()
         try:
             os.chmod(self.path, 0o600)
@@ -997,6 +1123,125 @@ class UserWorkspaceStore:
                 ),
             )
 
+    def _migrate_global_api_connections(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        rows = connection.execute(
+            "SELECT payload FROM user_exchange_accounts ORDER BY updated_at DESC"
+        ).fetchall()
+        grouped: dict[str, list[UserExchangeAccount]] = {}
+        for row in rows:
+            account = UserExchangeAccount.from_dict(json.loads(row["payload"]))
+            grouped.setdefault(account.connection_id or account.id, []).append(account)
+        for connection_id, accounts in grouped.items():
+            if connection.execute(
+                "SELECT 1 FROM user_api_connections WHERE id = ?",
+                (connection_id,),
+            ).fetchone():
+                continue
+            first = accounts[0]
+            healthy = [row for row in accounts if row.connection_status == "healthy"]
+            checked = max(
+                (row.connection_checked_at or 0.0 for row in accounts),
+                default=0.0,
+            )
+            global_connection = UserApiConnection.from_dict(
+                {
+                    "id": connection_id,
+                    "owner_email": first.owner_email,
+                    "label": first.label,
+                    "exchange": first.exchange,
+                    "market_type": first.market_type,
+                    "api_variant": first.api_variant,
+                    "withdrawal_disabled_confirmed": all(
+                        row.withdrawal_disabled_confirmed for row in accounts
+                    ),
+                    "trade_permission_confirmed": all(
+                        row.trade_permission_confirmed for row in accounts
+                    ),
+                    "connection_status": (
+                        "healthy"
+                        if len(healthy) == len(accounts)
+                        else "error"
+                        if any(row.connection_status == "error" for row in accounts)
+                        else "unverified"
+                    ),
+                    "connection_checked_at": checked or None,
+                    "connection_error": next(
+                        (row.connection_error for row in accounts if row.connection_error),
+                        "",
+                    ),
+                    "balance_snapshot": first.balance_snapshot,
+                    "open_order_count": first.open_order_count,
+                    "connection_latency_ms": max(
+                        (row.connection_latency_ms or 0.0 for row in accounts),
+                        default=0.0,
+                    ),
+                    "created_at": min(row.created_at for row in accounts),
+                    "updated_at": max(row.updated_at for row in accounts),
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO user_api_connections(
+                    id, owner_email, exchange, updated_at, payload
+                ) VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    global_connection.id,
+                    global_connection.owner_email,
+                    global_connection.exchange,
+                    global_connection.updated_at,
+                    self._dump(global_connection.to_dict()),
+                ),
+            )
+            if self._credential_row(connection, connection_id) is not None:
+                continue
+            source = next(
+                (
+                    (account, self._credential_row(connection, account.id))
+                    for account in accounts
+                    if self._credential_row(connection, account.id) is not None
+                ),
+                None,
+            )
+            if source is None or not self.cipher.available:
+                continue
+            source_account, credential_row = source
+            try:
+                credentials = self.cipher.decrypt(
+                    account_id=source_account.id,
+                    owner_email=source_account.owner_email,
+                    nonce=credential_row["nonce"],
+                    ciphertext=credential_row["ciphertext"],
+                )
+            except (RuntimeError, ValueError):
+                continue
+            try:
+                nonce, ciphertext = self.cipher.encrypt(
+                    account_id=connection_id,
+                    owner_email=source_account.owner_email,
+                    credentials=credentials,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO user_api_credentials(
+                        account_id, owner_email, nonce, ciphertext, fields, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        connection_id,
+                        source_account.owner_email,
+                        nonce,
+                        ciphertext,
+                        self._dump({"fields": sorted(credentials)}),
+                        global_connection.updated_at,
+                    ),
+                )
+            finally:
+                credentials.clear()
+
     @staticmethod
     def _dump(payload: dict[str, Any]) -> str:
         return json.dumps(
@@ -1028,6 +1273,152 @@ class UserWorkspaceStore:
                 params,
             ).fetchall()
         return [UserProject.from_dict(json.loads(row["payload"])) for row in rows]
+
+    def get_api_connection(self, connection_id: str) -> UserApiConnection | None:
+        self._ensure()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_api_connections WHERE id = ?",
+                (str(connection_id or "").strip(),),
+            ).fetchone()
+        return UserApiConnection.from_dict(json.loads(row["payload"])) if row else None
+
+    def list_api_connections(
+        self,
+        *,
+        owner_email: str,
+        is_admin: bool,
+    ) -> list[UserApiConnection]:
+        self._ensure()
+        where, params = self._scope_sql(owner_email, is_admin)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM user_api_connections"
+                + where
+                + " ORDER BY updated_at DESC, id ASC",
+                params,
+            ).fetchall()
+        return [UserApiConnection.from_dict(json.loads(row["payload"])) for row in rows]
+
+    def upsert_api_connection(
+        self,
+        api_connection: UserApiConnection,
+        *,
+        credentials: dict[str, Any] | None = None,
+    ) -> UserApiConnection:
+        self._ensure()
+        existing = self.get_api_connection(api_connection.id)
+        if existing is not None and existing.owner_email != api_connection.owner_email:
+            raise ValueError("API connection owner cannot be changed")
+        if existing is not None and (
+            existing.exchange != api_connection.exchange
+            or existing.market_type != api_connection.market_type
+            or existing.api_variant != api_connection.api_variant
+        ):
+            raise ValueError(
+                "exchange, market, and API region cannot be changed on an existing "
+                "connection; add a new connection instead"
+            )
+        supplied = self._clean_credentials(credentials)
+        if existing is None and not supplied:
+            raise ValueError("configure required API credentials before saving")
+        updated = replace(
+            api_connection,
+            created_at=existing.created_at if existing else api_connection.created_at,
+            updated_at=_now(),
+        )
+        if supplied:
+            if not updated.withdrawal_disabled_confirmed:
+                raise ValueError("confirm that API withdrawal permission is disabled")
+            required = required_credentials_for_exchange(updated.exchange)
+            missing = sorted(required.difference(supplied))
+            if missing:
+                raise ValueError(
+                    "missing required API credential fields: " + ", ".join(missing)
+                )
+            validate_exchange_credentials(updated.exchange, supplied)
+            updated = replace(
+                updated,
+                connection_status="unverified",
+                connection_checked_at=None,
+                connection_error="",
+            )
+        with self._connect() as connection:
+            if supplied:
+                nonce, ciphertext = self.cipher.encrypt(
+                    account_id=updated.id,
+                    owner_email=updated.owner_email,
+                    credentials=supplied,
+                )
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO user_api_credentials(
+                        account_id, owner_email, nonce, ciphertext, fields, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        updated.id,
+                        updated.owner_email,
+                        nonce,
+                        ciphertext,
+                        self._dump({"fields": sorted(supplied)}),
+                        updated.updated_at,
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO user_api_connections(
+                    id, owner_email, exchange, updated_at, payload
+                ) VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    updated.id,
+                    updated.owner_email,
+                    updated.exchange,
+                    updated.updated_at,
+                    self._dump(updated.to_dict()),
+                ),
+            )
+            connection.commit()
+        supplied.clear()
+        return updated
+
+    def update_api_connection_check(
+        self,
+        connection_id: str,
+        *,
+        status: str,
+        error: str = "",
+        check: dict[str, Any] | None = None,
+    ) -> UserApiConnection:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in CONNECTION_STATUSES:
+            raise ValueError(f"unsupported connection status: {status}")
+        api_connection = self.get_api_connection(connection_id)
+        if api_connection is None:
+            raise ValueError(f"API connection not found: {connection_id}")
+        updated = replace(
+            api_connection,
+            connection_status=normalized_status,
+            connection_checked_at=_now(),
+            connection_error=_clean_text(error, max_length=240),
+            balance_snapshot=(
+                _clean_balance_snapshot(check.get("balances"))
+                if check is not None and normalized_status == "healthy"
+                else api_connection.balance_snapshot
+            ),
+            open_order_count=(
+                _optional_non_negative_int(check.get("open_order_count")) or 0
+                if check is not None and normalized_status == "healthy"
+                else api_connection.open_order_count
+            ),
+            connection_latency_ms=(
+                _optional_non_negative_float(check.get("latency_ms")) or 0.0
+                if check is not None
+                else api_connection.connection_latency_ms
+            ),
+        )
+        return self.upsert_api_connection(updated)
 
     def platform_projects(self) -> list[dict[str, Any]]:
         """Return project summary metadata only; never account or credential data."""
@@ -2932,10 +3323,13 @@ class UserWorkspaceStore:
                 "DELETE FROM user_hyperliquid_authorizations WHERE account_id = ?",
                 (account_id,),
             )
-            connection.execute(
-                "DELETE FROM user_api_credentials WHERE account_id = ?",
-                (account_id,),
-            )
+            if account.connection_id != account.id or self.get_api_connection(
+                account.id
+            ) is None:
+                connection.execute(
+                    "DELETE FROM user_api_credentials WHERE account_id = ?",
+                    (account_id,),
+                )
             connection.execute(
                 "DELETE FROM user_exchange_accounts WHERE id = ?",
                 (account_id,),
@@ -2951,7 +3345,10 @@ class UserWorkspaceStore:
             for account in self.list_accounts(owner_email=owner, is_admin=False)
             if account.connection_id == connection_key
         ]
-        if not accounts:
+        api_connection = self.get_api_connection(connection_key)
+        if api_connection is None and not accounts:
+            raise ValueError(f"API connection not found: {connection_key}")
+        if api_connection is not None and api_connection.owner_email != owner:
             raise ValueError(f"API connection not found: {connection_key}")
         with self._connect() as connection:
             for account in accounts:
@@ -2972,21 +3369,31 @@ class UserWorkspaceStore:
                         "deleting it"
                     )
             account_ids = [account.id for account in accounts]
-            placeholders = ",".join("?" for _ in account_ids)
+            if account_ids:
+                placeholders = ",".join("?" for _ in account_ids)
+                connection.execute(
+                    f"DELETE FROM user_hyperliquid_authorizations "
+                    f"WHERE account_id IN ({placeholders})",
+                    account_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM user_api_credentials "
+                    f"WHERE account_id IN ({placeholders})",
+                    account_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM user_exchange_accounts "
+                    f"WHERE id IN ({placeholders}) AND owner_email = ?",
+                    (*account_ids, owner),
+                )
             connection.execute(
-                f"DELETE FROM user_hyperliquid_authorizations "
-                f"WHERE account_id IN ({placeholders})",
-                account_ids,
+                "DELETE FROM user_api_credentials WHERE account_id = ? "
+                "AND owner_email = ?",
+                (connection_key, owner),
             )
             connection.execute(
-                f"DELETE FROM user_api_credentials "
-                f"WHERE account_id IN ({placeholders})",
-                account_ids,
-            )
-            connection.execute(
-                f"DELETE FROM user_exchange_accounts "
-                f"WHERE id IN ({placeholders}) AND owner_email = ?",
-                (*account_ids, owner),
+                "DELETE FROM user_api_connections WHERE id = ? AND owner_email = ?",
+                (connection_key, owner),
             )
             connection.commit()
         return len(accounts)
@@ -3003,6 +3410,7 @@ class UserWorkspaceStore:
                 "user_venue_connections",
                 "user_wallet_connections",
                 "user_api_credentials",
+                "user_api_connections",
                 "user_strategies",
                 "user_exchange_accounts",
                 "user_projects",
@@ -3073,6 +3481,33 @@ class UserWorkspaceStore:
                     ),
                 )
             moved["user_venue_connections"] = len(venue_rows)
+            api_connection_rows = connection.execute(
+                "SELECT id, payload FROM user_api_connections WHERE owner_email = ?",
+                (old,),
+            ).fetchall()
+            for row in api_connection_rows:
+                api_connection = UserApiConnection.from_dict(
+                    json.loads(row["payload"])
+                )
+                updated_api_connection = replace(
+                    api_connection,
+                    owner_email=new,
+                    connection_status="unverified",
+                    connection_checked_at=None,
+                    connection_error="API credentials must be re-entered after email change",
+                    updated_at=_now(),
+                )
+                connection.execute(
+                    "UPDATE user_api_connections SET owner_email = ?, updated_at = ?, "
+                    "payload = ? WHERE id = ?",
+                    (
+                        new,
+                        updated_api_connection.updated_at,
+                        self._dump(updated_api_connection.to_dict()),
+                        updated_api_connection.id,
+                    ),
+                )
+            moved["user_api_connections"] = len(api_connection_rows)
             connection.execute(
                 "UPDATE user_exchange_accounts SET owner_email = ? "
                 "WHERE owner_email = ?",
@@ -3090,18 +3525,58 @@ class UserWorkspaceStore:
     def _connection_rows(
         account_rows: list[dict[str, Any]],
         project_map: dict[str, UserProject],
+        api_connection_rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         connection_groups: dict[str, dict[str, Any]] = {}
+        for row in api_connection_rows or []:
+            connection_id = str(row.get("id") or "")
+            connection_groups[connection_id] = {
+                "id": connection_id,
+                "owner_email": row.get("owner_email") or "",
+                "label": row.get("label") or row.get("exchange") or connection_id,
+                "exchange": row.get("exchange") or "",
+                "market_type": row.get("market_type") or "spot",
+                "api_variant": row.get("api_variant") or "default",
+                "withdrawal_disabled_confirmed": bool(
+                    row.get("withdrawal_disabled_confirmed")
+                ),
+                "trade_permission_confirmed": bool(
+                    row.get("trade_permission_confirmed")
+                ),
+                "account_ids": [],
+                "project_ids": [],
+                "markets": [],
+                "enabled_count": 0,
+                "healthy_count": 0,
+                "error_count": 0,
+                "credentials_configured": bool(
+                    row.get("credentials", {}).get("configured")
+                ),
+                "balances": list(row.get("balance_snapshot") or []),
+                "open_order_count": row.get("open_order_count"),
+                "latency_ms": row.get("connection_latency_ms"),
+                "checked_at": row.get("connection_checked_at"),
+                "connection_status": row.get("connection_status") or "unverified",
+                "connection_error": row.get("connection_error") or "",
+                "updated_at": float(row.get("updated_at") or 0.0),
+            }
         for row in account_rows:
             connection_id = str(row.get("connection_id") or row["id"])
             group = connection_groups.setdefault(
                 connection_id,
                 {
                     "id": connection_id,
+                    "owner_email": row.get("owner_email") or "",
                     "label": row.get("label") or row.get("exchange") or connection_id,
                     "exchange": row.get("exchange") or "",
                     "market_type": row.get("market_type") or "spot",
                     "api_variant": row.get("api_variant") or "default",
+                    "withdrawal_disabled_confirmed": bool(
+                        row.get("withdrawal_disabled_confirmed")
+                    ),
+                    "trade_permission_confirmed": bool(
+                        row.get("trade_permission_confirmed")
+                    ),
                     "account_ids": [],
                     "project_ids": [],
                     "markets": [],
@@ -3113,6 +3588,8 @@ class UserWorkspaceStore:
                     "open_order_count": row.get("open_order_count"),
                     "latency_ms": row.get("connection_latency_ms"),
                     "checked_at": row.get("connection_checked_at"),
+                    "connection_status": row.get("connection_status") or "unverified",
+                    "connection_error": row.get("connection_error") or "",
                     "updated_at": 0.0,
                 },
             )
@@ -3137,10 +3614,10 @@ class UserWorkspaceStore:
             group["enabled_count"] += int(bool(row.get("enabled")))
             group["healthy_count"] += int(bool(row.get("connection_fresh")))
             group["error_count"] += int(row.get("connection_status") == "error")
-            group["credentials_configured"] = bool(
-                group["credentials_configured"]
-                and row.get("credentials", {}).get("configured")
-            )
+            if not group["credentials_configured"]:
+                group["credentials_configured"] = bool(
+                    row.get("credentials", {}).get("configured")
+                )
             group["updated_at"] = max(
                 float(group["updated_at"]),
                 float(row.get("updated_at") or 0.0),
@@ -3153,7 +3630,7 @@ class UserWorkspaceStore:
                 if group["error_count"]
                 else "healthy"
                 if market_count and group["healthy_count"] == market_count
-                else "unverified"
+                else group["connection_status"]
             )
             group["live_enabled"] = bool(
                 market_count and group["enabled_count"] == market_count
@@ -3173,7 +3650,14 @@ class UserWorkspaceStore:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
         project_map = {project.id: project for project in projects}
         accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)
+        api_connections = self.list_api_connections(
+            owner_email=owner_email,
+            is_admin=is_admin,
+        )
         credentials = self.credential_statuses([account.id for account in accounts])
+        connection_credentials = self.credential_statuses(
+            [api_connection.id for api_connection in api_connections]
+        )
         now = _now()
         account_rows = []
         for account in accounts:
@@ -3181,7 +3665,16 @@ class UserWorkspaceStore:
             row["connection_fresh"] = account_connection_is_fresh(account, now=now)
             row["credentials"] = credentials[account.id]
             account_rows.append(row)
-        connections = self._connection_rows(account_rows, project_map)
+        api_connection_rows = []
+        for api_connection in api_connections:
+            row = api_connection.to_dict()
+            row["credentials"] = connection_credentials[api_connection.id]
+            api_connection_rows.append(row)
+        connections = self._connection_rows(
+            account_rows,
+            project_map,
+            api_connection_rows,
+        )
         return {
             "status": "ok",
             "connections": connections,
@@ -3200,11 +3693,18 @@ class UserWorkspaceStore:
             is_admin=is_admin,
         )
         strategies = self.list_strategies(owner_email=owner_email, is_admin=is_admin)
+        api_connections = self.list_api_connections(
+            owner_email=owner_email,
+            is_admin=is_admin,
+        )
         now = _now()
         risk_profile = self.risk_profile(owner_email)
         project_map = {project.id: project for project in projects}
         account_map = {account.id: account for account in accounts}
         credentials = self.credential_statuses([account.id for account in accounts])
+        connection_credentials = self.credential_statuses(
+            [api_connection.id for api_connection in api_connections]
+        )
         account_readiness = {
             account.id: self._account_readiness(
                 account,
@@ -3250,7 +3750,16 @@ class UserWorkspaceStore:
             row["credentials"] = credentials[account.id]
             row["readiness"] = account_readiness[account.id]
             account_rows.append(row)
-        connection_rows = self._connection_rows(account_rows, project_map)
+        api_connection_rows = []
+        for api_connection in api_connections:
+            row = api_connection.to_dict()
+            row["credentials"] = connection_credentials[api_connection.id]
+            api_connection_rows.append(row)
+        connection_rows = self._connection_rows(
+            account_rows,
+            project_map,
+            api_connection_rows,
+        )
         strategy_rows = []
         for strategy in strategies:
             row = strategy.to_dict()

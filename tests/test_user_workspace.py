@@ -13,6 +13,7 @@ from eth_account.messages import encode_defunct
 from arbitrage_bot.user_workspace import (
     CONNECTION_MAX_AGE_SECONDS,
     CredentialCipher,
+    UserApiConnection,
     UserExchangeAccount,
     UserProject,
     UserRiskProfile,
@@ -26,6 +27,59 @@ MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_global_api_connection_is_independent_of_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {"TEST_MASTER_KEY": MASTER_KEY},
+                clear=False,
+            ):
+                store = UserWorkspaceStore(
+                    Path(tmp) / "workspace.sqlite3",
+                    master_key_env="TEST_MASTER_KEY",
+                )
+                api_connection = store.upsert_api_connection(
+                    UserApiConnection.from_dict(
+                        {
+                            "owner_email": "trader@example.com",
+                            "label": "Coinbase Global",
+                            "exchange": "coinbase",
+                            "market_type": "spot",
+                            "withdrawal_disabled_confirmed": True,
+                            "trade_permission_confirmed": True,
+                        }
+                    ),
+                    credentials={
+                        "api_key": "test-api-key",
+                        "secret": "test-api-secret",
+                    },
+                )
+                payload = store.public_payload(
+                    owner_email="trader@example.com",
+                    is_admin=False,
+                )
+
+                self.assertEqual(payload["projects"], [])
+                self.assertEqual(payload["accounts"], [])
+                self.assertEqual(payload["connections"][0]["id"], api_connection.id)
+                self.assertTrue(
+                    payload["connections"][0]["credentials_configured"]
+                )
+                self.assertEqual(
+                    store.delete_connection(
+                        api_connection.id,
+                        owner_email="trader@example.com",
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    store.list_api_connections(
+                        owner_email="trader@example.com",
+                        is_admin=False,
+                    ),
+                    [],
+                )
+
     def test_wallet_challenge_verifies_once_and_persists_read_only_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = UserWorkspaceStore(
@@ -418,7 +472,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                     owner_email=project.owner_email,
                     is_admin=False,
                 )
-            self.assertLessEqual(connect.call_count, 5)
+            self.assertLessEqual(connect.call_count, 6)
 
         self.assertTrue(payload["projects"][0]["readiness"]["ready"])
         self.assertEqual(payload["summary"]["ready_project_count"], 1)
