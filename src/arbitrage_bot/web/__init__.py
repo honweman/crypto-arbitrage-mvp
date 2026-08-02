@@ -2957,6 +2957,7 @@ def _merge_workspace_account_balances(
     workspace: dict[str, Any] | None,
 ) -> dict[str, Any]:
     merged = dict(account_balances or {})
+    full_accounts_available = "accounts" in merged
     accounts = [
         dict(row)
         for row in merged.get("accounts", [])
@@ -3068,16 +3069,93 @@ def _merge_workspace_account_balances(
         )
 
     accounts.extend(workspace_accounts)
-    errors = [
+    workspace_errors = [
         str(error)
-        for account in accounts
+        for account in workspace_accounts
         for error in account.get("errors", []) or []
     ]
-    warnings = [
+    workspace_warnings = [
         str(warning)
-        for account in accounts
+        for account in workspace_accounts
         for warning in account.get("warnings", []) or []
     ]
+    errors = (
+        [
+            str(error)
+            for account in accounts
+            for error in account.get("errors", []) or []
+        ]
+        if full_accounts_available
+        else [*[str(item) for item in merged.get("errors", []) or []], *workspace_errors]
+    )
+    warnings = (
+        [
+            str(warning)
+            for account in accounts
+            for warning in account.get("warnings", []) or []
+        ]
+        if full_accounts_available
+        else [
+            *[str(item) for item in merged.get("warnings", []) or []],
+            *workspace_warnings,
+        ]
+    )
+    if full_accounts_available:
+        totals = _aggregate_account_balance_totals(accounts)
+        checked_account_count = sum(
+            1 for account in accounts if account.get("balance", {}).get("checked")
+        )
+        total_account_count = len(accounts)
+        status = _account_balance_status(accounts)
+    else:
+        totals_by_currency: dict[str, dict[str, Any]] = {}
+        for row in [
+            *(merged.get("totals", []) or []),
+            *_aggregate_account_balance_totals(workspace_accounts),
+        ]:
+            if not isinstance(row, dict):
+                continue
+            currency = str(row.get("currency") or "").upper()
+            if not currency:
+                continue
+            target = totals_by_currency.setdefault(
+                currency,
+                {
+                    "currency": currency,
+                    "free": 0.0,
+                    "used": 0.0,
+                    "total": 0.0,
+                    "open_order_reserved": 0.0,
+                },
+            )
+            for field in ("free", "used", "total", "open_order_reserved"):
+                value = _number_or_none(row.get(field))
+                if value is not None:
+                    target[field] += value
+        preferred = {"ACS": 0, "USDC": 1, "USDT": 2, "USD": 3, "KRW": 4}
+        totals = sorted(
+            totals_by_currency.values(),
+            key=lambda row: (preferred.get(row["currency"], 99), row["currency"]),
+        )
+        checked_account_count = int(merged.get("checked_account_count") or 0) + sum(
+            1
+            for account in workspace_accounts
+            if account.get("balance", {}).get("checked")
+        )
+        total_account_count = int(merged.get("total_account_count") or 0) + len(
+            workspace_accounts
+        )
+        base_status = str(merged.get("status") or "")
+        workspace_status = (
+            _account_balance_status(workspace_accounts) if workspace_accounts else ""
+        )
+        status = (
+            "error"
+            if "error" in {base_status, workspace_status}
+            else "warning"
+            if "warning" in {base_status, workspace_status}
+            else base_status or workspace_status
+        )
     last_finished = max(
         [
             float(value)
@@ -3091,17 +3169,130 @@ def _merge_workspace_account_balances(
     )
     return {
         **merged,
-        "status": _account_balance_status(accounts),
+        "status": status,
         "accounts": accounts,
-        "totals": _aggregate_account_balance_totals(accounts),
-        "checked_account_count": sum(
-            1 for account in accounts if account.get("balance", {}).get("checked")
-        ),
-        "total_account_count": len(accounts),
+        "totals": totals,
+        "checked_account_count": checked_account_count,
+        "total_account_count": total_account_count,
         "last_finished": last_finished or None,
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def _sync_portfolio_with_account_balances(
+    portfolio: dict[str, Any] | None,
+    account_balances: dict[str, Any] | None,
+    *,
+    quote_rates: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    payload = dict(portfolio or {})
+    totals = {
+        str(row.get("currency") or "").upper(): float(row.get("total") or 0.0)
+        for row in (account_balances or {}).get("totals", []) or []
+        if isinstance(row, dict) and row.get("currency")
+    }
+    if not totals or not payload:
+        return payload
+
+    positions = [
+        dict(row)
+        for row in payload.get("positions", []) or []
+        if isinstance(row, dict) and row.get("asset")
+    ]
+    if not positions and payload.get("asset"):
+        positions = [
+            {
+                "asset": str(payload.get("asset") or "").upper(),
+                "position_base": payload.get("position_base", 0.0),
+                "average_entry_price": payload.get("average_entry_price", 0.0),
+                "mark_price": payload.get("mark_price"),
+                "position_value": payload.get("position_value"),
+            }
+        ]
+
+    accounts = [
+        row
+        for row in (account_balances or {}).get("accounts", []) or []
+        if isinstance(row, dict)
+    ]
+    position_assets: set[str] = set()
+    position_values: list[float] = []
+    for position in positions:
+        asset = str(position.get("asset") or "").upper()
+        if not asset:
+            continue
+        position_assets.add(asset)
+        position_base = totals.get(asset, float(position.get("position_base") or 0.0))
+        mark_price = _number_or_none(position.get("mark_price"))
+        position["position_base"] = position_base
+        position["position_value"] = (
+            position_base * mark_price if mark_price is not None else None
+        )
+        if position["position_value"] is not None:
+            position_values.append(float(position["position_value"]))
+        breakdown: list[dict[str, Any]] = []
+        for account in accounts:
+            for row in account.get("balance", {}).get("currencies", []) or []:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("currency") or "").upper() != asset:
+                    continue
+                amount = _number_or_none(row.get("total")) or 0.0
+                if amount == 0.0:
+                    continue
+                breakdown.append(
+                    {
+                        "account": str(
+                            account.get("label") or account.get("exchange") or ""
+                        ),
+                        "exchange": str(account.get("id") or ""),
+                        "wallet": str(row.get("wallet") or "trading"),
+                        "amount": amount,
+                        "tradable": bool(row.get("tradable", True)),
+                    }
+                )
+        if breakdown:
+            position["account_breakdown"] = breakdown
+
+    payload["positions"] = positions
+    if positions:
+        payload["asset"] = positions[0]["asset"]
+        payload["position_base"] = positions[0]["position_base"]
+        payload["mark_price"] = positions[0].get("mark_price")
+    payload["position_value"] = sum(position_values) if position_values else None
+
+    cash_balances = {
+        currency: amount
+        for currency, amount in sorted(totals.items())
+        if currency not in position_assets
+    }
+    old_cash = payload.get("cash_balances", {}) or {}
+    old_common = payload.get("cash_balances_common", {}) or {}
+    rates = {str(key).upper(): float(value) for key, value in (quote_rates or {}).items()}
+    quote_currency = str(payload.get("quote_currency") or "USD").upper()
+    rates.setdefault(quote_currency, 1.0)
+    for currency, amount in old_cash.items():
+        numeric_amount = _number_or_none(amount)
+        common_amount = _number_or_none(old_common.get(currency))
+        if numeric_amount not in {None, 0.0} and common_amount is not None:
+            rates.setdefault(str(currency).upper(), common_amount / numeric_amount)
+    cash_common: dict[str, float] = {}
+    cash_missing: list[str] = []
+    for currency, amount in cash_balances.items():
+        rate = rates.get(currency)
+        if rate is None:
+            cash_missing.append(currency)
+        else:
+            cash_common[currency] = amount * rate
+    payload["cash_balances"] = cash_balances
+    payload["cash_balances_common"] = cash_common
+    payload["cash_value"] = sum(cash_common.values())
+    payload["cash_missing_rates"] = cash_missing
+    payload["balance_source"] = "merged_live_accounts"
+    payload["balance_status"] = (account_balances or {}).get("status")
+    payload["balance_observed_at"] = (account_balances or {}).get("last_finished")
+    return payload
 
 
 def build_strategy_center_payload(
@@ -5086,6 +5277,11 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         filtered["account_balances"] = _merge_workspace_account_balances(
             filtered.get("account_balances"),
             workspace_payload,
+        )
+        filtered["portfolio"] = _sync_portfolio_with_account_balances(
+            filtered.get("portfolio"),
+            filtered.get("account_balances"),
+            quote_rates=runtime_cfg.quote_rates,
         )
     return filtered
 

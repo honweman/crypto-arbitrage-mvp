@@ -6056,7 +6056,22 @@ function balanceStatusClass(status) {
           : "--";
       }
       return positions
-        .map((position) => `${position.asset} ${compact.format(position.position_base || 0)} · ${formatPositionPrice(position, portfolio)} · ${formatPositionValue(position, portfolio)}`)
+        .map((position) => {
+          const accountDetail = (position.account_breakdown || [])
+            .map((row) => {
+              const wallet = String(row.wallet || "trading").toLowerCase() === "funding"
+                ? uiText("Funding wallet")
+                : uiText("Trading wallet");
+              return `${row.account || row.exchange} ${wallet} ${compact.format(row.amount || 0)}`;
+            })
+            .join(" · ");
+          return [
+            `${position.asset} ${compact.format(position.position_base || 0)}`,
+            formatPositionPrice(position, portfolio),
+            formatPositionValue(position, portfolio),
+            accountDetail,
+          ].filter(Boolean).join(" · ");
+        })
         .join(" · ");
     }
 

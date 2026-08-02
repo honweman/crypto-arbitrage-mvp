@@ -85,8 +85,10 @@ from arbitrage_bot.web import (
     _client_ip,
     _ip_allowed,
     _make_session_token,
+    _merge_workspace_account_balances,
     _session_identity,
     _session_valid,
+    _sync_portfolio_with_account_balances,
     api_create_auto_buy_sell_task,
     api_control_auto_buy_sell_task,
     api_cancel_order,
@@ -215,13 +217,126 @@ def make_config(
 
 
 class WebMonitorTest(unittest.TestCase):
+    def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
+        merged = _merge_workspace_account_balances(
+            {
+                "status": "ok",
+                "totals": [
+                    {
+                        "currency": "USDC",
+                        "free": 50.0,
+                        "used": 0.0,
+                        "total": 50.0,
+                    }
+                ],
+                "checked_account_count": 3,
+                "total_account_count": 3,
+                "last_finished": 100.0,
+            },
+            {
+                "connections": [
+                    {
+                        "id": "bybit-main",
+                        "label": "Bybit Main",
+                        "exchange": "bybit",
+                        "status": "healthy",
+                        "checked_at": 200.0,
+                        "credentials_configured": True,
+                        "live_enabled": True,
+                        "balances": [
+                            {
+                                "currency": "ACS",
+                                "free": 110_000_000.0,
+                                "used": 0.0,
+                                "total": 110_000_000.0,
+                                "wallet": "funding",
+                                "tradable": False,
+                            }
+                        ],
+                        "markets": [
+                            {
+                                "symbol": "ACS/USDT",
+                                "connection_status": "healthy",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(merged["checked_account_count"], 4)
+        self.assertEqual(merged["total_account_count"], 4)
+        self.assertEqual(
+            {row["currency"]: row["total"] for row in merged["totals"]},
+            {"ACS": 110_000_000.0, "USDC": 50.0},
+        )
+
+    def test_workspace_balance_updates_top_portfolio_and_account_breakdown(self) -> None:
+        account_balances = {
+            "status": "ok",
+            "last_finished": 200.0,
+            "totals": [
+                {"currency": "ACS", "total": 110_000_000.0},
+                {"currency": "USDC", "total": 50.0},
+            ],
+            "accounts": [
+                {
+                    "label": "Bybit Main",
+                    "id": "bybit",
+                    "balance": {
+                        "currencies": [
+                            {
+                                "currency": "ACS",
+                                "total": 110_000_000.0,
+                                "wallet": "funding",
+                                "tradable": False,
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        portfolio = _sync_portfolio_with_account_balances(
+            {
+                "status": "ok",
+                "asset": "ACS",
+                "quote_currency": "USD",
+                "position_base": 1.0,
+                "position_value": 0.2,
+                "positions": [
+                    {
+                        "asset": "ACS",
+                        "position_base": 1.0,
+                        "mark_price": 0.2,
+                        "position_value": 0.2,
+                    }
+                ],
+                "cash_balances": {},
+                "cash_balances_common": {},
+            },
+            account_balances,
+            quote_rates={"USDC": 1.0},
+        )
+
+        self.assertEqual(portfolio["position_base"], 110_000_000.0)
+        self.assertEqual(portfolio["position_value"], 22_000_000.0)
+        self.assertEqual(portfolio["cash_value"], 50.0)
+        self.assertEqual(
+            portfolio["positions"][0]["account_breakdown"][0]["account"],
+            "Bybit Main",
+        )
+        self.assertEqual(
+            portfolio["positions"][0]["account_breakdown"][0]["wallet"],
+            "funding",
+        )
+
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-bybit-wallet1" defer></script>',
+            '<script src="/static/app.js?v=20260802-overview-wallet1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-bybit-wallet1" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-overview-wallet1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -345,7 +460,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260802-bybit-wallet1"),
+            INDEX_HTML.index("/static/styles.css?v=20260802-overview-wallet1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -452,7 +567,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260802-bybit-wallet1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260802-overview-wallet1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
