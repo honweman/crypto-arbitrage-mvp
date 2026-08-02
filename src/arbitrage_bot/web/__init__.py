@@ -7205,34 +7205,37 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if _user_store(request).get_user(owner) is None:
                 raise ValueError("project owner is not a registered user")
             raw["owner_email"] = owner
-            scope_changed = bool(
-                existing is not None
-                and (
-                    str(raw.get("asset") or "").strip().upper() != existing.asset
-                    or str(raw.get("quote_currency") or raw.get("quote") or "")
-                    .strip()
-                    .upper()
-                    != existing.quote_currency
-                )
-            )
             raw["status"] = (
-                "pending"
-                if scope_changed and user.role != "admin"
-                else existing.status
-                if existing is not None
+                "disabled"
+                if existing is not None and existing.status == "disabled"
                 else "active"
-                if user.role == "admin"
-                else "pending"
             )
             project = UserProject.from_dict(raw)
-            if project.status == "active" and user.role == "admin":
-                _user_store(request).admin_grant_asset(
+            if project.status == "active":
+                _user_store(request).grant_asset(
                     email=project.owner_email,
                     asset=project.asset,
                 )
             project = store.upsert_project(project)
             audit_target = project.id
-            audit_detail = f"saved user project {project.name}"
+            audit_detail = f"saved self-service user project {project.name}"
+            audit_payload = project.to_dict()
+            response_extra = {"project": project.to_dict()}
+        elif action == "activate_project":
+            project_id = str(
+                payload.get("project_id") or payload.get("id") or ""
+            ).strip()
+            project = store.get_project(project_id)
+            if project is None:
+                raise ValueError(f"project not found: {project_id}")
+            _require_owner_or_admin(user, project.owner_email)
+            _user_store(request).grant_asset(
+                email=project.owner_email,
+                asset=project.asset,
+            )
+            project = store.set_project_status(project.id, "active")
+            audit_target = project.id
+            audit_detail = f"activated user project {project.name}"
             audit_payload = project.to_dict()
             response_extra = {"project": project.to_dict()}
         elif action == "approve_project":
@@ -7490,7 +7493,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if account.enabled:
                 if project.status != "active":
                     raise PermissionError(
-                        "project approval is required before enabling account"
+                        "project must be active before enabling account"
                     )
                 _require_user_assets(user, [project.asset])
                 if not account.withdrawal_disabled_confirmed:
@@ -9090,6 +9093,25 @@ async def api_strategy_control(request: web.Request) -> web.Response:
     )
 
 
+def _activate_registered_pending_projects(
+    web_user_store: WebUserStore,
+    workspace_store: UserWorkspaceStore,
+) -> list[str]:
+    activated: list[str] = []
+    for project in workspace_store.list_projects(owner_email="", is_admin=True):
+        if project.status != "pending":
+            continue
+        if web_user_store.get_user(project.owner_email) is None:
+            continue
+        web_user_store.grant_asset(
+            email=project.owner_email,
+            asset=project.asset,
+        )
+        workspace_store.set_project_status(project.id, "active")
+        activated.append(project.id)
+    return activated
+
+
 def create_app(
     cfg: BotConfig,
     strategy: StrategyName,
@@ -9122,6 +9144,10 @@ def create_app(
         default_user_workspace_path(cfg),
         master_key_env=cfg.web_security.credential_master_key_env,
     )
+    self_service_project_migrations = _activate_registered_pending_projects(
+        web_user_store,
+        user_workspace_store,
+    )
     user_paper_store = UserPaperTradingStore(default_user_paper_trading_path(cfg))
     user_paper_service = UserPaperTradingService(
         user_workspace_store,
@@ -9147,6 +9173,7 @@ def create_app(
     app["auto_buy_sell_tasks"] = auto_buy_sell_tasks
     app["web_user_store"] = web_user_store
     app["user_workspace_store"] = user_workspace_store
+    app["self_service_project_migrations"] = self_service_project_migrations
     app["user_paper_store"] = user_paper_store
     app["user_paper_service"] = user_paper_service
     app["user_backtest_store"] = user_backtest_store

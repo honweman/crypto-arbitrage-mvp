@@ -3911,7 +3911,7 @@ function balanceStatusClass(status) {
     function continueUserProjectSetup(project) {
       const action = project?.readiness?.next_action || {};
       const actionCode = action.code || "";
-      if (["wait_for_project_approval", "contact_administrator"].includes(actionCode)) {
+      if (["activate_project", "contact_administrator"].includes(actionCode)) {
         fillUserProjectForm(project);
         focusWorkspaceControl("user-project-asset");
         return;
@@ -4138,7 +4138,6 @@ function balanceStatusClass(status) {
         body.appendChild(tr);
         return;
       }
-      const isAdmin = lastState?.auth?.role === "admin";
       for (const project of projects) {
         const platformOnly = Boolean(project.platform_only);
         const tr = document.createElement("tr");
@@ -4146,7 +4145,7 @@ function balanceStatusClass(status) {
         const statusClass = project.status === "active" ? "ok" : project.status === "pending" ? "risk-blocked" : "subtle";
         const setup = project.readiness || {};
         const setupText = platformOnly
-          ? uiText("Platform approval only")
+          ? uiText("Platform project summary")
           : `${setup.completed_steps || 0}/${setup.total_steps || 0} ${uiText("setup steps")}`;
         tr.innerHTML = `
           <td title="${escapeHtml(project.id || "")}">${escapeHtml(project.name || project.id)}</td>
@@ -4164,13 +4163,13 @@ function balanceStatusClass(status) {
           editButton.addEventListener("click", () => fillUserProjectForm(project));
           actions.appendChild(editButton);
         }
-        if (isAdmin && project.status !== "active") {
-          const approveButton = document.createElement("button");
-          approveButton.className = "control-button";
-          approveButton.type = "button";
-          approveButton.textContent = "Approve";
-          approveButton.addEventListener("click", () => approveUserProject(project, approveButton));
-          actions.appendChild(approveButton);
+        if (project.status !== "active") {
+          const activateButton = document.createElement("button");
+          activateButton.className = "control-button";
+          activateButton.type = "button";
+          activateButton.textContent = uiText("Activate");
+          activateButton.addEventListener("click", () => activateUserProject(project, activateButton));
+          actions.appendChild(activateButton);
         }
         if (project.status === "active") {
           const disableButton = document.createElement("button");
@@ -4412,7 +4411,7 @@ function balanceStatusClass(status) {
         enabled.disabled = !projectReady || (!connectionReady && !selectedAccount?.enabled);
         if (!connectionReady) enabled.checked = false;
         enabled.title = !projectReady
-          ? uiText("The project must be approved before this account can be enabled.")
+          ? uiText("The project must be active before this account can be enabled.")
           : !connectionReady
             ? uiText("Run a successful connection test before enabling this account.")
             : "";
@@ -4890,12 +4889,12 @@ function balanceStatusClass(status) {
       }
     }
 
-    async function approveUserProject(project, button) {
+    async function activateUserProject(project, button) {
       button.disabled = true;
       try {
-        await postUserWorkspace({ action: "approve_project", project_id: project.id });
+        await postUserWorkspace({ action: "activate_project", project_id: project.id });
       } catch (error) {
-        setUserWorkspaceNotice(`approval failed: ${error.message || error}`);
+        setUserWorkspaceNotice(`${uiText("Project activation failed")}: ${error.message || error}`);
       } finally {
         button.disabled = false;
       }

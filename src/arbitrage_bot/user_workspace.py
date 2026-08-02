@@ -1030,7 +1030,7 @@ class UserWorkspaceStore:
         return [UserProject.from_dict(json.loads(row["payload"])) for row in rows]
 
     def platform_projects(self) -> list[dict[str, Any]]:
-        """Return project approval metadata only; never account or credential data."""
+        """Return project summary metadata only; never account or credential data."""
         self._ensure()
         with self._connect() as connection:
             rows = connection.execute(
@@ -2353,7 +2353,7 @@ class UserWorkspaceStore:
         steps = [
             {
                 "id": "project_approved",
-                "label": "Project approved",
+                "label": "Project active",
                 "complete": project_active,
             },
             {
@@ -2418,8 +2418,8 @@ class UserWorkspaceStore:
 
         if project is None or not project_active:
             next_action = {
-                "code": "wait_for_project_approval",
-                "label": "Wait for administrator approval",
+                "code": "activate_project",
+                "label": "Activate project",
             }
         elif not vault_available:
             next_action = {
@@ -2693,7 +2693,7 @@ class UserWorkspaceStore:
             {"id": "project_created", "label": "Project created", "complete": True},
             {
                 "id": "project_approved",
-                "label": "Project approved",
+                "label": "Project active",
                 "complete": project.status == "active",
             },
             {
@@ -2725,12 +2725,8 @@ class UserWorkspaceStore:
 
         if project.status != "active":
             next_action = {
-                "code": "wait_for_project_approval",
-                "label": (
-                    "Wait for administrator approval"
-                    if project.status == "pending"
-                    else "Ask an administrator to reactivate the project"
-                ),
+                "code": "activate_project",
+                "label": "Activate project",
             }
         elif not accounts:
             next_action = {

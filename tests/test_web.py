@@ -147,7 +147,11 @@ from arbitrage_bot.web_config import (
 )
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 from arbitrage_bot.user_strategies import UserStrategy
-from arbitrage_bot.user_workspace import UserExchangeAccount, UserProject
+from arbitrage_bot.user_workspace import (
+    UserExchangeAccount,
+    UserProject,
+    UserWorkspaceStore,
+)
 
 
 HTML = f"{INDEX_HTML}\n{APP_JS}"
@@ -8040,7 +8044,61 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delete_venue_response.status, 200, delete_venue_payload)
         self.assertEqual(delete_venue_payload["workspace"]["venue_connections"], [])
 
-    async def test_user_workspace_project_approval_and_encrypted_account_flow(
+    async def test_pending_projects_migrate_to_self_service_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            user_store.create_user(
+                email="admin@example.com",
+                username="admin01",
+                password="Strong-pass-1!",
+            )
+            member = user_store.create_user(
+                email="member@example.com",
+                username="member01",
+                password="Strong-pass-2!",
+            )
+            workspace_path = data_dir / "user_workspace.sqlite3"
+            workspace = UserWorkspaceStore(workspace_path, master_key_env=None)
+            workspace.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "id": "project-pending",
+                        "owner_email": member.email,
+                        "name": "Legacy Pending Project",
+                        "asset": "ACS",
+                        "quote_currency": "USDC",
+                        "status": "pending",
+                    }
+                )
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(workspace_path),
+                    credential_master_key_env=None,
+                ),
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=str(data_dir / "trade_events.jsonl"),
+                ),
+            )
+
+            app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+
+            migrated = app["user_workspace_store"].get_project("project-pending")
+            migrated_user = app["web_user_store"].get_user(member.email)
+            self.assertEqual(app["self_service_project_migrations"], ["project-pending"])
+            self.assertIsNotNone(migrated)
+            self.assertEqual(migrated.status, "active")
+            self.assertIn("ACS", migrated_user.allowed_assets)
+
+    async def test_user_workspace_self_service_project_and_encrypted_account_flow(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8104,6 +8162,23 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     project_payload = await project_response.json()
                     project = project_payload["workspace"]["projects"][0]
                     self.assertEqual(project_payload["project"]["id"], project["id"])
+
+                    disable_project_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "disable_project",
+                            "project_id": project["id"],
+                        },
+                    )
+                    disable_project_payload = await disable_project_response.json()
+                    activate_project_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "activate_project",
+                            "project_id": project["id"],
+                        },
+                    )
+                    activate_project_payload = await activate_project_response.json()
 
                     with patch.object(
                         app["workspace_market_discovery"],
@@ -8181,14 +8256,6 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                             "password": "Strong-pass-1!",
                         },
                     )
-                    approve_response = await client.post(
-                        "/api/user-workspace",
-                        json={
-                            "action": "approve_project",
-                            "project_id": project["id"],
-                        },
-                    )
-                    approve_payload = await approve_response.json()
                     admin_foreign_account_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -8402,7 +8469,21 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             ).read_bytes()
 
         self.assertEqual(project_response.status, 200, project_payload)
-        self.assertEqual(project["status"], "pending")
+        self.assertEqual(project["status"], "active")
+        self.assertEqual(
+            disable_project_response.status,
+            200,
+            disable_project_payload,
+        )
+        self.assertEqual(
+            disable_project_payload["workspace"]["projects"][0]["status"],
+            "disabled",
+        )
+        self.assertEqual(activate_project_response.status, 200, activate_project_payload)
+        self.assertEqual(
+            activate_project_payload["workspace"]["projects"][0]["status"],
+            "active",
+        )
         self.assertEqual(discovery_response.status, 200, discovery_payload)
         self.assertEqual(discovery_payload["markets"][0]["symbol"], "ACS/USDC")
         self.assertEqual(account_response.status, 200, account_payload)
@@ -8411,11 +8492,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(account["symbol"], "ACS/USDC")
         self.assertNotIn("api_key", account)
         self.assertNotIn("secret", account)
-        self.assertEqual(premature_enable_response.status, 403)
+        self.assertEqual(premature_enable_response.status, 400)
         self.assertEqual(member_approve_response.status, 403)
-        self.assertEqual(approve_response.status, 200, approve_payload)
         self.assertEqual(
-            approve_payload["workspace"]["platform_projects"][0]["status"],
+            admin_settings_state["user_workspace"]["platform_projects"][0]["status"],
             "active",
         )
         self.assertEqual(
@@ -8433,6 +8513,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("only own their own funds", unregistered_owner_payload["error"])
         self.assertIn("ACS", persisted_member.allowed_assets)
+        self.assertIn("BTC", persisted_member.allowed_assets)
         self.assertEqual(untested_enable_response.status, 400, untested_enable_payload)
         self.assertIn("connection test", untested_enable_payload["error"])
         self.assertEqual(connection_test_response.status, 200, connection_test_payload)
@@ -8490,7 +8571,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("re-enter API key", exchange_change_payload["error"])
         self.assertEqual(scope_change_response.status, 200, scope_change_payload)
         self.assertEqual(
-            scope_change_payload["workspace"]["projects"][0]["status"], "pending"
+            scope_change_payload["workspace"]["projects"][0]["status"], "active"
         )
         self.assertFalse(scope_change_payload["workspace"]["accounts"][0]["enabled"])
         self.assertFalse(scope_change_payload["workspace"]["strategies"][0]["enabled"])

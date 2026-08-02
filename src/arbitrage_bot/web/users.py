@@ -554,7 +554,7 @@ class WebUserStore:
     def list_users(self) -> list[WebUser]:
         return sorted(self._read_users().values(), key=lambda item: item.email)
 
-    def admin_grant_asset(self, *, email: str, asset: str) -> WebUser:
+    def grant_asset(self, *, email: str, asset: str) -> WebUser:
         normalized_email = normalize_email(email)
         normalized_asset = str(asset or "").strip().upper()
         if not normalized_asset:
@@ -575,6 +575,9 @@ class WebUserStore:
         users[updated.email] = updated
         self._write_users(users)
         return updated
+
+    def admin_grant_asset(self, *, email: str, asset: str) -> WebUser:
+        return self.grant_asset(email=email, asset=asset)
 
     def admin_create_user(
         self,
