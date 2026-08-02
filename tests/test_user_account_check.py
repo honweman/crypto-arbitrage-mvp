@@ -6,11 +6,16 @@ from unittest.mock import AsyncMock, patch
 from arbitrage_bot.models import BookLevel, OrderBookSnapshot
 from arbitrage_bot.user_account_check import (
     WorkspaceAccountCheckService,
+    check_workspace_api_connection,
     check_workspace_account,
     discover_workspace_markets,
     workspace_exchange_config,
 )
-from arbitrage_bot.user_workspace import UserExchangeAccount, UserProject
+from arbitrage_bot.user_workspace import (
+    UserApiConnection,
+    UserExchangeAccount,
+    UserProject,
+)
 
 
 class FakeWorkspaceManager:
@@ -95,6 +100,9 @@ class FakeWorkspaceClient:
 
     async def load_markets(self):
         return self.markets
+
+    async def fetch_open_orders(self):
+        return [{"id": "open-1"}]
 
 
 class FakeBybitWorkspaceClient(FakeWorkspaceClient):
@@ -284,6 +292,30 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
                 for row in result["balances"]
             )
         )
+
+    async def test_unified_api_check_covers_every_supported_market_type(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "Bybit Main",
+                "exchange": "bybit",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeBybitWorkspaceManager,
+        )
+
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["market_types"], ["spot", "swap"])
+        self.assertEqual(result["market_counts"], {"spot": 2, "swap": 1})
+        self.assertEqual(result["open_order_count"], 2)
+        self.assertEqual(len(FakeWorkspaceManager.instances), 2)
+        self.assertTrue(all(row.closed for row in FakeWorkspaceManager.instances))
 
     async def test_account_check_service_applies_per_account_cooldown(self) -> None:
         project = UserProject.from_dict(

@@ -3970,12 +3970,13 @@ function balanceStatusClass(status) {
       const signature = JSON.stringify({
         status: workspace?.status || "",
         error: workspace?.error || "",
-        projects: (workspace?.projects || []).map((project) => ({
-          id: project.id,
-          name: project.name,
-          symbol: project.symbol,
-          status: project.status,
-          readiness: project.readiness,
+        connections: (workspace?.connections || []).map((connection) => ({
+          id: connection.id,
+          label: connection.label,
+          exchange: connection.exchange,
+          status: connection.status,
+          credentials: connection.credentials_configured,
+          markets: connection.markets,
         })),
       });
       if (signature === userSetupReadinessSignature) return;
@@ -3988,57 +3989,61 @@ function balanceStatusClass(status) {
         const title = document.createElement("strong");
         title.textContent = uiText(
           workspace?.status === "error"
-            ? "Project setup is temporarily unavailable"
+            ? "Account setup is temporarily unavailable"
             : "A registered user account is required"
         );
         const note = document.createElement("span");
         note.className = "subtle";
-        note.textContent = workspace?.error || uiText("Log in with your username to manage projects and exchange accounts.");
+        note.textContent = workspace?.error || uiText("Log in with your username to manage exchange accounts.");
         detail.append(title, note);
         row.appendChild(detail);
         container.appendChild(row);
         return;
       }
-      const projects = workspace?.projects || [];
-      if (projects.length === 0) {
+      const connections = workspace?.connections || [];
+      if (connections.length === 0) {
         const row = document.createElement("div");
         row.className = "workspace-readiness-row workspace-readiness-empty";
         const detail = document.createElement("div");
         const title = document.createElement("strong");
-        title.textContent = uiText("Create your first trading project");
+        title.textContent = uiText("Connect your first exchange account");
         const note = document.createElement("span");
         note.className = "subtle";
-        note.textContent = uiText("Choose an asset and quote currency to begin.");
+        note.textContent = uiText("Add one API connection, then choose its tradable currencies.");
         detail.append(title, note);
         const button = document.createElement("button");
         button.type = "button";
         button.className = "control-button";
-        button.textContent = uiText("Create Project");
+        button.textContent = uiText("Connect Exchange");
         button.addEventListener("click", () => {
-          resetUserProjectForm();
-          focusWorkspaceControl("user-project-asset");
+          resetUserExchangeAccountForm();
+          focusWorkspaceControl("user-exchange-id");
         });
         row.append(detail, button);
         container.appendChild(row);
         return;
       }
 
-      for (const project of projects) {
-        const readiness = project.readiness || {};
-        const completed = Number(readiness.completed_steps || 0);
-        const total = Number(readiness.total_steps || 0);
-        const progress = Math.max(0, Math.min(100, Number(readiness.progress_pct || 0)));
-        const nextAction = readiness.next_action || {};
+      for (const connection of connections) {
+        const steps = [
+          Boolean(connection.credentials_configured),
+          connection.status === "healthy",
+          Boolean((connection.markets || []).length),
+        ];
+        const completed = steps.filter(Boolean).length;
+        const total = steps.length;
+        const progress = completed * 100 / total;
+        const ready = completed === total;
         const row = document.createElement("div");
-        row.className = `workspace-readiness-row ${readiness.ready ? "workspace-ready" : "workspace-attention"}`;
+        row.className = `workspace-readiness-row ${ready ? "workspace-ready" : "workspace-attention"}`;
 
         const identity = document.createElement("div");
         identity.className = "workspace-readiness-identity";
         const name = document.createElement("strong");
-        name.textContent = project.name || project.symbol || project.id;
+        name.textContent = connection.label || connection.id;
         const pair = document.createElement("span");
         pair.className = "subtle";
-        pair.textContent = `${project.symbol || "--"} · ${uiText(project.status || "--")}`;
+        pair.textContent = `${workspaceExchange(connection.exchange)?.label || connection.exchange} · ${(connection.market_types || [connection.market_type || "spot"]).join(" / ")}`;
         identity.append(name, pair);
 
         const progressBlock = document.createElement("div");
@@ -4062,22 +4067,33 @@ function balanceStatusClass(status) {
         nextLabel.className = "subtle";
         nextLabel.textContent = uiText("Next step");
         const nextValue = document.createElement("strong");
-        nextValue.textContent = uiText(nextAction.label || "Review project setup");
+        nextValue.textContent = uiText(
+          !steps[0]
+            ? "Save API credentials"
+            : !steps[1]
+              ? "Test API connection"
+              : !steps[2]
+                ? "Select tradable currencies"
+                : "Account ready"
+        );
         next.append(nextLabel, nextValue);
-        next.title = (readiness.steps || [])
-          .filter((step) => !step.complete)
-          .map((step) => uiText(step.label || step.id))
-          .join(" · ");
 
-        const actionControl = document.createElement(readiness.ready ? "span" : "button");
-        actionControl.className = readiness.ready
-          ? "workspace-ready-label"
-          : "ghost-button workspace-continue-button";
-        actionControl.textContent = uiText(readiness.ready ? "Ready" : "Continue Setup");
-        if (!readiness.ready) {
-          actionControl.type = "button";
-          actionControl.addEventListener("click", () => continueUserProjectSetup(project));
-        }
+        const actionControl = document.createElement("button");
+        actionControl.className = ready
+          ? "ghost-button workspace-continue-button"
+          : "control-button workspace-continue-button";
+        actionControl.textContent = uiText(ready ? "Manage" : "Continue Setup");
+        actionControl.type = "button";
+        actionControl.addEventListener("click", () => {
+          fillUserExchangeAccountForm(connection);
+          focusWorkspaceControl(
+            !steps[0]
+              ? "user-exchange-api-key"
+              : !steps[2]
+                ? "user-exchange-assets"
+                : "user-exchange-label"
+          );
+        });
         row.append(identity, progressBlock, next, actionControl);
         container.appendChild(row);
       }
@@ -4244,6 +4260,9 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
+      setFieldValue("user-exchange-assets", "");
+      const symbolSelect = document.getElementById("user-exchange-symbol");
+      if (symbolSelect) symbolSelect.replaceChildren();
       setCheckedValue("user-exchange-enabled", false);
       setCheckedValue("user-exchange-no-withdraw", false);
       setCheckedValue("user-exchange-trade-permission", false);
@@ -4251,6 +4270,39 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-project", "");
       setFieldValue("user-exchange-id", defaultExchange?.id || "");
       syncUserExchangeMarketTypes();
+    }
+
+    function userExchangeMarketKey(market) {
+      return `${market?.market_type || market?.type || "spot"}|${market?.symbol || ""}`;
+    }
+
+    function renderUserExchangeMarketOptions(markets = [], selectedMarkets = []) {
+      const select = document.getElementById("user-exchange-symbol");
+      if (!select) return;
+      const selectedKeys = new Set([
+        ...Array.from(select.selectedOptions || []).map((option) => option.value),
+        ...selectedMarkets.map(userExchangeMarketKey),
+      ]);
+      const rows = new Map();
+      for (const market of markets) {
+        if (!market?.symbol) continue;
+        rows.set(userExchangeMarketKey(market), market);
+      }
+      select.replaceChildren();
+      for (const [key, market] of [...rows.entries()].sort((left, right) => (
+        left[0].localeCompare(right[0])
+      ))) {
+        const option = document.createElement("option");
+        option.value = key;
+        option.dataset.marketType = market.market_type || market.type || "spot";
+        option.dataset.symbol = market.symbol || "";
+        option.dataset.base = market.base || market.asset || "";
+        option.dataset.quote = market.quote || market.quote_currency || "";
+        const minimum = Number(market.cost_min || 0);
+        option.textContent = `${String(option.dataset.marketType).toUpperCase()} · ${market.symbol}${minimum > 0 ? ` · min ${fmt.format(minimum)} ${option.dataset.quote}` : ""}`;
+        option.selected = selectedKeys.has(key);
+        select.appendChild(option);
+      }
     }
 
     function fillUserExchangeAccountForm(connection) {
@@ -4264,6 +4316,12 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
+      const markets = connection?.markets || [];
+      setFieldValue(
+        "user-exchange-assets",
+        [...new Set(markets.map((market) => market.asset).filter(Boolean))].join(", ")
+      );
+      renderUserExchangeMarketOptions(markets, markets);
       setCheckedValue("user-exchange-enabled", connection?.live_enabled);
       setCheckedValue(
         "user-exchange-no-withdraw",
@@ -4274,7 +4332,7 @@ function balanceStatusClass(status) {
         connection?.trade_permission_confirmed
       );
       syncUserExchangeMarketTypes(
-        connection?.market_type || "spot",
+        connection?.market_types?.[0] || connection?.market_type || "spot",
         connection?.api_variant || ""
       );
       document.getElementById("user-exchange-label")?.focus();
@@ -4325,37 +4383,6 @@ function balanceStatusClass(status) {
       const variantField = document.getElementById("user-exchange-variant-field");
       if (variantField) variantField.hidden = variants.length <= 1;
 
-      const projectId = document.getElementById("user-exchange-project")?.value || "";
-      const project = workspaceProject(projectId);
-      const defaultSymbol = workspaceDefaultSymbol(project, selectedMarketType);
-      const currentSymbol = preferredSymbol
-        || document.getElementById("user-exchange-symbol")?.value
-        || defaultSymbol
-        || "";
-      const cacheKey = workspaceMarketCacheKey({
-        project,
-        exchange: exchangeId,
-        marketType: selectedMarketType,
-        apiVariant: selectedVariant,
-      });
-      const discovered = discoveredUserMarkets.get(cacheKey) || [];
-      const symbolRows = discovered.map((market) => ({
-        value: market.symbol,
-        label: market.cost_min
-          ? `${market.symbol} · min ${fmt.format(market.cost_min)} ${market.quote}`
-          : market.symbol,
-        title: `${market.type || selectedMarketType} · ${market.active === false ? "inactive" : "active"}`,
-      }));
-      if (defaultSymbol && !symbolRows.some((row) => row.value === defaultSymbol)) {
-        symbolRows.unshift({ value: defaultSymbol, label: defaultSymbol });
-      }
-      setSelectOptions(
-        "user-exchange-symbol",
-        symbolRows,
-        currentSymbol,
-        "Load or select pair"
-      );
-
       const needsPassphrase = (exchange?.required_credentials || []).includes("passphrase");
       text(
         "user-exchange-api-key-label",
@@ -4376,8 +4403,7 @@ function balanceStatusClass(status) {
       const authorizeHint = document.getElementById("user-hyperliquid-authorize-hint");
       if (authorizeButton) {
         authorizeButton.hidden = !isHyperliquid;
-        authorizeButton.disabled = !projectId || !currentSymbol
-          || !(currentUserWorkspace?.wallets || []).length
+        authorizeButton.disabled = !(currentUserWorkspace?.wallets || []).length
           || userExchangeAccountFormBusy;
       }
       if (authorizeHint) authorizeHint.hidden = !isHyperliquid;
@@ -4398,7 +4424,6 @@ function balanceStatusClass(status) {
       const sameConnection = Boolean(
         selectedConnection
         && selectedConnection.exchange === exchangeId
-        && selectedConnection.market_type === selectedMarketType
         && selectedConnection.api_variant === selectedVariant
       );
       const connectionReady = sameConnection && selectedConnection.status === "healthy";
@@ -4532,18 +4557,27 @@ function balanceStatusClass(status) {
           "user-exchange-trade-permission",
           selected.trade_permission_confirmed
         );
+        const markets = selected.markets || [];
+        setFieldValue(
+          "user-exchange-assets",
+          [...new Set(markets.map((market) => market.asset).filter(Boolean))].join(", ")
+        );
+        renderUserExchangeMarketOptions(markets, markets);
       } else {
         selectedUserExchangeAccountId = "";
         setFieldValue("user-exchange-account-id", "");
         setCheckedValue("user-exchange-enabled", false);
         setCheckedValue("user-exchange-no-withdraw", false);
         setCheckedValue("user-exchange-trade-permission", false);
+        setFieldValue("user-exchange-assets", "");
+        const symbolSelect = document.getElementById("user-exchange-symbol");
+        if (symbolSelect) symbolSelect.replaceChildren();
       }
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
       syncUserExchangeMarketTypes(
-        selected?.market_type || "",
+        selected?.market_types?.[0] || selected?.market_type || "",
         selected?.api_variant || "",
         ""
       );
@@ -4565,7 +4599,7 @@ function balanceStatusClass(status) {
       for (const connection of connections) {
         const firstAccount = accountMap.get(connection.account_ids?.[0]);
         const marketLabels = (connection.markets || []).map((market) => (
-          `${market.project || market.asset || "Project"}: ${market.symbol || "--"}`
+          `${String(market.market_type || "spot").toUpperCase()} · ${market.symbol || "--"}`
         ));
         const visibleMarkets = marketLabels.slice(0, 3).join(" · ");
         const remainingMarkets = Math.max(0, marketLabels.length - 3);
@@ -4574,7 +4608,9 @@ function balanceStatusClass(status) {
           ? "Encrypted / configured"
           : "Missing";
         const statusText = connection.status === "healthy"
-          ? `${connection.healthy_count}/${marketLabels.length} ${uiText("markets healthy")}`
+          ? marketLabels.length
+            ? `${connection.healthy_count}/${marketLabels.length} ${uiText("markets healthy")}`
+            : uiText("API ready")
           : connection.status === "error"
             ? `${connection.error_count || 1} ${uiText("market checks failed")}`
             : "Needs connection test";
@@ -4583,6 +4619,9 @@ function balanceStatusClass(status) {
           : connection.status === "error"
             ? "missing"
             : "";
+        const marketScope = (connection.market_types || [connection.market_type || "spot"])
+          .map((marketType) => String(marketType).toUpperCase())
+          .join(" / ");
         const variantText = connection.api_variant
           && !["default", "global"].includes(connection.api_variant)
           ? ` · ${connection.api_variant}`
@@ -4591,7 +4630,7 @@ function balanceStatusClass(status) {
         tr.dataset.workspaceConnectionId = connection.id || "";
         tr.innerHTML = `
           <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">${escapeHtml(connection.owner_email || firstAccount?.owner_email || "--")}</span></td>
-          <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${connection.market_type || "spot"}${variantText}`)}</span></td>
+          <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${marketScope}${variantText}`)}</span></td>
           <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
           <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
           <td class="${connectionClass}">${escapeHtml(uiText(statusText))}<br><span class="subtle">${connection.enabled_count || 0} ${escapeHtml(uiText("enabled"))}</span></td>
@@ -4601,7 +4640,7 @@ function balanceStatusClass(status) {
         const editButton = document.createElement("button");
         editButton.className = "control-button";
         editButton.type = "button";
-        editButton.textContent = "Edit";
+        editButton.textContent = uiText("Manage");
         editButton.addEventListener("click", () => fillUserExchangeAccountForm(connection));
         actions.appendChild(editButton);
         const testButton = document.createElement("button");
@@ -4675,9 +4714,17 @@ function balanceStatusClass(status) {
     function renderUserWorkspace(workspace) {
       currentUserWorkspace = workspace || null;
       const summary = workspace?.summary || {};
+      const connections = workspace?.connections || [];
+      const readyConnections = connections.filter(
+        (connection) => connection.status === "healthy"
+      ).length;
+      const tradablePairCount = connections.reduce(
+        (total, connection) => total + (connection.markets || []).length,
+        0
+      );
       const summaryParts = [
-        `${summary.ready_project_count || 0}/${summary.project_count || 0} ${uiText("projects ready")}`,
-        `${summary.ready_account_count || 0}/${summary.account_count || 0} ${uiText("accounts ready")}`,
+        `${readyConnections}/${connections.length} ${uiText("exchange accounts ready")}`,
+        `${tradablePairCount} ${uiText("tradable pairs")}`,
         `${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("paper ready")}`,
       ];
       if (!workspace?.vault_available) {
@@ -4723,13 +4770,15 @@ function balanceStatusClass(status) {
     async function loadUserExchangeMarkets() {
       if (userMarketDiscoveryBusy) return;
       const button = document.getElementById("user-exchange-load-markets");
-      const projectId = document.getElementById("user-exchange-project").value;
       const exchange = document.getElementById("user-exchange-id").value;
-      const marketType = document.getElementById("user-exchange-market-type").value;
       const apiVariant = document.getElementById("user-exchange-api-variant").value;
-      const project = workspaceProject(projectId);
-      if (!project || !exchange || !marketType) {
-        setUserWorkspaceNotice(uiText("Select a project and exchange first."));
+      const connectionId = document.getElementById("user-exchange-account-id").value;
+      const assets = String(document.getElementById("user-exchange-assets").value || "")
+        .split(/[\s,]+/)
+        .map((asset) => asset.trim().toUpperCase())
+        .filter((asset, index, rows) => asset && rows.indexOf(asset) === index);
+      if (!exchange || !assets.length) {
+        setUserWorkspaceNotice(uiText("Select an exchange and enter at least one currency."));
         return;
       }
       userMarketDiscoveryBusy = true;
@@ -4737,19 +4786,18 @@ function balanceStatusClass(status) {
       try {
         const result = await postUserWorkspace({
           action: "discover_markets",
-          project_id: projectId,
+          connection_id: connectionId,
           exchange,
-          market_type: marketType,
           api_variant: apiVariant,
+          assets,
         });
-        const cacheKey = workspaceMarketCacheKey({
-          project,
-          exchange,
-          marketType,
-          apiVariant,
-        });
+        const cacheKey = `account:${connectionId || exchange}:${apiVariant}`;
         discoveredUserMarkets.set(cacheKey, result.markets || []);
-        syncUserExchangeMarketTypes(marketType, apiVariant);
+        const connection = workspaceConnection(connectionId);
+        renderUserExchangeMarketOptions(
+          [...(connection?.markets || []), ...(result.markets || [])],
+          connection?.markets || []
+        );
         setUserWorkspaceNotice(
           `${(result.markets || []).length} ${uiText("trading pairs loaded")}${result.cached ? ` · ${uiText("cached")}` : ""}`
         );
@@ -4905,11 +4953,7 @@ function balanceStatusClass(status) {
 
     function collectUserExchangeAccount() {
       const exchangeId = document.getElementById("user-exchange-id").value;
-      const marketType = document.getElementById("user-exchange-market-type").value;
       const exchange = workspaceExchange(exchangeId);
-      const marketLabel = marketType === "swap"
-        ? "Perpetual"
-        : marketType === "future" ? "Futures" : "Spot";
       const credentials = {};
       const apiKey = document.getElementById("user-exchange-api-key").value.trim();
       const secret = document.getElementById("user-exchange-secret").value.trim();
@@ -4919,12 +4963,21 @@ function balanceStatusClass(status) {
       if (passphrase) credentials.passphrase = passphrase;
       const account = {
         label: document.getElementById("user-exchange-label").value.trim()
-          || `${exchange?.label || exchangeId} ${marketLabel}`,
+          || `${exchange?.label || exchangeId}`,
         exchange: exchangeId,
-        market_type: marketType,
+        market_types: exchange?.market_types || [],
         api_variant: document.getElementById("user-exchange-api-variant").value,
         withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
         trade_permission_confirmed: document.getElementById("user-exchange-trade-permission").checked,
+        replace_markets: true,
+        markets: Array.from(
+          document.getElementById("user-exchange-symbol")?.selectedOptions || []
+        ).map((option) => ({
+          market_type: option.dataset.marketType || "spot",
+          symbol: option.dataset.symbol || "",
+          base: option.dataset.base || "",
+          quote: option.dataset.quote || "",
+        })),
       };
       const id = document.getElementById("user-exchange-account-id").value.trim();
       if (id) account.connection_id = id;
@@ -5028,14 +5081,14 @@ function balanceStatusClass(status) {
     function workspaceStrategyProjectOptions(selectedProjectId = "") {
       const projects = (currentUserWorkspace?.projects || []).map((project) => ({
         value: project.id,
-        label: workspaceProjectLabel(project),
-        title: `${project.status} · ${project.owner_email}`,
+        label: project.symbol || `${project.asset}/${project.quote_currency}`,
+        title: project.status,
       }));
       const selected = selectedProjectId
         || projects.find((row) => workspaceProject(row.value)?.status === "active")?.value
         || projects[0]?.value
         || "";
-      setSelectOptions("user-strategy-project", projects, selected, "Select project");
+      setSelectOptions("user-strategy-project", projects, selected, "Select trading pair");
       return selected;
     }
 
@@ -5069,7 +5122,7 @@ function balanceStatusClass(status) {
       if (accounts.length === 0) {
         const empty = document.createElement("span");
         empty.className = "subtle";
-        empty.textContent = uiText("No exchange accounts for this project.");
+        empty.textContent = uiText("No exchange accounts support this trading pair.");
         container.appendChild(empty);
       } else {
         for (const account of accounts) {
@@ -5479,7 +5532,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || strategy.id)}<br><span class="subtle">${escapeHtml(uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type))}</span></td>
-          <td>${escapeHtml(project?.name || strategy.project_id || "--")}</td>
+          <td>${escapeHtml(project?.symbol || strategy.project_id || "--")}</td>
           <td>${escapeHtml(accounts || "--")}</td>
           <td class="num">${formatSymbolQuantity(strategy.risk?.max_total_quote || 0, project?.symbol || "", "quote")}${progressText}</td>
           <td class="${statusClass}" title="${escapeHtml(runtimeTitle)}">${escapeHtml(uiText(runtimeStatus))}<br><span class="subtle">${escapeHtml(runtimeDetail)}</span></td>
@@ -6679,7 +6732,7 @@ function balanceStatusClass(status) {
       const projectSelect = document.createElement("select");
       projectSelect.dataset.projectSelector = inputName;
       projectSelect.className = "account-select";
-      projectSelect.title = uiText("Project");
+      projectSelect.title = uiText("Currency");
 
       const exchangeSelect = document.createElement("select");
       exchangeSelect.dataset.exchangeSelector = inputName;
@@ -6703,7 +6756,7 @@ function balanceStatusClass(status) {
         projectSelect.innerHTML = "";
         const placeholder = document.createElement("option");
         placeholder.value = "";
-        placeholder.textContent = projects.length ? uiText("Select project") : uiText("No projects");
+        placeholder.textContent = projects.length ? uiText("Select currency") : uiText("No currencies");
         projectSelect.appendChild(placeholder);
         for (const project of projects) {
           const option = document.createElement("option");
@@ -9293,6 +9346,8 @@ function balanceStatusClass(status) {
 	        "user-exchange-api-variant",
 	      ].includes(event.target?.id)) {
 	        if (event.target?.id === "user-exchange-id" && !selectedUserExchangeAccountId) {
+	          const symbolSelect = document.getElementById("user-exchange-symbol");
+	          if (symbolSelect) symbolSelect.replaceChildren();
 	          const labelInput = document.getElementById("user-exchange-label");
 	          const currentLabel = labelInput?.value.trim() || "";
 	          if (!currentLabel || currentLabel === "Coinbase Main") {

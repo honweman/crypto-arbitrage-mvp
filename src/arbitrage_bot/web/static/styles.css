@@ -1643,6 +1643,14 @@ tbody tr:last-child td {
   font-size: 13px;
 }
 
+#user-exchange-symbol {
+  min-height: 150px;
+}
+
+#user-exchange-symbol option {
+  padding: 6px 8px;
+}
+
 .field textarea {
   min-height: 92px;
   resize: vertical;

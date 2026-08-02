@@ -526,6 +526,7 @@ class UserApiConnection:
     label: str
     exchange: str
     market_type: str = "spot"
+    market_types: tuple[str, ...] = ()
     api_variant: str = "default"
     withdrawal_disabled_confirmed: bool = False
     trade_permission_confirmed: bool = False
@@ -546,10 +547,32 @@ class UserApiConnection:
         exchange_row = EXCHANGES_BY_ID.get(exchange)
         if exchange_row is None:
             raise ValueError(f"unsupported exchange: {exchange}")
-        market_type = str(raw.get("market_type") or "spot").strip().lower()
+        supported_market_types = tuple(
+            str(item).strip().lower()
+            for item in exchange_row["market_types"]
+            if str(item).strip().lower() in MARKET_TYPES
+        )
+        requested_market_types = raw.get("market_types")
+        if isinstance(requested_market_types, (list, tuple, set)):
+            market_types = tuple(
+                dict.fromkeys(
+                    str(item).strip().lower()
+                    for item in requested_market_types
+                    if str(item).strip().lower() in supported_market_types
+                )
+            )
+        else:
+            # Legacy connections stored one market type. A real exchange API account
+            # is now treated as a unified account across every supported market.
+            market_types = supported_market_types
+        if not market_types:
+            market_types = supported_market_types
+        market_type = str(raw.get("market_type") or "").strip().lower()
+        if market_type not in market_types:
+            market_type = "spot" if "spot" in market_types else market_types[0]
         if (
             market_type not in MARKET_TYPES
-            or market_type not in exchange_row["market_types"]
+            or market_type not in supported_market_types
         ):
             raise ValueError(f"{exchange} does not support {market_type} accounts")
         variants = {
@@ -574,6 +597,7 @@ class UserApiConnection:
             label=_clean_text(raw.get("label") or exchange_row["label"]),
             exchange=exchange,
             market_type=market_type,
+            market_types=market_types,
             api_variant=api_variant,
             withdrawal_disabled_confirmed=_strict_bool(
                 raw.get("withdrawal_disabled_confirmed"),
@@ -608,6 +632,8 @@ class UserApiConnection:
             "label": self.label,
             "exchange": self.exchange,
             "market_type": self.market_type,
+            "market_types": list(self.market_types),
+            "market_scope": "unified",
             "api_variant": self.api_variant,
             "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
             "trade_permission_confirmed": self.trade_permission_confirmed,
@@ -1312,11 +1338,10 @@ class UserWorkspaceStore:
             raise ValueError("API connection owner cannot be changed")
         if existing is not None and (
             existing.exchange != api_connection.exchange
-            or existing.market_type != api_connection.market_type
             or existing.api_variant != api_connection.api_variant
         ):
             raise ValueError(
-                "exchange, market, and API region cannot be changed on an existing "
+                "exchange and API region cannot be changed on an existing "
                 "connection; add a new connection instead"
             )
         supplied = self._clean_credentials(credentials)
@@ -3536,6 +3561,8 @@ class UserWorkspaceStore:
                 "label": row.get("label") or row.get("exchange") or connection_id,
                 "exchange": row.get("exchange") or "",
                 "market_type": row.get("market_type") or "spot",
+                "market_types": list(row.get("market_types") or []),
+                "market_scope": "unified",
                 "api_variant": row.get("api_variant") or "default",
                 "withdrawal_disabled_confirmed": bool(
                     row.get("withdrawal_disabled_confirmed")
@@ -3570,6 +3597,8 @@ class UserWorkspaceStore:
                     "label": row.get("label") or row.get("exchange") or connection_id,
                     "exchange": row.get("exchange") or "",
                     "market_type": row.get("market_type") or "spot",
+                    "market_types": [row.get("market_type") or "spot"],
+                    "market_scope": "unified",
                     "api_variant": row.get("api_variant") or "default",
                     "withdrawal_disabled_confirmed": bool(
                         row.get("withdrawal_disabled_confirmed")
@@ -3606,6 +3635,7 @@ class UserWorkspaceStore:
                         project.quote_currency if project is not None else ""
                     ),
                     "symbol": row.get("symbol") or "",
+                    "market_type": row.get("market_type") or "spot",
                     "connection_status": row.get("connection_status") or "unverified",
                     "connection_fresh": bool(row.get("connection_fresh")),
                     "enabled": bool(row.get("enabled")),

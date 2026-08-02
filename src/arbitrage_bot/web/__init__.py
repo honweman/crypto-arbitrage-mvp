@@ -6735,7 +6735,7 @@ async def _sync_workspace_connection(
     store = _user_workspace_store(request)
     connection_id = str(raw.get("connection_id") or "").strip()
     exchange = str(raw.get("exchange") or "").strip().lower()
-    market_type = str(raw.get("market_type") or "spot").strip().lower()
+    market_type = str(raw.get("market_type") or "").strip().lower()
     api_variant = str(raw.get("api_variant") or "").strip().lower()
     label = str(raw.get("label") or "").strip()
     existing_connection = (
@@ -6760,7 +6760,6 @@ async def _sync_workspace_connection(
                 is_admin=False,
             )
             if item.exchange == exchange
-            and item.market_type == market_type
             and (not api_variant or item.api_variant == api_variant)
             and item.label.casefold() == label.casefold()
         ]
@@ -6781,7 +6780,6 @@ async def _sync_workspace_connection(
                     is_admin=False,
                 )
                 if account.exchange == exchange
-                and account.market_type == market_type
                 and (not api_variant or account.api_variant == api_variant)
                 and account.label.casefold() == label.casefold()
             ]
@@ -6806,12 +6804,19 @@ async def _sync_workspace_connection(
         )
     if existing_connection is not None and (
         existing_connection.exchange != exchange
-        or existing_connection.market_type != market_type
         or (api_variant and existing_connection.api_variant != api_variant)
     ):
         raise ValueError(
-            "exchange, market, and API region cannot be changed on an existing "
+            "exchange and API region cannot be changed on an existing "
             "connection; add a new connection instead"
+        )
+    if not market_type:
+        market_type = (
+            existing_connection.market_type
+            if existing_connection is not None
+            else existing_rows[0].market_type
+            if existing_rows
+            else "spot"
         )
     if existing_connection is not None and not api_variant:
         api_variant = existing_connection.api_variant
@@ -6831,6 +6836,7 @@ async def _sync_workspace_connection(
             or (existing_connection.label if existing_connection else exchange.title()),
             "exchange": exchange,
             "market_type": market_type,
+            "market_types": raw.get("market_types"),
             "api_variant": api_variant,
             "withdrawal_disabled_confirmed": bool(
                 raw.get(
@@ -6854,57 +6860,130 @@ async def _sync_workspace_connection(
         UserApiConnection.from_dict(connection_raw),
         credentials=supplied or None,
     )
-    matches: list[tuple[UserProject, dict[str, Any]]] = []
+    matches: list[tuple[UserProject, dict[str, Any], str]] = []
     warnings: list[str] = []
-    for project in projects:
-        if project.status != "active":
-            continue
-        try:
-            markets, _ = await _workspace_market_discovery(request).discover(
-                exchange=exchange,
-                market_type=market_type,
-                api_variant=api_variant,
-                asset=project.asset,
+    selected_market_rows = raw.get("markets")
+    replace_markets = bool(raw.get("replace_markets")) and isinstance(
+        selected_market_rows, list
+    )
+    if replace_markets:
+        if len(selected_market_rows) > 100:
+            raise ValueError("an account supports at most 100 selected trading pairs")
+        projects_by_pair = {
+            (project.asset, project.quote_currency): project for project in projects
+        }
+        seen_markets: set[tuple[str, str]] = set()
+        for selected in selected_market_rows:
+            if not isinstance(selected, dict):
+                raise ValueError("selected markets must be objects")
+            selected_type = str(selected.get("market_type") or "spot").lower()
+            if selected_type not in api_connection.market_types:
+                raise ValueError(
+                    f"{exchange} does not support selected market type {selected_type}"
+                )
+            selected_symbol = str(selected.get("symbol") or "").strip().upper()
+            if "/" not in selected_symbol:
+                raise ValueError(f"invalid trading pair: {selected_symbol}")
+            selected_asset = selected_symbol.split("/", 1)[0]
+            try:
+                discovered, _ = await _workspace_market_discovery(request).discover(
+                    exchange=exchange,
+                    market_type=selected_type,
+                    api_variant=api_variant,
+                    asset=selected_asset,
+                )
+            except RuntimeError as exc:
+                raise ValueError(
+                    f"cannot verify {selected_symbol} {selected_type}: {exc}"
+                ) from exc
+            market = next(
+                (
+                    row
+                    for row in discovered
+                    if str(row.get("symbol") or "").upper() == selected_symbol
+                    and row.get("active") is not False
+                ),
+                None,
             )
-        except RuntimeError as exc:
-            warnings.append(f"{project.symbol} discovery failed: {exc}")
-            continue
-        exact = [
-            market
-            for market in markets
-            if str(market.get("quote") or "").upper() == project.quote_currency
-            and market.get("active") is not False
-        ]
-        if not exact:
+            if market is None:
+                raise ValueError(
+                    f"{selected_symbol} is not an active {selected_type} market on "
+                    f"{exchange}"
+                )
+            key = (selected_type, selected_symbol)
+            if key in seen_markets:
+                continue
+            seen_markets.add(key)
+            quote = str(market.get("quote") or "").upper()
+            project_key = (selected_asset, quote)
+            project = projects_by_pair.get(project_key)
+            if project is None:
+                project = store.upsert_project(
+                    UserProject.from_dict(
+                        {
+                            "owner_email": user.email,
+                            "name": f"{selected_asset}/{quote}",
+                            "asset": selected_asset,
+                            "quote_currency": quote,
+                            "status": "active",
+                        }
+                    )
+                )
+                _user_store(request).grant_asset(
+                    email=user.email,
+                    asset=selected_asset,
+                )
+                projects.append(project)
+                projects_by_pair[project_key] = project
+            elif project.status != "active":
+                project = store.set_project_status(project.id, "active")
+                projects_by_pair[project_key] = project
+            matches.append((project, market, selected_type))
+    else:
+        for project in projects:
+            if project.status != "active":
+                continue
+            try:
+                markets, _ = await _workspace_market_discovery(request).discover(
+                    exchange=exchange,
+                    market_type=market_type,
+                    api_variant=api_variant,
+                    asset=project.asset,
+                )
+            except RuntimeError as exc:
+                warnings.append(f"{project.symbol} discovery failed: {exc}")
+                continue
+            exact = [
+                market
+                for market in markets
+                if str(market.get("quote") or "").upper()
+                == project.quote_currency
+                and market.get("active") is not False
+            ]
+            if not exact:
+                continue
+            exact.sort(key=lambda market: str(market.get("symbol") or ""))
+            matches.append((project, exact[0], market_type))
+
+        matched_project_ids = {project.id for project, _, _ in matches}
+        project_by_id = {project.id: project for project in projects}
+        for existing in existing_rows:
+            if existing.project_id in matched_project_ids:
+                continue
+            project = project_by_id.get(existing.project_id)
+            if project is None:
+                continue
+            matches.append(
+                (project, {"symbol": existing.symbol}, existing.market_type)
+            )
             warnings.append(
-                f"{project.symbol} is not available on {exchange} {market_type}"
+                f"kept existing {existing.symbol} binding because automatic market "
+                "discovery did not return it"
             )
-            continue
-        exact.sort(key=lambda market: str(market.get("symbol") or ""))
-        matches.append((project, exact[0]))
-    if not projects:
-        warnings.append("API saved globally; add a project to create trading bindings")
-    elif not matches and not existing_rows:
-        warnings.append(
-            "no current project has a matching active trading pair on "
-            f"{exchange} {market_type}"
-        )
 
-    matched_project_ids = {project.id for project, _ in matches}
-    project_by_id = {project.id: project for project in projects}
-    for existing in existing_rows:
-        if existing.project_id in matched_project_ids:
-            continue
-        project = project_by_id.get(existing.project_id)
-        if project is None:
-            continue
-        matches.append((project, {"symbol": existing.symbol}))
-        warnings.append(
-            f"kept existing {existing.symbol} binding because automatic market "
-            "discovery did not return it"
-        )
-
-    existing_by_project = {account.project_id: account for account in existing_rows}
+    existing_by_market = {
+        (account.market_type, account.symbol): account for account in existing_rows
+    }
     credential_copy: dict[str, str] = dict(supplied)
     if not credential_copy:
         credential_copy = store.decrypt_credentials(
@@ -6913,8 +6992,11 @@ async def _sync_workspace_connection(
         )
     saved: list[UserExchangeAccount] = []
     try:
-        for project, market in matches:
-            existing = existing_by_project.get(project.id)
+        for project, market, binding_market_type in matches:
+            binding_symbol = str(market.get("symbol") or "").upper()
+            existing = existing_by_market.get(
+                (binding_market_type, binding_symbol)
+            )
             account_raw = existing.to_dict() if existing is not None else {}
             account_raw.update(
                 {
@@ -6928,9 +7010,9 @@ async def _sync_workspace_connection(
                     "connection_id": connection_id,
                     "label": api_connection.label,
                     "exchange": exchange,
-                    "market_type": market_type,
+                    "market_type": binding_market_type,
                     "api_variant": api_variant,
-                    "symbol": str(market.get("symbol") or "").upper(),
+                    "symbol": binding_symbol,
                     "enabled": bool(existing.enabled) if existing is not None else False,
                     "withdrawal_disabled_confirmed": bool(
                         api_connection.withdrawal_disabled_confirmed
@@ -6962,6 +7044,21 @@ async def _sync_workspace_connection(
                     },
                 )
             saved.append(saved_account)
+        if replace_markets:
+            selected_keys = {
+                (account.market_type, account.symbol) for account in saved
+            }
+            for existing in existing_rows:
+                if (existing.market_type, existing.symbol) in selected_keys:
+                    continue
+                try:
+                    if existing.enabled:
+                        store.upsert_account(replace(existing, enabled=False))
+                    store.delete_account(existing.id)
+                except ValueError as exc:
+                    warnings.append(
+                        f"kept {existing.symbol} because it is still in use: {exc}"
+                    )
     finally:
         credential_copy.clear()
         supplied.clear()
@@ -7717,39 +7814,89 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             response_extra = {"account": account.to_dict()}
         elif action == "discover_markets":
             project_id = str(payload.get("project_id") or "").strip()
-            project = store.get_project(project_id)
-            if project is None:
-                raise ValueError(f"project not found: {project_id}")
-            _require_workspace_owner(user, project.owner_email)
             exchange = str(payload.get("exchange") or "").strip().lower()
-            market_type = str(payload.get("market_type") or "spot").strip().lower()
             api_variant = str(payload.get("api_variant") or "").strip().lower()
-            probe_raw = {
-                "owner_email": project.owner_email,
-                "project_id": project.id,
-                "exchange": exchange,
-                "market_type": market_type,
-                "symbol": project.symbol,
-            }
-            if api_variant:
-                probe_raw["api_variant"] = api_variant
-            probe = UserExchangeAccount.from_dict(probe_raw)
-            api_variant = probe.api_variant
-            markets, cached = await _workspace_market_discovery(request).discover(
-                exchange=probe.exchange,
-                market_type=probe.market_type,
-                api_variant=probe.api_variant,
-                asset=project.asset,
+            connection_id = str(payload.get("connection_id") or "").strip()
+            api_connection = (
+                store.get_api_connection(connection_id) if connection_id else None
             )
-            audit_target = project.id
+            if api_connection is not None:
+                _require_workspace_owner(user, api_connection.owner_email)
+                exchange = api_connection.exchange
+                api_variant = api_connection.api_variant
+            probe = api_connection or UserApiConnection.from_dict(
+                {
+                    "owner_email": user.email,
+                    "label": exchange,
+                    "exchange": exchange,
+                    "api_variant": api_variant,
+                }
+            )
+            raw_assets = payload.get("assets")
+            if isinstance(raw_assets, str):
+                raw_assets = raw_assets.replace(",", " ").split()
+            assets = [
+                str(asset).strip().upper()
+                for asset in (raw_assets or [])
+                if str(asset).strip()
+            ]
+            if project_id:
+                project = store.get_project(project_id)
+                if project is None:
+                    raise ValueError(f"project not found: {project_id}")
+                _require_workspace_owner(user, project.owner_email)
+                assets.append(project.asset)
+            assets = list(dict.fromkeys(assets))
+            if not assets:
+                raise ValueError("enter at least one tradable currency")
+            if len(assets) > 20:
+                raise ValueError("load at most 20 currencies at a time")
+            requested_type = str(payload.get("market_type") or "").strip().lower()
+            market_types = (
+                (requested_type,)
+                if requested_type
+                else probe.market_types or (probe.market_type,)
+            )
+            markets: list[dict[str, Any]] = []
+            cached = True
+            for market_type in market_types:
+                for asset in assets:
+                    discovered, from_cache = await _workspace_market_discovery(
+                        request
+                    ).discover(
+                        exchange=probe.exchange,
+                        market_type=market_type,
+                        api_variant=probe.api_variant,
+                        asset=asset,
+                    )
+                    cached = cached and from_cache
+                    markets.extend(
+                        {**market, "market_type": market_type}
+                        for market in discovered
+                    )
+            deduplicated = {
+                (str(market.get("market_type")), str(market.get("symbol"))): market
+                for market in markets
+            }
+            markets = sorted(
+                deduplicated.values(),
+                key=lambda row: (
+                    str(row.get("base") or ""),
+                    str(row.get("market_type") or ""),
+                    str(row.get("quote") or ""),
+                    str(row.get("symbol") or ""),
+                ),
+            )[:500]
+            audit_target = connection_id or exchange
             audit_detail = (
-                f"discovered {len(markets)} {project.asset} markets on {exchange}"
+                f"discovered {len(markets)} account markets on {exchange}"
             )
             audit_payload = {
-                "project_id": project.id,
+                "connection_id": connection_id,
                 "exchange": exchange,
-                "market_type": market_type,
-                "api_variant": api_variant,
+                "market_types": list(market_types),
+                "api_variant": probe.api_variant,
+                "assets": assets,
                 "market_count": len(markets),
                 "cached": cached,
             }

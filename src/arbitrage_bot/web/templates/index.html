@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260713-ux1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260802-overview-wallet1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-unified-account1">
 
 </head>
 <body>
@@ -456,11 +456,11 @@
       <div id="user-setup-readiness" class="workspace-readiness" aria-live="polite"></div>
       <div class="workspace-quick-intro">
         <strong>Quick Setup</strong>
-        <span class="subtle">Add each exchange API once. Matching projects and trading pairs are discovered and synchronized automatically.</span>
+        <span class="subtle">Add each exchange account once, then manage its tradable currencies and pairs in one place.</span>
       </div>
       <div class="workspace-step-title">
         <span class="workspace-step-number">1</span>
-        <div><strong>Connect Exchange</strong><span class="subtle">Choose only the venue and market. No project or pair selection is required.</span></div>
+        <div><strong>Connect Exchange</strong><span class="subtle">One API connection covers every supported spot and contract market.</span></div>
       </div>
       <form id="user-exchange-account-form" class="control-panel workspace-quick-form">
         <input id="user-exchange-account-id" type="hidden">
@@ -472,7 +472,7 @@
           <label for="user-exchange-id">Exchange</label>
           <select id="user-exchange-id" required></select>
         </div>
-        <div class="field">
+        <div class="field" hidden>
           <label for="user-exchange-market-type">Market</label>
           <select id="user-exchange-market-type" required></select>
         </div>
@@ -480,18 +480,23 @@
           <label for="user-exchange-api-variant">API Region</label>
           <select id="user-exchange-api-variant"></select>
         </div>
-        <div class="field wide-field" hidden>
-          <label for="user-exchange-symbol">Trading Pair</label>
-          <select id="user-exchange-symbol"></select>
+        <div class="field wide-field">
+          <label for="user-exchange-assets">Tradable Currencies</label>
+          <input id="user-exchange-assets" type="text" maxlength="160" placeholder="ACS, BTC, ETH">
         </div>
-        <button id="user-exchange-load-markets" class="ghost-button" type="button" hidden>Find Matching Pair</button>
+        <button id="user-exchange-load-markets" class="ghost-button" type="button">Load Trading Pairs</button>
+        <div class="field wide-field">
+          <label for="user-exchange-symbol">Trading Pairs</label>
+          <select id="user-exchange-symbol" multiple size="6"></select>
+          <span class="field-hint">Select the spot and contract pairs this account may use. Existing pairs stay selected when editing.</span>
+        </div>
         <div class="field">
           <label for="user-exchange-label">Account Name (optional)</label>
-          <input id="user-exchange-label" type="text" maxlength="80" placeholder="Auto: Coinbase Spot">
+          <input id="user-exchange-label" type="text" maxlength="80" placeholder="Auto: Coinbase">
         </div>
         <div class="workspace-step-title workspace-step-inline wide-field">
           <span class="workspace-step-number">2</span>
-          <div><strong>Add API &amp; Sync</strong><span class="subtle">Credentials are encrypted, tested read-only, then linked to every matching project.</span></div>
+          <div><strong>Add API &amp; Sync</strong><span class="subtle">Credentials are encrypted once and shared only with this account's selected trading pairs.</span></div>
         </div>
         <div id="user-exchange-api-key-field" class="field">
           <label id="user-exchange-api-key-label" for="user-exchange-api-key">API Key</label>
@@ -515,7 +520,7 @@
         </label>
         <label class="check-field wide-field workspace-safety-confirm">
           <input id="user-exchange-trade-permission" type="checkbox">
-          I confirm this API key has trading permission for the selected market
+          I confirm this API key has trading permission
         </label>
         <div class="subtle wide-field">Use a trade-only API key with withdrawals disabled. A successful connection test enables the account for live strategies, but no order is placed until a strategy is configured and started.</div>
         <button id="user-hyperliquid-authorize" class="control-button wide-field" type="button" hidden>Authorize Hyperliquid with MetaMask</button>
@@ -528,7 +533,7 @@
         </div>
       </form>
 
-      <details class="workspace-advanced-group">
+      <details class="workspace-advanced-group" hidden>
         <summary>Project Management</summary>
         <div class="workspace-advanced-body">
           <div class="subtle">Projects define the assets the account may monitor or trade. They are managed separately from API credentials.</div>
@@ -551,12 +556,12 @@
         </div>
       </details>
 
-      <details class="workspace-advanced-group">
-        <summary>Global API Connections</summary>
+      <details class="workspace-advanced-group" open>
+        <summary>Exchange Accounts</summary>
         <div class="workspace-advanced-body">
           <div class="table-wrap stacked-table">
             <table class="mobile-card-table">
-              <thead><tr><th>Account</th><th>Exchange</th><th>Synced Markets</th><th>Credentials</th><th>Status</th><th>Action</th></tr></thead>
+              <thead><tr><th>Account</th><th>Exchange</th><th>Tradable Pairs</th><th>Credentials</th><th>Status</th><th>Action</th></tr></thead>
               <tbody id="user-exchange-accounts"></tbody>
             </table>
           </div>
@@ -613,7 +618,7 @@
       <form id="user-strategy-form" class="control-panel" hidden>
         <input id="user-strategy-id" type="hidden">
         <div class="field">
-          <label for="user-strategy-project">Project</label>
+          <label for="user-strategy-project">Trading Pair</label>
           <select id="user-strategy-project" required></select>
         </div>
         <div class="field">
@@ -877,7 +882,7 @@
           <thead>
             <tr>
               <th>Strategy</th>
-              <th>Project</th>
+              <th>Trading Pair</th>
               <th>Accounts</th>
               <th>Budget</th>
               <th>Status</th>
@@ -1650,7 +1655,7 @@
           Enabled
         </label>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="slow-accounts" class="account-options"></div>
         </div>
         <div class="field">
@@ -1847,12 +1852,12 @@
         </label>
         <div class="form-divider">Cash Source · Buy Token</div>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="rebalance-buy-accounts" class="account-options"></div>
         </div>
         <div class="form-divider">Cash Destination · Sell Token</div>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="rebalance-sell-accounts" class="account-options"></div>
         </div>
         <div class="form-divider">Target</div>
@@ -1951,7 +1956,7 @@
           Live Ready
         </label>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="grid-accounts" class="account-options"></div>
         </div>
         <div class="form-divider">Range</div>
@@ -2046,7 +2051,7 @@
           Live Ready
         </label>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="dca-accounts" class="account-options"></div>
         </div>
         <div class="field">
@@ -2140,7 +2145,7 @@
           Live Ready
         </label>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="exec-accounts" class="account-options"></div>
         </div>
         <div class="field">
@@ -2247,7 +2252,7 @@
       </div>
       <form id="backtest-form" class="control-panel">
         <div class="field">
-          <label for="backtest-project">Project</label>
+          <label for="backtest-project">Trading Pair</label>
           <select id="backtest-project"></select>
         </div>
         <div class="field">
@@ -2376,7 +2381,7 @@
           Live MM
         </label>
         <div class="field account-field">
-          <label>Account / Project / Exchange / Pair</label>
+          <label>Account / Currency / Exchange / Pair</label>
           <div id="mm-accounts" class="account-options"></div>
         </div>
         <div class="form-divider">Core Settings</div>
@@ -2625,8 +2630,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260802-global-api1" defer></script>
-  <script src="/static/app.js?v=20260802-global-api1" defer></script>
+  <script src="/static/i18n.js?v=20260802-unified-account1" defer></script>
+  <script src="/static/app.js?v=20260802-unified-account1" defer></script>
 
 </body>
 </html>

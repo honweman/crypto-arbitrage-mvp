@@ -350,129 +350,163 @@ async def check_workspace_api_connection(
     timeout_seconds: float = DEFAULT_CHECK_TIMEOUT_SECONDS,
     manager_factory: Callable[..., ExchangeManager] = ExchangeManager,
 ) -> dict[str, Any]:
-    cfg = workspace_exchange_config(
-        exchange=api_connection.exchange,
-        market_type=api_connection.market_type,
-        api_variant=api_connection.api_variant,
-        runtime_key=api_connection.id,
-    )
-    manager = manager_factory(credentials_by_key={cfg.key: credentials})
     started = time.perf_counter()
-    try:
-        client = manager.client(cfg)
-        markets = await asyncio.wait_for(
-            client.load_markets(),
-            timeout=max(1.0, timeout_seconds),
+    scope_results: list[dict[str, Any]] = []
+    scope_errors: list[str] = []
+    market_types = api_connection.market_types or (api_connection.market_type,)
+    for market_type in market_types:
+        cfg = workspace_exchange_config(
+            exchange=api_connection.exchange,
+            market_type=market_type,
+            api_variant=api_connection.api_variant,
+            runtime_key=f"{api_connection.id}:{market_type}",
         )
-        balance = await asyncio.wait_for(
-            manager.fetch_balance(cfg),
-            timeout=max(1.0, timeout_seconds),
-        )
-        currencies: set[str] = set()
-        for field in ("free", "used", "total"):
-            values = balance.get(field)
-            if isinstance(values, dict):
-                currencies.update(str(key).upper() for key in values)
-        currencies.update(
-            str(key).upper()
-            for key, value in balance.items()
-            if isinstance(value, dict)
-            and any(name in value for name in ("free", "used", "total"))
-        )
-        balances = _balance_rows(balance, currencies)
-        warnings: list[str] = []
-        open_orders: list[dict[str, Any]] = []
+        manager = manager_factory(credentials_by_key={cfg.key: credentials})
         try:
-            fetched = await asyncio.wait_for(
-                client.fetch_open_orders(),
+            client = manager.client(cfg)
+            markets = await asyncio.wait_for(
+                client.load_markets(),
                 timeout=max(1.0, timeout_seconds),
             )
-            open_orders = list(fetched or [])
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(
-                "Account-wide open orders unavailable: "
-                + _safe_error(exc, credentials)
+            balance = await asyncio.wait_for(
+                manager.fetch_balance(cfg),
+                timeout=max(1.0, timeout_seconds),
             )
-        if api_connection.exchange == "bybit":
+            currencies: set[str] = set()
+            for field in ("free", "used", "total"):
+                values = balance.get(field)
+                if isinstance(values, dict):
+                    currencies.update(str(key).upper() for key in values)
+            currencies.update(
+                str(key).upper()
+                for key, value in balance.items()
+                if isinstance(value, dict)
+                and any(name in value for name in ("free", "used", "total"))
+            )
+            balances = _balance_rows(balance, currencies)
+            warnings: list[str] = []
+            open_orders: list[dict[str, Any]] = []
             try:
-                funding_balance = await asyncio.wait_for(
-                    client.fetch_balance({"type": "funding"}),
+                fetched = await asyncio.wait_for(
+                    client.fetch_open_orders(),
                     timeout=max(1.0, timeout_seconds),
                 )
-                funding_currencies = {
-                    str(key).upper()
-                    for key, value in funding_balance.items()
-                    if isinstance(value, dict)
-                    and any(name in value for name in ("free", "used", "total"))
-                }
-                balances.extend(
-                    _balance_rows(
-                        funding_balance,
-                        funding_currencies,
-                        wallet="funding",
-                        tradable=False,
-                    )
-                )
+                open_orders = list(fetched or [])
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 warnings.append(
-                    f"Bybit funding wallet unavailable: {_safe_error(exc, credentials)}"
+                    f"{market_type} open orders unavailable: "
+                    + _safe_error(exc, credentials)
                 )
-        active_markets = sum(
-            1
-            for market in (markets or {}).values()
-            if isinstance(market, dict)
-            and _market_matches_type(market, api_connection.market_type)
-            and market.get("active") is not False
-        )
-        return {
-            "status": "healthy",
-            "checked_at": time.time(),
-            "latency_ms": (time.perf_counter() - started) * 1000,
-            "exchange": api_connection.exchange,
-            "market_type": api_connection.market_type,
-            "api_variant": api_connection.api_variant,
-            "market_count": active_markets,
-            "balances": balances,
-            "balance_warnings": warnings,
-            "open_order_count": len(open_orders),
-            "permissions": {
-                "private_account_read": "verified",
-                "open_order_read": (
-                    "verified" if not warnings else "partially_verified"
-                ),
-                "trade_endpoint": "supported_not_exercised",
-                "trade_permission": (
-                    "user_confirmed"
-                    if api_connection.trade_permission_confirmed
-                    else "not_confirmed"
-                ),
-                "withdrawal_disabled": (
-                    "user_confirmed"
-                    if api_connection.withdrawal_disabled_confirmed
-                    else "not_confirmed"
-                ),
-                "safe_for_strategy_setup": bool(
-                    api_connection.trade_permission_confirmed
-                    and api_connection.withdrawal_disabled_confirmed
-                ),
-            },
-        }
-    except Exception as exc:
+            if api_connection.exchange == "bybit" and market_type == market_types[0]:
+                try:
+                    funding_balance = await asyncio.wait_for(
+                        client.fetch_balance({"type": "funding"}),
+                        timeout=max(1.0, timeout_seconds),
+                    )
+                    funding_currencies = {
+                        str(key).upper()
+                        for key, value in funding_balance.items()
+                        if isinstance(value, dict)
+                        and any(name in value for name in ("free", "used", "total"))
+                    }
+                    balances.extend(
+                        _balance_rows(
+                            funding_balance,
+                            funding_currencies,
+                            wallet="funding",
+                            tradable=False,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(
+                        "Bybit funding wallet unavailable: "
+                        + _safe_error(exc, credentials)
+                    )
+            scope_results.append(
+                {
+                    "market_type": market_type,
+                    "market_count": sum(
+                        1
+                        for market in (markets or {}).values()
+                        if isinstance(market, dict)
+                        and _market_matches_type(market, market_type)
+                        and market.get("active") is not False
+                    ),
+                    "balances": balances,
+                    "open_order_count": len(open_orders),
+                    "warnings": warnings,
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            scope_errors.append(f"{market_type}: {_safe_error(exc, credentials)}")
+        finally:
+            await manager.close()
+
+    if not scope_results:
         return {
             "status": "error",
             "checked_at": time.time(),
             "latency_ms": (time.perf_counter() - started) * 1000,
             "exchange": api_connection.exchange,
-            "market_type": api_connection.market_type,
+            "market_types": list(market_types),
             "api_variant": api_connection.api_variant,
-            "error": _safe_error(exc, credentials),
+            "error": "; ".join(scope_errors)[:240] or "account check failed",
         }
-    finally:
-        await manager.close()
+
+    balance_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    warnings = list(scope_errors)
+    for result in scope_results:
+        warnings.extend(result["warnings"])
+        for row in result["balances"]:
+            key = (str(row.get("currency") or ""), str(row.get("wallet") or "trading"))
+            current = balance_rows.get(key)
+            if current is None or float(row.get("total") or 0.0) > float(
+                current.get("total") or 0.0
+            ):
+                balance_rows[key] = row
+    return {
+        "status": "healthy",
+        "checked_at": time.time(),
+        "latency_ms": (time.perf_counter() - started) * 1000,
+        "exchange": api_connection.exchange,
+        "market_type": api_connection.market_type,
+        "market_types": [result["market_type"] for result in scope_results],
+        "api_variant": api_connection.api_variant,
+        "market_count": sum(result["market_count"] for result in scope_results),
+        "market_counts": {
+            result["market_type"]: result["market_count"] for result in scope_results
+        },
+        "balances": list(balance_rows.values()),
+        "balance_warnings": warnings,
+        "open_order_count": sum(
+            result["open_order_count"] for result in scope_results
+        ),
+        "permissions": {
+            "private_account_read": "verified",
+            "open_order_read": "verified" if not warnings else "partially_verified",
+            "trade_endpoint": "supported_not_exercised",
+            "trade_permission": (
+                "user_confirmed"
+                if api_connection.trade_permission_confirmed
+                else "not_confirmed"
+            ),
+            "withdrawal_disabled": (
+                "user_confirmed"
+                if api_connection.withdrawal_disabled_confirmed
+                else "not_confirmed"
+            ),
+            "safe_for_strategy_setup": bool(
+                api_connection.trade_permission_confirmed
+                and api_connection.withdrawal_disabled_confirmed
+            ),
+        },
+    }
 
 
 class WorkspaceMarketDiscoveryService:

@@ -336,11 +336,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-global-api1" defer></script>',
+            '<script src="/static/app.js?v=20260802-unified-account1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-global-api1" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-unified-account1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -351,7 +351,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
         self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
-        self.assertIn('<summary>Global API Connections</summary>', INDEX_HTML)
+        self.assertIn('<summary>Exchange Accounts</summary>', INDEX_HTML)
         self.assertIn('<summary>Project Management</summary>', INDEX_HTML)
         self.assertIn('id="profile-account"', INDEX_HTML)
         self.assertNotIn('id="user-account-monitor-rows"', INDEX_HTML)
@@ -464,7 +464,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260802-overview-wallet1"),
+            INDEX_HTML.index("/static/styles.css?v=20260802-unified-account1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -571,7 +571,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260802-overview-wallet1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260802-unified-account1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -8939,6 +8939,136 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(b"global-api-key", database_bytes)
         self.assertNotIn(b"global-api-secret", database_bytes)
+
+    async def test_unified_api_account_manages_spot_and_swap_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            member = user_store.create_user(
+                email="unified@example.com",
+                username="unified",
+                password="Strong-pass-5!",
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(data_dir / "user_workspace.sqlite3"),
+                    credential_master_key_env="TEST_CREDENTIAL_MASTER_KEY",
+                )
+            )
+            master_key = base64.urlsafe_b64encode(b"u" * 32).decode("ascii")
+            with patch.dict(
+                os.environ,
+                {"TEST_CREDENTIAL_MASTER_KEY": master_key},
+                clear=False,
+            ):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": member.username,
+                            "password": "Strong-pass-5!",
+                        },
+                    )
+
+                    async def discover_markets(**kwargs):
+                        market_type = kwargs["market_type"]
+                        symbol = (
+                            "ACS/USDT"
+                            if market_type == "spot"
+                            else "ACS/USDT:USDT"
+                        )
+                        return (
+                            [
+                                {
+                                    "symbol": symbol,
+                                    "base": "ACS",
+                                    "quote": "USDT",
+                                    "settle": "USDT" if market_type == "swap" else "",
+                                    "active": True,
+                                    "type": market_type,
+                                }
+                            ],
+                            False,
+                        )
+
+                    with patch.object(
+                        app["workspace_market_discovery"],
+                        "discover",
+                        side_effect=discover_markets,
+                    ):
+                        discovery_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "discover_markets",
+                                "exchange": "bybit",
+                                "assets": ["ACS"],
+                            },
+                        )
+                        save_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "sync_account",
+                                "account": {
+                                    "label": "Bybit Main",
+                                    "exchange": "bybit",
+                                    "withdrawal_disabled_confirmed": True,
+                                    "trade_permission_confirmed": True,
+                                    "replace_markets": True,
+                                    "markets": [
+                                        {
+                                            "market_type": "spot",
+                                            "symbol": "ACS/USDT",
+                                        },
+                                        {
+                                            "market_type": "swap",
+                                            "symbol": "ACS/USDT:USDT",
+                                        },
+                                    ],
+                                    "credentials": {
+                                        "api_key": "unified-api-key",
+                                        "secret": "unified-api-secret",
+                                    },
+                                },
+                            },
+                        )
+                    discovery_payload = await discovery_response.json()
+                    save_payload = await save_response.json()
+                finally:
+                    await client.close()
+
+            database_bytes = (data_dir / "user_workspace.sqlite3").read_bytes()
+
+        self.assertEqual(discovery_response.status, 200, discovery_payload)
+        self.assertEqual(
+            {
+                (row["market_type"], row["symbol"])
+                for row in discovery_payload["markets"]
+            },
+            {("spot", "ACS/USDT"), ("swap", "ACS/USDT:USDT")},
+        )
+        self.assertEqual(save_response.status, 200, save_payload)
+        self.assertEqual(len(save_payload["accounts"]), 2)
+        connection = save_payload["workspace"]["connections"][0]
+        self.assertEqual(connection["market_types"], ["spot", "swap"])
+        self.assertEqual(
+            {
+                (row["market_type"], row["symbol"])
+                for row in connection["markets"]
+            },
+            {("spot", "ACS/USDT"), ("swap", "ACS/USDT:USDT")},
+        )
+        self.assertEqual(len(save_payload["workspace"]["projects"]), 1)
+        self.assertNotIn(b"unified-api-key", database_bytes)
+        self.assertNotIn(b"unified-api-secret", database_bytes)
 
 
 class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
