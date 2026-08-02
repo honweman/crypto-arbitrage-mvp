@@ -486,6 +486,7 @@ class UserExchangeAccount:
     project_id: str
     label: str
     exchange: str
+    connection_id: str = ""
     market_type: str = "spot"
     api_variant: str = "default"
     symbol: str = ""
@@ -538,13 +539,18 @@ class UserExchangeAccount:
         if connection_status not in CONNECTION_STATUSES:
             connection_status = "unverified"
         project_id = _clean_id(raw.get("project_id"), prefix="project")
+        account_id = _clean_id(raw.get("id"), prefix="account")
         now = _now()
         return cls(
-            id=_clean_id(raw.get("id"), prefix="account"),
+            id=account_id,
             owner_email=_clean_email(raw.get("owner_email")),
             project_id=project_id,
             label=_clean_text(raw.get("label") or exchange_row["label"]),
             exchange=exchange,
+            connection_id=_clean_id(
+                raw.get("connection_id") or account_id,
+                prefix="connection",
+            ),
             market_type=market_type,
             api_variant=api_variant,
             symbol=_clean_symbol(raw.get("symbol")),
@@ -596,6 +602,7 @@ class UserExchangeAccount:
             "project_id": self.project_id,
             "label": self.label,
             "exchange": self.exchange,
+            "connection_id": self.connection_id,
             "market_type": self.market_type,
             "api_variant": self.api_variant,
             "symbol": self.symbol,
@@ -2860,6 +2867,55 @@ class UserWorkspaceStore:
             )
             connection.commit()
 
+    def delete_connection(self, connection_id: str, *, owner_email: str) -> int:
+        self._ensure()
+        connection_key = str(connection_id or "").strip()
+        owner = _clean_email(owner_email)
+        accounts = [
+            account
+            for account in self.list_accounts(owner_email=owner, is_admin=False)
+            if account.connection_id == connection_key
+        ]
+        if not accounts:
+            raise ValueError(f"API connection not found: {connection_key}")
+        with self._connect() as connection:
+            for account in accounts:
+                referenced_by = self._strategies_using_account_in_connection(
+                    connection,
+                    account.id,
+                )
+                if referenced_by:
+                    raise ValueError(
+                        "delete or update strategies using this connection first: "
+                        + ", ".join(
+                            strategy.name for strategy in referenced_by[:5]
+                        )
+                    )
+                if account.enabled:
+                    raise ValueError(
+                        "disable every market linked to this connection before "
+                        "deleting it"
+                    )
+            account_ids = [account.id for account in accounts]
+            placeholders = ",".join("?" for _ in account_ids)
+            connection.execute(
+                f"DELETE FROM user_hyperliquid_authorizations "
+                f"WHERE account_id IN ({placeholders})",
+                account_ids,
+            )
+            connection.execute(
+                f"DELETE FROM user_api_credentials "
+                f"WHERE account_id IN ({placeholders})",
+                account_ids,
+            )
+            connection.execute(
+                f"DELETE FROM user_exchange_accounts "
+                f"WHERE id IN ({placeholders}) AND owner_email = ?",
+                (*account_ids, owner),
+            )
+            connection.commit()
+        return len(accounts)
+
     def purge_owner(self, owner_email: str) -> dict[str, int]:
         """Delete every workspace record owned by owner_email (account deletion)."""
         email = _clean_email(owner_email)
@@ -2955,6 +3011,106 @@ class UserWorkspaceStore:
                 moved[table] = cursor.rowcount
         return moved
 
+    @staticmethod
+    def _connection_rows(
+        account_rows: list[dict[str, Any]],
+        project_map: dict[str, UserProject],
+    ) -> list[dict[str, Any]]:
+        connection_groups: dict[str, dict[str, Any]] = {}
+        for row in account_rows:
+            connection_id = str(row.get("connection_id") or row["id"])
+            group = connection_groups.setdefault(
+                connection_id,
+                {
+                    "id": connection_id,
+                    "label": row.get("label") or row.get("exchange") or connection_id,
+                    "exchange": row.get("exchange") or "",
+                    "market_type": row.get("market_type") or "spot",
+                    "api_variant": row.get("api_variant") or "default",
+                    "account_ids": [],
+                    "project_ids": [],
+                    "markets": [],
+                    "enabled_count": 0,
+                    "healthy_count": 0,
+                    "error_count": 0,
+                    "credentials_configured": True,
+                    "updated_at": 0.0,
+                },
+            )
+            group["account_ids"].append(row["id"])
+            group["project_ids"].append(row["project_id"])
+            project = project_map.get(str(row.get("project_id") or ""))
+            group["markets"].append(
+                {
+                    "account_id": row["id"],
+                    "project_id": row["project_id"],
+                    "project": project.name if project is not None else "",
+                    "asset": project.asset if project is not None else "",
+                    "quote_currency": (
+                        project.quote_currency if project is not None else ""
+                    ),
+                    "symbol": row.get("symbol") or "",
+                    "connection_status": row.get("connection_status") or "unverified",
+                    "connection_fresh": bool(row.get("connection_fresh")),
+                    "enabled": bool(row.get("enabled")),
+                }
+            )
+            group["enabled_count"] += int(bool(row.get("enabled")))
+            group["healthy_count"] += int(bool(row.get("connection_fresh")))
+            group["error_count"] += int(row.get("connection_status") == "error")
+            group["credentials_configured"] = bool(
+                group["credentials_configured"]
+                and row.get("credentials", {}).get("configured")
+            )
+            group["updated_at"] = max(
+                float(group["updated_at"]),
+                float(row.get("updated_at") or 0.0),
+            )
+        connection_rows = []
+        for group in connection_groups.values():
+            market_count = len(group["markets"])
+            group["status"] = (
+                "error"
+                if group["error_count"]
+                else "healthy"
+                if market_count and group["healthy_count"] == market_count
+                else "unverified"
+            )
+            connection_rows.append(group)
+        connection_rows.sort(
+            key=lambda row: (-float(row.get("updated_at") or 0.0), row["id"])
+        )
+        return connection_rows
+
+    def public_connections_payload(
+        self,
+        *,
+        owner_email: str,
+        is_admin: bool,
+    ) -> dict[str, Any]:
+        projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
+        project_map = {project.id: project for project in projects}
+        accounts = self.list_accounts(owner_email=owner_email, is_admin=is_admin)
+        credentials = self.credential_statuses([account.id for account in accounts])
+        now = _now()
+        account_rows = []
+        for account in accounts:
+            row = account.to_dict()
+            row["connection_fresh"] = account_connection_is_fresh(account, now=now)
+            row["credentials"] = credentials[account.id]
+            account_rows.append(row)
+        connections = self._connection_rows(account_rows, project_map)
+        return {
+            "status": "ok",
+            "connections": connections,
+            "summary": {
+                "connection_count": len(connections),
+                "healthy_connection_count": sum(
+                    row["status"] == "healthy" for row in connections
+                ),
+            },
+        }
+
     def public_payload(self, *, owner_email: str, is_admin: bool) -> dict[str, Any]:
         projects = self.list_projects(owner_email=owner_email, is_admin=is_admin)
         accounts, wallets, venue_connections = self._list_accounts_wallets_and_venues(
@@ -3012,6 +3168,7 @@ class UserWorkspaceStore:
             row["credentials"] = credentials[account.id]
             row["readiness"] = account_readiness[account.id]
             account_rows.append(row)
+        connection_rows = self._connection_rows(account_rows, project_map)
         strategy_rows = []
         for strategy in strategies:
             row = strategy.to_dict()
@@ -3053,6 +3210,7 @@ class UserWorkspaceStore:
             "risk_profile": risk_profile.to_dict(),
             "projects": project_rows,
             "accounts": account_rows,
+            "connections": connection_rows,
             "wallets": [wallet.to_dict() for wallet in wallets],
             "venue_connections": venue_rows,
             "strategies": strategy_rows,
@@ -3088,6 +3246,7 @@ class UserWorkspaceStore:
                     }
                 ),
                 "account_count": len(account_rows),
+                "connection_count": len(connection_rows),
                 "wallet_count": len(wallets),
                 "venue_connection_count": len(venue_connections),
                 "healthy_venue_connection_count": sum(

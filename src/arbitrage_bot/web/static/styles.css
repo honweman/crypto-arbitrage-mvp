@@ -1685,6 +1685,10 @@ tbody tr:last-child td {
   align-self: end;
 }
 
+.check-field[hidden] {
+  display: none !important;
+}
+
 .account-field {
   grid-column: 1 / -1;
   align-self: stretch;

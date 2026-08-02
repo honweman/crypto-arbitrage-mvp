@@ -1196,6 +1196,34 @@ function balanceStatusClass(status) {
       }
     }
 
+    function renderProfileAccounts(workspace) {
+      const select = document.getElementById("profile-account");
+      if (!select) return;
+      const previous = select.value || localStorage.getItem("profile-account") || "";
+      const connections = workspace?.connections || [];
+      select.innerHTML = "";
+      const allOption = document.createElement("option");
+      allOption.value = "";
+      allOption.textContent = connections.length ? "All accounts" : "No API accounts";
+      select.appendChild(allOption);
+      for (const connection of connections) {
+        const option = document.createElement("option");
+        option.value = connection.id;
+        const exchange = workspaceExchange(connection.exchange)?.label
+          || connection.exchange;
+        option.textContent = `${connection.label || exchange} · ${connection.markets?.length || 0}`;
+        option.title = (connection.markets || [])
+          .map((market) => market.symbol)
+          .filter(Boolean)
+          .join(" · ");
+        select.appendChild(option);
+      }
+      select.value = connections.some((connection) => connection.id === previous)
+        ? previous
+        : "";
+      select.disabled = connections.length === 0;
+    }
+
     async function updateProfileAsset(event) {
       const preferredAsset = event.target.value || "";
       const res = await fetch("/api/profile", {
@@ -4124,7 +4152,13 @@ function balanceStatusClass(status) {
     function workspaceSelectedAccount() {
       const accountId = document.getElementById("user-exchange-account-id")?.value || "";
       return (currentUserWorkspace?.accounts || []).find(
-        (account) => account.id === accountId
+        (account) => account.id === accountId || account.connection_id === accountId
+      ) || null;
+    }
+
+    function workspaceConnection(connectionId) {
+      return (currentUserWorkspace?.connections || []).find(
+        (connection) => connection.id === connectionId
       ) || null;
     }
 
@@ -4174,9 +4208,10 @@ function balanceStatusClass(status) {
     }
 
     function fillUserExchangeAccountForm(account) {
-      selectedUserExchangeAccountId = account?.id || "";
+      const connectionId = account?.connection_id || account?.id || "";
+      selectedUserExchangeAccountId = connectionId;
       userExchangeAccountFormDirty = false;
-      setFieldValue("user-exchange-account-id", account?.id || "");
+      setFieldValue("user-exchange-account-id", connectionId);
       setFieldValue("user-exchange-project", account?.project_id || "");
       setFieldValue("user-exchange-label", account?.label || "");
       setFieldValue("user-exchange-id", account?.exchange || "");
@@ -4441,7 +4476,10 @@ function balanceStatusClass(status) {
         title: (exchange.market_types || []).join(", "),
       }));
       const selected = (workspace?.accounts || []).find(
-        (account) => account.id === selectedUserExchangeAccountId
+        (account) => (
+          account.id === selectedUserExchangeAccountId
+          || account.connection_id === selectedUserExchangeAccountId
+        )
       );
       const projectValue = selected?.project_id
         || document.getElementById("user-exchange-project")?.value
@@ -4455,7 +4493,10 @@ function balanceStatusClass(status) {
       setSelectOptions("user-exchange-project", projects, projectValue, "Select project");
       setSelectOptions("user-exchange-id", exchanges, exchangeValue, "Select exchange");
       if (selected) {
-        setFieldValue("user-exchange-account-id", selected.id);
+        setFieldValue(
+          "user-exchange-account-id",
+          selected.connection_id || selected.id
+        );
         setFieldValue("user-exchange-label", selected.label);
         setCheckedValue("user-exchange-enabled", selected.enabled);
         setCheckedValue(
@@ -4488,64 +4529,48 @@ function balanceStatusClass(status) {
       if (!body) return;
       body.innerHTML = "";
       const accounts = workspace?.accounts || [];
-      const projectMap = new Map(
-        (workspace?.projects || []).map((project) => [project.id, project])
-      );
-      if (accounts.length === 0) {
+      const accountMap = new Map(accounts.map((account) => [account.id, account]));
+      const connections = workspace?.connections || [];
+      if (connections.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="6">${escapeHtml(uiText("No exchange accounts yet."))}</td>`;
         body.appendChild(tr);
         return;
       }
-      for (const account of accounts) {
-        const project = projectMap.get(account.project_id);
-        const credentials = account.credentials || {};
-        const readiness = account.readiness || {};
-        const rotationText = credentials.rotation_required
-          ? " · rotation due"
-          : credentials.rotation_remaining_seconds != null
-            ? ` · rotate in ${formatDurationSeconds(credentials.rotation_remaining_seconds)}`
-            : "";
-        const credentialText = credentials.configured
-          ? `Encrypted / configured${rotationText}`
+      for (const connection of connections) {
+        const firstAccount = accountMap.get(connection.account_ids?.[0]);
+        if (!firstAccount) continue;
+        const marketLabels = (connection.markets || []).map((market) => (
+          `${market.project || market.asset || "Project"}: ${market.symbol || "--"}`
+        ));
+        const visibleMarkets = marketLabels.slice(0, 3).join(" · ");
+        const remainingMarkets = Math.max(0, marketLabels.length - 3);
+        const marketsText = `${visibleMarkets}${remainingMarkets ? ` · +${remainingMarkets}` : ""}`;
+        const credentialText = connection.credentials_configured
+          ? "Encrypted / configured"
           : "Missing";
-        const agentText = account.agent_address
-          ? `\n${account.agent_name || "API Wallet"} · ${account.agent_address.slice(0, 8)}…${account.agent_address.slice(-6)}`
-          : "";
-        const connectionFresh = workspaceConnectionFresh(account);
-        const accountStatus = account.enabled
-          ? "Enabled"
-          : project?.status !== "active"
-            ? "Waiting for project"
-            : account.connection_status === "error"
-              ? "Connection error"
-              : connectionFresh
-                ? "Ready to enable"
-                : "Needs connection test";
-        const connectionText = account.connection_checked_at
-          ? `${account.connection_status || "unverified"} · ${formatAge(account.connection_checked_at)}`
-          : account.connection_status || "unverified";
-        const connectionRemaining = readiness.connection_remaining_seconds;
-        const readinessText = `${readiness.completed_steps || 0}/${readiness.total_steps || 0} ${uiText("setup steps")}`;
-        const expiryText = connectionRemaining == null
-          ? ""
-          : ` · ${uiText("test valid for")} ${formatDurationSeconds(connectionRemaining)}`;
-        const connectionClass = account.connection_status === "healthy"
+        const statusText = connection.status === "healthy"
+          ? `${connection.healthy_count}/${marketLabels.length} ${uiText("markets healthy")}`
+          : connection.status === "error"
+            ? `${connection.error_count || 1} ${uiText("market checks failed")}`
+            : "Needs connection test";
+        const connectionClass = connection.status === "healthy"
           ? "ok"
-          : account.connection_status === "error"
+          : connection.status === "error"
             ? "missing"
-            : "subtle";
-        const variantText = account.api_variant && !["default", "global"].includes(account.api_variant)
-          ? ` · ${account.api_variant}`
+            : "";
+        const variantText = connection.api_variant
+          && !["default", "global"].includes(connection.api_variant)
+          ? ` · ${connection.api_variant}`
           : "";
         const tr = document.createElement("tr");
-        tr.dataset.workspaceAccountId = account.id || "";
+        tr.dataset.workspaceConnectionId = connection.id || "";
         tr.innerHTML = `
-          <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || account.id)}<br><span class="subtle">${escapeHtml(account.owner_email || "--")}</span></td>
-          <td>${escapeHtml(project?.name || account.project_id || "--")}<br><span class="subtle">${escapeHtml(account.symbol || project?.symbol || "--")}</span></td>
-          <td>${escapeHtml(workspaceExchange(account.exchange)?.label || account.exchange)}<br><span class="subtle">${escapeHtml(`${account.market_type || "spot"}${variantText}`)}</span></td>
-          <td class="${credentials.configured ? "ok" : "missing"}">${escapeHtml(credentialText)}${agentText ? `<br><span class="subtle">${escapeHtml(agentText.trim())}</span>` : ""}</td>
-          <td class="${connectionClass}" title="${escapeHtml((readiness.blockers || []).join(" · ") || account.connection_error || "")}">${escapeHtml(uiText(accountStatus))}<br><span class="subtle">${escapeHtml(connectionText + expiryText)}</span><br><span class="subtle">${escapeHtml(readinessText)}</span></td>
+          <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">${escapeHtml(firstAccount.owner_email || "--")}</span></td>
+          <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${connection.market_type || "spot"}${variantText}`)}</span></td>
+          <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
+          <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
+          <td class="${connectionClass}">${escapeHtml(uiText(statusText))}<br><span class="subtle">${connection.enabled_count || 0} ${escapeHtml(uiText("enabled"))}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");
@@ -4553,21 +4578,21 @@ function balanceStatusClass(status) {
         editButton.className = "control-button";
         editButton.type = "button";
         editButton.textContent = "Edit";
-        editButton.addEventListener("click", () => fillUserExchangeAccountForm(account));
+        editButton.addEventListener("click", () => fillUserExchangeAccountForm(firstAccount));
         actions.appendChild(editButton);
         const testButton = document.createElement("button");
         testButton.className = "ghost-button workspace-account-test";
         testButton.type = "button";
         testButton.textContent = "Test";
-        testButton.disabled = !credentials.configured || !account.symbol;
-        testButton.title = testButton.disabled ? uiText("Save credentials and a trading pair first.") : "";
-        testButton.addEventListener("click", () => testUserExchangeAccount(account, testButton));
+        testButton.disabled = !connection.credentials_configured;
+        testButton.title = testButton.disabled ? uiText("Save credentials first.") : "";
+        testButton.addEventListener("click", () => testUserExchangeConnection(connection, testButton));
         actions.appendChild(testButton);
         const deleteButton = document.createElement("button");
         deleteButton.className = "danger-button";
         deleteButton.type = "button";
         deleteButton.textContent = "Delete";
-        deleteButton.addEventListener("click", () => deleteUserExchangeAccount(account, deleteButton));
+        deleteButton.addEventListener("click", () => deleteUserExchangeConnection(connection, deleteButton));
         actions.appendChild(deleteButton);
         body.appendChild(tr);
       }
@@ -4735,13 +4760,44 @@ function balanceStatusClass(status) {
       }
     }
 
+    async function testUserExchangeConnection(connection, button) {
+      button.disabled = true;
+      try {
+        const result = await postUserWorkspace({
+          action: "test_connection",
+          connection_id: connection.id,
+        });
+        const check = result.connection_test || {};
+        if (check.status !== "healthy") {
+          const failed = (check.results || []).find((row) => row.status !== "healthy");
+          throw new Error(failed?.error || "connection test failed");
+        }
+        const latency = Math.max(
+          0,
+          ...(check.results || []).map((row) => Number(row.latency_ms || 0))
+        );
+        setUserWorkspaceNotice(
+          `${uiText("Connection healthy")} · ${check.healthy_count || 0}/${check.market_count || 0} ${uiText("synced markets")} · ${latency.toFixed(0)}ms max`
+        );
+      } catch (error) {
+        setUserWorkspaceNotice(`connection test failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     async function testSelectedUserExchangeAccount(event) {
       const account = workspaceSelectedAccount();
       if (!account) {
         setUserWorkspaceNotice(uiText("Save an exchange account before testing it."));
         return;
       }
-      await testUserExchangeAccount(account, event.currentTarget);
+      const connection = workspaceConnection(account.connection_id || account.id);
+      if (!connection) {
+        setUserWorkspaceNotice(uiText("Save an exchange account before testing it."));
+        return;
+      }
+      await testUserExchangeConnection(connection, event.currentTarget);
     }
 
     async function applyUserProject(event) {
@@ -4835,19 +4891,16 @@ function balanceStatusClass(status) {
       if (secret) credentials.secret = secret;
       if (passphrase) credentials.passphrase = passphrase;
       const account = {
-        project_id: document.getElementById("user-exchange-project").value,
         label: document.getElementById("user-exchange-label").value.trim()
           || `${exchange?.label || exchangeId} ${marketLabel}`,
         exchange: exchangeId,
         market_type: marketType,
         api_variant: document.getElementById("user-exchange-api-variant").value,
-        symbol: document.getElementById("user-exchange-symbol").value,
-        enabled: document.getElementById("user-exchange-enabled").checked,
         withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
         trade_permission_confirmed: document.getElementById("user-exchange-trade-permission").checked,
       };
       const id = document.getElementById("user-exchange-account-id").value.trim();
-      if (id) account.id = id;
+      if (id) account.connection_id = id;
       if (Object.keys(credentials).length) account.credentials = credentials;
       return account;
     }
@@ -4873,20 +4926,32 @@ function balanceStatusClass(status) {
       saveTestButton.disabled = true;
       const account = collectUserExchangeAccount();
       try {
-        const result = await postUserWorkspace({ action: "upsert_account", account });
-        const savedAccount = result.account || findSavedUserExchangeAccount(result.workspace, account);
+        const result = await postUserWorkspace({ action: "sync_account", account });
+        const savedAccount = (result.accounts || [])[0]
+          || (result.workspace?.accounts || []).find(
+            (row) => row.connection_id === result.connection_id
+          );
         if (!savedAccount) throw new Error("saved account was not returned by the server");
         if (testAfterSave) {
-          selectedUserExchangeAccountId = savedAccount.id;
+          selectedUserExchangeAccountId = result.connection_id || savedAccount.connection_id;
           fillUserExchangeAccountForm(savedAccount);
-          await testUserExchangeAccount(savedAccount, saveTestButton);
+          const connection = workspaceConnection(
+            result.connection_id || savedAccount.connection_id || savedAccount.id
+          );
+          if (!connection) throw new Error("synced connection was not returned by the server");
+          await testUserExchangeConnection(connection, saveTestButton);
           const refreshed = (currentUserWorkspace?.accounts || []).find(
-            (row) => row.id === savedAccount.id
+            (row) => row.connection_id === connection.id
           );
           if (refreshed) fillUserExchangeAccountForm(refreshed);
         } else {
           resetUserExchangeAccountForm();
-          setUserWorkspaceNotice(`${uiText("Account saved")} · ${savedAccount.label}`);
+          const warningText = (result.warnings || []).length
+            ? ` · ${(result.warnings || []).join(" · ")}`
+            : "";
+          setUserWorkspaceNotice(
+            `${uiText("Account saved")} · ${(result.accounts || []).length} ${uiText("synced markets")}${warningText}`
+          );
         }
         renderUserWorkspace(currentUserWorkspace);
       } catch (error) {
@@ -4919,6 +4984,28 @@ function balanceStatusClass(status) {
       try {
         await postUserWorkspace({ action: "delete_account", account_id: account.id });
         if (selectedUserExchangeAccountId === account.id) resetUserExchangeAccountForm();
+      } catch (error) {
+        setUserWorkspaceNotice(`delete failed: ${error.message || error}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function deleteUserExchangeConnection(connection, button) {
+      const count = connection.account_ids?.length || 0;
+      if (!dangerConfirm(
+        `Delete this API connection and ${count} synced market binding(s)?`,
+        "Encrypted credentials for this connection will also be deleted."
+      )) return;
+      button.disabled = true;
+      try {
+        await postUserWorkspace({
+          action: "delete_connection",
+          connection_id: connection.id,
+        });
+        if (selectedUserExchangeAccountId === connection.id) {
+          resetUserExchangeAccountForm();
+        }
       } catch (error) {
         setUserWorkspaceNotice(`delete failed: ${error.message || error}`);
       } finally {
@@ -8824,6 +8911,7 @@ function balanceStatusClass(status) {
     function renderCommonState(data) {
       setHeaderStatus(data.status || "starting");
       renderAuthProfile(data.auth);
+      renderProfileAccounts(data.user_workspace);
       document.getElementById("program-toggle").checked = data.program?.running !== false;
 
       text("scan-count", data.scan?.count ?? 0);
@@ -9149,6 +9237,9 @@ function balanceStatusClass(status) {
       setProgramRunning(event.target.checked);
     });
     document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
+    document.getElementById("profile-account").addEventListener("change", (event) => {
+      localStorage.setItem("profile-account", event.target.value || "");
+    });
 	    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
 	    document.getElementById("user-risk-profile-form").addEventListener("input", () => {
 	      userRiskProfileDirty = true;

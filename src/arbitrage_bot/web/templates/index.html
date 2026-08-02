@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260713-ux1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260802-workspace-quick1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync1">
 
 </head>
 <body>
@@ -27,6 +27,7 @@
       <div id="user-profile" class="user-profile">
         <span id="user-email" class="subtle">Legacy</span>
         <select id="profile-asset" title="Current asset view"></select>
+        <select id="profile-account" title="Connected API account"></select>
         <a id="security-link" href="/security" hidden>Security</a>
         <a href="/logout">Logout</a>
       </div>
@@ -447,7 +448,7 @@
 
     <section id="user-workspace-section" data-page="settings" class="compact-section section-open" data-ui-feature="user_workspace">
       <div class="section-title">
-        <h2>Projects & Accounts</h2>
+        <h2>Exchange API Connections</h2>
         <span id="user-workspace-meta" class="subtle"></span>
         <span id="user-workspace-notice" class="subtle" role="status" aria-live="polite"></span>
       </div>
@@ -455,40 +456,17 @@
       <div id="user-setup-readiness" class="workspace-readiness" aria-live="polite"></div>
       <div class="workspace-quick-intro">
         <strong>Quick Setup</strong>
-        <span class="subtle">Create the market scope, connect an exchange, then verify read-only account access.</span>
+        <span class="subtle">Add each exchange API once. Matching projects and trading pairs are discovered and synchronized automatically.</span>
       </div>
       <div class="workspace-step-title">
         <span class="workspace-step-number">1</span>
-        <div><strong>Choose Market</strong><span class="subtle">Enter only the asset and quote currency. The project name is generated automatically.</span></div>
-      </div>
-      <form id="user-project-form" class="control-panel workspace-quick-form">
-        <input id="user-project-id" type="hidden">
-        <div class="field">
-          <label for="user-project-asset">Asset</label>
-          <input id="user-project-asset" type="text" maxlength="20" placeholder="ACS" required>
-        </div>
-        <div class="field">
-          <label for="user-project-quote">Quote Currency</label>
-          <input id="user-project-quote" type="text" maxlength="20" placeholder="USDC" required>
-        </div>
-        <div class="field">
-          <label for="user-project-name">Project Name (optional)</label>
-          <input id="user-project-name" type="text" maxlength="80" placeholder="Auto: ACS/USDC">
-        </div>
-        <div class="workspace-form-actions wide-field">
-          <button id="user-project-save" class="control-button" type="submit">Save &amp; Continue</button>
-          <button id="user-project-new" class="ghost-button" type="button">Clear</button>
-        </div>
-      </form>
-      <div class="workspace-step-title">
-        <span class="workspace-step-number">2</span>
-        <div><strong>Connect Exchange</strong><span class="subtle">Select the venue and market. The matching pair and account name are suggested automatically.</span></div>
+        <div><strong>Connect Exchange</strong><span class="subtle">Choose only the venue and market. No project or pair selection is required.</span></div>
       </div>
       <form id="user-exchange-account-form" class="control-panel workspace-quick-form">
         <input id="user-exchange-account-id" type="hidden">
-        <div class="field">
+        <div class="field" hidden>
           <label for="user-exchange-project">Project</label>
-          <select id="user-exchange-project" required></select>
+          <select id="user-exchange-project"></select>
         </div>
         <div class="field">
           <label for="user-exchange-id">Exchange</label>
@@ -502,18 +480,18 @@
           <label for="user-exchange-api-variant">API Region</label>
           <select id="user-exchange-api-variant"></select>
         </div>
-        <div class="field wide-field">
+        <div class="field wide-field" hidden>
           <label for="user-exchange-symbol">Trading Pair</label>
-          <select id="user-exchange-symbol" required></select>
+          <select id="user-exchange-symbol"></select>
         </div>
-        <button id="user-exchange-load-markets" class="ghost-button" type="button">Find Matching Pair</button>
+        <button id="user-exchange-load-markets" class="ghost-button" type="button" hidden>Find Matching Pair</button>
         <div class="field">
           <label for="user-exchange-label">Account Name (optional)</label>
           <input id="user-exchange-label" type="text" maxlength="80" placeholder="Auto: Coinbase Spot">
         </div>
         <div class="workspace-step-title workspace-step-inline wide-field">
-          <span class="workspace-step-number">3</span>
-          <div><strong>Add API &amp; Verify</strong><span class="subtle">Only credentials required by the selected exchange are shown.</span></div>
+          <span class="workspace-step-number">2</span>
+          <div><strong>Add API &amp; Sync</strong><span class="subtle">Credentials are encrypted, tested read-only, then linked to every matching project.</span></div>
         </div>
         <div id="user-exchange-api-key-field" class="field">
           <label id="user-exchange-api-key-label" for="user-exchange-api-key">API Key</label>
@@ -527,7 +505,7 @@
           <label for="user-exchange-passphrase">Passphrase</label>
           <input id="user-exchange-passphrase" type="password" autocomplete="new-password" placeholder="Optional">
         </div>
-        <label class="check-field">
+        <label class="check-field" hidden>
           <input id="user-exchange-enabled" type="checkbox">
           Enabled
         </label>
@@ -539,29 +517,46 @@
           <input id="user-exchange-trade-permission" type="checkbox">
           I confirm this API key has trading permission for the selected market
         </label>
-        <div class="subtle wide-field">Use a trade-only API key with withdrawals disabled. Save &amp; Test is read-only and never places or cancels orders. Enable trading separately after the test passes.</div>
+        <div class="subtle wide-field">Use a trade-only API key with withdrawals disabled. Save, Sync &amp; Test is read-only and never places or cancels orders. Live trading remains disabled until explicitly enabled in a strategy.</div>
         <button id="user-hyperliquid-authorize" class="control-button wide-field" type="button" hidden>Authorize Hyperliquid with MetaMask</button>
         <div id="user-hyperliquid-authorize-hint" class="subtle wide-field" hidden>MetaMask signs one API Wallet approval. The dedicated agent key is encrypted on the server; this does not enable the account or place an order.</div>
         <div class="workspace-form-actions wide-field">
-          <button id="user-exchange-save-test" class="control-button" type="button">Save &amp; Test</button>
-          <button id="user-exchange-save" class="ghost-button" type="submit">Save Only</button>
+          <button id="user-exchange-save-test" class="control-button" type="button">Save, Sync &amp; Test</button>
+          <button id="user-exchange-save" class="ghost-button" type="submit">Save &amp; Sync</button>
           <button id="user-exchange-test" class="ghost-button" type="button">Test Again</button>
           <button id="user-exchange-new" class="ghost-button" type="button">Clear</button>
         </div>
       </form>
 
       <details class="workspace-advanced-group">
-        <summary>Existing Projects &amp; Accounts</summary>
+        <summary>Project Management</summary>
         <div class="workspace-advanced-body">
+          <div class="subtle">Projects define the assets the account may monitor or trade. They are managed separately from API credentials.</div>
+          <form id="user-project-form" class="control-panel workspace-quick-form">
+            <input id="user-project-id" type="hidden">
+            <div class="field"><label for="user-project-asset">Asset</label><input id="user-project-asset" type="text" maxlength="20" placeholder="ACS" required></div>
+            <div class="field"><label for="user-project-quote">Quote Currency</label><input id="user-project-quote" type="text" maxlength="20" placeholder="USDC" required></div>
+            <div class="field"><label for="user-project-name">Project Name (optional)</label><input id="user-project-name" type="text" maxlength="80" placeholder="Auto: ACS/USDC"></div>
+            <div class="workspace-form-actions wide-field">
+              <button id="user-project-save" class="control-button" type="submit">Save Project</button>
+              <button id="user-project-new" class="ghost-button" type="button">Clear</button>
+            </div>
+          </form>
           <div class="table-wrap stacked-table">
             <table class="mobile-card-table">
               <thead><tr><th>Project</th><th>Owner</th><th>Pair</th><th>Status</th><th>Action</th></tr></thead>
               <tbody id="user-projects"></tbody>
             </table>
           </div>
+        </div>
+      </details>
+
+      <details class="workspace-advanced-group">
+        <summary>Connected Accounts</summary>
+        <div class="workspace-advanced-body">
           <div class="table-wrap stacked-table">
             <table class="mobile-card-table">
-              <thead><tr><th>Account</th><th>Project</th><th>Exchange</th><th>Credentials</th><th>Status</th><th>Action</th></tr></thead>
+              <thead><tr><th>Account</th><th>Exchange</th><th>Synced Markets</th><th>Credentials</th><th>Status</th><th>Action</th></tr></thead>
               <tbody id="user-exchange-accounts"></tbody>
             </table>
           </div>
@@ -2630,8 +2625,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260802-workspace-quick1" defer></script>
-  <script src="/static/app.js?v=20260802-workspace-quick1" defer></script>
+  <script src="/static/i18n.js?v=20260802-account-sync1" defer></script>
+  <script src="/static/app.js?v=20260802-account-sync1" defer></script>
 
 </body>
 </html>

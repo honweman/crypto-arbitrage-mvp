@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-workspace-quick1" defer></script>',
+            '<script src="/static/app.js?v=20260802-account-sync1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-workspace-quick1" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-account-sync1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -232,7 +232,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
         self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
-        self.assertIn('<summary>Existing Projects &amp; Accounts</summary>', INDEX_HTML)
+        self.assertIn('<summary>Connected Accounts</summary>', INDEX_HTML)
+        self.assertIn('<summary>Project Management</summary>', INDEX_HTML)
+        self.assertIn('id="profile-account"', INDEX_HTML)
+        self.assertIn('id="user-exchange-project"></select>', INDEX_HTML)
+        self.assertNotIn('id="user-exchange-project" required', INDEX_HTML)
+        self.assertNotIn('id="user-exchange-symbol" required', INDEX_HTML)
         self.assertIn('<summary>Advanced Risk Profile</summary>', INDEX_HTML)
         self.assertIn('<summary>Paper Strategy Lab</summary>', INDEX_HTML)
         self.assertNotIn('id="user-project-name" type="text" maxlength="80" placeholder="ACS Trading" required', INDEX_HTML)
@@ -337,7 +342,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260802-workspace-quick1"),
+            INDEX_HTML.index("/static/styles.css?v=20260802-account-sync1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -444,7 +449,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260802-workspace-quick1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -8378,6 +8383,165 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b"test-secret-value", database_bytes)
         self.assertNotIn(b"test-api-key-value", paper_database_bytes)
         self.assertNotIn(b"test-secret-value", paper_database_bytes)
+
+
+    async def test_api_connection_syncs_all_matching_user_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            member = user_store.create_user(
+                email="sync@example.com",
+                username="syncuser",
+                password="Strong-pass-3!",
+            )
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(data_dir / "user_workspace.sqlite3"),
+                    credential_master_key_env="TEST_CREDENTIAL_MASTER_KEY",
+                )
+            )
+            master_key = base64.urlsafe_b64encode(b"s" * 32).decode("ascii")
+            with patch.dict(
+                os.environ,
+                {"TEST_CREDENTIAL_MASTER_KEY": master_key},
+                clear=False,
+            ):
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": member.username,
+                            "password": "Strong-pass-3!",
+                        },
+                    )
+                    for asset, quote in (("ACS", "USDC"), ("BTC", "USD")):
+                        response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "upsert_project",
+                                "project": {
+                                    "name": f"{asset} Project",
+                                    "asset": asset,
+                                    "quote_currency": quote,
+                                },
+                            },
+                        )
+                        self.assertEqual(response.status, 200)
+
+                    async def discover_markets(**kwargs):
+                        asset = kwargs["asset"]
+                        quote = "USDC" if asset == "ACS" else "USD"
+                        return (
+                            [
+                                {
+                                    "symbol": f"{asset}/{quote}",
+                                    "base": asset,
+                                    "quote": quote,
+                                    "active": True,
+                                    "type": "spot",
+                                }
+                            ],
+                            False,
+                        )
+
+                    with patch.object(
+                        app["workspace_market_discovery"],
+                        "discover",
+                        side_effect=discover_markets,
+                    ):
+                        sync_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "sync_account",
+                                "account": {
+                                    "label": "Coinbase Main",
+                                    "exchange": "coinbase",
+                                    "market_type": "spot",
+                                    "api_variant": "default",
+                                    "withdrawal_disabled_confirmed": True,
+                                    "trade_permission_confirmed": True,
+                                    "credentials": {
+                                        "api_key": "test-api-key-value",
+                                        "secret": "test-secret-value",
+                                    },
+                                },
+                            },
+                        )
+                    sync_payload = await sync_response.json()
+                    self.assertEqual(sync_response.status, 200, sync_payload)
+                    self.assertEqual(len(sync_payload["accounts"]), 2)
+                    connection_id = sync_payload["connection_id"]
+                    self.assertEqual(
+                        {row["connection_id"] for row in sync_payload["accounts"]},
+                        {connection_id},
+                    )
+                    self.assertEqual(
+                        {row["symbol"] for row in sync_payload["accounts"]},
+                        {"ACS/USDC", "BTC/USD"},
+                    )
+                    self.assertEqual(
+                        sync_payload["workspace"]["summary"]["connection_count"],
+                        1,
+                    )
+
+                    async def check_account(*, account, **_kwargs):
+                        return {
+                            "status": "healthy",
+                            "checked_at": time.time(),
+                            "latency_ms": 9.0,
+                            "symbol": account.symbol,
+                            "balances": [],
+                            "open_order_count": 0,
+                        }
+
+                    with patch.object(
+                        app["workspace_account_checker"],
+                        "check",
+                        side_effect=check_account,
+                    ):
+                        test_response = await client.post(
+                            "/api/user-workspace",
+                            json={
+                                "action": "test_connection",
+                                "connection_id": connection_id,
+                            },
+                        )
+                    test_payload = await test_response.json()
+                    self.assertEqual(test_response.status, 200, test_payload)
+                    self.assertEqual(
+                        test_payload["connection_test"]["healthy_count"],
+                        2,
+                    )
+                    trading_state = await (
+                        await client.get("/api/state?view=trading")
+                    ).json()
+                    self.assertEqual(
+                        trading_state["user_workspace"]["connections"][0]["id"],
+                        connection_id,
+                    )
+
+                    delete_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "delete_connection",
+                            "connection_id": connection_id,
+                        },
+                    )
+                    delete_payload = await delete_response.json()
+                    self.assertEqual(delete_response.status, 200, delete_payload)
+                    self.assertEqual(delete_payload["deleted_count"], 2)
+                    self.assertEqual(delete_payload["workspace"]["connections"], [])
+                finally:
+                    await client.close()
 
 
 class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
