@@ -831,10 +831,19 @@ function balanceStatusClass(status) {
         for (const row of rows) {
           const tr = document.createElement("tr");
           const reserved = Number(row.open_order_reserved || 0);
-          const usedTitle = reserved > 0 ? `Open-order reserve ${formatBalanceAmount(reserved)} ${row.currency}` : "";
+          const wallet = String(row.wallet || "trading").toLowerCase();
+          const walletLabel = wallet === "funding"
+            ? uiText("Funding wallet")
+            : uiText("Trading wallet");
+          const currencyLabel = `${row.currency} · ${walletLabel}`;
+          const usedTitle = reserved > 0
+            ? `Open-order reserve ${formatBalanceAmount(reserved)} ${row.currency}`
+            : row.tradable === false
+              ? uiText("Funding balance is not directly tradable")
+              : "";
           tr.innerHTML = `
             <td>${escapeHtml(account.label || account.exchange)}</td>
-            <td>${escapeHtml(row.currency)}</td>
+            <td title="${escapeHtml(usedTitle)}">${escapeHtml(currencyLabel)}</td>
             <td class="num">${formatBalanceAmount(row.free)}</td>
             <td class="num" title="${escapeHtml(usedTitle)}">${formatBalanceAmount(row.used)}</td>
             <td class="num">${formatBalanceAmount(row.total)}</td>

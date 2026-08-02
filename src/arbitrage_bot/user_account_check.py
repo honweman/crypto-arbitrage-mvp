@@ -35,6 +35,9 @@ def workspace_exchange_config(
     variant = str(api_variant or "default").strip().lower()
     options: dict[str, Any] = {}
 
+    if exchange_id in {"binance", "bybit"}:
+        options["defaultType"] = market
+
     if exchange_id == "bithumb":
         options["private_api"] = "v2.0"
     elif exchange_id == "upbit" and variant == "indonesia":
@@ -150,7 +153,11 @@ def _balance_value(balance: dict[str, Any], currency: str, field: str) -> float 
 
 
 def _balance_rows(
-    balance: dict[str, Any], currencies: set[str]
+    balance: dict[str, Any],
+    currencies: set[str],
+    *,
+    wallet: str = "trading",
+    tradable: bool = True,
 ) -> list[dict[str, Any]]:
     rows = []
     for currency in sorted(currencies):
@@ -159,6 +166,8 @@ def _balance_rows(
             "free": _balance_value(balance, currency, "free"),
             "used": _balance_value(balance, currency, "used"),
             "total": _balance_value(balance, currency, "total"),
+            "wallet": wallet,
+            "tradable": tradable,
         }
         if any(
             value not in {None, 0.0}
@@ -248,6 +257,28 @@ async def check_workspace_account(
             _base_currency(account.symbol),
             _quote_currency(account.symbol),
         }
+        balances = _balance_rows(balance, currencies)
+        balance_warnings: list[str] = []
+        if account.exchange == "bybit":
+            try:
+                funding_balance = await asyncio.wait_for(
+                    manager.client(cfg).fetch_balance({"type": "funding"}),
+                    timeout=max(1.0, timeout_seconds),
+                )
+                balances.extend(
+                    _balance_rows(
+                        funding_balance,
+                        currencies,
+                        wallet="funding",
+                        tradable=False,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                balance_warnings.append(
+                    f"Bybit funding wallet unavailable: {_safe_error(exc, credentials)}"
+                )
         return {
             "status": "healthy",
             "checked_at": time.time(),
@@ -258,7 +289,8 @@ async def check_workspace_account(
             "symbol": account.symbol,
             "market": _market_row(market),
             "order_book": book_summary,
-            "balances": _balance_rows(balance, currencies),
+            "balances": balances,
+            "balance_warnings": balance_warnings,
             "open_order_count": len(open_orders or []),
             "permissions": {
                 "private_account_read": "verified",

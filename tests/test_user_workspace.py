@@ -342,7 +342,22 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             )
             self.assertEqual(account_row["readiness"]["completed_steps"], 6)
 
-            account = store.update_account_connection(account.id, status="healthy")
+            account = store.update_account_connection(
+                account.id,
+                status="healthy",
+                check={
+                    "balances": [
+                        {
+                            "currency": "ACS",
+                            "free": 110_000_000,
+                            "used": 0,
+                            "total": 110_000_000,
+                            "wallet": "funding",
+                            "tradable": False,
+                        }
+                    ]
+                },
+            )
             payload = store.public_payload(
                 owner_email=project.owner_email,
                 is_admin=False,
@@ -353,6 +368,8 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 "complete",
             )
             self.assertTrue(account.enabled)
+            self.assertEqual(account.balance_snapshot[0]["wallet"], "funding")
+            self.assertFalse(account.balance_snapshot[0]["tradable"])
             self.assertTrue(account_row["enabled"])
             self.assertEqual(account_row["readiness"]["completed_steps"], 8)
             self.assertGreater(

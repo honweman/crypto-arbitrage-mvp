@@ -68,6 +68,9 @@ def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
             except (TypeError, ValueError):
                 numeric = 0.0
             row[field_name] = numeric if math.isfinite(numeric) else 0.0
+        wallet = str(item.get("wallet") or "trading").strip().lower()[:20]
+        row["wallet"] = wallet or "trading"
+        row["tradable"] = bool(item.get("tradable", True))
         rows.append(row)
     return tuple(rows)
 

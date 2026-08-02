@@ -97,6 +97,20 @@ class FakeWorkspaceClient:
         return self.markets
 
 
+class FakeBybitWorkspaceClient(FakeWorkspaceClient):
+    async def fetch_balance(self, params=None):
+        self.balance_params = dict(params or {})
+        return {
+            "ACS": {"free": 500.0, "used": 0.0, "total": 500.0},
+        }
+
+
+class FakeBybitWorkspaceManager(FakeWorkspaceManager):
+    def __init__(self, *, credentials_by_key=None) -> None:
+        super().__init__(credentials_by_key=credentials_by_key)
+        self.client_instance = FakeBybitWorkspaceClient()
+
+
 class FailingWorkspaceManager(FakeWorkspaceManager):
     async def fetch_balance(self, _cfg):
         secret = next(iter(self.credentials_by_key.values()))["secret"]
@@ -136,10 +150,19 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upbit.options["hostname"], "id-api.upbit.com")
         self.assertEqual(bithumb.options["private_api"], "v2.0")
         self.assertEqual(binance.id, "binanceusdm")
+        self.assertEqual(binance.options["defaultType"], "swap")
         self.assertEqual(
             hyperliquid_testnet.options["hostname"],
             "hyperliquid-testnet.xyz",
         )
+
+        bybit = workspace_exchange_config(
+            exchange="bybit",
+            market_type="spot",
+            api_variant="default",
+            runtime_key="account-5",
+        )
+        self.assertEqual(bybit.options["defaultType"], "spot")
 
     async def test_discovers_only_active_asset_markets_for_requested_type(self) -> None:
         rows = await discover_workspace_markets(
@@ -218,6 +241,37 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("[redacted]", result["error"])
         self.assertNotIn("leaky-secret", result["error"])
+
+    async def test_bybit_account_check_includes_non_tradable_funding_wallet(self) -> None:
+        project = UserProject.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "asset": "ACS",
+                "quote_currency": "USDC",
+            }
+        )
+        account = UserExchangeAccount.from_dict(
+            {
+                "owner_email": project.owner_email,
+                "project_id": project.id,
+                "exchange": "bybit",
+                "symbol": "ACS/USDC",
+            }
+        )
+
+        result = await check_workspace_account(
+            account=account,
+            project=project,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeBybitWorkspaceManager,
+        )
+
+        funding = next(
+            row for row in result["balances"] if row["wallet"] == "funding"
+        )
+        self.assertEqual(funding["currency"], "ACS")
+        self.assertEqual(funding["total"], 500.0)
+        self.assertFalse(funding["tradable"])
 
     async def test_account_check_service_applies_per_account_cooldown(self) -> None:
         project = UserProject.from_dict(
