@@ -836,6 +836,97 @@ h2 {
   min-width: 760px;
 }
 
+.workspace-quick-intro {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 2px 0;
+}
+
+.workspace-quick-intro strong {
+  font-size: 13px;
+}
+
+.workspace-step-title {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.workspace-step-title > div {
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-step-title strong {
+  font-size: 12px;
+}
+
+.workspace-step-title .subtle {
+  font-size: 11px;
+}
+
+.workspace-step-number {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.compact-section.section-open > .workspace-quick-form {
+  margin-top: 8px;
+}
+
+.workspace-quick-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.workspace-step-inline {
+  margin: 4px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.workspace-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workspace-form-actions .control-button,
+.workspace-form-actions .ghost-button {
+  min-height: 34px;
+}
+
+.workspace-advanced-group {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.workspace-advanced-group > summary {
+  min-height: 40px;
+  padding: 11px 2px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workspace-advanced-group[open] > summary {
+  color: var(--text);
+}
+
+.workspace-advanced-body {
+  padding-bottom: 4px;
+}
+
 .compact-section.section-open > .workspace-readiness {
   display: grid;
   margin-top: 0;
@@ -939,7 +1030,8 @@ h2 {
   padding: 5px 9px;
 }
 
-.compact-section.section-open > .workspace-strategy-header {
+.compact-section.section-open > .workspace-strategy-header,
+.workspace-advanced-body > .workspace-strategy-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2068,6 +2160,21 @@ tbody tr:last-child td {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px 10px;
     padding: 10px;
+  }
+  .workspace-quick-intro {
+    display: grid;
+    gap: 2px;
+  }
+  .workspace-step-title {
+    align-items: start;
+  }
+  .workspace-form-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .workspace-form-actions .control-button,
+  .workspace-form-actions .ghost-button {
+    width: 100%;
   }
   .workspace-readiness-identity {
     grid-column: 1;

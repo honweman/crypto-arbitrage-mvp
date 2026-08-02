@@ -6674,6 +6674,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_target = project.id
             audit_detail = f"saved user project {project.name}"
             audit_payload = project.to_dict()
+            response_extra = {"project": project.to_dict()}
         elif action == "approve_project":
             _require_admin_user(user)
             project_id = str(
@@ -6843,6 +6844,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_detail = f"saved encrypted {account.exchange} account"
             audit_payload = account.to_dict()
             audit_payload["credentials"] = store.credential_status(account.id)
+            response_extra = {"account": account.to_dict()}
         elif action == "discover_markets":
             project_id = str(payload.get("project_id") or "").strip()
             project = store.get_project(project_id)

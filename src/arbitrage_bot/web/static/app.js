@@ -3836,7 +3836,7 @@ function balanceStatusClass(status) {
       const actionCode = action.code || "";
       if (["wait_for_project_approval", "contact_administrator"].includes(actionCode)) {
         fillUserProjectForm(project);
-        focusWorkspaceControl("user-project-name");
+        focusWorkspaceControl("user-project-asset");
         return;
       }
 
@@ -3861,7 +3861,7 @@ function balanceStatusClass(status) {
         resetUserExchangeAccountForm();
         setFieldValue("user-exchange-project", project.id);
         syncUserExchangeMarketTypes("", "", project.symbol || "");
-        focusWorkspaceControl("user-exchange-label");
+        focusWorkspaceControl("user-exchange-id");
         return;
       }
 
@@ -3884,7 +3884,7 @@ function balanceStatusClass(status) {
       }
 
       fillUserProjectForm(project);
-      focusWorkspaceControl("user-project-name");
+      focusWorkspaceControl("user-project-asset");
     }
 
     function renderUserSetupReadiness(workspace) {
@@ -3939,7 +3939,7 @@ function balanceStatusClass(status) {
         button.textContent = uiText("Create Project");
         button.addEventListener("click", () => {
           resetUserProjectForm();
-          focusWorkspaceControl("user-project-name");
+          focusWorkspaceControl("user-project-asset");
         });
         row.append(detail, button);
         container.appendChild(row);
@@ -4132,6 +4132,14 @@ function balanceStatusClass(status) {
       return [project?.asset || "", exchange || "", marketType || "", apiVariant || ""].join(":");
     }
 
+    function workspaceDefaultSymbol(project, marketType = "spot") {
+      if (!project?.asset || !project?.quote_currency) return project?.symbol || "";
+      const spotSymbol = `${project.asset}/${project.quote_currency}`;
+      return ["swap", "future"].includes(marketType)
+        ? `${spotSymbol}:${project.quote_currency}`
+        : spotSymbol;
+    }
+
     function workspaceConnectionFresh(account) {
       if (typeof account?.connection_fresh === "boolean") {
         return account.connection_fresh;
@@ -4239,9 +4247,10 @@ function balanceStatusClass(status) {
 
       const projectId = document.getElementById("user-exchange-project")?.value || "";
       const project = workspaceProject(projectId);
+      const defaultSymbol = workspaceDefaultSymbol(project, selectedMarketType);
       const currentSymbol = preferredSymbol
         || document.getElementById("user-exchange-symbol")?.value
-        || project?.symbol
+        || defaultSymbol
         || "";
       const cacheKey = workspaceMarketCacheKey({
         project,
@@ -4257,8 +4266,8 @@ function balanceStatusClass(status) {
           : market.symbol,
         title: `${market.type || selectedMarketType} · ${market.active === false ? "inactive" : "active"}`,
       }));
-      if (project?.symbol && !symbolRows.some((row) => row.value === project.symbol)) {
-        symbolRows.unshift({ value: project.symbol, label: project.symbol });
+      if (defaultSymbol && !symbolRows.some((row) => row.value === defaultSymbol)) {
+        symbolRows.unshift({ value: defaultSymbol, label: defaultSymbol });
       }
       setSelectOptions(
         "user-exchange-symbol",
@@ -4742,15 +4751,30 @@ function balanceStatusClass(status) {
       const button = document.getElementById("user-project-save");
       button.disabled = true;
       const id = document.getElementById("user-project-id").value.trim();
+      const asset = document.getElementById("user-project-asset").value.trim().toUpperCase();
+      const quoteCurrency = document.getElementById("user-project-quote").value.trim().toUpperCase();
       const project = {
-        name: document.getElementById("user-project-name").value.trim(),
-        asset: document.getElementById("user-project-asset").value.trim().toUpperCase(),
-        quote_currency: document.getElementById("user-project-quote").value.trim().toUpperCase(),
+        name: document.getElementById("user-project-name").value.trim() || `${asset}/${quoteCurrency}`,
+        asset,
+        quote_currency: quoteCurrency,
       };
       if (id) project.id = id;
       try {
-        await postUserWorkspace({ action: "upsert_project", project });
+        const result = await postUserWorkspace({ action: "upsert_project", project });
+        const savedProject = result.project || (result.workspace?.projects || []).find((row) => (
+          (id && row.id === id)
+          || (!id && row.asset === asset && row.quote_currency === quoteCurrency)
+        ));
         resetUserProjectForm();
+        resetUserExchangeAccountForm();
+        if (savedProject) {
+          setFieldValue("user-exchange-project", savedProject.id);
+          syncUserExchangeMarketTypes("", "", workspaceDefaultSymbol(savedProject, "spot"));
+          setUserWorkspaceNotice(
+            `${uiText("Project saved")} · ${savedProject.symbol} · ${uiText("Select an exchange to continue.")}`
+          );
+          focusWorkspaceControl("user-exchange-id");
+        }
         renderUserWorkspace(currentUserWorkspace);
       } catch (error) {
         setUserWorkspaceNotice(`project update failed: ${error.message || error}`);
@@ -4796,13 +4820,13 @@ function balanceStatusClass(status) {
       }
     }
 
-    async function applyUserExchangeAccount(event) {
-      event.preventDefault();
-      if (userExchangeAccountFormBusy) return;
-      userExchangeAccountFormBusy = true;
-      const button = document.getElementById("user-exchange-save");
-      button.disabled = true;
-      const id = document.getElementById("user-exchange-account-id").value.trim();
+    function collectUserExchangeAccount() {
+      const exchangeId = document.getElementById("user-exchange-id").value;
+      const marketType = document.getElementById("user-exchange-market-type").value;
+      const exchange = workspaceExchange(exchangeId);
+      const marketLabel = marketType === "swap"
+        ? "Perpetual"
+        : marketType === "future" ? "Futures" : "Spot";
       const credentials = {};
       const apiKey = document.getElementById("user-exchange-api-key").value.trim();
       const secret = document.getElementById("user-exchange-secret").value.trim();
@@ -4812,20 +4836,58 @@ function balanceStatusClass(status) {
       if (passphrase) credentials.passphrase = passphrase;
       const account = {
         project_id: document.getElementById("user-exchange-project").value,
-        label: document.getElementById("user-exchange-label").value.trim(),
-        exchange: document.getElementById("user-exchange-id").value,
-        market_type: document.getElementById("user-exchange-market-type").value,
+        label: document.getElementById("user-exchange-label").value.trim()
+          || `${exchange?.label || exchangeId} ${marketLabel}`,
+        exchange: exchangeId,
+        market_type: marketType,
         api_variant: document.getElementById("user-exchange-api-variant").value,
         symbol: document.getElementById("user-exchange-symbol").value,
         enabled: document.getElementById("user-exchange-enabled").checked,
         withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
         trade_permission_confirmed: document.getElementById("user-exchange-trade-permission").checked,
       };
+      const id = document.getElementById("user-exchange-account-id").value.trim();
       if (id) account.id = id;
       if (Object.keys(credentials).length) account.credentials = credentials;
+      return account;
+    }
+
+    function findSavedUserExchangeAccount(workspace, draft) {
+      const accounts = workspace?.accounts || [];
+      if (draft.id) return accounts.find((row) => row.id === draft.id) || null;
+      return accounts.find((row) => (
+        row.project_id === draft.project_id
+        && row.exchange === draft.exchange
+        && row.market_type === draft.market_type
+        && row.api_variant === draft.api_variant
+        && row.symbol === draft.symbol
+      )) || null;
+    }
+
+    async function saveUserExchangeAccount({ testAfterSave = false } = {}) {
+      if (userExchangeAccountFormBusy) return;
+      userExchangeAccountFormBusy = true;
+      const saveButton = document.getElementById("user-exchange-save");
+      const saveTestButton = document.getElementById("user-exchange-save-test");
+      saveButton.disabled = true;
+      saveTestButton.disabled = true;
+      const account = collectUserExchangeAccount();
       try {
-        await postUserWorkspace({ action: "upsert_account", account });
-        resetUserExchangeAccountForm();
+        const result = await postUserWorkspace({ action: "upsert_account", account });
+        const savedAccount = result.account || findSavedUserExchangeAccount(result.workspace, account);
+        if (!savedAccount) throw new Error("saved account was not returned by the server");
+        if (testAfterSave) {
+          selectedUserExchangeAccountId = savedAccount.id;
+          fillUserExchangeAccountForm(savedAccount);
+          await testUserExchangeAccount(savedAccount, saveTestButton);
+          const refreshed = (currentUserWorkspace?.accounts || []).find(
+            (row) => row.id === savedAccount.id
+          );
+          if (refreshed) fillUserExchangeAccountForm(refreshed);
+        } else {
+          resetUserExchangeAccountForm();
+          setUserWorkspaceNotice(`${uiText("Account saved")} · ${savedAccount.label}`);
+        }
         renderUserWorkspace(currentUserWorkspace);
       } catch (error) {
         setUserWorkspaceNotice(`account update failed: ${error.message || error}`);
@@ -4834,8 +4896,18 @@ function balanceStatusClass(status) {
         document.getElementById("user-exchange-secret").value = "";
         document.getElementById("user-exchange-passphrase").value = "";
         userExchangeAccountFormBusy = false;
-        button.disabled = false;
+        saveButton.disabled = false;
+        saveTestButton.disabled = false;
       }
+    }
+
+    async function applyUserExchangeAccount(event) {
+      event.preventDefault();
+      await saveUserExchangeAccount();
+    }
+
+    async function saveAndTestUserExchangeAccount() {
+      await saveUserExchangeAccount({ testAfterSave: true });
     }
 
     async function deleteUserExchangeAccount(account, button) {
@@ -9123,6 +9195,7 @@ function balanceStatusClass(status) {
 	      }
 	    });
 	    document.getElementById("user-exchange-account-form").addEventListener("submit", applyUserExchangeAccount);
+	    document.getElementById("user-exchange-save-test").addEventListener("click", saveAndTestUserExchangeAccount);
 	    document.getElementById("user-exchange-new").addEventListener("click", resetUserExchangeAccountForm);
 	    document.getElementById("user-exchange-load-markets").addEventListener("click", loadUserExchangeMarkets);
 	    document.getElementById("user-exchange-test").addEventListener("click", testSelectedUserExchangeAccount);

@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260720-mm-simple2" defer></script>',
+            '<script src="/static/app.js?v=20260802-workspace-quick1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260720-mm-simple2" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-workspace-quick1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -230,6 +230,12 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertIn('id="user-setup-readiness"', INDEX_HTML)
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
+        self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
+        self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
+        self.assertIn('<summary>Existing Projects &amp; Accounts</summary>', INDEX_HTML)
+        self.assertIn('<summary>Advanced Risk Profile</summary>', INDEX_HTML)
+        self.assertIn('<summary>Paper Strategy Lab</summary>', INDEX_HTML)
+        self.assertNotIn('id="user-project-name" type="text" maxlength="80" placeholder="ACS Trading" required', INDEX_HTML)
         self.assertIn('id="backtest-section"', INDEX_HTML)
         self.assertIn('id="backtest-run"', INDEX_HTML)
         self.assertIn("Uses public historical candles", INDEX_HTML)
@@ -331,7 +337,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260720-mm-simple2"),
+            INDEX_HTML.index("/static/styles.css?v=20260802-workspace-quick1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -438,7 +444,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260720-mm-simple2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260802-workspace-quick1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -7974,6 +7980,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     )
                     project_payload = await project_response.json()
                     project = project_payload["workspace"]["projects"][0]
+                    self.assertEqual(project_payload["project"]["id"], project["id"])
 
                     with patch.object(
                         app["workspace_market_discovery"],
@@ -8026,6 +8033,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     )
                     account_payload = await account_response.json()
                     account = account_payload["workspace"]["accounts"][0]
+                    self.assertEqual(account_payload["account"]["id"], account["id"])
 
                     premature_enable_response = await client.post(
                         "/api/user-workspace",
