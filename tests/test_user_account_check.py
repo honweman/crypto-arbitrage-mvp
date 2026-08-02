@@ -110,6 +110,12 @@ class FakeBybitWorkspaceManager(FakeWorkspaceManager):
         super().__init__(credentials_by_key=credentials_by_key)
         self.client_instance = FakeBybitWorkspaceClient()
 
+    async def fetch_balance(self, _cfg):
+        return {
+            "ACS": {"free": 0.0, "used": 0.0, "total": 0.0},
+            "USDC": {"free": 0.0, "used": 0.0, "total": 0.0},
+        }
+
 
 class FailingWorkspaceManager(FakeWorkspaceManager):
     async def fetch_balance(self, _cfg):
@@ -272,6 +278,12 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(funding["currency"], "ACS")
         self.assertEqual(funding["total"], 500.0)
         self.assertFalse(funding["tradable"])
+        self.assertFalse(
+            any(
+                row["wallet"] == "trading" and row["currency"] == "USDC"
+                for row in result["balances"]
+            )
+        )
 
     async def test_account_check_service_applies_per_account_cooldown(self) -> None:
         project = UserProject.from_dict(

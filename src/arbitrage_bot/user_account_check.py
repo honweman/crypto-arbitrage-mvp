@@ -169,11 +169,7 @@ def _balance_rows(
             "wallet": wallet,
             "tradable": tradable,
         }
-        if any(
-            value not in {None, 0.0}
-            for value in row.values()
-            if not isinstance(value, str)
-        ):
+        if any(row[field] not in {None, 0.0} for field in ("free", "used", "total")):
             rows.append(row)
     return rows
 
