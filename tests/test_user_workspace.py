@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -27,6 +29,65 @@ MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_legacy_api_connection_is_normalized_and_keeps_large_balance_snapshot(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_MASTER_KEY": MASTER_KEY},
+                clear=False,
+            ),
+        ):
+            path = Path(tmp) / "workspace.sqlite3"
+            store = UserWorkspaceStore(path, master_key_env="TEST_MASTER_KEY")
+            connection = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "label": "Binance Main",
+                        "exchange": "binance",
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                        "balance_snapshot": [
+                            {"currency": f"ASSET{index}", "total": index + 1}
+                            for index in range(150)
+                        ],
+                    }
+                ),
+                credentials={"api_key": "key", "secret": "secret"},
+            )
+            with sqlite3.connect(path) as database:
+                raw = json.loads(
+                    database.execute(
+                        "SELECT payload FROM user_api_connections WHERE id = ?",
+                        (connection.id,),
+                    ).fetchone()[0]
+                )
+                raw.pop("market_types")
+                raw.pop("market_scope")
+                database.execute(
+                    "UPDATE user_api_connections SET payload = ? WHERE id = ?",
+                    (json.dumps(raw), connection.id),
+                )
+                database.commit()
+
+            restarted = UserWorkspaceStore(path, master_key_env="TEST_MASTER_KEY")
+            normalized = restarted.get_api_connection(connection.id)
+            with sqlite3.connect(path) as database:
+                stored = json.loads(
+                    database.execute(
+                        "SELECT payload FROM user_api_connections WHERE id = ?",
+                        (connection.id,),
+                    ).fetchone()[0]
+                )
+
+        self.assertEqual(normalized.market_types, ("spot", "swap"))
+        self.assertEqual(len(normalized.balance_snapshot), 150)
+        self.assertEqual(stored["market_types"], ["spot", "swap"])
+        self.assertEqual(stored["market_scope"], "unified")
+
     def test_global_api_connection_is_independent_of_projects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -62,9 +123,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 self.assertEqual(payload["projects"], [])
                 self.assertEqual(payload["accounts"], [])
                 self.assertEqual(payload["connections"][0]["id"], api_connection.id)
-                self.assertTrue(
-                    payload["connections"][0]["credentials_configured"]
-                )
+                self.assertTrue(payload["connections"][0]["credentials_configured"])
                 self.assertEqual(
                     store.delete_connection(
                         api_connection.id,
@@ -119,9 +178,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 {row["id"] for row in payload["dex_venue_catalog"]},
                 {"hyperliquid", "polymarket", "dydx", "aster"},
             )
-            exchange_catalog = {
-                row["id"]: row for row in payload["exchange_catalog"]
-            }
+            exchange_catalog = {row["id"]: row for row in payload["exchange_catalog"]}
             self.assertEqual(
                 exchange_catalog["hyperliquid"]["market_types"],
                 ["spot", "swap"],
@@ -193,7 +250,9 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             self.assertFalse(link.to_dict()["trading_authorized"])
             self.assertEqual(payload["summary"]["venue_connection_count"], 1)
             self.assertEqual(payload["summary"]["healthy_venue_connection_count"], 1)
-            self.assertEqual(payload["venue_connections"][0]["detail"], {"position_count": 3})
+            self.assertEqual(
+                payload["venue_connections"][0]["detail"], {"position_count": 3}
+            )
             restarted.delete_wallet(wallet.id, owner_email="trader@example.com")
             self.assertEqual(
                 restarted.list_venue_connections(

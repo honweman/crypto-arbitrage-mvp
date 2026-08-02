@@ -336,11 +336,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-unified-account1" defer></script>',
+            '<script src="/static/app.js?v=20260802-binance-sync1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-unified-account1" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-binance-sync1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -1183,7 +1183,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("data-project-selector", APP_JS)
         self.assertIn("exchangeSelector", APP_JS)
         self.assertIn("data-symbol-selector", APP_JS)
-        self.assertIn("Account / Project / Exchange / Pair", HTML)
+        self.assertIn("Account / Currency / Exchange / Pair", HTML)
         self.assertIn('id="strategy-settings-section"', HTML)
         self.assertIn('id="strategy-settings-cards"', HTML)
         self.assertIn('id="status-reasons-section"', HTML)

@@ -14,6 +14,8 @@ from .user_workspace import UserApiConnection, UserExchangeAccount, UserWorkspac
 LOGGER = logging.getLogger(__name__)
 HEALTHY_REFRESH_SECONDS = 6 * 60 * 60.0
 ERROR_RETRY_SECONDS = 5 * 60.0
+API_CONNECTION_HEALTHY_REFRESH_SECONDS = 2 * 60.0
+API_CONNECTION_ERROR_RETRY_SECONDS = 60.0
 DEFAULT_LOOP_SECONDS = 30.0
 DEFAULT_MAX_CONNECTION_CONCURRENCY = 2
 DEFAULT_MAX_BATCH = 20
@@ -30,6 +32,21 @@ def workspace_account_check_due(
         HEALTHY_REFRESH_SECONDS
         if account.connection_status == "healthy"
         else ERROR_RETRY_SECONDS
+    )
+    return current >= checked_at + interval
+
+
+def workspace_api_connection_check_due(
+    api_connection: UserApiConnection,
+    *,
+    now: float | None = None,
+) -> bool:
+    current = float(now if now is not None else time.time())
+    checked_at = float(api_connection.connection_checked_at or 0.0)
+    interval = (
+        API_CONNECTION_HEALTHY_REFRESH_SECONDS
+        if api_connection.connection_status == "healthy"
+        else API_CONNECTION_ERROR_RETRY_SECONDS
     )
     return current >= checked_at + interval
 
@@ -89,7 +106,7 @@ async def refresh_workspace_api_connections(
             candidates,
             key=lambda item: float(item.connection_checked_at or 0.0),
         )
-        if (force or workspace_account_check_due(api_connection, now=current))
+        if (force or workspace_api_connection_check_due(api_connection, now=current))
         and api_connection.connection_status in {"healthy", "error"}
         and api_connection.withdrawal_disabled_confirmed
         and api_connection.trade_permission_confirmed
@@ -199,9 +216,7 @@ async def refresh_workspace_accounts(
             candidates,
             key=lambda item: float(item.connection_checked_at or 0.0),
         )
-        if (
-            force or workspace_account_check_due(account, now=current)
-        )
+        if (force or workspace_account_check_due(account, now=current))
         and account.connection_status in {"healthy", "error"}
         and account.withdrawal_disabled_confirmed
         and account.trade_permission_confirmed
@@ -219,15 +234,15 @@ async def refresh_workspace_accounts(
         async with semaphore:
             results: list[UserExchangeAccount | None] = []
             for account in rows:
-                results.append(
-                    await refresh_workspace_account(store, checker, account)
-                )
+                results.append(await refresh_workspace_account(store, checker, account))
             return results
 
     grouped_results = await asyncio.gather(
         *(run_group(rows) for rows in grouped.values())
     )
-    refreshed = [item for group in grouped_results for item in group if item is not None]
+    refreshed = [
+        item for group in grouped_results for item in group if item is not None
+    ]
     return {
         "candidate_count": len(candidates),
         "due_count": len(due),

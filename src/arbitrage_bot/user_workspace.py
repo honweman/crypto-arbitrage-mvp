@@ -55,7 +55,10 @@ def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list):
         return ()
     rows: list[dict[str, Any]] = []
-    for item in value[:100]:
+    # Large exchange accounts can legitimately contain hundreds of non-zero
+    # dust balances.  The old 100-row limit could discard stablecoin balances
+    # after a unified spot + derivatives refresh.
+    for item in value[:500]:
         if not isinstance(item, dict):
             continue
         currency = str(item.get("currency") or "").strip().upper()[:20]
@@ -88,6 +91,7 @@ def _optional_non_negative_float(value: Any) -> float | None:
 def _optional_non_negative_int(value: Any) -> int | None:
     numeric = _optional_non_negative_float(value)
     return int(numeric) if numeric is not None else None
+
 
 EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
     {
@@ -570,21 +574,22 @@ class UserApiConnection:
         market_type = str(raw.get("market_type") or "").strip().lower()
         if market_type not in market_types:
             market_type = "spot" if "spot" in market_types else market_types[0]
-        if (
-            market_type not in MARKET_TYPES
-            or market_type not in supported_market_types
-        ):
+        if market_type not in MARKET_TYPES or market_type not in supported_market_types:
             raise ValueError(f"{exchange} does not support {market_type} accounts")
         variants = {
             str(item.get("id") or "")
             for item in exchange_row.get("variants", [])
             if isinstance(item, dict)
         }
-        api_variant = str(
-            raw.get("api_variant")
-            or exchange_row.get("default_variant")
-            or "default"
-        ).strip().lower()
+        api_variant = (
+            str(
+                raw.get("api_variant")
+                or exchange_row.get("default_variant")
+                or "default"
+            )
+            .strip()
+            .lower()
+        )
         if api_variant not in variants:
             raise ValueError(f"{exchange} does not support API variant {api_variant}")
         status = str(raw.get("connection_status") or "unverified").strip().lower()
@@ -765,9 +770,7 @@ class UserExchangeAccount:
                 max_length=240,
             ),
             balance_snapshot=_clean_balance_snapshot(raw.get("balance_snapshot")),
-            open_order_count=_optional_non_negative_int(
-                raw.get("open_order_count")
-            ),
+            open_order_count=_optional_non_negative_int(raw.get("open_order_count")),
             connection_latency_ms=_optional_non_negative_float(
                 raw.get("connection_latency_ms")
             ),
@@ -1102,6 +1105,7 @@ class UserWorkspaceStore:
             )
             self._migrate_legacy_accounts(connection)
             self._migrate_global_api_connections(connection)
+            self._normalize_api_connections(connection)
             connection.commit()
         try:
             os.chmod(self.path, 0o600)
@@ -1195,7 +1199,11 @@ class UserWorkspaceStore:
                     ),
                     "connection_checked_at": checked or None,
                     "connection_error": next(
-                        (row.connection_error for row in accounts if row.connection_error),
+                        (
+                            row.connection_error
+                            for row in accounts
+                            if row.connection_error
+                        ),
                         "",
                     ),
                     "balance_snapshot": first.balance_snapshot,
@@ -1267,6 +1275,21 @@ class UserWorkspaceStore:
                 )
             finally:
                 credentials.clear()
+
+    def _normalize_api_connections(self, connection: sqlite3.Connection) -> None:
+        """Persist canonical fields added to legacy global API connections."""
+        rows = connection.execute(
+            "SELECT id, payload FROM user_api_connections"
+        ).fetchall()
+        for row in rows:
+            raw = json.loads(row["payload"])
+            normalized = UserApiConnection.from_dict(raw).to_dict()
+            if raw == normalized:
+                continue
+            connection.execute(
+                "UPDATE user_api_connections SET payload = ? WHERE id = ?",
+                (self._dump(normalized), row["id"]),
+            )
 
     @staticmethod
     def _dump(payload: dict[str, Any]) -> str:
@@ -3348,9 +3371,10 @@ class UserWorkspaceStore:
                 "DELETE FROM user_hyperliquid_authorizations WHERE account_id = ?",
                 (account_id,),
             )
-            if account.connection_id != account.id or self.get_api_connection(
-                account.id
-            ) is None:
+            if (
+                account.connection_id != account.id
+                or self.get_api_connection(account.id) is None
+            ):
                 connection.execute(
                     "DELETE FROM user_api_credentials WHERE account_id = ?",
                     (account_id,),
@@ -3384,9 +3408,7 @@ class UserWorkspaceStore:
                 if referenced_by:
                     raise ValueError(
                         "delete or update strategies using this connection first: "
-                        + ", ".join(
-                            strategy.name for strategy in referenced_by[:5]
-                        )
+                        + ", ".join(strategy.name for strategy in referenced_by[:5])
                     )
                 if account.enabled:
                     raise ValueError(
@@ -3511,9 +3533,7 @@ class UserWorkspaceStore:
                 (old,),
             ).fetchall()
             for row in api_connection_rows:
-                api_connection = UserApiConnection.from_dict(
-                    json.loads(row["payload"])
-                )
+                api_connection = UserApiConnection.from_dict(json.loads(row["payload"]))
                 updated_api_connection = replace(
                     api_connection,
                     owner_email=new,

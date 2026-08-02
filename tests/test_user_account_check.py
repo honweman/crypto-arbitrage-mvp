@@ -125,6 +125,14 @@ class FakeBybitWorkspaceManager(FakeWorkspaceManager):
         }
 
 
+class FakeBinanceWorkspaceManager(FakeWorkspaceManager):
+    async def fetch_balance(self, cfg):
+        total = 25.0 if cfg.market_type == "spot" else 100.0
+        return {
+            "USDT": {"free": total, "used": 0.0, "total": total},
+        }
+
+
 class FailingWorkspaceManager(FakeWorkspaceManager):
     async def fetch_balance(self, _cfg):
         secret = next(iter(self.credentials_by_key.values()))["secret"]
@@ -191,7 +199,9 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["cost_min"], 1.0)
         self.assertTrue(FakeWorkspaceManager.instances[-1].closed)
 
-    async def test_account_check_uses_direct_credentials_and_returns_safe_summary(self) -> None:
+    async def test_account_check_uses_direct_credentials_and_returns_safe_summary(
+        self,
+    ) -> None:
         project = UserProject.from_dict(
             {
                 "owner_email": "member@example.com",
@@ -256,7 +266,9 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[redacted]", result["error"])
         self.assertNotIn("leaky-secret", result["error"])
 
-    async def test_bybit_account_check_includes_non_tradable_funding_wallet(self) -> None:
+    async def test_bybit_account_check_includes_non_tradable_funding_wallet(
+        self,
+    ) -> None:
         project = UserProject.from_dict(
             {
                 "owner_email": "member@example.com",
@@ -280,9 +292,7 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             manager_factory=FakeBybitWorkspaceManager,
         )
 
-        funding = next(
-            row for row in result["balances"] if row["wallet"] == "funding"
-        )
+        funding = next(row for row in result["balances"] if row["wallet"] == "funding")
         self.assertEqual(funding["currency"], "ACS")
         self.assertEqual(funding["total"], 500.0)
         self.assertFalse(funding["tradable"])
@@ -316,6 +326,31 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["open_order_count"], 2)
         self.assertEqual(len(FakeWorkspaceManager.instances), 2)
         self.assertTrue(all(row.closed for row in FakeWorkspaceManager.instances))
+
+    async def test_binance_unified_check_keeps_spot_and_futures_wallets(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "Binance Main",
+                "exchange": "binance",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeBinanceWorkspaceManager,
+        )
+
+        balances = {
+            (row["currency"], row["wallet"]): row["total"] for row in result["balances"]
+        }
+        self.assertEqual(
+            balances,
+            {("USDT", "spot"): 25.0, ("USDT", "swap"): 100.0},
+        )
 
     async def test_account_check_service_applies_per_account_cooldown(self) -> None:
         project = UserProject.from_dict(

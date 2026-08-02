@@ -383,7 +383,15 @@ async def check_workspace_api_connection(
                 if isinstance(value, dict)
                 and any(name in value for name in ("free", "used", "total"))
             )
-            balances = _balance_rows(balance, currencies)
+            # Binance keeps spot and USD-M futures in separate wallets.  Keeping
+            # both as a generic "trading" wallet would make the later merge drop
+            # one side whenever the same currency exists in both scopes.
+            wallet = (
+                market_type
+                if api_connection.exchange == "binance" and len(market_types) > 1
+                else "trading"
+            )
+            balances = _balance_rows(balance, currencies, wallet=wallet)
             warnings: list[str] = []
             open_orders: list[dict[str, Any]] = []
             try:
@@ -484,9 +492,7 @@ async def check_workspace_api_connection(
         },
         "balances": list(balance_rows.values()),
         "balance_warnings": warnings,
-        "open_order_count": sum(
-            result["open_order_count"] for result in scope_results
-        ),
+        "open_order_count": sum(result["open_order_count"] for result in scope_results),
         "permissions": {
             "private_account_read": "verified",
             "open_order_read": "verified" if not warnings else "partially_verified",

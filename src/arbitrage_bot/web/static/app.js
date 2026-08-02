@@ -834,7 +834,11 @@ function balanceStatusClass(status) {
           const wallet = String(row.wallet || "trading").toLowerCase();
           const walletLabel = wallet === "funding"
             ? uiText("Funding wallet")
-            : uiText("Trading wallet");
+            : wallet === "spot"
+              ? uiText("Spot wallet")
+              : wallet === "swap"
+                ? uiText("Futures wallet")
+                : uiText("Trading wallet");
           const currencyLabel = `${row.currency} · ${walletLabel}`;
           const usedTitle = reserved > 0
             ? `Open-order reserve ${formatBalanceAmount(reserved)} ${row.currency}`
@@ -4614,6 +4618,10 @@ function balanceStatusClass(status) {
           : connection.status === "error"
             ? `${connection.error_count || 1} ${uiText("market checks failed")}`
             : "Needs connection test";
+        const balanceCount = (connection.balances || []).length;
+        const balanceStatus = connection.checked_at
+          ? `${balanceCount} ${uiText("balances")} · ${formatAge(connection.checked_at)}`
+          : uiText("Balance not checked");
         const connectionClass = connection.status === "healthy"
           ? "ok"
           : connection.status === "error"
@@ -4633,7 +4641,7 @@ function balanceStatusClass(status) {
           <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${marketScope}${variantText}`)}</span></td>
           <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
           <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
-          <td class="${connectionClass}">${escapeHtml(uiText(statusText))}<br><span class="subtle">${connection.enabled_count || 0} ${escapeHtml(uiText("enabled"))}</span></td>
+          <td class="${connectionClass}">${escapeHtml(uiText(statusText))}<br><span class="subtle">${escapeHtml(balanceStatus)} · ${connection.enabled_count || 0} ${escapeHtml(uiText("enabled"))}</span></td>
           <td><div class="workspace-table-actions"></div></td>
         `;
         const actions = tr.querySelector(".workspace-table-actions");

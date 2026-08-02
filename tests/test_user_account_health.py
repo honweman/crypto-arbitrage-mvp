@@ -9,12 +9,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arbitrage_bot.user_account_health import (
+    API_CONNECTION_ERROR_RETRY_SECONDS,
+    API_CONNECTION_HEALTHY_REFRESH_SECONDS,
     ERROR_RETRY_SECONDS,
     HEALTHY_REFRESH_SECONDS,
     refresh_workspace_accounts,
     workspace_account_check_due,
+    workspace_api_connection_check_due,
 )
 from arbitrage_bot.user_workspace import (
+    UserApiConnection,
     UserExchangeAccount,
     UserProject,
     UserWorkspaceStore,
@@ -77,10 +81,15 @@ class WorkspaceAccountHealthTest(unittest.IsolatedAsyncioTestCase):
         )
         return store, account
 
-    async def test_due_health_refresh_enables_account_and_persists_balance(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {"TEST_ACCOUNT_HEALTH_KEY": MASTER_KEY},
+    async def test_due_health_refresh_enables_account_and_persists_balance(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                "os.environ",
+                {"TEST_ACCOUNT_HEALTH_KEY": MASTER_KEY},
+            ),
         ):
             store, account = self._store_with_account(Path(tmp) / "workspace.sqlite3")
             checker = FakeChecker(
@@ -109,7 +118,9 @@ class WorkspaceAccountHealthTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.balance_snapshot[0]["total"], 100.0)
         self.assertEqual(refreshed.open_order_count, 1)
 
-    async def test_refresh_intervals_prevent_healthy_account_polling_churn(self) -> None:
+    async def test_refresh_intervals_prevent_healthy_account_polling_churn(
+        self,
+    ) -> None:
         now = time.time()
         healthy = UserExchangeAccount.from_dict(
             {
@@ -149,5 +160,45 @@ class WorkspaceAccountHealthTest(unittest.IsolatedAsyncioTestCase):
             workspace_account_check_due(
                 failed,
                 now=now + ERROR_RETRY_SECONDS,
+            )
+        )
+
+    async def test_global_api_balances_refresh_more_often_than_market_bindings(
+        self,
+    ) -> None:
+        now = time.time()
+        healthy = UserApiConnection.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "exchange": "binance",
+                "connection_status": "healthy",
+                "connection_checked_at": now,
+            }
+        )
+        failed = replace(healthy, connection_status="error")
+
+        self.assertLess(API_CONNECTION_HEALTHY_REFRESH_SECONDS, HEALTHY_REFRESH_SECONDS)
+        self.assertFalse(
+            workspace_api_connection_check_due(
+                healthy,
+                now=now + API_CONNECTION_HEALTHY_REFRESH_SECONDS - 1,
+            )
+        )
+        self.assertTrue(
+            workspace_api_connection_check_due(
+                healthy,
+                now=now + API_CONNECTION_HEALTHY_REFRESH_SECONDS,
+            )
+        )
+        self.assertFalse(
+            workspace_api_connection_check_due(
+                failed,
+                now=now + API_CONNECTION_ERROR_RETRY_SECONDS - 1,
+            )
+        )
+        self.assertTrue(
+            workspace_api_connection_check_due(
+                failed,
+                now=now + API_CONNECTION_ERROR_RETRY_SECONDS,
             )
         )
