@@ -248,6 +248,7 @@ from ..user_account_check import (
     WorkspaceAccountCheckService,
     WorkspaceMarketDiscoveryService,
 )
+from ..user_account_health import workspace_account_health_loop
 from ..user_paper_engine import (
     UserPaperTradingService,
     user_paper_trading_task_loop,
@@ -2951,6 +2952,158 @@ def build_user_workspace_payload(
         }
 
 
+def _merge_workspace_account_balances(
+    account_balances: dict[str, Any] | None,
+    workspace: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(account_balances or {})
+    accounts = [
+        dict(row)
+        for row in merged.get("accounts", [])
+        if isinstance(row, dict)
+    ]
+    existing_connection_ids = {
+        str(row.get("workspace_connection_id") or "")
+        for row in accounts
+        if row.get("workspace_connection_id")
+    }
+    workspace_accounts: list[dict[str, Any]] = []
+    for connection in (workspace or {}).get("connections", []) or []:
+        if not isinstance(connection, dict):
+            continue
+        connection_id = str(connection.get("id") or "").strip()
+        if not connection_id or connection_id in existing_connection_ids:
+            continue
+        connection_status = str(connection.get("status") or "unverified")
+        checked_at = _number_or_none(connection.get("checked_at"))
+        markets = [
+            row
+            for row in connection.get("markets", []) or []
+            if isinstance(row, dict)
+        ]
+        symbols = sorted(
+            {
+                str(row.get("symbol") or "").strip()
+                for row in markets
+                if str(row.get("symbol") or "").strip()
+            }
+        )
+        status = (
+            "ok"
+            if connection_status == "healthy"
+            else "error"
+            if connection_status == "error"
+            else "warning"
+        )
+        balances = [
+            dict(row)
+            for row in connection.get("balances", []) or []
+            if isinstance(row, dict) and row.get("currency")
+        ]
+        open_order_count = max(
+            0,
+            int(_number_or_none(connection.get("open_order_count")) or 0),
+        )
+        workspace_accounts.append(
+            {
+                "exchange": connection_id,
+                "label": str(
+                    connection.get("label")
+                    or connection.get("exchange")
+                    or connection_id
+                ),
+                "id": str(connection.get("exchange") or ""),
+                "market_type": str(connection.get("market_type") or "spot"),
+                "symbols": symbols,
+                "auth": {
+                    "configured": bool(connection.get("credentials_configured")),
+                    "private_checks_enabled": True,
+                    "missing_env": [],
+                    "storage": "encrypted",
+                },
+                "status": status,
+                "warnings": (
+                    []
+                    if status == "ok"
+                    else ["connection test is required or no longer fresh"]
+                ),
+                "errors": (
+                    ["workspace account connection check failed"]
+                    if status == "error"
+                    else []
+                ),
+                "balance": {
+                    "checked": checked_at is not None,
+                    "skipped_reason": (
+                        None if checked_at is not None else "connection not tested"
+                    ),
+                    "currencies": balances,
+                    "open_order_reserves": {
+                        "currencies": {},
+                        "open_order_count": open_order_count,
+                        "warnings": [],
+                    },
+                },
+                "markets": [
+                    {
+                        "exchange": connection_id,
+                        "symbol": str(row.get("symbol") or ""),
+                        "status": (
+                            "ok" if row.get("connection_status") == "healthy" else status
+                        ),
+                        "market": {
+                            "found": bool(row.get("symbol")),
+                            "symbol": str(row.get("symbol") or ""),
+                        },
+                        "error": None,
+                    }
+                    for row in markets
+                ],
+                "source": "user_workspace",
+                "workspace_connection_id": connection_id,
+                "live_enabled": bool(connection.get("live_enabled")),
+                "latency_ms": _number_or_none(connection.get("latency_ms")),
+                "checked_at": checked_at,
+            }
+        )
+
+    accounts.extend(workspace_accounts)
+    errors = [
+        str(error)
+        for account in accounts
+        for error in account.get("errors", []) or []
+    ]
+    warnings = [
+        str(warning)
+        for account in accounts
+        for warning in account.get("warnings", []) or []
+    ]
+    last_finished = max(
+        [
+            float(value)
+            for value in [
+                _number_or_none(merged.get("last_finished")),
+                *[row.get("checked_at") for row in workspace_accounts],
+            ]
+            if value is not None
+        ]
+        or [0.0]
+    )
+    return {
+        **merged,
+        "status": _account_balance_status(accounts),
+        "accounts": accounts,
+        "totals": _aggregate_account_balance_totals(accounts),
+        "checked_account_count": sum(
+            1 for account in accounts if account.get("balance", {}).get("checked")
+        ),
+        "total_account_count": len(accounts),
+        "last_finished": last_finished or None,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
 def build_strategy_center_payload(
     cfg: BotConfig,
     store: StrategyCenterStore | None = None,
@@ -4898,21 +5051,24 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     quant_sections = {
         item.strip() for item in str(sections or "").split(",") if item.strip()
     }
+    workspace_payload: dict[str, Any] | None = None
     if view in (None, "settings") or (
         view == "quant" and (sections is None or "backtest-points" in quant_sections)
     ):
-        payload["user_workspace"] = build_user_workspace_payload(
+        workspace_payload = build_user_workspace_payload(
             _user_workspace_store(request),
             user=requesting_user,
             paper_store=_user_paper_store(request),
         )
     elif requesting_user is not None:
-        payload["user_workspace"] = _user_workspace_store(
+        workspace_payload = _user_workspace_store(
             request
         ).public_connections_payload(
             owner_email=requesting_user.email,
             is_admin=False,
         )
+    if workspace_payload is not None:
+        payload["user_workspace"] = workspace_payload
     if (
         requesting_user is not None
         and requesting_user.role == "admin"
@@ -4921,11 +5077,17 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         payload["admin_users"] = [
             _public_admin_user_dict(item) for item in _user_store(request).list_users()
         ]
-    return _filter_state_payload_for_user(
+    filtered = _filter_state_payload_for_user(
         payload,
         cfg=runtime_cfg,
         user=requesting_user,
     )
+    if requesting_user is not None and workspace_payload is not None:
+        filtered["account_balances"] = _merge_workspace_account_balances(
+            filtered.get("account_balances"),
+            workspace_payload,
+        )
+    return filtered
 
 
 async def api_state(request: web.Request) -> web.Response:
@@ -7408,6 +7570,9 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             )
             if not accounts:
                 raise ValueError(f"API connection not found: {connection_id}")
+            for account in accounts:
+                if account.enabled:
+                    store.upsert_account(replace(account, enabled=False))
             deleted_count = store.delete_connection(
                 connection_id,
                 owner_email=user.email,
@@ -8878,6 +9043,16 @@ def create_app(
             ),
             name="venue-connection-health",
         )
+        workspace_account_health_task = asyncio.create_task(
+            workspace_account_health_loop(
+                user_workspace_store,
+                workspace_account_checker,
+                leader_check=lambda: (
+                    supervisor.role == "leader" and supervisor.leader_ready
+                ),
+            ),
+            name="workspace-account-health",
+        )
         backup_task: asyncio.Task[Any] | None = None
         if cfg.backup.enabled:
             backup_task = asyncio.create_task(
@@ -8892,6 +9067,7 @@ def create_app(
                 guard_task.cancel()
             supervisor_task.cancel()
             venue_health_task.cancel()
+            workspace_account_health_task.cancel()
             if backup_task is not None:
                 backup_task.cancel()
             if guard_tasks:
@@ -8899,6 +9075,10 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await supervisor_task
             await asyncio.gather(venue_health_task, return_exceptions=True)
+            await asyncio.gather(
+                workspace_account_health_task,
+                return_exceptions=True,
+            )
             if backup_task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await backup_task

@@ -2210,9 +2210,19 @@ class UserWorkspaceStore:
         account = self.get_account(account_id)
         if account is None:
             raise ValueError(f"exchange account not found: {account_id}")
+        project = self.get_project(account.project_id)
+        credentials_configured = self.credential_status(account.id)["configured"]
+        live_account_ready = bool(
+            normalized_status == "healthy"
+            and project is not None
+            and project.status == "active"
+            and account.withdrawal_disabled_confirmed
+            and account.trade_permission_confirmed
+            and credentials_configured
+        )
         updated = replace(
             account,
-            enabled=account.enabled if normalized_status == "healthy" else False,
+            enabled=live_account_ready,
             connection_status=normalized_status,
             connection_checked_at=_now(),
             connection_error=_clean_text(error, max_length=240),
@@ -3145,6 +3155,9 @@ class UserWorkspaceStore:
                 else "healthy"
                 if market_count and group["healthy_count"] == market_count
                 else "unverified"
+            )
+            group["live_enabled"] = bool(
+                market_count and group["enabled_count"] == market_count
             )
             connection_rows.append(group)
         connection_rows.sort(

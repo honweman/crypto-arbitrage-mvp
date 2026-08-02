@@ -217,11 +217,11 @@ def make_config(
 class WebMonitorTest(unittest.TestCase):
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-account-sync2" defer></script>',
+            '<script src="/static/app.js?v=20260802-account-unify1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-account-sync2" defer></script>',
+            '<script src="/static/i18n.js?v=20260802-account-unify1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -235,9 +235,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('<summary>Connected Accounts</summary>', INDEX_HTML)
         self.assertIn('<summary>Project Management</summary>', INDEX_HTML)
         self.assertIn('id="profile-account"', INDEX_HTML)
-        self.assertIn('id="user-account-monitor-rows"', INDEX_HTML)
-        self.assertIn('id="user-account-trading-rows"', INDEX_HTML)
-        self.assertIn('id="user-account-quant-rows"', INDEX_HTML)
+        self.assertNotIn('id="user-account-monitor-rows"', INDEX_HTML)
+        self.assertNotIn('id="user-account-trading-rows"', INDEX_HTML)
+        self.assertNotIn('id="user-account-quant-rows"', INDEX_HTML)
         self.assertIn('id="user-exchange-project"></select>', INDEX_HTML)
         self.assertNotIn('id="user-exchange-project" required', INDEX_HTML)
         self.assertNotIn('id="user-exchange-symbol" required', INDEX_HTML)
@@ -345,7 +345,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260802-account-sync2"),
+            INDEX_HTML.index("/static/styles.css?v=20260802-account-unify1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -452,7 +452,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260802-account-sync2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260802-account-unify1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -8559,6 +8559,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(tested_connection["balances"][0]["total"], 100.0)
                     self.assertEqual(tested_connection["open_order_count"], 2)
                     self.assertEqual(tested_connection["latency_ms"], 9.0)
+                    self.assertEqual(tested_connection["enabled_count"], 2)
+                    self.assertTrue(tested_connection["live_enabled"])
                     trading_state = await (
                         await client.get("/api/state?view=trading")
                     ).json()
@@ -8566,6 +8568,14 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         trading_state["user_workspace"]["connections"][0]["id"],
                         connection_id,
                     )
+                    merged_balances = trading_state["account_balances"]
+                    self.assertEqual(merged_balances["total_account_count"], 1)
+                    self.assertEqual(
+                        merged_balances["accounts"][0]["workspace_connection_id"],
+                        connection_id,
+                    )
+                    self.assertTrue(merged_balances["accounts"][0]["live_enabled"])
+                    self.assertEqual(merged_balances["totals"][0]["total"], 100.0)
 
                     delete_response = await client.post(
                         "/api/user-workspace",

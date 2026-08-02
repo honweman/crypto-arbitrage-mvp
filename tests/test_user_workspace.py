@@ -350,15 +350,14 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             account_row = payload["accounts"][0]
             self.assertEqual(
                 account_row["readiness"]["next_action"]["code"],
-                "enable_account",
+                "complete",
             )
+            self.assertTrue(account.enabled)
+            self.assertTrue(account_row["enabled"])
+            self.assertEqual(account_row["readiness"]["completed_steps"], 8)
             self.assertGreater(
                 account_row["readiness"]["connection_remaining_seconds"],
                 86_000,
-            )
-
-            account = store.upsert_account(
-                UserExchangeAccount.from_dict({**account.to_dict(), "enabled": True})
             )
             payload = store.public_payload(
                 owner_email=project.owner_email,
