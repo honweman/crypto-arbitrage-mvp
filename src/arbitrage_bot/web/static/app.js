@@ -21,6 +21,11 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const LIVE_AUTO_BUY_SELL_CONFIRMATION = "ENABLE LIVE AUTO BUY SELL";
 	    const LIVE_MARKET_MAKER_CONFIRMATION = "ENABLE LIVE MARKET MAKER";
 	    const LIVE_REBALANCE_CONFIRMATION = "ENABLE LIVE REBALANCE";
+	    const SPOT_DUST_VALUE_USD = 10;
+	    const CASH_BALANCE_CURRENCIES = new Set([
+	      "USD", "USDC", "USDT", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD",
+	      "KRW", "EUR", "GBP", "JPY", "CNY", "CNH", "HKD", "SGD",
+	    ]);
 	    let refreshTimer = null;
 	    let mutationRefreshTimer = null;
 	    const PAGE_SECTION_IDS = {
@@ -727,6 +732,58 @@ function balanceStatusClass(status) {
       });
     }
 
+    function balanceCommonValue(row) {
+      const total = Number(row?.total || 0);
+      if (!Number.isFinite(total)) return null;
+      for (const field of ["value_common", "usd_value", "value_usd"]) {
+        if (row?.[field] == null) continue;
+        const explicit = Number(row?.[field]);
+        if (Number.isFinite(explicit)) return explicit;
+      }
+      const currency = String(row?.currency || "").toUpperCase();
+      if (!currency) return null;
+      const rate = Number(lastState?.quote_rates?.[currency]);
+      if (Number.isFinite(rate) && rate > 0) return total * rate;
+      const position = (lastState?.portfolio?.positions || []).find(
+        (item) => String(item?.asset || "").toUpperCase() === currency
+      );
+      const mark = Number(position?.mark_price);
+      if (Number.isFinite(mark) && mark > 0) return total * mark;
+      const market = (lastState?.markets || []).find((item) => {
+        const symbol = String(item?.symbol || "").split(":", 1)[0];
+        return symbol.split("/", 1)[0].toUpperCase() === currency;
+      });
+      const bid = Number(market?.bid_common);
+      const ask = Number(market?.ask_common);
+      if (Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0) {
+        return total * ((bid + ask) / 2);
+      }
+      if (Number.isFinite(bid) && bid > 0) return total * bid;
+      if (Number.isFinite(ask) && ask > 0) return total * ask;
+      return null;
+    }
+
+    function isDisplayableSpotBalance(row) {
+      const currency = String(row?.currency || "").toUpperCase();
+      if (!currency || CASH_BALANCE_CURRENCIES.has(currency)) return true;
+      const wallet = String(row?.wallet || "trading").toLowerCase();
+      if (["swap", "future", "futures", "derivatives"].includes(wallet)) return true;
+      const value = balanceCommonValue(row);
+      return value == null || Math.abs(value) >= SPOT_DUST_VALUE_USD;
+    }
+
+    function visibleBalanceRows(rows) {
+      const source = rows || [];
+      const visible = source.filter(isDisplayableSpotBalance);
+      return { visible, hiddenCount: source.length - visible.length };
+    }
+
+    function hiddenSpotBalanceText(hiddenCount) {
+      return hiddenCount > 0
+        ? `${hiddenCount} ${uiText("spot balance(s) below $10 hidden")}`
+        : "";
+    }
+
     function accountBalancesForProfile(accountBalances) {
       if (!accountBalances) return accountBalances;
       const selectedId = document.getElementById("profile-account")?.value || "";
@@ -770,13 +827,13 @@ function balanceStatusClass(status) {
     }
 
     function renderAccountBalanceSummary(accountBalances) {
-      const filtered = accountBalancesForProfile(accountBalances);
-      const totals = sortBalanceCurrencies(filtered?.totals || []);
+      const { visible: visibleTotals, hiddenCount } = visibleBalanceRows(accountBalances?.totals || []);
+      const totals = sortBalanceCurrencies(visibleTotals);
       const valueEl = document.getElementById("account-balances-total");
       const detailEl = document.getElementById("account-balances-detail");
       if (totals.length === 0) {
         valueEl.textContent = "--";
-        detailEl.textContent = filtered?.status || "--";
+        detailEl.textContent = hiddenSpotBalanceText(hiddenCount) || accountBalances?.status || "--";
         detailEl.title = detailEl.textContent;
         return;
       }
@@ -784,27 +841,44 @@ function balanceStatusClass(status) {
       valueEl.textContent = totals.length === 1
         ? `${formatBalanceAmount(totals[0].total)} ${totals[0].currency}`
         : `${totals.length} currencies`;
-      const detail = totals
+      const accountCount = Number(accountBalances?.total_account_count || 0);
+      const balanceDetail = totals
         .slice(0, 5)
         .map((row) => `${row.currency} ${formatBalanceAmount(row.total)}`)
         .join(" · ");
+      const detail = [
+        accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
+        balanceDetail,
+        hiddenSpotBalanceText(hiddenCount),
+      ].filter(Boolean).join(" · ");
       detailEl.textContent = detail;
-      detailEl.title = totals
+      const totalsTitle = totals
         .map((row) => {
           const reserved = Number(row.open_order_reserved || 0);
           const reserveText = reserved > 0 ? ` · reserved ${formatBalanceAmount(reserved)}` : "";
           return `${row.currency} free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · total ${formatBalanceAmount(row.total)}${reserveText}`;
         })
         .join(" | ");
+      detailEl.title = [
+        accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
+        totalsTitle,
+        hiddenSpotBalanceText(hiddenCount),
+      ].filter(Boolean).join(" | ");
     }
 
     function renderAccountBalances(accountBalances) {
       const filtered = accountBalancesForProfile(accountBalances);
-      renderAccountBalanceSummary(filtered);
+      const filteredRows = (filtered?.accounts || []).flatMap(
+        (account) => account.balance?.currencies || []
+      );
+      const hiddenCount = visibleBalanceRows(filteredRows).hiddenCount;
       text(
         "account-balances-meta",
         filtered
-          ? `${filtered.status || "unknown"} · checked ${filtered.checked_account_count || 0}/${filtered.total_account_count || 0} · ${formatAge(filtered.last_finished)}`
+          ? [
+            `${filtered.status || "unknown"} · checked ${filtered.checked_account_count || 0}/${filtered.total_account_count || 0} · ${formatAge(filtered.last_finished)}`,
+            hiddenSpotBalanceText(hiddenCount),
+          ].filter(Boolean).join(" · ")
           : ""
       );
 
@@ -819,12 +893,16 @@ function balanceStatusClass(status) {
       }
 
       for (const account of accounts) {
-        const rows = sortBalanceCurrencies(account.balance?.currencies || []);
+        const accountBalances = visibleBalanceRows(account.balance?.currencies || []);
+        const rows = sortBalanceCurrencies(accountBalances.visible);
         const statusText = account.live_enabled
           ? uiText("Live enabled")
           : account.status || "--";
         if (rows.length === 0) {
-          const message = account.balance?.error || account.balance?.skipped_reason || "No non-zero target balances.";
+          const message = hiddenSpotBalanceText(accountBalances.hiddenCount)
+            || account.balance?.error
+            || account.balance?.skipped_reason
+            || "No non-zero target balances.";
           const tr = document.createElement("tr");
           tr.innerHTML = `
             <td>${escapeHtml(account.label || account.exchange)}</td>
@@ -6097,22 +6175,30 @@ function balanceStatusClass(status) {
       }
       return positions
         .map((position) => {
-          const accountDetail = (position.account_breakdown || [])
-            .map((row) => {
-              const wallet = String(row.wallet || "trading").toLowerCase() === "funding"
-                ? uiText("Funding wallet")
-                : uiText("Trading wallet");
-              return `${row.account || row.exchange} ${wallet} ${compact.format(row.amount || 0)}`;
-            })
-            .join(" · ");
+          const accountCount = new Set(
+            (position.account_breakdown || [])
+              .map((row) => String(row.account || row.exchange || "").trim())
+              .filter(Boolean)
+          ).size;
           return [
             `${position.asset} ${compact.format(position.position_base || 0)}`,
             formatPositionPrice(position, portfolio),
             formatPositionValue(position, portfolio),
-            accountDetail,
+            accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
           ].filter(Boolean).join(" · ");
         })
         .join(" · ");
+    }
+
+    function formatPositionAccountTitle(portfolio) {
+      return (portfolio?.positions || [])
+        .flatMap((position) => (position.account_breakdown || []).map((row) => {
+          const wallet = String(row.wallet || "trading").toLowerCase() === "funding"
+            ? uiText("Funding wallet")
+            : uiText("Trading wallet");
+          return `${position.asset} · ${row.account || row.exchange} · ${wallet} ${compact.format(row.amount || 0)}`;
+        }))
+        .join(" | ");
     }
 
     function formatMarkDetail(portfolio) {
@@ -6151,7 +6237,7 @@ function balanceStatusClass(status) {
         text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
         text("portfolio-position-detail", positionDetail);
       }
-      document.getElementById("portfolio-position-detail").title = positionDetail;
+      document.getElementById("portfolio-position-detail").title = formatPositionAccountTitle(portfolio) || positionDetail;
       const cashValue = portfolio.cash_value == null ? null : portfolio.cash_value;
       text("portfolio-cash", cashValue == null ? "--" : `$${money.format(cashValue)}`);
       const cashDetail = formatCashDetail(portfolio);

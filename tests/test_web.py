@@ -336,11 +336,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-balance-filter1" defer></script>',
+            '<script src="/static/app.js?v=20260803-all-balances1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-balance-filter1" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-all-balances1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -380,6 +380,13 @@ class WebMonitorTest(unittest.TestCase):
             'localStorage.setItem("profile-account"',
             APP_JS,
         )
+        summary_body = APP_JS.split(
+            "function renderAccountBalanceSummary(accountBalances)", 1
+        )[1].split("function renderAccountBalances(accountBalances)", 1)[0]
+        self.assertNotIn("accountBalancesForProfile", summary_body)
+        self.assertIn("SPOT_DUST_VALUE_USD = 10", APP_JS)
+        self.assertIn("function visibleBalanceRows(rows)", APP_JS)
+        self.assertIn('uiText("All accounts")', summary_body)
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
         self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
@@ -496,7 +503,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260803-balance-filter1"),
+            INDEX_HTML.index("/static/styles.css?v=20260803-all-balances1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -603,7 +610,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260803-balance-filter1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260803-all-balances1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
