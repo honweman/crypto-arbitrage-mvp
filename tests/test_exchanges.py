@@ -21,6 +21,7 @@ from arbitrage_bot.exchanges import (
     _proxy_options_from_env,
     limit_order_capability_errors,
     limit_order_features,
+    normalize_client_order_id_for_exchange,
 )
 
 
@@ -367,8 +368,128 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertTrue(features.batch_cancel)
         self.assertEqual(errors, [])
 
+    def test_gateio_and_htx_limit_order_features_allow_guarded_orders(self) -> None:
+        for exchange_id, client_ids in (("gateio", True), ("htx", False)):
+            with self.subTest(exchange=exchange_id):
+                cfg = ExchangeConfig(
+                    id=exchange_id,
+                    label=f"{exchange_id}-swap",
+                    market_type="swap",
+                )
+
+                features = limit_order_features(cfg)
+                errors = limit_order_capability_errors(cfg, post_only=True)
+
+                self.assertTrue(features.post_only)
+                self.assertEqual(features.client_order_id, client_ids)
+                self.assertEqual(features.recover_by_client_order_id, client_ids)
+                self.assertFalse(features.batch_create)
+                self.assertFalse(features.batch_cancel)
+                self.assertEqual(errors, [])
+
+    def test_gateio_client_order_id_is_prefixed_and_bounded(self) -> None:
+        cfg = ExchangeConfig(id="gateio", label="gateio-swap", market_type="swap")
+
+        normalized = normalize_client_order_id_for_exchange(
+            cfg,
+            "market-maker-very-long-client-order-id-123456789",
+        )
+
+        self.assertTrue(normalized.startswith("t-"))
+        self.assertLessEqual(len(normalized), 28)
+        self.assertEqual(
+            normalized,
+            normalize_client_order_id_for_exchange(cfg, normalized),
+        )
+
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_gateio_and_htx_prepare_stable_linear_contract_orders(self) -> None:
+        class FakeClient:
+            async def load_markets(self) -> dict[str, object]:
+                return {
+                    "BTC/USDT:USDT": {
+                        "swap": True,
+                        "contract": True,
+                        "linear": True,
+                        "inverse": False,
+                        "quote": "USDT",
+                        "settle": "USDT",
+                        "contractSize": 0.001,
+                        "limits": {
+                            "amount": {"min": 1.0, "max": None},
+                            "price": {"min": None, "max": None},
+                            "cost": {"min": 5.0, "max": None},
+                        },
+                        "precision": {"amount": 1.0, "price": 0.1},
+                    }
+                }
+
+            def amount_to_precision(self, _: str, amount: float) -> str:
+                return f"{amount:.0f}"
+
+            def price_to_precision(self, _: str, price: float) -> str:
+                return f"{price:.1f}"
+
+        for exchange_id in ("gateio", "htx"):
+            with self.subTest(exchange=exchange_id):
+                cfg = ExchangeConfig(
+                    id=exchange_id,
+                    label=f"{exchange_id}-perp",
+                    market_type="swap",
+                )
+                manager = ExchangeManager()
+                manager._clients[cfg.key] = FakeClient()  # noqa: SLF001
+
+                prepared = await manager.prepare_linear_contract_order(
+                    cfg,
+                    symbol="BTC/USDT:USDT",
+                    side="buy",
+                    base_amount=0.0124,
+                    price=50_000.04,
+                )
+
+                self.assertEqual(prepared["status"], "ok")
+                self.assertEqual(prepared["contracts"], 12.0)
+                self.assertAlmostEqual(prepared["base_amount"], 0.012)
+
+    async def test_gateio_and_htx_configure_margin_mode_through_leverage(self) -> None:
+        class FakeClient:
+            has = {"setMarginMode": False, "setLeverage": True}
+
+            def __init__(self) -> None:
+                self.leverage_args = None
+
+            async def set_leverage(self, *args: object) -> dict[str, object]:
+                self.leverage_args = args
+                return {"configured": True}
+
+        for exchange_id in ("gateio", "htx"):
+            with self.subTest(exchange=exchange_id):
+                cfg = ExchangeConfig(
+                    id=exchange_id,
+                    label=f"{exchange_id}-perp",
+                    market_type="swap",
+                )
+                client = FakeClient()
+                manager = ExchangeManager()
+                manager._clients[cfg.key] = client  # noqa: SLF001
+
+                result = await manager.configure_linear_perpetual(
+                    cfg,
+                    symbol="BTC/USDT:USDT",
+                    leverage=2.0,
+                    margin_mode="cross",
+                )
+
+                self.assertEqual(
+                    client.leverage_args,
+                    (2.0, "BTC/USDT:USDT", {"marginMode": "cross"}),
+                )
+                self.assertEqual(
+                    result["margin"]["status"],
+                    "configured_with_leverage",
+                )
     async def test_prepare_linear_contract_order_converts_base_to_contracts(
         self,
     ) -> None:

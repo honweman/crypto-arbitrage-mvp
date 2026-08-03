@@ -20,7 +20,11 @@ from uuid import uuid4
 from eth_account import Account
 
 from .config import ExchangeConfig
-from .derivatives import STABLE_MARGIN_CURRENCIES, stable_linear_contract_currencies
+from .derivatives import (
+    LINEAR_PERPETUAL_EXCHANGE_IDS,
+    STABLE_MARGIN_CURRENCIES,
+    stable_linear_contract_currencies,
+)
 from .models import OrderBookSnapshot, Side
 from .order_reliability import OrderIntentStore, is_confirmed_order_rejection
 from .order_validation import validate_prepared_limit_order
@@ -97,6 +101,16 @@ LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
         batch_create=True,
         batch_cancel=True,
     ),
+    "gateio": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
+    "htx": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
     "coinbase": LimitOrderFeatures(
         post_only=True,
         client_order_id=True,
@@ -111,7 +125,11 @@ LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
 }
 
 
-def normalize_client_order_id(value: str) -> str:
+def normalize_client_order_id(
+    value: str,
+    *,
+    max_length: int = CLIENT_ORDER_ID_MAX_LENGTH,
+) -> str:
     raw = str(value or "").strip()
     safe = "".join(
         character
@@ -119,15 +137,36 @@ def normalize_client_order_id(value: str) -> str:
         else "-"
         for character in raw
     )
-    if len(safe) <= CLIENT_ORDER_ID_MAX_LENGTH:
+    max_length = max(12, int(max_length))
+    if len(safe) <= max_length:
         return safe
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
-    prefix_length = CLIENT_ORDER_ID_MAX_LENGTH - len(digest) - 1
+    prefix_length = max_length - len(digest) - 1
     prefix = safe[:prefix_length].rstrip("-_") or "order"
-    return f"{prefix}-{digest}"[:CLIENT_ORDER_ID_MAX_LENGTH]
+    return f"{prefix}-{digest}"[:max_length]
+
+
+def normalize_client_order_id_for_exchange(
+    cfg: ExchangeConfig,
+    value: str,
+) -> str:
+    if cfg.id == "gateio":
+        raw = str(value or "").strip()
+        without_prefix = raw[2:] if raw.startswith("t-") else raw
+        return "t-" + normalize_client_order_id(without_prefix, max_length=26)
+    return normalize_client_order_id(value)
 
 
 def limit_order_features(cfg: ExchangeConfig) -> LimitOrderFeatures:
+    if cfg.id == "htx" and cfg.market_type in {"swap", "future"}:
+        # HTX contract APIs only accept numeric client_order_id values. The bot's
+        # stable idempotency keys are strings, so exchange-order reconciliation is
+        # safer than silently dropping or coercing them.
+        return LimitOrderFeatures(
+            post_only=True,
+            client_order_id=False,
+            recover_by_client_order_id=False,
+        )
     return LIMIT_ORDER_FEATURE_OVERRIDES.get(cfg.id, LimitOrderFeatures())
 
 
@@ -1206,7 +1245,9 @@ class ExchangeManager:
             raise ValueError("; ".join(str(error) for error in prepared["errors"]))
 
         normalized_client_order_id = (
-            normalize_client_order_id(client_order_id) if client_order_id else None
+            normalize_client_order_id_for_exchange(cfg, client_order_id)
+            if client_order_id
+            else None
         )
 
         if (
@@ -1298,7 +1339,9 @@ class ExchangeManager:
             if post_only:
                 params["postOnly"] = True
             normalized_client_order_id = (
-                normalize_client_order_id(client_order_id) if client_order_id else None
+                normalize_client_order_id_for_exchange(cfg, client_order_id)
+                if client_order_id
+                else None
             )
             if normalized_client_order_id and features.client_order_id:
                 params["clientOrderId"] = normalized_client_order_id
@@ -1360,10 +1403,13 @@ class ExchangeManager:
         base_amount: float,
         price: float,
     ) -> dict[str, Any]:
-        if cfg.id not in {"binanceusdm", "bybit"} or cfg.market_type != "swap":
+        if (
+            cfg.id not in LINEAR_PERPETUAL_EXCHANGE_IDS
+            or cfg.market_type != "swap"
+        ):
             raise ValueError(
-                "perpetual Auto Buy/Sell supports Binance USDM and Bybit "
-                "stablecoin linear swaps only"
+                "perpetual Auto Buy/Sell supports Binance USDM, Bybit, Gate.io, "
+                "and HTX stablecoin linear swaps only"
             )
         symbol_quote, symbol_settle = stable_linear_contract_currencies(symbol)
         client = self.client(cfg)
@@ -1453,7 +1499,10 @@ class ExchangeManager:
         leverage: float,
         margin_mode: str,
     ) -> dict[str, Any]:
-        if cfg.id not in {"binanceusdm", "bybit"} or cfg.market_type != "swap":
+        if (
+            cfg.id not in LINEAR_PERPETUAL_EXCHANGE_IDS
+            or cfg.market_type != "swap"
+        ):
             raise ValueError("unsupported perpetual exchange configuration")
         if leverage <= 0:
             raise ValueError("leverage must be positive")
@@ -1473,13 +1522,28 @@ class ExchangeManager:
             "no need to change",
             "same margin mode",
         )
-        for name, method_name, args in (
-            ("margin", "set_margin_mode", (margin_mode, symbol)),
-            ("leverage", "set_leverage", (leverage, symbol)),
-        ):
-            setter = getattr(client, method_name, None)
+        capabilities = getattr(client, "has", None) or {}
+        margin_setter = getattr(client, "set_margin_mode", None)
+        supports_margin_setter = (
+            callable(margin_setter)
+            and capabilities.get("setMarginMode") is not False
+        )
+        operations: list[tuple[str, Any, tuple[Any, ...]]] = []
+        if supports_margin_setter:
+            operations.append(("margin", margin_setter, (margin_mode, symbol)))
+            leverage_args: tuple[Any, ...] = (leverage, symbol)
+        else:
+            results["margin"] = {
+                "status": "configured_with_leverage",
+                "margin_mode": margin_mode,
+            }
+            leverage_args = (leverage, symbol, {"marginMode": margin_mode})
+        operations.append(
+            ("leverage", getattr(client, "set_leverage", None), leverage_args)
+        )
+        for name, setter, args in operations:
             if not callable(setter):
-                raise ValueError(f"{cfg.key} does not support {method_name}")
+                raise ValueError(f"{cfg.key} does not support set_{name}")
             try:
                 results[name] = await setter(*args)
             except Exception as exc:  # noqa: BLE001
@@ -1943,7 +2007,10 @@ class ExchangeManager:
         resolve_confirmed_absent: bool = True,
     ) -> dict[str, Any]:
         """Reconcile uncertain submissions and remove only managed MM orders."""
-        prefix = normalize_client_order_id(client_order_prefix).rstrip("-_")
+        prefix = normalize_client_order_id_for_exchange(
+            cfg,
+            client_order_prefix,
+        ).rstrip("-_")
         if not prefix:
             return {
                 "status": "blocked",

@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, load_config
-from .derivatives import normalize_derivative_position
+from .derivatives import (
+    LINEAR_PERPETUAL_EXCHANGE_IDS,
+    normalize_derivative_position,
+)
 from .exchanges import ExchangeManager
 from .order_validation import summarize_order_validations
 from .risk import (
@@ -75,10 +78,13 @@ def _validate_instrument_exchange(
                 f"Auto Buy/Sell spot mode requires a spot account: {exchange.key}"
             )
         return
-    if exchange.id not in {"binanceusdm", "bybit"} or exchange.market_type != "swap":
+    if (
+        exchange.id not in LINEAR_PERPETUAL_EXCHANGE_IDS
+        or exchange.market_type != "swap"
+    ):
         raise ValueError(
-            "perpetual Auto Buy/Sell supports Binance USDM and Bybit "
-            "stablecoin linear swap accounts only"
+            "perpetual Auto Buy/Sell supports Binance USDM, Bybit, Gate.io, and "
+            "HTX stablecoin linear swap accounts only"
         )
 
 

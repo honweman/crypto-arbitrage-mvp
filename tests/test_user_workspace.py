@@ -191,6 +191,15 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 exchange_catalog["aster"]["default_variant"],
                 "v3",
             )
+            for exchange_id in ("gateio", "htx"):
+                self.assertEqual(
+                    exchange_catalog[exchange_id]["market_types"],
+                    ["spot", "swap"],
+                )
+                self.assertEqual(
+                    exchange_catalog[exchange_id]["required_credentials"],
+                    ["api_key", "secret"],
+                )
             with self.assertRaisesRegex(ValueError, "already been used"):
                 store.verify_wallet_challenge(
                     owner_email="trader@example.com",

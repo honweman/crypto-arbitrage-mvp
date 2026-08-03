@@ -35,8 +35,10 @@ def workspace_exchange_config(
     variant = str(api_variant or "default").strip().lower()
     options: dict[str, Any] = {}
 
-    if exchange_id in {"binance", "bybit"}:
+    if exchange_id in {"binance", "bybit", "gateio", "htx"}:
         options["defaultType"] = market
+    if exchange_id == "htx" and market == "swap":
+        options["defaultSubType"] = "linear"
 
     if exchange_id == "bithumb":
         options["private_api"] = "v2.0"
@@ -388,7 +390,8 @@ async def check_workspace_api_connection(
             # one side whenever the same currency exists in both scopes.
             wallet = (
                 market_type
-                if api_connection.exchange == "binance" and len(market_types) > 1
+                if api_connection.exchange in {"binance", "gateio", "htx"}
+                and len(market_types) > 1
                 else "trading"
             )
             balances = _balance_rows(balance, currencies, wallet=wallet)

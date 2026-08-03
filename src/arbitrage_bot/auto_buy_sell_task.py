@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import BotConfig, ExchangeConfig, SlowExecutionConfig
-from .derivatives import stable_linear_contract_currencies
+from .derivatives import (
+    LINEAR_PERPETUAL_EXCHANGE_IDS,
+    stable_linear_contract_currencies,
+)
 from .exchanges import ExchangeManager
 from .slow_executor import build_plan, cancel_order_ids, run_cycle
 from .strategy_timeline import write_strategy_timeline_from_payload
@@ -168,10 +171,13 @@ def validate_task_exchange_config(
                 f"spot Auto Buy/Sell requires a spot account: {exchange.key}"
             )
         return
-    if exchange.id not in {"binanceusdm", "bybit"} or exchange.market_type != "swap":
+    if (
+        exchange.id not in LINEAR_PERPETUAL_EXCHANGE_IDS
+        or exchange.market_type != "swap"
+    ):
         raise ValueError(
-            "perpetual Auto Buy/Sell supports Binance USDM and Bybit "
-            "stablecoin linear swap accounts only"
+            "perpetual Auto Buy/Sell supports Binance USDM, Bybit, Gate.io, and "
+            "HTX stablecoin linear swap accounts only"
         )
 
 

@@ -168,11 +168,28 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             api_variant="testnet",
             runtime_key="account-4",
         )
+        gateio = workspace_exchange_config(
+            exchange="gateio",
+            market_type="swap",
+            api_variant="default",
+            runtime_key="account-gateio",
+        )
+        htx = workspace_exchange_config(
+            exchange="htx",
+            market_type="swap",
+            api_variant="default",
+            runtime_key="account-htx",
+        )
 
         self.assertEqual(upbit.options["hostname"], "id-api.upbit.com")
         self.assertEqual(bithumb.options["private_api"], "v2.0")
         self.assertEqual(binance.id, "binanceusdm")
         self.assertEqual(binance.options["defaultType"], "swap")
+        self.assertEqual(gateio.id, "gateio")
+        self.assertEqual(gateio.options["defaultType"], "swap")
+        self.assertEqual(htx.id, "htx")
+        self.assertEqual(htx.options["defaultType"], "swap")
+        self.assertEqual(htx.options["defaultSubType"], "linear")
         self.assertEqual(
             hyperliquid_testnet.options["hostname"],
             "hyperliquid-testnet.xyz",
@@ -351,6 +368,35 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             balances,
             {("USDT", "spot"): 25.0, ("USDT", "swap"): 100.0},
         )
+
+    async def test_gateio_and_htx_keep_spot_and_contract_wallets_separate(self) -> None:
+        for exchange in ("gateio", "htx"):
+            with self.subTest(exchange=exchange):
+                FakeWorkspaceManager.instances.clear()
+                connection = UserApiConnection.from_dict(
+                    {
+                        "owner_email": "member@example.com",
+                        "label": f"{exchange} Main",
+                        "exchange": exchange,
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                )
+
+                result = await check_workspace_api_connection(
+                    api_connection=connection,
+                    credentials={"api_key": "key", "secret": "secret"},
+                    manager_factory=FakeBinanceWorkspaceManager,
+                )
+
+                balances = {
+                    (row["currency"], row["wallet"]): row["total"]
+                    for row in result["balances"]
+                }
+                self.assertEqual(
+                    balances,
+                    {("USDT", "spot"): 25.0, ("USDT", "swap"): 100.0},
+                )
 
     async def test_account_check_service_applies_per_account_cooldown(self) -> None:
         project = UserProject.from_dict(

@@ -19,6 +19,7 @@ from .config import (
     SpotGridConfig,
     SpotMarketConfig,
 )
+from .derivatives import LINEAR_PERPETUAL_EXCHANGE_IDS
 
 
 def spot_grid_config_to_dict(cfg: SpotGridConfig) -> dict[str, Any]:
@@ -224,7 +225,8 @@ def auto_buy_sell_exchanges(cfg: BotConfig) -> list[ExchangeConfig]:
     supported_derivatives = [
         exchange
         for exchange in cfg.derivative_exchanges
-        if exchange.market_type == "swap" and exchange.id in {"binanceusdm", "bybit"}
+        if exchange.market_type == "swap"
+        and exchange.id in LINEAR_PERPETUAL_EXCHANGE_IDS
     ]
     return [*cfg.spot_exchanges, *supported_derivatives]
 

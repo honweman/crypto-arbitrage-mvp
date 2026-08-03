@@ -18,6 +18,10 @@ STABLE_MARGIN_CURRENCIES = {
     "USDE",
 }
 
+LINEAR_PERPETUAL_EXCHANGE_IDS = frozenset(
+    {"binanceusdm", "bybit", "gateio", "htx"}
+)
+
 
 def stable_linear_contract_currencies(symbol: str) -> tuple[str, str]:
     normalized = str(symbol or "").strip().upper()
