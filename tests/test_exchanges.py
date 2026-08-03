@@ -161,6 +161,35 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(client.options_payload["apiKey"], "key")
         self.assertEqual(client.options_payload["secret"], "secret")
 
+    def test_gateio_catalog_id_uses_current_ccxt_gate_client(self) -> None:
+        class FakeGate:
+            def __init__(self, options: dict[str, object]) -> None:
+                self.options_payload = options
+
+        class FakeCcxt:
+            gate = FakeGate
+
+        cfg = ExchangeConfig(
+            id="gateio",
+            label="workspace:gate-main:spot",
+            market_type="spot",
+        )
+        manager = ExchangeManager(
+            credentials_by_key={
+                cfg.key: {"api_key": "key", "secret": "secret"},
+            }
+        )
+
+        with patch(
+            "arbitrage_bot.exchanges.importlib.import_module",
+            return_value=FakeCcxt,
+        ):
+            client = manager.client(cfg)
+
+        self.assertEqual(client.options_payload["apiKey"], "key")
+        self.assertEqual(client.options_payload["secret"], "secret")
+        self.assertEqual(client.options_payload["options"], {})
+
     def test_direct_credentials_override_environment_without_global_mutation(self) -> None:
         class FakeCoinbase:
             def __init__(self, options: dict[str, object]) -> None:

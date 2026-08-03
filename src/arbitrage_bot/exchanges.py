@@ -119,6 +119,10 @@ CCXT_TOP_LEVEL_OPTION_KEYS = {
     "urls",
 }
 
+CCXT_EXCHANGE_ID_ALIASES = {
+    "gateio": "gate",
+}
+
 
 @dataclass(frozen=True)
 class LimitOrderFeatures:
@@ -822,7 +826,8 @@ class ExchangeManager:
 
     def _build_client(self, cfg: ExchangeConfig) -> Any:
         ccxt = importlib.import_module("ccxt.async_support")
-        exchange_cls = getattr(ccxt, cfg.id)
+        ccxt_exchange_id = CCXT_EXCHANGE_ID_ALIASES.get(cfg.id, cfg.id)
+        exchange_cls = getattr(ccxt, ccxt_exchange_id)
         exchange_options = dict(cfg.options)
         top_level_options = {
             key: exchange_options.pop(key)
