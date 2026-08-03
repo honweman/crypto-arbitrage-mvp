@@ -197,6 +197,9 @@ async def fetch_account_balances_snapshot(
         "errors": [],
         "balance": {"checked": False, "currencies": []},
     }
+    workspace_connection_id = str(exchange.credential_connection_id or "").strip()
+    if workspace_connection_id:
+        account["workspace_connection_id"] = workspace_connection_id
     if not auth.get("private_checks_enabled"):
         account["status"] = "warning"
         account["warnings"].append("API env vars are missing")

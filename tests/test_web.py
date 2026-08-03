@@ -333,6 +333,58 @@ class WebMonitorTest(unittest.TestCase):
             {"USDT": 100.0, "USDC": 50.0},
         )
 
+    def test_workspace_balance_deduplicates_dynamic_account_runtime_key(self) -> None:
+        merged = _merge_workspace_account_balances(
+            {
+                "status": "ok",
+                "accounts": [
+                    {
+                        "exchange": "workspace:connection-gate-main:spot",
+                        "label": "Gate.io Main - SPOT",
+                        "id": "gateio",
+                        "status": "ok",
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {"currency": "ACS", "total": 1_000.0},
+                                {"currency": "USDT", "total": 50.0},
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "connections": [
+                    {
+                        "id": "connection-gate-main",
+                        "label": "Gate.io Main",
+                        "exchange": "gateio",
+                        "runtime_keys": [],
+                        "status": "healthy",
+                        "checked_at": 200.0,
+                        "credentials_configured": True,
+                        "balances": [
+                            {"currency": "ACS", "total": 1_000.0},
+                            {"currency": "USDT", "total": 50.0},
+                            {"currency": "GT", "total": 25.0},
+                        ],
+                        "markets": [],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(merged["total_account_count"], 1)
+        self.assertEqual(merged["accounts"][0]["label"], "Gate.io Main")
+        self.assertEqual(
+            merged["accounts"][0]["workspace_connection_id"],
+            "connection-gate-main",
+        )
+        self.assertEqual(
+            {row["currency"]: row["total"] for row in merged["totals"]},
+            {"ACS": 1_000.0, "GT": 25.0, "USDT": 50.0},
+        )
+
     def test_workspace_balance_updates_top_portfolio_and_account_breakdown(self) -> None:
         account_balances = {
             "status": "ok",
@@ -394,11 +446,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-account-labels1" defer></script>',
+            '<script src="/static/app.js?v=20260803-balance-dedupe2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-balance-filter1" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-balance-dedupe2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -445,6 +497,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("BALANCE_MIN_QUANTITY = 1", APP_JS)
         self.assertIn("BALANCE_MIN_VALUE_USDT = 10", APP_JS)
         self.assertIn("function meetsBalanceDisplayThreshold(amount, valueCommon)", APP_JS)
+        self.assertIn("if (valueCommon == null) return false;", APP_JS)
         self.assertIn("function visibleBalanceRows(rows)", APP_JS)
         self.assertIn('function displayExchange(exchange, explicitLabel = "")', APP_JS)
         self.assertIn("friendlyAccountMessage(value)", APP_JS)

@@ -1762,6 +1762,9 @@ async def _fetch_exchange_balance_payload(
         },
         "markets": [],
     }
+    workspace_connection_id = str(exchange.credential_connection_id or "").strip()
+    if workspace_connection_id:
+        account["workspace_connection_id"] = workspace_connection_id
 
     if not symbols:
         account["status"] = "idle"
@@ -2971,22 +2974,43 @@ def _merge_workspace_account_balances(
         for row in merged.get("accounts", [])
         if isinstance(row, dict)
     ]
+
+    def account_connection_id(row: dict[str, Any]) -> str:
+        direct = str(
+            row.get("workspace_connection_id")
+            or row.get("credential_connection_id")
+            or ""
+        ).strip()
+        if direct:
+            return direct
+        auth = row.get("auth") if isinstance(row.get("auth"), dict) else {}
+        nested = str(
+            auth.get("workspace_connection_id")
+            or auth.get("credential_connection_id")
+            or ""
+        ).strip()
+        if nested:
+            return nested
+        exchange_key = str(row.get("exchange") or "").strip()
+        if not exchange_key.startswith("workspace:"):
+            return ""
+        connection_and_market = exchange_key.removeprefix("workspace:")
+        connection_id, separator, market_type = connection_and_market.rpartition(":")
+        if separator and connection_id and market_type in {"spot", "swap", "future"}:
+            return connection_id
+        return ""
+
     platform_keys = {
         str(row.get("exchange") or "").strip()
         for row in accounts
         if str(row.get("source") or "") != "user_workspace"
-    }
-    existing_connection_ids = {
-        str(row.get("workspace_connection_id") or "")
-        for row in accounts
-        if row.get("workspace_connection_id")
     }
     workspace_accounts: list[dict[str, Any]] = []
     for connection in (workspace or {}).get("connections", []) or []:
         if not isinstance(connection, dict):
             continue
         connection_id = str(connection.get("id") or "").strip()
-        if not connection_id or connection_id in existing_connection_ids:
+        if not connection_id:
             continue
         connection_status = str(connection.get("status") or "unverified")
         checked_at = _number_or_none(connection.get("checked_at"))
@@ -2996,6 +3020,10 @@ def _merge_workspace_account_balances(
             if str(item or "").strip()
         }
         linked_platform_keys = runtime_keys & platform_keys
+        linked_connection_accounts = [
+            row for row in accounts if account_connection_id(row) == connection_id
+        ]
+        has_linked_account = bool(linked_platform_keys or linked_connection_accounts)
         markets = [
             row
             for row in connection.get("markets", []) or []
@@ -3020,18 +3048,19 @@ def _merge_workspace_account_balances(
             for row in connection.get("balances", []) or []
             if isinstance(row, dict) and row.get("currency")
         ]
-        if linked_platform_keys and (
+        if has_linked_account and (
             connection_status != "healthy" or checked_at is None or not balances
         ):
             # Keep the live platform snapshot until the imported encrypted account
             # has completed its own private check. This prevents both double-counting
             # and a temporary blank balance during migration.
             continue
-        if linked_platform_keys:
+        if has_linked_account:
             accounts = [
                 row
                 for row in accounts
-                if str(row.get("exchange") or "").strip()
+                if account_connection_id(row) != connection_id
+                and str(row.get("exchange") or "").strip()
                 not in linked_platform_keys
             ]
             platform_keys.difference_update(linked_platform_keys)

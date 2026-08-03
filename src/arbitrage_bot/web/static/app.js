@@ -800,9 +800,9 @@ function balanceStatusClass(status) {
       if (!Number.isFinite(quantity) || Math.abs(quantity) < BALANCE_MIN_QUANTITY) {
         return false;
       }
-      if (valueCommon == null) return true;
+      if (valueCommon == null) return false;
       const value = Number(valueCommon);
-      return !Number.isFinite(value) || Math.abs(value) >= BALANCE_MIN_VALUE_USDT;
+      return Number.isFinite(value) && Math.abs(value) >= BALANCE_MIN_VALUE_USDT;
     }
 
     function isDisplayableBalance(row) {
@@ -819,7 +819,7 @@ function balanceStatusClass(status) {
 
     function hiddenBalanceText(hiddenCount) {
       return hiddenCount > 0
-        ? `${hiddenCount} ${uiText("balance(s) below 1 unit or 10 USDT hidden")}`
+        ? `${hiddenCount} ${uiText("balance(s) below 1 unit, 10 USDT, or without price hidden")}`
         : "";
     }
 
