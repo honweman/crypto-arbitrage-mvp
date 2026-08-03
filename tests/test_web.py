@@ -556,11 +556,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260713-ux1"></script>',
+            '<script src="/static/theme.js?v=20260803-i18n2"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
+            INDEX_HTML.index("/static/theme.js?v=20260803-i18n2"),
             INDEX_HTML.index("/static/styles.css?v=20260803-all-balances1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)

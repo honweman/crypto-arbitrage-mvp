@@ -1098,6 +1098,11 @@
   // Pattern rules for dynamic strings the exact-match dictionary cannot
   // cover (counts, ages, prefixed labels). Applied after exact lookup.
   const ZH_PATTERNS = [
+    [/^price (.+)$/, "价格 $1"],
+    [/^price --$/, "价格 --"],
+    [/^value (.+)$/, "价值 $1"],
+    [/^value --$/, "价值 --"],
+    [/^missing (.+)$/, "缺少 $1"],
     [/^open (\d+)$/, "挂单 $1"],
     [/^fills (\d+)$/, "成交 $1"],
     [/^issues (\d+)$/, "异常 $1"],
@@ -2210,6 +2215,11 @@
   };
 
   const KO_PATTERNS = [
+    [/^price (.+)$/, "가격 $1"],
+    [/^price --$/, "가격 --"],
+    [/^value (.+)$/, "가치 $1"],
+    [/^value --$/, "가치 --"],
+    [/^missing (.+)$/, "$1 누락"],
     [/^open (\d+)$/, "미체결 $1"],
     [/^fills (\d+)$/, "체결 $1"],
     [/^issues (\d+)$/, "이슈 $1"],
@@ -2296,12 +2306,20 @@
     return ["SCRIPT", "STYLE", "TEXTAREA", "CODE", "PRE"].includes(element.tagName);
   }
 
+  // Attributes are UI chrome even on elements whose *content* must not be
+  // translated: a textarea's value is user data, but its placeholder is a
+  // label. Only an explicit data-no-i18n opts an element out here.
+  function shouldSkipAttributes(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+    return Boolean(element.closest("[data-no-i18n]"));
+  }
+
   function translateAttributes(root) {
     const elements = root.querySelectorAll
       ? root.querySelectorAll("[title], [aria-label], [placeholder]")
       : [];
     for (const element of elements) {
-      if (shouldSkipElement(element)) continue;
+      if (shouldSkipAttributes(element)) continue;
       for (const attr of ["title", "aria-label", "placeholder"]) {
         if (!element.hasAttribute(attr)) continue;
         const value = element.getAttribute(attr) || "";
