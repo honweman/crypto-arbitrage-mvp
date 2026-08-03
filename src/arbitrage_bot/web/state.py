@@ -62,6 +62,10 @@ from ..web_config import (
     spot_grid_config_to_dict,
     strategy_universe_to_dict,
 )
+from ..workspace_runtime import (
+    WorkspaceRuntimeAccounts,
+    merge_workspace_runtime_accounts,
+)
 from . import (
     STRATEGY_IDS,
     _all_account_exchanges,
@@ -258,9 +262,13 @@ class MonitorState:
         poll_seconds: float,
         *,
         runtime_store_path: str | None = None,
+        workspace_runtime_accounts: WorkspaceRuntimeAccounts | None = None,
     ) -> None:
         self._lock = asyncio.Lock()
         self._base_cfg = cfg
+        self._workspace_runtime_accounts = (
+            workspace_runtime_accounts or WorkspaceRuntimeAccounts()
+        )
         self._program_running = True
         self._program_updated_at = time.time()
         self._auto_stopped = False
@@ -813,6 +821,10 @@ class MonitorState:
         }
 
     def _runtime_config_unlocked(self, cfg: BotConfig) -> BotConfig:
+        cfg = merge_workspace_runtime_accounts(
+            cfg,
+            self._workspace_runtime_accounts,
+        )
         legacy_market_maker = market_maker_config_with_id(
             replace(
                 cfg.market_maker,
@@ -828,13 +840,24 @@ class MonitorState:
         primary_market_maker = (
             market_maker_instances[0] if market_maker_instances else legacy_market_maker
         )
+        configured_spot_markets = (
+            self._spot_markets_override
+            if self._spot_markets_override is not None
+            else cfg.spot_markets
+        )
+        spot_market_keys = {
+            (row.exchange, row.symbol) for row in configured_spot_markets
+        }
         return replace(
             cfg,
-            spot_markets=(
-                self._spot_markets_override
-                if self._spot_markets_override is not None
-                else cfg.spot_markets
-            ),
+            spot_markets=[
+                *configured_spot_markets,
+                *(
+                    row
+                    for row in self._workspace_runtime_accounts.spot_markets
+                    if (row.exchange, row.symbol) not in spot_market_keys
+                ),
+            ],
             cash_and_carry_pairs=(
                 self._cash_and_carry_pairs_override
                 if self._cash_and_carry_pairs_override is not None
@@ -1357,6 +1380,16 @@ class MonitorState:
     async def runtime_config(self, cfg: BotConfig) -> BotConfig:
         async with self._lock:
             return self._runtime_config_unlocked(cfg)
+
+    async def set_workspace_runtime_accounts(
+        self,
+        workspace: WorkspaceRuntimeAccounts,
+    ) -> None:
+        async with self._lock:
+            self._workspace_runtime_accounts = workspace
+            runtime_cfg = self._runtime_config_unlocked(self._base_cfg)
+            self._refresh_config_payloads_unlocked(runtime_cfg)
+            self._clear_state_view_cache_unlocked()
 
     async def set_slow_execution_overrides(
         self,

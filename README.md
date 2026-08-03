@@ -784,6 +784,16 @@ The config `label` is the stable runtime identity used by existing strategies. M
 }
 ```
 
+Administrator-owned workspace accounts no longer need a duplicate static
+runtime entry. After a connection and pair pass the read-only account check,
+enabled spot bindings are hot-added to Market Maker, Auto Buy/Sell,
+cross-exchange rebalancing, and spot-spread scanning. The runtime identity is
+derived from the immutable connection ID, while selectors show the account
+label and market type. Gate.io and HTX use the same path as the other unified
+accounts; disabling the account removes it from new strategy selections without
+deleting credentials. Imported legacy connections that already declare
+`runtime_keys` keep their existing static identity and are not duplicated.
+
 Legacy environment-backed accounts can be migrated without exposing secrets on
 the command line. Load the service environment first, then run
 `scripts/migrate_runtime_accounts.py --config config.acs.json --owner
@@ -910,7 +920,7 @@ The settings page presents one exchange-account workflow and points to the next 
 
 Users can create isolated paper strategy instances for Market Maker, Auto Buy/Sell, Spot Grid, DCA, cross-exchange Spot Arbitrage, CEX/DEX Contract Arbitrage, and Polymarket Arbitrage. The form selects a trading pair and only that owner's compatible verified exchange accounts; the project ID remains an internal compatibility field. Each strategy has its own order budget, total budget, daily-loss, open-order, slippage, and order-book-age limits. Contract Arbitrage requires at least one spot pair and one swap/future pair, can require a Hyperliquid, dYdX, or Aster derivative leg, converts each venue's quote currency into the configured common quote, and evaluates depth-adjusted basis, fees, slippage, and supportive funding. A strategy can be resumed only when its internal pair scope is active, its account count and symbols match, credentials remain available in the encrypted vault, withdrawal permission is confirmed disabled, and every selected account has a fresh successful connection test. Credential or market changes and failed/stale connection checks automatically pause affected instances.
 
-Per-user strategy instances are intentionally paper-only: they do not submit or cancel exchange orders, never decrypt the account API credentials, and their payloads reject `live_enabled`. A background scheduler reads public order books, shares one fetch across strategies and accounts watching the same public market, and runs each enabled instance at its configured refresh/scan interval. The global program switch pauses this scheduler too. Existing global MM, Auto Buy/Sell, and arbitrage runners remain separately configured.
+Per-user strategy instances are intentionally paper-only: they do not submit or cancel exchange orders, never decrypt the account API credentials, and their payloads reject `live_enabled`. A background scheduler reads public order books, shares one fetch across strategies and accounts watching the same public market, and runs each enabled instance at its configured refresh/scan interval. The global program switch pauses this scheduler too. Administrator-owned verified workspace accounts are also available to the separately controlled global MM, Auto Buy/Sell, rebalancing, and spot-arbitrage runners; ordinary-user accounts are never bridged into those administrator-only live controls.
 
 Paper state, virtual fills, and the strategy timeline are stored separately in `data/user_paper_trading.sqlite3`. Writes use one SQLite transaction with optimistic version checks, so a stale cycle cannot overwrite a reset, strategy edit, or newer cycle. State survives service restarts; each user sees only their own strategy records, while administrators retain operational visibility. The UI shows status/reason, progress, virtual open orders, cumulative and daily P/L, recent activity, and the exact retained state/fill/event counts before reset. History is compacted per strategy to the newest 5,000 fills and 500 events.
 

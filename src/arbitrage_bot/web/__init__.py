@@ -265,6 +265,7 @@ from ..user_workspace import (
     api_connection_is_fresh,
     required_credentials_for_exchange,
 )
+from ..workspace_runtime import build_workspace_runtime_accounts
 from ..web_config import (
     _backtest_overrides_from_payload,
     _auto_buy_sell_symbols_by_exchange,
@@ -7101,6 +7102,17 @@ async def _sync_workspace_connection(
     return connection_id, saved, warnings
 
 
+async def _refresh_admin_workspace_runtime_accounts(request: web.Request) -> None:
+    admin_emails = [
+        row.email for row in _user_store(request).list_users() if row.role == "admin"
+    ]
+    workspace = build_workspace_runtime_accounts(
+        _user_workspace_store(request),
+        owner_emails=admin_emails,
+    )
+    await request.app["monitor_state"].set_workspace_runtime_accounts(workspace)
+
+
 async def api_user_workspace(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     store = _user_workspace_store(request)
@@ -7593,6 +7605,23 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     check=check_result,
                 )
                 results.append(check_result)
+                if check_result.get("status") == "healthy":
+                    _, synced_accounts, sync_warnings = (
+                        await _sync_workspace_connection(
+                            request,
+                            user=user,
+                            raw={
+                                **api_connection.to_dict(),
+                                "connection_id": api_connection.id,
+                            },
+                            credentials=None,
+                        )
+                    )
+                    if synced_accounts:
+                        accounts = synced_accounts
+                        results.clear()
+                    if sync_warnings:
+                        response_extra["warnings"] = sync_warnings
             for account in accounts:
                 project = store.get_project(account.project_id)
                 if project is None:
@@ -7632,6 +7661,13 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     error=str(check_result.get("error") or ""),
                     check=check_result,
                 )
+                if (
+                    check_result.get("status") == "healthy"
+                    and updated.withdrawal_disabled_confirmed
+                    and updated.trade_permission_confirmed
+                    and not updated.enabled
+                ):
+                    updated = store.upsert_account(replace(updated, enabled=True))
                 updated_accounts.append(updated)
                 results.append(
                     {
@@ -8182,6 +8218,19 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_payload = profile.to_dict()
         else:
             raise ValueError(f"unsupported workspace action: {action}")
+
+        if user.role == "admin" and action in {
+            "upsert_project",
+            "activate_project",
+            "disable_project",
+            "delete_project",
+            "sync_account",
+            "test_connection",
+            "upsert_account",
+            "delete_connection",
+            "delete_account",
+        }:
+            await _refresh_admin_workspace_runtime_accounts(request)
 
         write_web_audit_event(
             cfg,
@@ -9499,11 +9548,6 @@ def create_app(
             performance_middleware,
         ]
     )
-    state = MonitorState(
-        cfg,
-        interval,
-        runtime_store_path=default_runtime_store_path(cfg),
-    )
     auto_buy_sell_tasks = AutoBuySellTaskService(default_task_store_path(cfg))
     web_user_store = WebUserStore(
         default_web_user_store_path(cfg),
@@ -9517,6 +9561,18 @@ def create_app(
     self_service_project_migrations = _activate_registered_pending_projects(
         web_user_store,
         user_workspace_store,
+    )
+    workspace_runtime_accounts = build_workspace_runtime_accounts(
+        user_workspace_store,
+        owner_emails=[
+            row.email for row in web_user_store.list_users() if row.role == "admin"
+        ],
+    )
+    state = MonitorState(
+        cfg,
+        interval,
+        runtime_store_path=default_runtime_store_path(cfg),
+        workspace_runtime_accounts=workspace_runtime_accounts,
     )
     user_paper_store = UserPaperTradingStore(default_user_paper_trading_path(cfg))
     user_paper_service = UserPaperTradingService(

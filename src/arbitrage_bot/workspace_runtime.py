@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Iterable
+
+from .config import BotConfig, ExchangeConfig, SpotMarketConfig
+from .user_account_check import workspace_exchange_config
+from .user_workspace import UserWorkspaceStore
+
+
+DEFAULT_WORKSPACE_FEE_BPS = {
+    "binance": 10.0,
+    "bithumb": 25.0,
+    "bybit": 10.0,
+    "coinbase": 60.0,
+    "gateio": 20.0,
+    "htx": 20.0,
+    "upbit": 5.0,
+}
+
+
+@dataclass(frozen=True)
+class WorkspaceRuntimeAccounts:
+    spot_exchanges: tuple[ExchangeConfig, ...] = ()
+    derivative_exchanges: tuple[ExchangeConfig, ...] = ()
+    spot_markets: tuple[SpotMarketConfig, ...] = ()
+
+
+def _runtime_key(connection_id: str, market_type: str) -> str:
+    return f"workspace:{connection_id}:{market_type}"
+
+
+def build_workspace_runtime_accounts(
+    store: UserWorkspaceStore,
+    *,
+    owner_emails: Iterable[str],
+) -> WorkspaceRuntimeAccounts:
+    owners = {str(email).strip().lower() for email in owner_emails if str(email).strip()}
+    if not owners:
+        return WorkspaceRuntimeAccounts()
+    connections = {
+        row.id: row
+        for row in store.list_api_connections(owner_email="", is_admin=True)
+        if row.owner_email in owners and not row.runtime_keys
+    }
+    configured = store.credential_statuses(connections)
+    projects = {
+        row.id: row
+        for row in store.list_projects(owner_email="", is_admin=True)
+        if row.owner_email in owners and row.status == "active"
+    }
+    grouped: dict[tuple[str, str], list[tuple[object, object]]] = {}
+    for account in store.list_accounts(owner_email="", is_admin=True):
+        connection = connections.get(account.connection_id)
+        project = projects.get(account.project_id)
+        if connection is None or project is None or not account.enabled:
+            continue
+        if not (
+            connection.withdrawal_disabled_confirmed
+            and connection.trade_permission_confirmed
+            and account.withdrawal_disabled_confirmed
+            and account.trade_permission_confirmed
+            and configured.get(connection.id, {}).get("configured")
+        ):
+            continue
+        grouped.setdefault((connection.id, account.market_type), []).append(
+            (account, project)
+        )
+
+    spot_exchanges: list[ExchangeConfig] = []
+    derivative_exchanges: list[ExchangeConfig] = []
+    spot_markets: list[SpotMarketConfig] = []
+    for (connection_id, market_type), bindings in sorted(grouped.items()):
+        connection = connections[connection_id]
+        runtime_key = _runtime_key(connection.id, market_type)
+        base = workspace_exchange_config(
+            exchange=connection.exchange,
+            market_type=market_type,
+            api_variant=connection.api_variant,
+            runtime_key=f"{connection.id}:{market_type}",
+        )
+        exchange = replace(
+            base,
+            display_label=f"{connection.label} · {market_type.upper()}",
+            fee_bps=DEFAULT_WORKSPACE_FEE_BPS.get(connection.exchange, 25.0),
+            credential_connection_id=connection.id,
+            credential_owner_email=connection.owner_email,
+            credential_store_path=str(store.path),
+            credential_master_key_env=store.master_key_env,
+        )
+        if market_type == "spot":
+            spot_exchanges.append(exchange)
+            for account, project in bindings:
+                spot_markets.append(
+                    SpotMarketConfig(
+                        asset=project.asset,
+                        exchange=runtime_key,
+                        symbol=account.symbol,
+                        quote_currency=project.quote_currency,
+                    )
+                )
+        else:
+            derivative_exchanges.append(exchange)
+    return WorkspaceRuntimeAccounts(
+        spot_exchanges=tuple(spot_exchanges),
+        derivative_exchanges=tuple(derivative_exchanges),
+        spot_markets=tuple(spot_markets),
+    )
+
+
+def merge_workspace_runtime_accounts(
+    cfg: BotConfig,
+    workspace: WorkspaceRuntimeAccounts,
+) -> BotConfig:
+    spot_keys = {row.key for row in cfg.spot_exchanges}
+    derivative_keys = {row.key for row in cfg.derivative_exchanges}
+    market_keys = {(row.exchange, row.symbol) for row in cfg.spot_markets}
+    return replace(
+        cfg,
+        spot_exchanges=[
+            *cfg.spot_exchanges,
+            *(row for row in workspace.spot_exchanges if row.key not in spot_keys),
+        ],
+        derivative_exchanges=[
+            *cfg.derivative_exchanges,
+            *(
+                row
+                for row in workspace.derivative_exchanges
+                if row.key not in derivative_keys
+            ),
+        ],
+        spot_markets=[
+            *cfg.spot_markets,
+            *(
+                row
+                for row in workspace.spot_markets
+                if (row.exchange, row.symbol) not in market_keys
+            ),
+        ],
+    )

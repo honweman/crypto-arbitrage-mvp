@@ -376,7 +376,7 @@ def slow_execution_accounts(
         rows.append(
             {
                 "key": exchange.key,
-                "label": exchange.key,
+                "label": exchange.display_label or exchange.key,
                 "id": exchange.id,
                 "market_type": exchange.market_type,
                 "symbol": symbols[0] if symbols else "",
@@ -1180,7 +1180,7 @@ def exchange_configs_to_list(
     return [
         {
             "key": exchange.key,
-            "label": exchange.label or exchange.key,
+            "label": exchange.display_label or exchange.label or exchange.key,
             "id": exchange.id,
             "market_type": exchange.market_type,
         }

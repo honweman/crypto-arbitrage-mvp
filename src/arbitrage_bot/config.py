@@ -11,6 +11,7 @@ from typing import Any
 class ExchangeConfig:
     id: str
     label: str | None = None
+    display_label: str | None = None
     market_type: str = "spot"
     fee_bps: float = 0.0
     api_key_env: str | None = None
@@ -549,6 +550,7 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
     return ExchangeConfig(
         id=raw["id"],
         label=raw.get("label"),
+        display_label=raw.get("display_label"),
         market_type=raw.get("market_type", "spot"),
         fee_bps=float(raw.get("fee_bps", 0.0)),
         api_key_env=raw.get("api_key_env"),
