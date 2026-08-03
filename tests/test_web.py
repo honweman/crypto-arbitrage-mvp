@@ -394,7 +394,7 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-unified-accounts1" defer></script>',
+            '<script src="/static/app.js?v=20260803-unified-accounts2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(

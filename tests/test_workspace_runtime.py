@@ -125,6 +125,11 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
         account_by_key = {row["key"]: row for row in rebalance_accounts}
         for key in dynamic_keys:
             self.assertEqual(account_by_key[key]["symbols"], ["ACS/USDT"])
+            self.assertNotIn("workspace:", account_by_key[key]["label"])
+            self.assertNotIn(
+                "workspace:",
+                account_by_key[key]["markets"][0]["exchange_label"],
+            )
 
     def test_imported_legacy_connection_is_not_duplicated(self) -> None:
         master_key = base64.urlsafe_b64encode(b"x" * 32).decode("ascii")

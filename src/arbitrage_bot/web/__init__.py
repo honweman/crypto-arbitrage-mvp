@@ -538,10 +538,14 @@ def build_trading_console_payload(
     live_base = (
         cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
     )
+    exchange_labels = {
+        exchange.key: exchange.display_label or exchange.label or exchange.key
+        for exchange in _all_account_exchanges(cfg)
+    }
     accounts = [
         {
             "key": exchange.key,
-            "label": exchange.label or exchange.key,
+            "label": exchange_labels[exchange.key],
             "id": exchange.id,
             "market_type": exchange.market_type,
             "enabled": _risk_account_enabled(cfg, exchange.key),
@@ -576,6 +580,7 @@ def build_trading_console_payload(
             "label": label,
             "configured": configured,
             "exchange": exchange,
+            "exchange_label": exchange_labels.get(exchange, exchange),
             "symbol": symbol,
             "paused": paused,
             "live": live,

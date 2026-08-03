@@ -552,7 +552,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         const rawLabels = { no_task: "No active task" };
         parts.push(uiText(rawLabels[row.raw_status] || row.raw_status));
       }
-      if (row.reason) parts.push(row.reason);
+      if (row.reason) parts.push(friendlyAccountMessage(row.reason));
       return parts.filter(Boolean).join(" · ");
     }
 
@@ -566,6 +566,33 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         label: lifecycleStateLabel(row.actual_state),
         detail: lifecycleDetail(row),
       };
+    }
+
+    function coreAccountRows() {
+      return [
+        ...(lastState?.market_maker?.accounts || []),
+        ...(lastState?.slow_execution?.accounts || []),
+        ...(lastState?.cross_exchange_rebalance?.accounts || []),
+        ...(lastState?.trading_console?.accounts || []),
+      ].filter((row) => row && row.key);
+    }
+
+    function accountLabelForKey(key) {
+      const accountKey = String(key || "");
+      if (!accountKey) return "";
+      const account = coreAccountRows().find((row) => row.key === accountKey);
+      return account?.label || accountKey;
+    }
+
+    function friendlyAccountMessage(message) {
+      let textValue = String(message || "");
+      const labels = new Map(
+        coreAccountRows().map((row) => [String(row.key), String(row.label || row.key)]),
+      );
+      for (const [key, label] of [...labels.entries()].sort((left, right) => right[0].length - left[0].length)) {
+        if (key && label !== key) textValue = textValue.split(key).join(label);
+      }
+      return textValue;
     }
 
     function coreLiveRiskReadiness(strategyId, exchanges = []) {
@@ -582,7 +609,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       let detail = "Risk checks passed";
       if (!globalReady) detail = "Global live gate is off";
       else if (!strategyReady) detail = "Strategy risk switch is off";
-      else if (!accountsReady) detail = `${blockedAccount} ${uiText("account risk switch is off")}`;
+      else if (!accountsReady) detail = `${accountLabelForKey(blockedAccount)} ${uiText("account risk switch is off")}`;
       return {
         ready: globalReady && strategyReady && accountsReady,
         globalReady,
@@ -604,7 +631,9 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       }
       const preflight = result.preflight || {};
       if (!preflight.ready || !preflight.token) {
-        const blockers = Array.isArray(preflight.blockers) ? preflight.blockers : [];
+        const blockers = Array.isArray(preflight.blockers)
+          ? preflight.blockers.map((message) => friendlyAccountMessage(message))
+          : [];
         throw new Error(
           blockers.length
             ? `${uiText("Preflight blocked")}: ${blockers.slice(0, 3).join("; ")}`
@@ -1735,7 +1764,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Strategy")}">${escapeHtml(strategy.label || strategy.id)}</td>
           <td data-label="${uiText("Status")}" class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled")}</td>
           <td data-label="${uiText("Live")}" class="${strategy.live ? "ok" : "missing"}">${strategy.live ? "YES" : "NO"}</td>
-          <td data-label="${uiText("Account")}">${escapeHtml(strategy.exchange || "--")}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(strategy.exchange_label || strategy.exchange || "--")}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(strategy.symbol || "--")}</td>
           <td data-label="${uiText("Mode")}">${escapeHtml(strategy.mode || "--")}</td>
           <td data-label="${uiText("Action")}" class="strategy-action"></td>
@@ -1891,7 +1920,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td>${escapeHtml(strategy.label || displayStrategy(strategy.id))}</td>
           <td class="${strategy.configured ? "risk-ok" : "risk-off"}">${strategy.configured ? "yes" : "no"}</td>
-          <td>${escapeHtml(strategy.exchange || "--")}</td>
+          <td>${escapeHtml(strategy.exchange_label || accountLabelForKey(strategy.exchange) || "--")}</td>
           <td>${escapeHtml(strategy.symbol || "--")}</td>
           <td class="${strategy.live ? "risk-ok" : "risk-off"}">${strategy.live ? "YES" : "NO"}</td>
           <td class="${readinessClass(strategy.status)}">${escapeHtml(strategy.status || "--")}</td>
@@ -3284,7 +3313,7 @@ function balanceStatusClass(status) {
           <td>${escapeHtml(displayStrategy(strategy.strategy_type))}</td>
           <td>${escapeHtml(strategy.owner_email || "--")}</td>
           <td>${escapeHtml(strategy.account_id || "--")}</td>
-          <td>${escapeHtml(strategy.exchange || "--")}<br><span class="subtle">${escapeHtml(strategy.symbol || strategy.asset || "--")}</span></td>
+          <td>${escapeHtml(strategy.exchange_label || accountLabelForKey(strategy.exchange) || "--")}<br><span class="subtle">${escapeHtml(strategy.symbol || strategy.asset || "--")}</span></td>
           <td class="${strategy.enabled ? "ok" : "subtle"}">${strategy.live_enabled ? "live ready" : (strategy.status || (strategy.enabled ? "enabled" : "draft"))}</td>
           <td class="num">${money.format(strategy.pnl_quote || 0)}</td>
           <td class="num">${strategy.open_order_count || 0}</td>
@@ -6555,7 +6584,7 @@ function balanceStatusClass(status) {
       const strategies = (tradingConsole?.strategies || []).map((strategy) => ({
         key: strategy.id,
         label: strategy.label || displayStrategy(strategy.id),
-        title: strategy.symbol ? `${strategy.exchange || "all"} · ${strategy.symbol}` : strategy.id,
+        title: strategy.symbol ? `${strategy.exchange_label || strategy.exchange || "all"} · ${strategy.symbol}` : strategy.id,
       }));
       renderRiskToggleOptions(
         "risk-accounts",
@@ -7026,7 +7055,7 @@ function balanceStatusClass(status) {
     function marketMakerInstanceLabel(instance) {
       const config = instance?.config || {};
       const status = instance?.runtime?.status || instance?.status || "disabled";
-      return `${config.exchange || "account"} ${config.symbol || "symbol"} · ${status}`;
+      return `${accountLabelForKey(config.exchange) || "account"} ${config.symbol || "symbol"} · ${status}`;
     }
 
     function firstListText(items) {
@@ -7065,6 +7094,10 @@ function balanceStatusClass(status) {
 
     function marketMakerInstanceName(instance) {
       const config = instance?.config || {};
+      const accountLabel = accountLabelForKey(config.exchange);
+      if (accountLabel && accountLabel !== config.exchange) {
+        return `${accountLabel} ${config.symbol || "symbol"}`;
+      }
       return instance?.display_name || `${config.exchange || "account"} ${config.symbol || "symbol"}`;
     }
 
@@ -7115,7 +7148,7 @@ function balanceStatusClass(status) {
         const row = document.createElement("div");
         row.className = "instance-status-row";
         const detail = `${instance?.mode || runtime.mode || "dry_run"} · open ${runtime.open_order_count ?? 0} · placed ${runtime.placed_count ?? 0} · canceled ${runtime.canceled_count ?? 0}`;
-        const reason = marketMakerStatusReason(instance) || "--";
+        const reason = friendlyAccountMessage(marketMakerStatusReason(instance)) || "--";
         row.innerHTML = `
           <div class="instance-status-name" title="${escapeHtml(marketMakerInstanceName(instance))}">${escapeHtml(marketMakerInstanceName(instance))}</div>
           <div class="instance-status-pill ${marketMakerStatusClass(status)}">${escapeHtml(status)}</div>
@@ -7146,7 +7179,7 @@ function balanceStatusClass(status) {
           ? `${uiText("Missing")}: ${missing.join(", ")}`
           : belowExchangeMinimum
             ? `${uiText("quote per level")}: ${formatLimitValue(payload.quote_per_level, quote)} · ${uiText("Min notional")}: ${formatLimitValue(costMin, quote)}`
-          : `${payload.exchange} · ${payload.symbol} · ${payload.levels} ${uiText("levels per side")}`,
+          : `${accountLabelForKey(payload.exchange)} · ${payload.symbol} · ${payload.levels} ${uiText("levels per side")}`,
       };
     }
 
@@ -7212,7 +7245,7 @@ function balanceStatusClass(status) {
       const plannedOrders = Math.max(0, Number(payload.levels || 0)) * 2;
       const plannedQuote = plannedOrders * Math.max(0, Number(payload.quote_per_level || 0));
       return [
-        `${uiText("Account")}: ${payload.exchange}`,
+        `${uiText("Account")}: ${accountLabelForKey(payload.exchange)}`,
         `${uiText("Trading pair")}: ${payload.symbol}`,
         `${uiText("Orders")}: ${plannedOrders} (${payload.levels} ${uiText("levels per side")})`,
         `${uiText("Quote/Level")}: ${quote} ${money.format(payload.quote_per_level)}`,
@@ -7242,7 +7275,9 @@ function balanceStatusClass(status) {
         body: JSON.stringify(payload),
       });
       const result = await res.json();
-      if (!res.ok) throw new Error(result.error || "market maker update failed");
+      if (!res.ok) {
+        throw new Error(friendlyAccountMessage(result.error || "market maker update failed"));
+      }
       syncSelectedMarketMakerId(
         result,
         payload.id || selectedMarketMakerInstanceId,
@@ -7596,7 +7631,7 @@ function balanceStatusClass(status) {
       };
       if (!dangerConfirm(
         "Stop this Market Maker and cancel its managed orders?",
-        `${payload.exchange} · ${payload.symbol}`,
+        `${accountLabelForKey(payload.exchange)} · ${payload.symbol}`,
       )) return;
       mmFormBusy = true;
       setStrategyFeedback("mm-feedback");

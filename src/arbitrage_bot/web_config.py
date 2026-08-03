@@ -284,7 +284,9 @@ def _account_market_rows(
                 "project": asset,
                 "exchange": exchange.key,
                 "exchange_id": exchange.id,
-                "exchange_label": exchange.label or exchange.key,
+                "exchange_label": (
+                    exchange.display_label or exchange.label or exchange.key
+                ),
                 "market_type": exchange.market_type,
                 "symbol": symbol,
                 "quote_currency": quote,
