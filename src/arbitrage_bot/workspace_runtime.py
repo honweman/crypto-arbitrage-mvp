@@ -5,7 +5,7 @@ from typing import Iterable
 
 from .config import BotConfig, ExchangeConfig, SpotMarketConfig
 from .user_account_check import workspace_exchange_config
-from .user_workspace import UserWorkspaceStore
+from .user_workspace import api_connection_egress_blockers, UserWorkspaceStore
 
 
 DEFAULT_WORKSPACE_FEE_BPS = {
@@ -38,10 +38,13 @@ def build_workspace_runtime_accounts(
     owners = {str(email).strip().lower() for email in owner_emails if str(email).strip()}
     if not owners:
         return WorkspaceRuntimeAccounts()
+    all_connections = store.list_api_connections(owner_email="", is_admin=True)
     connections = {
         row.id: row
-        for row in store.list_api_connections(owner_email="", is_admin=True)
-        if row.owner_email in owners and not row.runtime_keys
+        for row in all_connections
+        if row.owner_email in owners
+        and not row.runtime_keys
+        and not api_connection_egress_blockers(row, all_connections)
     }
     configured = store.credential_statuses(connections)
     projects = {
@@ -78,6 +81,7 @@ def build_workspace_runtime_accounts(
             market_type=market_type,
             api_variant=connection.api_variant,
             runtime_key=f"{connection.id}:{market_type}",
+            egress_mode=connection.egress_mode,
         )
         exchange = replace(
             base,
@@ -87,6 +91,11 @@ def build_workspace_runtime_accounts(
             credential_owner_email=connection.owner_email,
             credential_store_path=str(store.path),
             credential_master_key_env=store.master_key_env,
+            source_ip=(
+                connection.egress_source_ip
+                if connection.egress_mode == "source_ip"
+                else None
+            ),
         )
         if market_type == "spot":
             spot_exchanges.append(exchange)

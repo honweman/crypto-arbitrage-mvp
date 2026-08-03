@@ -446,11 +446,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-balance-dedupe2" defer></script>',
+            '<script src="/static/app.js?v=20260803-account-egress1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-balance-dedupe2" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-account-egress1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -504,6 +504,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('uiText("All accounts")', summary_body)
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
+        self.assertIn('id="user-exchange-egress-mode"', INDEX_HTML)
+        self.assertIn('id="user-exchange-source-ip"', INDEX_HTML)
+        self.assertIn('id="user-exchange-expected-ip"', INDEX_HTML)
+        self.assertIn('id="user-exchange-proxy-url"', INDEX_HTML)
         self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
         self.assertIn('<summary>Exchange Accounts</summary>', INDEX_HTML)
         self.assertIn('<summary>Project Management</summary>', INDEX_HTML)

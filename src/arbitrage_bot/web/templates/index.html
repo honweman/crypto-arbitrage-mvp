@@ -495,6 +495,27 @@
           <input id="user-exchange-label" type="text" maxlength="80" placeholder="Coinbase Main or Coinbase MM 2" required>
           <span class="field-hint">Use a distinct name for every API account on the same exchange.</span>
         </div>
+        <div class="field">
+          <label for="user-exchange-egress-mode">Account Egress</label>
+          <select id="user-exchange-egress-mode">
+            <option value="default">Server Default IP</option>
+            <option value="source_ip">Bind Local Source IP</option>
+            <option value="proxy">Dedicated Proxy</option>
+          </select>
+        </div>
+        <div class="field" id="user-exchange-source-ip-field" hidden>
+          <label for="user-exchange-source-ip">Local Source IP</label>
+          <input id="user-exchange-source-ip" type="text" maxlength="45" placeholder="10.0.0.12">
+        </div>
+        <div class="field" id="user-exchange-expected-ip-field">
+          <label for="user-exchange-expected-ip">Expected Public IP</label>
+          <input id="user-exchange-expected-ip" type="text" maxlength="45" placeholder="47.237.175.169">
+        </div>
+        <div class="field" id="user-exchange-proxy-url-field" hidden>
+          <label for="user-exchange-proxy-url">Proxy URL</label>
+          <input id="user-exchange-proxy-url" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing">
+        </div>
+        <p id="user-exchange-egress-status" class="subtle wide-field" role="status">Single accounts may use the server default IP.</p>
         <div class="workspace-step-title workspace-step-inline wide-field">
           <span class="workspace-step-number">2</span>
           <div><strong>Add API &amp; Sync</strong><span class="subtle">Credentials are encrypted once and shared only with this account's selected trading pairs.</span></div>
@@ -2626,8 +2647,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260803-balance-dedupe2" defer></script>
-  <script src="/static/app.js?v=20260803-balance-dedupe2" defer></script>
+  <script src="/static/i18n.js?v=20260803-account-egress1" defer></script>
+  <script src="/static/app.js?v=20260803-account-egress1" defer></script>
 
 </body>
 </html>

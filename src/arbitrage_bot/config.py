@@ -27,6 +27,8 @@ class ExchangeConfig:
     ws_proxy_env: str | None = None
     wss_proxy_env: str | None = None
     ws_socks_proxy_env: str | None = None
+    egress_mode: str = "default"
+    source_ip: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -566,6 +568,8 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
         ws_proxy_env=raw.get("ws_proxy_env"),
         wss_proxy_env=raw.get("wss_proxy_env"),
         ws_socks_proxy_env=raw.get("ws_socks_proxy_env"),
+        egress_mode=str(raw.get("egress_mode") or "default"),
+        source_ip=raw.get("source_ip"),
         options=dict(raw.get("options", {})),
     )
 

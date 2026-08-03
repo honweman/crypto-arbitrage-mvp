@@ -29,6 +29,8 @@ def workspace_exchange_config(
     market_type: str,
     api_variant: str,
     runtime_key: str,
+    egress_mode: str = "default",
+    source_ip: str = "",
 ) -> ExchangeConfig:
     exchange_id = str(exchange or "").strip().lower()
     market = str(market_type or "spot").strip().lower()
@@ -54,6 +56,8 @@ def workspace_exchange_config(
         id=ccxt_id,
         label=f"workspace:{runtime_key}",
         market_type=market,
+        egress_mode=str(egress_mode or "default"),
+        source_ip=str(source_ip or "").strip() or None,
         options=options,
     )
 
@@ -222,9 +226,62 @@ async def check_workspace_account(
         market_type=account.market_type,
         api_variant=account.api_variant,
         runtime_key=account.id,
+        egress_mode=account.egress_mode,
+        source_ip=(
+            account.egress_source_ip if account.egress_mode == "source_ip" else ""
+        ),
     )
     manager = manager_factory(credentials_by_key={cfg.key: credentials})
     started = time.perf_counter()
+    egress_result: dict[str, Any] = {}
+    if account.egress_mode != "default" or account.egress_expected_ip:
+        try:
+            observed_ip = await asyncio.wait_for(
+                manager.fetch_egress_ip(cfg),
+                timeout=min(max(1.0, timeout_seconds), 12.0),
+            )
+            egress_result = {
+                "egress_observed_ip": observed_ip,
+                "egress_checked_at": time.time(),
+                "egress_error": "",
+            }
+            if account.egress_expected_ip and observed_ip != account.egress_expected_ip:
+                message = (
+                    f"egress IP mismatch: expected {account.egress_expected_ip}, "
+                    f"observed {observed_ip}"
+                )
+                await manager.close()
+                return {
+                    "status": "error",
+                    "checked_at": time.time(),
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                    "exchange": account.exchange,
+                    "market_type": account.market_type,
+                    "api_variant": account.api_variant,
+                    "symbol": account.symbol,
+                    **egress_result,
+                    "egress_error": message,
+                    "error": message,
+                }
+        except asyncio.CancelledError:
+            await manager.close()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            message = "egress IP verification failed: " + _safe_error(
+                exc, credentials
+            )
+            await manager.close()
+            return {
+                "status": "error",
+                "checked_at": time.time(),
+                "latency_ms": (time.perf_counter() - started) * 1000,
+                "exchange": account.exchange,
+                "market_type": account.market_type,
+                "api_variant": account.api_variant,
+                "symbol": account.symbol,
+                "egress_error": message,
+                "error": message,
+            }
     try:
         market = await asyncio.wait_for(
             manager.fetch_market_info(cfg, symbol=account.symbol),
@@ -285,6 +342,7 @@ async def check_workspace_account(
             "market_type": account.market_type,
             "api_variant": account.api_variant,
             "symbol": account.symbol,
+            **egress_result,
             "market": _market_row(market),
             "order_book": book_summary,
             "balances": balances,
@@ -323,6 +381,7 @@ async def check_workspace_account(
             "market_type": account.market_type,
             "api_variant": account.api_variant,
             "symbol": account.symbol,
+            **egress_result,
             "permissions": {
                 "private_account_read": "failed",
                 "open_order_read": "failed_or_not_reached",
@@ -356,12 +415,82 @@ async def check_workspace_api_connection(
     scope_results: list[dict[str, Any]] = []
     scope_errors: list[str] = []
     market_types = api_connection.market_types or (api_connection.market_type,)
+    egress_result: dict[str, Any] = {}
+    if api_connection.egress_mode != "default" or api_connection.egress_expected_ip:
+        probe_cfg = workspace_exchange_config(
+            exchange=api_connection.exchange,
+            market_type=market_types[0],
+            api_variant=api_connection.api_variant,
+            runtime_key=f"{api_connection.id}:{market_types[0]}",
+            egress_mode=api_connection.egress_mode,
+            source_ip=(
+                api_connection.egress_source_ip
+                if api_connection.egress_mode == "source_ip"
+                else ""
+            ),
+        )
+        probe_manager = manager_factory(
+            credentials_by_key={probe_cfg.key: credentials}
+        )
+        try:
+            observed_ip = await asyncio.wait_for(
+                probe_manager.fetch_egress_ip(probe_cfg),
+                timeout=min(max(1.0, timeout_seconds), 12.0),
+            )
+            egress_result = {
+                "egress_observed_ip": observed_ip,
+                "egress_checked_at": time.time(),
+                "egress_error": "",
+            }
+            if (
+                api_connection.egress_expected_ip
+                and observed_ip != api_connection.egress_expected_ip
+            ):
+                message = (
+                    f"egress IP mismatch: expected "
+                    f"{api_connection.egress_expected_ip}, observed {observed_ip}"
+                )
+                return {
+                    "status": "error",
+                    "checked_at": time.time(),
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                    "exchange": api_connection.exchange,
+                    "market_types": list(market_types),
+                    "api_variant": api_connection.api_variant,
+                    **egress_result,
+                    "egress_error": message,
+                    "error": message,
+                }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            message = "egress IP verification failed: " + _safe_error(
+                exc, credentials
+            )
+            return {
+                "status": "error",
+                "checked_at": time.time(),
+                "latency_ms": (time.perf_counter() - started) * 1000,
+                "exchange": api_connection.exchange,
+                "market_types": list(market_types),
+                "api_variant": api_connection.api_variant,
+                "egress_error": message,
+                "error": message,
+            }
+        finally:
+            await probe_manager.close()
     for market_type in market_types:
         cfg = workspace_exchange_config(
             exchange=api_connection.exchange,
             market_type=market_type,
             api_variant=api_connection.api_variant,
             runtime_key=f"{api_connection.id}:{market_type}",
+            egress_mode=api_connection.egress_mode,
+            source_ip=(
+                api_connection.egress_source_ip
+                if api_connection.egress_mode == "source_ip"
+                else ""
+            ),
         )
         manager = manager_factory(credentials_by_key={cfg.key: credentials})
         try:
@@ -467,6 +596,7 @@ async def check_workspace_api_connection(
             "exchange": api_connection.exchange,
             "market_types": list(market_types),
             "api_variant": api_connection.api_variant,
+            **egress_result,
             "error": "; ".join(scope_errors)[:240] or "account check failed",
         }
 
@@ -489,6 +619,7 @@ async def check_workspace_api_connection(
         "market_type": api_connection.market_type,
         "market_types": [result["market_type"] for result in scope_results],
         "api_variant": api_connection.api_variant,
+        **egress_result,
         "market_count": sum(result["market_count"] for result in scope_results),
         "market_counts": {
             result["market_type"]: result["market_count"] for result in scope_results

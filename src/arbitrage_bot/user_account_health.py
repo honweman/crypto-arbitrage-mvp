@@ -152,9 +152,11 @@ async def refresh_workspace_account(
     project = store.get_project(account.project_id)
     if project is None or project.status != "active":
         return None
+    api_connection = store.get_api_connection(account.connection_id)
+    credential_owner = api_connection or account
     credentials = store.decrypt_credentials(
-        account_id=account.id,
-        owner_email=account.owner_email,
+        account_id=credential_owner.id,
+        owner_email=credential_owner.owner_email,
     )
     try:
         try:

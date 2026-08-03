@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -48,7 +50,33 @@ SYMBOL_RE = re.compile(
     r"^[A-Z0-9][A-Z0-9._-]{0,29}/[A-Z0-9][A-Z0-9._-]{0,29}"
     r"(?::[A-Z0-9][A-Z0-9._-]{0,29})?$"
 )
-CREDENTIAL_FIELDS = {"api_key", "secret", "passphrase", "password"}
+CREDENTIAL_FIELDS = {"api_key", "secret", "passphrase", "password", "proxy_url"}
+EGRESS_MODES = {"default", "source_ip", "proxy"}
+
+
+def _clean_ip_address(value: Any, *, label: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a valid IPv4 or IPv6 address") from exc
+    if address.is_unspecified or address.is_multicast:
+        raise ValueError(f"{label} cannot be unspecified or multicast")
+    return str(address)
+
+
+def _validate_proxy_url(value: str) -> str:
+    proxy_url = str(value or "").strip()
+    if not proxy_url:
+        return ""
+    parsed = urlsplit(proxy_url)
+    if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"}:
+        raise ValueError("proxy URL must use http, https, socks5, or socks5h")
+    if not parsed.hostname:
+        raise ValueError("proxy URL must include a hostname")
+    return proxy_url
 
 
 def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
@@ -549,6 +577,12 @@ class UserApiConnection:
     market_types: tuple[str, ...] = ()
     api_variant: str = "default"
     runtime_keys: tuple[str, ...] = ()
+    egress_mode: str = "default"
+    egress_source_ip: str = ""
+    egress_expected_ip: str = ""
+    egress_observed_ip: str = ""
+    egress_checked_at: float | None = None
+    egress_error: str = ""
     withdrawal_disabled_confirmed: bool = False
     trade_permission_confirmed: bool = False
     connection_status: str = "unverified"
@@ -615,6 +649,22 @@ class UserApiConnection:
         runtime_keys_raw = raw.get("runtime_keys")
         if not isinstance(runtime_keys_raw, (list, tuple, set)):
             runtime_keys_raw = ()
+        egress_mode = str(raw.get("egress_mode") or "default").strip().lower()
+        if egress_mode not in EGRESS_MODES:
+            raise ValueError(f"unsupported account egress mode: {egress_mode}")
+        egress_source_ip = _clean_ip_address(
+            raw.get("egress_source_ip"), label="egress source IP"
+        )
+        egress_expected_ip = _clean_ip_address(
+            raw.get("egress_expected_ip"), label="expected public IP"
+        )
+        egress_observed_ip = _clean_ip_address(
+            raw.get("egress_observed_ip"), label="observed public IP"
+        )
+        if egress_mode == "source_ip" and not egress_source_ip:
+            raise ValueError("source IP egress requires a local source IP")
+        if egress_mode in {"source_ip", "proxy"} and not egress_expected_ip:
+            raise ValueError("dedicated egress requires an expected public IP")
         now = _now()
         return cls(
             id=_clean_id(raw.get("id"), prefix="connection"),
@@ -631,6 +681,16 @@ class UserApiConnection:
                     if str(item or "").strip()
                 )
             ),
+            egress_mode=egress_mode,
+            egress_source_ip=egress_source_ip,
+            egress_expected_ip=egress_expected_ip,
+            egress_observed_ip=egress_observed_ip,
+            egress_checked_at=(
+                float(raw["egress_checked_at"])
+                if raw.get("egress_checked_at") is not None
+                else None
+            ),
+            egress_error=_clean_text(raw.get("egress_error"), max_length=240),
             withdrawal_disabled_confirmed=_strict_bool(
                 raw.get("withdrawal_disabled_confirmed"),
                 label="withdrawal-disabled confirmation",
@@ -668,6 +728,12 @@ class UserApiConnection:
             "market_scope": "unified",
             "api_variant": self.api_variant,
             "runtime_keys": list(self.runtime_keys),
+            "egress_mode": self.egress_mode,
+            "egress_source_ip": self.egress_source_ip,
+            "egress_expected_ip": self.egress_expected_ip,
+            "egress_observed_ip": self.egress_observed_ip,
+            "egress_checked_at": self.egress_checked_at,
+            "egress_error": self.egress_error,
             "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
             "trade_permission_confirmed": self.trade_permission_confirmed,
             "connection_status": self.connection_status,
@@ -694,6 +760,69 @@ def api_connection_is_fresh(
     return 0.0 <= age <= CONNECTION_MAX_AGE_SECONDS
 
 
+def api_connection_egress_blockers(
+    connection: UserApiConnection,
+    peers: list[UserApiConnection] | tuple[UserApiConnection, ...],
+    *,
+    now: float | None = None,
+) -> list[str]:
+    same_exchange = [row for row in peers if row.exchange == connection.exchange]
+    dedicated_required = len(same_exchange) > 1
+    if connection.egress_mode == "default" and not dedicated_required:
+        return []
+
+    blockers: list[str] = []
+    if not connection.egress_expected_ip:
+        blockers.append("expected public IP is required")
+    if not connection.egress_observed_ip:
+        blockers.append("egress public IP has not been verified")
+    elif (
+        connection.egress_expected_ip
+        and connection.egress_observed_ip != connection.egress_expected_ip
+    ):
+        blockers.append("observed public IP does not match the expected IP")
+    checked_at = float(connection.egress_checked_at or 0.0)
+    current = float(now if now is not None else _now())
+    if connection.egress_observed_ip and not (
+        0.0 <= current - checked_at <= CONNECTION_MAX_AGE_SECONDS
+    ):
+        blockers.append("egress public IP verification is stale")
+    if connection.egress_observed_ip:
+        duplicate = next(
+            (
+                row
+                for row in same_exchange
+                if row.id != connection.id
+                and row.egress_observed_ip == connection.egress_observed_ip
+            ),
+            None,
+        )
+        if duplicate is not None:
+            blockers.append(
+                f"public IP is already assigned to another "
+                f"{connection.exchange} account"
+            )
+    if connection.egress_error:
+        blockers.append(connection.egress_error)
+    return list(dict.fromkeys(blockers))
+
+
+def _public_api_connection_row(
+    connection: UserApiConnection,
+    credential_status: dict[str, Any],
+    peers: list[UserApiConnection],
+) -> dict[str, Any]:
+    row = connection.to_dict()
+    row["credentials"] = credential_status
+    blockers = api_connection_egress_blockers(connection, peers)
+    row["egress_ready"] = not blockers
+    row["egress_blockers"] = blockers
+    row["proxy_configured"] = "proxy_url" in (
+        credential_status.get("fields") or []
+    )
+    return row
+
+
 @dataclass(frozen=True)
 class UserExchangeAccount:
     id: str
@@ -705,6 +834,11 @@ class UserExchangeAccount:
     market_type: str = "spot"
     api_variant: str = "default"
     symbol: str = ""
+    egress_mode: str = "default"
+    egress_source_ip: str = ""
+    egress_expected_ip: str = ""
+    egress_observed_ip: str = ""
+    egress_checked_at: float | None = None
     enabled: bool = False
     withdrawal_disabled_confirmed: bool = False
     trade_permission_confirmed: bool = False
@@ -756,6 +890,9 @@ class UserExchangeAccount:
         )
         if connection_status not in CONNECTION_STATUSES:
             connection_status = "unverified"
+        egress_mode = str(raw.get("egress_mode") or "default").strip().lower()
+        if egress_mode not in EGRESS_MODES:
+            raise ValueError(f"unsupported account egress mode: {egress_mode}")
         project_id = _clean_id(raw.get("project_id"), prefix="project")
         account_id = _clean_id(raw.get("id"), prefix="account")
         now = _now()
@@ -772,6 +909,21 @@ class UserExchangeAccount:
             market_type=market_type,
             api_variant=api_variant,
             symbol=_clean_symbol(raw.get("symbol")),
+            egress_mode=egress_mode,
+            egress_source_ip=_clean_ip_address(
+                raw.get("egress_source_ip"), label="egress source IP"
+            ),
+            egress_expected_ip=_clean_ip_address(
+                raw.get("egress_expected_ip"), label="expected public IP"
+            ),
+            egress_observed_ip=_clean_ip_address(
+                raw.get("egress_observed_ip"), label="observed public IP"
+            ),
+            egress_checked_at=(
+                float(raw["egress_checked_at"])
+                if raw.get("egress_checked_at") is not None
+                else None
+            ),
             enabled=_strict_bool(
                 raw.get("enabled"),
                 label="account enabled",
@@ -829,6 +981,11 @@ class UserExchangeAccount:
             "market_type": self.market_type,
             "api_variant": self.api_variant,
             "symbol": self.symbol,
+            "egress_mode": self.egress_mode,
+            "egress_source_ip": self.egress_source_ip,
+            "egress_expected_ip": self.egress_expected_ip,
+            "egress_observed_ip": self.egress_observed_ip,
+            "egress_checked_at": self.egress_checked_at,
             "enabled": self.enabled,
             "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
             "trade_permission_confirmed": self.trade_permission_confirmed,
@@ -1413,24 +1570,68 @@ class UserWorkspaceStore:
                 f"account name already exists on {api_connection.exchange}: "
                 f"{api_connection.label}; use a distinct name for each API account"
             )
+        if api_connection.egress_expected_ip:
+            egress_duplicate = next(
+                (
+                    row
+                    for row in self.list_api_connections(
+                        owner_email="",
+                        is_admin=True,
+                    )
+                    if row.id != api_connection.id
+                    and row.exchange == api_connection.exchange
+                    and row.egress_expected_ip == api_connection.egress_expected_ip
+                ),
+                None,
+            )
+            if egress_duplicate is not None:
+                raise ValueError(
+                    f"public IP {api_connection.egress_expected_ip} is already "
+                    f"assigned to another {api_connection.exchange} account"
+                )
         supplied = self._clean_credentials(credentials)
         if existing is None and not supplied:
             raise ValueError("configure required API credentials before saving")
+        stored_credentials: dict[str, str] = {}
+        if existing is not None and (supplied or api_connection.egress_mode == "proxy"):
+            stored_credentials = self.decrypt_credentials(
+                account_id=existing.id,
+                owner_email=existing.owner_email,
+            )
+        merged_credentials = {**stored_credentials, **supplied}
+        if api_connection.egress_mode == "proxy" and not merged_credentials.get(
+            "proxy_url"
+        ):
+            raise ValueError("proxy egress requires an encrypted proxy URL")
+        route_changed = bool(
+            existing is not None
+            and (
+                existing.egress_mode != api_connection.egress_mode
+                or existing.egress_source_ip != api_connection.egress_source_ip
+                or existing.egress_expected_ip != api_connection.egress_expected_ip
+            )
+        )
         updated = replace(
             api_connection,
             created_at=existing.created_at if existing else api_connection.created_at,
             updated_at=_now(),
+            egress_observed_ip=(
+                "" if route_changed else api_connection.egress_observed_ip
+            ),
+            egress_checked_at=None if route_changed else api_connection.egress_checked_at,
+            egress_error="" if route_changed else api_connection.egress_error,
         )
         if supplied:
             if not updated.withdrawal_disabled_confirmed:
                 raise ValueError("confirm that API withdrawal permission is disabled")
             required = required_credentials_for_exchange(updated.exchange)
-            missing = sorted(required.difference(supplied))
+            missing = sorted(required.difference(merged_credentials))
             if missing:
                 raise ValueError(
                     "missing required API credential fields: " + ", ".join(missing)
                 )
-            validate_exchange_credentials(updated.exchange, supplied)
+            validate_exchange_credentials(updated.exchange, merged_credentials)
+        if supplied or route_changed:
             updated = replace(
                 updated,
                 connection_status="unverified",
@@ -1442,7 +1643,7 @@ class UserWorkspaceStore:
                 nonce, ciphertext = self.cipher.encrypt(
                     account_id=updated.id,
                     owner_email=updated.owner_email,
-                    credentials=supplied,
+                    credentials=merged_credentials,
                 )
                 connection.execute(
                     """
@@ -1455,7 +1656,7 @@ class UserWorkspaceStore:
                         updated.owner_email,
                         nonce,
                         ciphertext,
-                        self._dump({"fields": sorted(supplied)}),
+                        self._dump({"fields": sorted(merged_credentials)}),
                         updated.updated_at,
                     ),
                 )
@@ -1475,6 +1676,8 @@ class UserWorkspaceStore:
             )
             connection.commit()
         supplied.clear()
+        stored_credentials.clear()
+        merged_credentials.clear()
         return updated
 
     def update_api_connection_check(
@@ -1511,7 +1714,38 @@ class UserWorkspaceStore:
                 if check is not None
                 else api_connection.connection_latency_ms
             ),
+            egress_observed_ip=(
+                _clean_ip_address(
+                    check.get("egress_observed_ip"),
+                    label="observed public IP",
+                )
+                if check is not None and check.get("egress_observed_ip")
+                else api_connection.egress_observed_ip
+            ),
+            egress_checked_at=(
+                float(check.get("egress_checked_at") or _now())
+                if check is not None and check.get("egress_observed_ip")
+                else api_connection.egress_checked_at
+            ),
+            egress_error=(
+                _clean_text(check.get("egress_error"), max_length=240)
+                if check is not None
+                else api_connection.egress_error
+            ),
         )
+        if normalized_status == "healthy":
+            peers = [
+                updated if row.id == updated.id else row
+                for row in self.list_api_connections(owner_email="", is_admin=True)
+            ]
+            blockers = api_connection_egress_blockers(updated, peers)
+            if blockers:
+                updated = replace(
+                    updated,
+                    connection_status="error",
+                    connection_error=_clean_text(blockers[0], max_length=240),
+                    egress_error=_clean_text(blockers[0], max_length=240),
+                )
         return self.upsert_api_connection(updated)
 
     def suggest_api_connection_label(
@@ -2532,11 +2766,14 @@ class UserWorkspaceStore:
     def _clean_credentials(raw: Any) -> dict[str, str]:
         if not isinstance(raw, dict):
             return {}
-        return {
+        cleaned = {
             key: str(value).strip()
             for key, value in raw.items()
             if key in CREDENTIAL_FIELDS and str(value or "").strip()
         }
+        if "proxy_url" in cleaned:
+            cleaned["proxy_url"] = _validate_proxy_url(cleaned["proxy_url"])
+        return cleaned
 
     def _credential_row(
         self,
@@ -2592,6 +2829,9 @@ class UserWorkspaceStore:
                 or existing.market_type != account.market_type
                 or existing.api_variant != account.api_variant
                 or existing.symbol != account.symbol
+                or existing.egress_mode != account.egress_mode
+                or existing.egress_source_ip != account.egress_source_ip
+                or existing.egress_expected_ip != account.egress_expected_ip
             )
         )
         updated = replace(
@@ -2733,6 +2973,7 @@ class UserWorkspaceStore:
             and account.withdrawal_disabled_confirmed
             and account.trade_permission_confirmed
             and credentials_configured
+            and not (check or {}).get("egress_error")
         )
         updated = replace(
             account,
@@ -2754,6 +2995,19 @@ class UserWorkspaceStore:
                 _optional_non_negative_float(check.get("latency_ms")) or 0.0
                 if check is not None
                 else account.connection_latency_ms
+            ),
+            egress_observed_ip=(
+                _clean_ip_address(
+                    check.get("egress_observed_ip"),
+                    label="observed public IP",
+                )
+                if check is not None and check.get("egress_observed_ip")
+                else account.egress_observed_ip
+            ),
+            egress_checked_at=(
+                float(check.get("egress_checked_at") or _now())
+                if check is not None and check.get("egress_observed_ip")
+                else account.egress_checked_at
             ),
         )
         return self.upsert_account(updated)
@@ -3657,6 +3911,15 @@ class UserWorkspaceStore:
                 "market_scope": "unified",
                 "api_variant": row.get("api_variant") or "default",
                 "runtime_keys": list(row.get("runtime_keys") or []),
+                "egress_mode": row.get("egress_mode") or "default",
+                "egress_source_ip": row.get("egress_source_ip") or "",
+                "egress_expected_ip": row.get("egress_expected_ip") or "",
+                "egress_observed_ip": row.get("egress_observed_ip") or "",
+                "egress_checked_at": row.get("egress_checked_at"),
+                "egress_error": row.get("egress_error") or "",
+                "egress_ready": bool(row.get("egress_ready")),
+                "egress_blockers": list(row.get("egress_blockers") or []),
+                "proxy_configured": bool(row.get("proxy_configured")),
                 "withdrawal_disabled_confirmed": bool(
                     row.get("withdrawal_disabled_confirmed")
                 ),
@@ -3694,6 +3957,15 @@ class UserWorkspaceStore:
                     "market_scope": "unified",
                     "api_variant": row.get("api_variant") or "default",
                     "runtime_keys": [],
+                    "egress_mode": row.get("egress_mode") or "default",
+                    "egress_source_ip": row.get("egress_source_ip") or "",
+                    "egress_expected_ip": row.get("egress_expected_ip") or "",
+                    "egress_observed_ip": row.get("egress_observed_ip") or "",
+                    "egress_checked_at": row.get("egress_checked_at"),
+                    "egress_error": "",
+                    "egress_ready": True,
+                    "egress_blockers": [],
+                    "proxy_configured": False,
                     "withdrawal_disabled_confirmed": bool(
                         row.get("withdrawal_disabled_confirmed")
                     ),
@@ -3751,13 +4023,15 @@ class UserWorkspaceStore:
             market_count = len(group["markets"])
             group["status"] = (
                 "error"
-                if group["error_count"]
+                if group["error_count"] or not group["egress_ready"]
                 else "healthy"
                 if market_count and group["healthy_count"] == market_count
                 else group["connection_status"]
             )
             group["live_enabled"] = bool(
-                market_count and group["enabled_count"] == market_count
+                group["egress_ready"]
+                and market_count
+                and group["enabled_count"] == market_count
             )
             connection_rows.append(group)
         connection_rows.sort(
@@ -3778,6 +4052,7 @@ class UserWorkspaceStore:
             owner_email=owner_email,
             is_admin=is_admin,
         )
+        all_api_connections = api_connections
         credentials = self.credential_statuses([account.id for account in accounts])
         connection_credentials = self.credential_statuses(
             [api_connection.id for api_connection in api_connections]
@@ -3789,11 +4064,14 @@ class UserWorkspaceStore:
             row["connection_fresh"] = account_connection_is_fresh(account, now=now)
             row["credentials"] = credentials[account.id]
             account_rows.append(row)
-        api_connection_rows = []
-        for api_connection in api_connections:
-            row = api_connection.to_dict()
-            row["credentials"] = connection_credentials[api_connection.id]
-            api_connection_rows.append(row)
+        api_connection_rows = [
+            _public_api_connection_row(
+                api_connection,
+                connection_credentials[api_connection.id],
+                all_api_connections,
+            )
+            for api_connection in api_connections
+        ]
         connections = self._connection_rows(
             account_rows,
             project_map,
@@ -3821,6 +4099,7 @@ class UserWorkspaceStore:
             owner_email=owner_email,
             is_admin=is_admin,
         )
+        all_api_connections = api_connections
         now = _now()
         risk_profile = self.risk_profile(owner_email)
         project_map = {project.id: project for project in projects}
@@ -3874,11 +4153,14 @@ class UserWorkspaceStore:
             row["credentials"] = credentials[account.id]
             row["readiness"] = account_readiness[account.id]
             account_rows.append(row)
-        api_connection_rows = []
-        for api_connection in api_connections:
-            row = api_connection.to_dict()
-            row["credentials"] = connection_credentials[api_connection.id]
-            api_connection_rows.append(row)
+        api_connection_rows = [
+            _public_api_connection_row(
+                api_connection,
+                connection_credentials[api_connection.id],
+                all_api_connections,
+            )
+            for api_connection in api_connections
+        ]
         connection_rows = self._connection_rows(
             account_rows,
             project_map,

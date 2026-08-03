@@ -831,6 +831,23 @@ export BYBIT_MM_A_HTTPS_PROXY="http://user:password@proxy-a.example.com:8080"
 
 Supported proxy env fields are `http_proxy_env`, `https_proxy_env`, and `socks_proxy_env` for REST calls, plus `ws_proxy_env`, `wss_proxy_env`, and `ws_socks_proxy_env` for future WebSocket clients. Configure only one REST proxy env and one WebSocket proxy env per exchange entry. SOCKS proxies require the optional `aiohttp_socks` package used by CCXT.
 
+Dashboard API accounts also support an account-level egress route. Choose
+`Server Default IP` for the only account on an exchange, `Bind Local Source IP`
+when the server has a local address mapped to a dedicated EIP/SNAT rule, or
+`Dedicated Proxy` for an account-specific HTTP/SOCKS proxy. The proxy URL is
+stored with the encrypted API credentials and is never returned by the state
+API. REST, WebSocket, balance, order, and cancellation clients inherit the same
+route.
+
+For a second account on the same exchange, first configure and test a dedicated
+route on the existing account. Then add the new account with a different
+expected public IP. The read-only account test resolves the actual egress
+through `api.ipify.org`, records the observed IP, and rejects an expected-IP
+mismatch. The runtime excludes an unverified, stale, duplicated, or mismatched
+egress account without disabling unrelated exchanges. A local source IP must
+already exist on the host and the cloud route/NAT configuration must map it to
+the expected public IP; the application does not create cloud network routes.
+
 ## Web security and operations
 
 The web monitor can be protected with a password and an IP allowlist without storing secrets in Git:

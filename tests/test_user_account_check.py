@@ -139,6 +139,11 @@ class FailingWorkspaceManager(FakeWorkspaceManager):
         raise RuntimeError(f"authentication failed for {secret}")
 
 
+class EgressWorkspaceManager(FakeWorkspaceManager):
+    async def fetch_egress_ip(self, _cfg):
+        return "203.0.113.11"
+
+
 class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         FakeWorkspaceManager.instances.clear()
@@ -343,6 +348,31 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["open_order_count"], 2)
         self.assertEqual(len(FakeWorkspaceManager.instances), 2)
         self.assertTrue(all(row.closed for row in FakeWorkspaceManager.instances))
+
+    async def test_dedicated_egress_mismatch_blocks_account_check(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "Bybit Dedicated",
+                "exchange": "bybit",
+                "egress_mode": "source_ip",
+                "egress_source_ip": "10.0.0.12",
+                "egress_expected_ip": "203.0.113.10",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=EgressWorkspaceManager,
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["egress_observed_ip"], "203.0.113.11")
+        self.assertIn("egress IP mismatch", result["error"])
+        self.assertTrue(FakeWorkspaceManager.instances[-1].closed)
 
     async def test_binance_unified_check_keeps_spot_and_futures_wallets(self) -> None:
         connection = UserApiConnection.from_dict(

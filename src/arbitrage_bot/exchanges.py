@@ -289,6 +289,29 @@ def _proxy_options_from_env(cfg: ExchangeConfig) -> dict[str, str]:
     }
 
 
+def _proxy_options_from_url(proxy_url: str) -> dict[str, str]:
+    value = str(proxy_url or "").strip()
+    if not value:
+        return {}
+    if value.lower().startswith(("socks5://", "socks5h://")):
+        return {"socksProxy": value, "wsSocksProxy": value}
+    return {"httpsProxy": value, "wssProxy": value}
+
+
+def _attach_source_ip_session(client: Any, source_ip: str | None) -> None:
+    address = str(source_ip or "").strip()
+    if not address:
+        return
+    aiohttp = importlib.import_module("aiohttp")
+    connector = aiohttp.TCPConnector(
+        local_addr=(address, 0),
+        enable_cleanup_closed=True,
+    )
+    client.tcp_connector = connector
+    client.session = aiohttp.ClientSession(connector=connector)
+    client.own_session = True
+
+
 def _credential_from_env(env_name: str | None) -> str | None:
     if not env_name:
         return None
@@ -561,11 +584,13 @@ class BithumbV2Client:
         *,
         api_key: str | None,
         secret: str | None,
+        proxy_url: str = "",
     ) -> None:
         self.cfg = cfg
         self.public_client = public_client
         self.apiKey = api_key
         self.secret = secret
+        self.proxy_url = str(proxy_url or "").strip()
         self.base_url = str(
             cfg.options.get("api_url") or "https://api.bithumb.com"
         ).rstrip("/")
@@ -596,7 +621,16 @@ class BithumbV2Client:
     async def _http_session(self) -> Any:
         if self._session is None:
             aiohttp = importlib.import_module("aiohttp")
-            self._session = aiohttp.ClientSession()
+            connector = None
+            if self.proxy_url.lower().startswith(("socks5://", "socks5h://")):
+                aiohttp_socks = importlib.import_module("aiohttp_socks")
+                connector = aiohttp_socks.ProxyConnector.from_url(self.proxy_url)
+            elif self.cfg.source_ip:
+                connector = aiohttp.TCPConnector(
+                    local_addr=(self.cfg.source_ip, 0),
+                    enable_cleanup_closed=True,
+                )
+            self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
     def _authorization(self, query: str = "") -> str:
@@ -633,8 +667,18 @@ class BithumbV2Client:
             headers["Content-Type"] = "application/json; charset=utf-8"
 
         session = await self._http_session()
+        request_proxy = (
+            self.proxy_url
+            if self.proxy_url
+            and not self.proxy_url.lower().startswith(("socks5://", "socks5h://"))
+            else None
+        )
         async with session.request(
-            method, url, headers=headers, json=json_body
+            method,
+            url,
+            headers=headers,
+            json=json_body,
+            proxy=request_proxy,
         ) as response:
             text = await response.text()
             try:
@@ -803,6 +847,7 @@ class ExchangeManager:
     ) -> None:
         self._clients: dict[str, Any] = {}
         self._workspace_credential_revisions: dict[str, float | None] = {}
+        self._client_network_routes: dict[str, tuple[str, str]] = {}
         self._credentials_by_key = {
             str(key): {
                 str(field): str(value).replace("\\n", "\n")
@@ -840,7 +885,6 @@ class ExchangeManager:
             "options": exchange_options,
             **top_level_options,
         }
-        options.update(_proxy_options_from_env(cfg))
         if cfg.market_type != "spot":
             options["options"].setdefault("defaultType", cfg.market_type)
 
@@ -868,6 +912,26 @@ class ExchangeManager:
             or workspace_credentials.get("passphrase")
             or _credential_from_env(cfg.password_env)
         )
+        proxy_url = (
+            (
+                direct_credentials.get("proxy_url")
+                or workspace_credentials.get("proxy_url")
+            )
+            if cfg.egress_mode == "proxy"
+            else None
+        )
+        env_proxy_options = _proxy_options_from_env(cfg)
+        credential_proxy_options = _proxy_options_from_url(proxy_url or "")
+        if env_proxy_options and credential_proxy_options:
+            raise ValueError(
+                f"exchange {cfg.key} has both environment and encrypted account "
+                "proxy configuration"
+            )
+        if cfg.source_ip and (env_proxy_options or credential_proxy_options):
+            raise ValueError(
+                f"exchange {cfg.key} cannot combine a bound source IP and a proxy"
+            )
+        options.update(env_proxy_options or credential_proxy_options)
         if api_key:
             options["apiKey"] = api_key
         if secret:
@@ -895,6 +959,7 @@ class ExchangeManager:
                 )
 
         client = exchange_cls(options)
+        _attach_source_ip_session(client, cfg.source_ip)
         workspace_credentials.clear()
         if cfg.id == "bithumb" and str(cfg.options.get("private_api", "")).lower() in {
             "v2",
@@ -907,15 +972,65 @@ class ExchangeManager:
                 client,
                 api_key=api_key,
                 secret=secret,
+                proxy_url=proxy_url or "",
             )
 
         return client
+
+    async def fetch_egress_ip(self, cfg: ExchangeConfig) -> str:
+        direct_credentials = self._credentials_by_key.get(cfg.key, {})
+        workspace_credentials = (
+            _workspace_credentials(cfg) if cfg.credential_connection_id else {}
+        )
+        proxy_url = (
+            (
+                direct_credentials.get("proxy_url")
+                or workspace_credentials.get("proxy_url")
+            )
+            if cfg.egress_mode == "proxy"
+            else None
+        )
+        aiohttp = importlib.import_module("aiohttp")
+        connector = None
+        request_proxy = None
+        try:
+            if str(proxy_url or "").lower().startswith(("socks5://", "socks5h://")):
+                aiohttp_socks = importlib.import_module("aiohttp_socks")
+                connector = aiohttp_socks.ProxyConnector.from_url(str(proxy_url))
+            elif proxy_url:
+                request_proxy = str(proxy_url)
+            elif cfg.source_ip:
+                connector = aiohttp.TCPConnector(
+                    local_addr=(cfg.source_ip, 0),
+                    enable_cleanup_closed=True,
+                )
+            timeout = aiohttp.ClientTimeout(total=10.0)
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+            ) as session:
+                async with session.get(
+                    "https://api.ipify.org?format=json",
+                    proxy=request_proxy,
+                ) as response:
+                    response.raise_for_status()
+                    payload = await response.json()
+            observed = str(payload.get("ip") or "").strip()
+            if not observed:
+                raise RuntimeError("egress IP service returned no address")
+            return observed
+        finally:
+            workspace_credentials.clear()
 
     def client(self, cfg: ExchangeConfig) -> Any:
         if cfg.key in self._clients and cfg.credential_connection_id:
             revision = _workspace_credential_revision(cfg)
             previous = self._workspace_credential_revisions.get(cfg.key)
-            if revision is not None and revision != previous:
+            network_route = (cfg.egress_mode, str(cfg.source_ip or ""))
+            previous_route = self._client_network_routes.get(cfg.key)
+            if (revision is not None and revision != previous) or (
+                network_route != previous_route
+            ):
                 stale_client = self._clients.pop(cfg.key)
                 close = getattr(stale_client, "close", None)
                 if callable(close):
@@ -930,6 +1045,10 @@ class ExchangeManager:
             self._workspace_credential_revisions[cfg.key] = (
                 _workspace_credential_revision(cfg)
             )
+            self._client_network_routes[cfg.key] = (
+                cfg.egress_mode,
+                str(cfg.source_ip or ""),
+            )
         return self._clients[cfg.key]
 
     async def close(self) -> None:
@@ -940,6 +1059,7 @@ class ExchangeManager:
         self._clients.clear()
         self._credentials_by_key.clear()
         self._workspace_credential_revisions.clear()
+        self._client_network_routes.clear()
 
     async def fetch_order_book(
         self,

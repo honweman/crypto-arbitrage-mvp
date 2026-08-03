@@ -5,6 +5,7 @@ import os
 import base64
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -190,6 +191,44 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(client.options_payload["secret"], "secret")
         self.assertEqual(client.options_payload["options"], {})
 
+    def test_encrypted_account_proxy_is_applied_to_rest_and_websocket(self) -> None:
+        class FakeGate:
+            def __init__(self, options: dict[str, object]) -> None:
+                self.options_payload = options
+
+        class FakeCcxt:
+            gate = FakeGate
+
+        cfg = ExchangeConfig(
+            id="gateio",
+            label="workspace:gate-proxy:spot",
+            egress_mode="proxy",
+        )
+        manager = ExchangeManager(
+            credentials_by_key={
+                cfg.key: {
+                    "api_key": "key",
+                    "secret": "secret",
+                    "proxy_url": "http://proxy-user:proxy-pass@10.0.0.20:8080",
+                }
+            }
+        )
+
+        with patch(
+            "arbitrage_bot.exchanges.importlib.import_module",
+            return_value=FakeCcxt,
+        ):
+            client = manager.client(cfg)
+
+        self.assertEqual(
+            client.options_payload["httpsProxy"],
+            "http://proxy-user:proxy-pass@10.0.0.20:8080",
+        )
+        self.assertEqual(
+            client.options_payload["wssProxy"],
+            "http://proxy-user:proxy-pass@10.0.0.20:8080",
+        )
+
     def test_direct_credentials_override_environment_without_global_mutation(self) -> None:
         class FakeCoinbase:
             def __init__(self, options: dict[str, object]) -> None:
@@ -292,6 +331,64 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(first.options_payload["apiKey"], "first-key")
         self.assertEqual(second.options_payload["apiKey"], "rotated-key")
         self.assertEqual(second.options_payload["secret"], "rotated-secret")
+
+    def test_workspace_network_route_change_rebuilds_cached_client(self) -> None:
+        class FakeCoinbase:
+            instances = []
+
+            def __init__(self, options: dict[str, object]) -> None:
+                self.options_payload = options
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            async def close(self) -> None:
+                self.closed = True
+
+        class FakeCcxt:
+            coinbase = FakeCoinbase
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "workspace.sqlite3"
+            master_key = base64.urlsafe_b64encode(b"r" * 32).decode("ascii")
+            with patch.dict(os.environ, {"TEST_WORKSPACE_KEY": master_key}, clear=False):
+                store = UserWorkspaceStore(path, master_key_env="TEST_WORKSPACE_KEY")
+                connection = store.upsert_api_connection(
+                    UserApiConnection.from_dict(
+                        {
+                            "owner_email": "owner@example.com",
+                            "label": "Coinbase Main",
+                            "exchange": "coinbase",
+                            "withdrawal_disabled_confirmed": True,
+                            "trade_permission_confirmed": True,
+                        }
+                    ),
+                    credentials={"api_key": "key", "secret": "secret"},
+                )
+                cfg = ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    credential_connection_id=connection.id,
+                    credential_owner_email=connection.owner_email,
+                    credential_store_path=str(path),
+                    credential_master_key_env="TEST_WORKSPACE_KEY",
+                )
+                routed_cfg = replace(
+                    cfg,
+                    egress_mode="source_ip",
+                    source_ip="172.19.60.74",
+                )
+                manager = ExchangeManager()
+                with patch(
+                    "arbitrage_bot.exchanges.importlib.import_module",
+                    return_value=FakeCcxt,
+                ), patch(
+                    "arbitrage_bot.exchanges._attach_source_ip_session"
+                ) as attach_session:
+                    first = manager.client(cfg)
+                    second = manager.client(routed_cfg)
+
+        self.assertIsNot(first, second)
+        attach_session.assert_called_with(second, "172.19.60.74")
 
     def test_decentralized_exchange_credentials_map_to_ccxt_signers(self) -> None:
         created = {}

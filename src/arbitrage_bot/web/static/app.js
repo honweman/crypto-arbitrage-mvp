@@ -4406,6 +4406,10 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
+      setFieldValue("user-exchange-proxy-url", "");
+      setFieldValue("user-exchange-egress-mode", "default");
+      setFieldValue("user-exchange-source-ip", "");
+      setFieldValue("user-exchange-expected-ip", "");
       setFieldValue("user-exchange-assets", "");
       const symbolSelect = document.getElementById("user-exchange-symbol");
       if (symbolSelect) symbolSelect.replaceChildren();
@@ -4420,6 +4424,31 @@ function balanceStatusClass(status) {
         suggestedWorkspaceAccountLabel(defaultExchange?.id || "")
       );
       syncUserExchangeMarketTypes();
+      syncUserExchangeEgressFields();
+    }
+
+    function syncUserExchangeEgressFields(connection = null) {
+      const mode = document.getElementById("user-exchange-egress-mode")?.value || "default";
+      const sourceField = document.getElementById("user-exchange-source-ip-field");
+      const proxyField = document.getElementById("user-exchange-proxy-url-field");
+      if (sourceField) sourceField.hidden = mode !== "source_ip";
+      if (proxyField) proxyField.hidden = mode !== "proxy";
+      const status = document.getElementById("user-exchange-egress-status");
+      if (!status) return;
+      const blockers = connection?.egress_blockers || [];
+      if (connection?.egress_ready && connection?.egress_observed_ip) {
+        status.textContent = `${uiText("Verified public IP")} ${connection.egress_observed_ip} · ${formatAge(connection.egress_checked_at)}`;
+        status.className = "ok wide-field";
+      } else if (blockers.length) {
+        status.textContent = blockers.map((item) => friendlyAccountMessage(item)).join(" · ");
+        status.className = "missing wide-field";
+      } else if (mode === "default") {
+        status.textContent = uiText("Single accounts may use the server default IP.");
+        status.className = "subtle wide-field";
+      } else {
+        status.textContent = uiText("Save and test to verify this account's public IP.");
+        status.className = "subtle wide-field";
+      }
     }
 
     function suggestedWorkspaceAccountLabel(exchangeId) {
@@ -4482,6 +4511,10 @@ function balanceStatusClass(status) {
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
+      setFieldValue("user-exchange-proxy-url", "");
+      setFieldValue("user-exchange-egress-mode", connection?.egress_mode || "default");
+      setFieldValue("user-exchange-source-ip", connection?.egress_source_ip || "");
+      setFieldValue("user-exchange-expected-ip", connection?.egress_expected_ip || "");
       const markets = connection?.markets || [];
       setFieldValue(
         "user-exchange-assets",
@@ -4501,6 +4534,7 @@ function balanceStatusClass(status) {
         connection?.market_types?.[0] || connection?.market_type || "spot",
         connection?.api_variant || ""
       );
+      syncUserExchangeEgressFields(connection);
       document.getElementById("user-exchange-label")?.focus();
     }
 
@@ -4719,6 +4753,9 @@ function balanceStatusClass(status) {
           "user-exchange-no-withdraw",
           selected.withdrawal_disabled_confirmed
         );
+        setFieldValue("user-exchange-egress-mode", selected.egress_mode || "default");
+        setFieldValue("user-exchange-source-ip", selected.egress_source_ip || "");
+        setFieldValue("user-exchange-expected-ip", selected.egress_expected_ip || "");
         setCheckedValue(
           "user-exchange-trade-permission",
           selected.trade_permission_confirmed
@@ -4736,17 +4773,22 @@ function balanceStatusClass(status) {
         setCheckedValue("user-exchange-no-withdraw", false);
         setCheckedValue("user-exchange-trade-permission", false);
         setFieldValue("user-exchange-assets", "");
+        setFieldValue("user-exchange-egress-mode", "default");
+        setFieldValue("user-exchange-source-ip", "");
+        setFieldValue("user-exchange-expected-ip", "");
         const symbolSelect = document.getElementById("user-exchange-symbol");
         if (symbolSelect) symbolSelect.replaceChildren();
       }
       setFieldValue("user-exchange-api-key", "");
       setFieldValue("user-exchange-secret", "");
       setFieldValue("user-exchange-passphrase", "");
+      setFieldValue("user-exchange-proxy-url", "");
       syncUserExchangeMarketTypes(
         selected?.market_types?.[0] || selected?.market_type || "",
         selected?.api_variant || "",
         ""
       );
+      syncUserExchangeEgressFields(selected || null);
     }
 
     function renderUserExchangeAccounts(workspace) {
@@ -4793,11 +4835,16 @@ function balanceStatusClass(status) {
           && !["default", "global"].includes(connection.api_variant)
           ? ` · ${connection.api_variant}`
           : "";
+        const egressText = connection.egress_observed_ip
+          ? `${uiText("Public IP")} ${connection.egress_observed_ip}`
+          : connection.egress_expected_ip
+            ? `${uiText("Expected IP")} ${connection.egress_expected_ip}`
+            : uiText("Server Default IP");
         const tr = document.createElement("tr");
         tr.dataset.workspaceConnectionId = connection.id || "";
         tr.innerHTML = `
           <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">ID ${escapeHtml(String(connection.id || "").slice(-8))}${connection.runtime_keys?.length ? ` · ${escapeHtml(connection.runtime_keys.join(" / "))}` : ""}</span></td>
-          <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${marketScope}${variantText}`)}</span></td>
+          <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${marketScope}${variantText}`)} · ${escapeHtml(egressText)}</span></td>
           <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
           <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
           <td class="${connectionClass}">${escapeHtml(uiText(statusText))}<br><span class="subtle">${escapeHtml(balanceStatus)} · ${connection.enabled_count || 0} ${escapeHtml(uiText("enabled"))}</span></td>
@@ -5125,14 +5172,19 @@ function balanceStatusClass(status) {
       const apiKey = document.getElementById("user-exchange-api-key").value.trim();
       const secret = document.getElementById("user-exchange-secret").value.trim();
       const passphrase = document.getElementById("user-exchange-passphrase").value.trim();
+      const proxyUrl = document.getElementById("user-exchange-proxy-url").value.trim();
       if (apiKey) credentials.api_key = apiKey;
       if (secret) credentials.secret = secret;
       if (passphrase) credentials.passphrase = passphrase;
+      if (proxyUrl) credentials.proxy_url = proxyUrl;
       const account = {
         label: document.getElementById("user-exchange-label").value.trim(),
         exchange: exchangeId,
         market_types: exchange?.market_types || [],
         api_variant: document.getElementById("user-exchange-api-variant").value,
+        egress_mode: document.getElementById("user-exchange-egress-mode").value,
+        egress_source_ip: document.getElementById("user-exchange-source-ip").value.trim(),
+        egress_expected_ip: document.getElementById("user-exchange-expected-ip").value.trim(),
         withdrawal_disabled_confirmed: document.getElementById("user-exchange-no-withdraw").checked,
         trade_permission_confirmed: document.getElementById("user-exchange-trade-permission").checked,
         replace_markets: true,
@@ -5185,6 +5237,7 @@ function balanceStatusClass(status) {
         document.getElementById("user-exchange-api-key").value = "";
         document.getElementById("user-exchange-secret").value = "";
         document.getElementById("user-exchange-passphrase").value = "";
+        document.getElementById("user-exchange-proxy-url").value = "";
         userExchangeAccountFormBusy = false;
         saveButton.disabled = false;
         saveTestButton.disabled = false;
@@ -9612,7 +9665,8 @@ function balanceStatusClass(status) {
 	      } else if ([
 	        "user-exchange-id",
 	        "user-exchange-market-type",
-	        "user-exchange-api-variant",
+        "user-exchange-api-variant",
+        "user-exchange-egress-mode",
 	      ].includes(event.target?.id)) {
 	        if (event.target?.id === "user-exchange-id" && !selectedUserExchangeAccountId) {
 	          const symbolSelect = document.getElementById("user-exchange-symbol");
@@ -9623,6 +9677,7 @@ function balanceStatusClass(status) {
                   }
 	        }
 	        syncUserExchangeMarketTypes();
+	        syncUserExchangeEgressFields();
 	      }
 	    });
 	    document.getElementById("user-exchange-account-form").addEventListener("submit", applyUserExchangeAccount);

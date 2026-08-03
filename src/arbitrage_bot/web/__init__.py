@@ -262,6 +262,7 @@ from ..user_workspace import (
     UserRiskProfile,
     UserWorkspaceStore,
     account_connection_is_fresh,
+    api_connection_egress_blockers,
     api_connection_is_fresh,
     required_credentials_for_exchange,
 )
@@ -6909,6 +6910,18 @@ async def _sync_workspace_connection(
             "market_type": market_type,
             "market_types": raw.get("market_types"),
             "api_variant": api_variant,
+            "egress_mode": raw.get(
+                "egress_mode",
+                existing_connection.egress_mode if existing_connection else "default",
+            ),
+            "egress_source_ip": raw.get(
+                "egress_source_ip",
+                existing_connection.egress_source_ip if existing_connection else "",
+            ),
+            "egress_expected_ip": raw.get(
+                "egress_expected_ip",
+                existing_connection.egress_expected_ip if existing_connection else "",
+            ),
             "withdrawal_disabled_confirmed": bool(
                 raw.get(
                     "withdrawal_disabled_confirmed",
@@ -6927,8 +6940,30 @@ async def _sync_workspace_connection(
             ),
         }
     )
+    connection_candidate = UserApiConnection.from_dict(connection_raw)
+    if existing_connection is None:
+        same_exchange_accounts = [
+            row
+            for row in store.list_api_connections(owner_email="", is_admin=True)
+            if row.exchange == connection_candidate.exchange
+        ]
+        if same_exchange_accounts:
+            if connection_candidate.egress_mode == "default":
+                raise ValueError(
+                    "a second account on the same exchange requires a dedicated "
+                    "source IP or proxy"
+                )
+            future_peers = [*same_exchange_accounts, connection_candidate]
+            if any(
+                api_connection_egress_blockers(row, future_peers)
+                for row in same_exchange_accounts
+            ):
+                raise ValueError(
+                    "configure and verify a dedicated public IP for the existing "
+                    f"{connection_candidate.exchange} account before adding another"
+                )
     api_connection = store.upsert_api_connection(
-        UserApiConnection.from_dict(connection_raw),
+        connection_candidate,
         credentials=supplied or None,
     )
     matches: list[tuple[UserProject, dict[str, Any], str]] = []
@@ -7084,6 +7119,11 @@ async def _sync_workspace_connection(
                     "market_type": binding_market_type,
                     "api_variant": api_variant,
                     "symbol": binding_symbol,
+                    "egress_mode": api_connection.egress_mode,
+                    "egress_source_ip": api_connection.egress_source_ip,
+                    "egress_expected_ip": api_connection.egress_expected_ip,
+                    "egress_observed_ip": api_connection.egress_observed_ip,
+                    "egress_checked_at": api_connection.egress_checked_at,
                     "enabled": bool(existing.enabled) if existing is not None else False,
                     "withdrawal_disabled_confirmed": bool(
                         api_connection.withdrawal_disabled_confirmed
@@ -7660,14 +7700,14 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 project = store.get_project(account.project_id)
                 if project is None:
                     raise ValueError(f"project not found: {account.project_id}")
-                credential_status = store.credential_status(account.id)
+                credential_status = store.credential_status(api_connection.id)
                 if not credential_status["configured"]:
                     raise ValueError(
                         f"configure required credentials before testing {account.symbol}"
                     )
                 credentials = store.decrypt_credentials(
-                    account_id=account.id,
-                    owner_email=account.owner_email,
+                    account_id=api_connection.id,
+                    owner_email=api_connection.owner_email,
                 )
                 try:
                     check_result = await _workspace_account_checker(request).check(

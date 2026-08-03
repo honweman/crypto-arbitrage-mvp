@@ -20,6 +20,7 @@ from arbitrage_bot.user_workspace import (
     UserProject,
     UserRiskProfile,
     UserWorkspaceStore,
+    api_connection_egress_blockers,
     validate_exchange_credentials,
 )
 from arbitrage_bot.user_strategies import UserStrategy
@@ -29,6 +30,102 @@ MASTER_KEY = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 
 
 class UserWorkspaceStoreTest(unittest.TestCase):
+    def test_account_egress_is_encrypted_verified_and_unique_per_exchange(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_MASTER_KEY": MASTER_KEY},
+            clear=False,
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_MASTER_KEY",
+            )
+            first = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "trader@example.com",
+                        "label": "Gate Main",
+                        "exchange": "gateio",
+                        "egress_mode": "proxy",
+                        "egress_expected_ip": "203.0.113.10",
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                ),
+                credentials={
+                    "api_key": "key-1",
+                    "secret": "secret-1",
+                    "proxy_url": "http://user:pass@10.0.0.10:8080",
+                },
+            )
+            verified = store.update_api_connection_check(
+                first.id,
+                status="healthy",
+                check={
+                    "balances": [],
+                    "open_order_count": 0,
+                    "egress_observed_ip": "203.0.113.10",
+                    "egress_checked_at": time.time(),
+                    "egress_error": "",
+                },
+            )
+            payload = store.public_payload(
+                owner_email="trader@example.com",
+                is_admin=False,
+            )
+            decrypted = store.decrypt_credentials(
+                account_id=first.id,
+                owner_email=first.owner_email,
+            )
+
+            self.assertEqual(verified.connection_status, "healthy")
+            self.assertEqual(decrypted["proxy_url"], "http://user:pass@10.0.0.10:8080")
+            self.assertNotIn(
+                "http://user:pass@10.0.0.10:8080",
+                str(payload["connections"][0]),
+            )
+            self.assertTrue(payload["connections"][0]["proxy_configured"])
+            self.assertTrue(payload["connections"][0]["egress_ready"])
+            with self.assertRaisesRegex(ValueError, "already assigned"):
+                store.upsert_api_connection(
+                    UserApiConnection.from_dict(
+                        {
+                            "owner_email": "other@example.com",
+                            "label": "Gate Second",
+                            "exchange": "gateio",
+                            "egress_mode": "source_ip",
+                            "egress_source_ip": "10.0.0.11",
+                            "egress_expected_ip": "203.0.113.10",
+                        }
+                    ),
+                    credentials={"api_key": "key-2", "secret": "secret-2"},
+                )
+
+    def test_multiple_same_exchange_accounts_require_verified_unique_egress(
+        self,
+    ) -> None:
+        first = UserApiConnection.from_dict(
+            {
+                "owner_email": "one@example.com",
+                "label": "Bybit One",
+                "exchange": "bybit",
+            }
+        )
+        second = UserApiConnection.from_dict(
+            {
+                "owner_email": "two@example.com",
+                "label": "Bybit Two",
+                "exchange": "bybit",
+            }
+        )
+
+        blockers = api_connection_egress_blockers(first, [first, second])
+
+        self.assertIn("expected public IP is required", blockers)
+        self.assertIn("egress public IP has not been verified", blockers)
+
     def test_legacy_api_connection_is_normalized_and_keeps_large_balance_snapshot(
         self,
     ) -> None:
