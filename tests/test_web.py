@@ -336,11 +336,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260802-contract-auto1" defer></script>',
+            '<script src="/static/app.js?v=20260803-balance-filter1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260802-contract-auto1" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-balance-filter1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -358,6 +358,28 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('<option value="close_short">Close Short (Reduce Only)</option>', INDEX_HTML)
         self.assertNotIn('id="slow-position-effect"', INDEX_HTML)
         self.assertNotIn('id="slow-position-side"', INDEX_HTML)
+
+    def test_balance_account_filter_defaults_to_all_after_page_reload(self) -> None:
+        self.assertIn(
+            'function accountBalanceFilterKey(account)',
+            APP_JS,
+        )
+        self.assertIn(
+            'const previous = select.value || "";',
+            APP_JS,
+        )
+        self.assertIn(
+            'renderProfileAccounts(data.account_balances);',
+            APP_JS,
+        )
+        self.assertNotIn(
+            'localStorage.getItem("profile-account")',
+            APP_JS,
+        )
+        self.assertNotIn(
+            'localStorage.setItem("profile-account"',
+            APP_JS,
+        )
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)
         self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
@@ -474,7 +496,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260713-ux1"),
-            INDEX_HTML.index("/static/styles.css?v=20260802-contract-auto1"),
+            INDEX_HTML.index("/static/styles.css?v=20260803-balance-filter1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -581,7 +603,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260802-contract-auto1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260803-balance-filter1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)

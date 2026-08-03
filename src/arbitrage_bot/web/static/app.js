@@ -732,7 +732,7 @@ function balanceStatusClass(status) {
       const selectedId = document.getElementById("profile-account")?.value || "";
       if (!selectedId) return accountBalances;
       const accounts = (accountBalances.accounts || []).filter(
-        (account) => account.workspace_connection_id === selectedId
+        (account) => accountBalanceFilterKey(account) === selectedId
       );
       const totalsByCurrency = new Map();
       for (const account of accounts) {
@@ -760,6 +760,13 @@ function balanceStatusClass(status) {
         checked_account_count: accounts.filter((account) => account.balance?.checked).length,
         total_account_count: accounts.length,
       };
+    }
+
+    function accountBalanceFilterKey(account) {
+      const workspaceId = String(account?.workspace_connection_id || "").trim();
+      if (workspaceId) return `workspace:${workspaceId}`;
+      const exchange = String(account?.exchange || "").trim();
+      return exchange ? `platform:${exchange}` : "";
     }
 
     function renderAccountBalanceSummary(accountBalances) {
@@ -1249,32 +1256,48 @@ function balanceStatusClass(status) {
       }
     }
 
-    function renderProfileAccounts(workspace) {
+    function renderProfileAccounts(accountBalances) {
       const select = document.getElementById("profile-account");
       if (!select) return;
-      const previous = select.value || localStorage.getItem("profile-account") || "";
-      const connections = workspace?.connections || [];
+      const previous = select.value || "";
+      const accounts = (accountBalances?.accounts || []).filter(
+        (account) => accountBalanceFilterKey(account),
+      );
+      const signature = JSON.stringify(accounts.map((account) => [
+        accountBalanceFilterKey(account),
+        account.label,
+        account.exchange,
+        account.symbols,
+      ]));
+      if (select.dataset.signature === signature) return;
+      select.dataset.signature = signature;
       select.innerHTML = "";
       const allOption = document.createElement("option");
       allOption.value = "";
-      allOption.textContent = connections.length ? "All accounts" : "No API accounts";
+      allOption.textContent = accounts.length
+        ? `${uiText("All accounts")} (${accounts.length})`
+        : uiText("No account balances yet.");
       select.appendChild(allOption);
-      for (const connection of connections) {
+      const seen = new Set();
+      for (const account of accounts) {
+        const key = accountBalanceFilterKey(account);
+        if (seen.has(key)) continue;
+        seen.add(key);
         const option = document.createElement("option");
-        option.value = connection.id;
-        const exchange = workspaceExchange(connection.exchange)?.label
-          || connection.exchange;
-        option.textContent = `${connection.label || exchange} · ${connection.markets?.length || 0}`;
-        option.title = (connection.markets || [])
-          .map((market) => market.symbol)
+        option.value = key;
+        const ownerLabel = account.workspace_connection_id
+          ? uiText("My API")
+          : uiText("Platform account");
+        option.textContent = `${account.label || account.exchange} · ${ownerLabel}`;
+        option.title = (account.symbols || [])
           .filter(Boolean)
           .join(" · ");
         select.appendChild(option);
       }
-      select.value = connections.some((connection) => connection.id === previous)
+      select.value = seen.has(previous)
         ? previous
         : "";
-      select.disabled = connections.length === 0;
+      select.disabled = accounts.length === 0;
     }
 
     async function updateProfileAsset(event) {
@@ -9033,7 +9056,7 @@ function balanceStatusClass(status) {
     function renderCommonState(data) {
       setHeaderStatus(data.status || "starting");
       renderAuthProfile(data.auth);
-      renderProfileAccounts(data.user_workspace);
+      renderProfileAccounts(data.account_balances);
       document.getElementById("program-toggle").checked = data.program?.running !== false;
 
       text("scan-count", data.scan?.count ?? 0);
@@ -9360,7 +9383,6 @@ function balanceStatusClass(status) {
     });
     document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
     document.getElementById("profile-account").addEventListener("change", (event) => {
-      localStorage.setItem("profile-account", event.target.value || "");
       renderAccountBalances(lastState?.account_balances);
     });
 	    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
