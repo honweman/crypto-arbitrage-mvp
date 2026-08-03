@@ -394,7 +394,7 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-balance-filter1" defer></script>',
+            '<script src="/static/app.js?v=20260803-account-labels1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -446,6 +446,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("BALANCE_MIN_VALUE_USDT = 10", APP_JS)
         self.assertIn("function meetsBalanceDisplayThreshold(amount, valueCommon)", APP_JS)
         self.assertIn("function visibleBalanceRows(rows)", APP_JS)
+        self.assertIn('function displayExchange(exchange, explicitLabel = "")', APP_JS)
+        self.assertIn("friendlyAccountMessage(value)", APP_JS)
         self.assertIn('uiText("All accounts")', summary_body)
         self.assertIn('id="user-exchange-test"', INDEX_HTML)
         self.assertIn('id="user-exchange-save-test"', INDEX_HTML)

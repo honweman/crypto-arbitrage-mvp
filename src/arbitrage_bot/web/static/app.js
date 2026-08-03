@@ -224,7 +224,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 
     function text(id, value) {
       const el = document.getElementById(id);
-      if (el) el.textContent = value;
+      if (el) el.textContent = friendlyAccountMessage(value);
     }
 
     function isSectionOpenFor(id) {
@@ -317,7 +317,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     }
 
     function showToast(message, level = "ok") {
-      const textValue = uiText(String(message || "")).trim();
+      const textValue = uiText(friendlyAccountMessage(message)).trim();
       if (!textValue) return;
       const container = toastContainer();
       // Collapse duplicates: refresh the timer instead of stacking copies.
@@ -581,6 +581,12 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return account?.label || accountKey;
     }
 
+    function displayExchange(exchange, explicitLabel = "") {
+      const label = String(explicitLabel || "").trim();
+      if (label && !label.startsWith("workspace:")) return label;
+      return accountLabelForKey(exchange) || String(exchange || "");
+    }
+
     function friendlyAccountMessage(message) {
       let textValue = String(message || "");
       const labels = new Map(
@@ -703,7 +709,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       for (const row of markets || []) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${row.exchange}</td>
+          <td>${escapeHtml(displayExchange(row.exchange, row.exchange_label))}</td>
           <td>${row.symbol}</td>
           <td class="${row.status === "ok" ? "ok" : "missing"}">${row.status}</td>
           <td class="num">${row.bid == null ? "--" : fmt.format(row.bid)}</td>
@@ -938,7 +944,7 @@ function balanceStatusClass(status) {
             || "No non-zero target balances.";
           const tr = document.createElement("tr");
           tr.innerHTML = `
-            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
             <td colspan="4">${escapeHtml(message)}</td>
             <td class="${balanceStatusClass(account.status)}">${escapeHtml(statusText)}</td>
           `;
@@ -964,7 +970,7 @@ function balanceStatusClass(status) {
               ? uiText("Funding balance is not directly tradable")
               : "";
           tr.innerHTML = `
-            <td>${escapeHtml(account.label || account.exchange)}</td>
+            <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
             <td title="${escapeHtml(usedTitle)}">${escapeHtml(currencyLabel)}</td>
             <td class="num">${formatBalanceAmount(row.free)}</td>
             <td class="num" title="${escapeHtml(usedTitle)}">${formatBalanceAmount(row.used)}</td>
@@ -998,7 +1004,7 @@ function balanceStatusClass(status) {
           const message = account.error || account.skipped_reason || (account.risk_reasons || []).join(" · ") || "No open positions.";
           const tr = document.createElement("tr");
           tr.innerHTML = `
-            <td>${escapeHtml(account.label || account.exchange)}</td>
+          <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
             <td colspan="8">${escapeHtml(message)}</td>
             <td class="${balanceStatusClass(account.status)}">${escapeHtml(account.status || "--")}</td>
           `;
@@ -1011,7 +1017,7 @@ function balanceStatusClass(status) {
           const reasons = (position.risk_reasons || []).join(" · ");
           const tr = document.createElement("tr");
           tr.innerHTML = `
-            <td>${escapeHtml(account.label || account.exchange)}</td>
+          <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
             <td>${escapeHtml(position.symbol || "--")}</td>
             <td class="${position.side === "long" ? "side-buy" : position.side === "short" ? "side-sell" : ""}">${escapeHtml(String(position.side || "--").toUpperCase())}</td>
             <td class="num">${formatBalanceAmount(position.notional_quote)}</td>
@@ -1047,7 +1053,7 @@ function balanceStatusClass(status) {
         const paper = row.paper_execution || {};
         const protection = paper.protection || {};
         const legs = (paper.suggested_legs || [])
-          .map((leg) => `${leg.side} ${leg.symbol} @ ${leg.exchange}`)
+          .map((leg) => `${leg.side} ${leg.symbol} @ ${displayExchange(leg.exchange, leg.exchange_label)}`)
           .join(" / ");
         const protectionText = protection.status ? ` · protection ${protection.status}` : "";
         const protectionTitle = [
@@ -1063,7 +1069,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td title="${escapeHtml(row.pair_id || "")}">${escapeHtml(row.pair_id || "--")}</td>
-          <td>${escapeHtml(row.spot_exchange || "--")}<br><span class="subtle">${escapeHtml(row.spot_symbol || "--")}</span><br>${escapeHtml(row.derivative_exchange || "--")}<br><span class="subtle">${escapeHtml(row.derivative_symbol || "--")}</span></td>
+          <td>${escapeHtml(displayExchange(row.spot_exchange, row.spot_exchange_label) || "--")}<br><span class="subtle">${escapeHtml(row.spot_symbol || "--")}</span><br>${escapeHtml(displayExchange(row.derivative_exchange, row.derivative_exchange_label) || "--")}<br><span class="subtle">${escapeHtml(row.derivative_symbol || "--")}</span></td>
           <td class="num">${row.spot_mid == null ? "--" : fmt.format(row.spot_mid)}</td>
           <td class="num">${row.derivative_mid == null ? "--" : fmt.format(row.derivative_mid)}</td>
           <td class="num">${formatBps(row.basis_bps)}</td>
@@ -1399,7 +1405,7 @@ function balanceStatusClass(status) {
         const ownerLabel = account.workspace_connection_id
           ? uiText("My API")
           : uiText("Platform account");
-        option.textContent = `${account.label || account.exchange} · ${ownerLabel}`;
+        option.textContent = `${displayExchange(account.exchange, account.label)} · ${ownerLabel}`;
         option.title = (account.symbols || [])
           .filter(Boolean)
           .join(" · ");
@@ -1457,7 +1463,7 @@ function balanceStatusClass(status) {
     async function cancelOrder(order, button) {
       const key = `${order.exchange}:${order.symbol}:${order.id}`;
       if (cancelOrderBusy.has(key)) return;
-      const detail = `${order.label || order.exchange} · ${order.symbol || "--"} · ${String(order.side || "--").toUpperCase()} · ${order.id || "--"}`;
+      const detail = `${displayExchange(order.exchange, order.label)} · ${order.symbol || "--"} · ${String(order.side || "--").toUpperCase()} · ${order.id || "--"}`;
       if (!dangerConfirm("Confirm cancel this order?", detail)) return;
       cancelOrderBusy.add(key);
       button.disabled = true;
@@ -1502,7 +1508,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         const actionCell = showActions ? `<td class="order-action"></td>` : "";
         tr.innerHTML = `
-          <td data-label="${uiText("Account")}">${escapeHtml(order.label || order.exchange)}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(order.exchange, order.label))}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(order.symbol || "--")}</td>
           <td data-label="${uiText("Side")}" class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Status")}">${escapeHtml(order.status || "--")}</td>
@@ -1544,7 +1550,7 @@ function balanceStatusClass(status) {
       for (const fill of fills) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td data-label="${uiText("Account")}">${escapeHtml(fill.label || fill.exchange)}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(fill.exchange, fill.label))}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(fill.symbol || "--")}</td>
           <td data-label="${uiText("Side")}" class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Source")}">${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
@@ -1581,10 +1587,10 @@ function balanceStatusClass(status) {
           <td class="${levelClass}">${escapeHtml(level.toUpperCase())}</td>
           <td>${escapeHtml(displayReconciliationType(issue.type))}</td>
           <td>${escapeHtml(displayStrategy(issue.strategy))}</td>
-          <td>${escapeHtml(issue.exchange || "--")}</td>
+          <td>${escapeHtml(displayExchange(issue.exchange, issue.exchange_label) || "--")}</td>
           <td>${escapeHtml(issue.symbol || "--")}</td>
           <td title="${escapeHtml(issue.order_id || "")}">${escapeHtml(shortId(issue.order_id))}</td>
-          <td title="${escapeHtml(issue.source_id || "")}">${escapeHtml(issue.message || "--")}</td>
+          <td title="${escapeHtml(issue.source_id || "")}">${escapeHtml(friendlyAccountMessage(issue.message) || "--")}</td>
         `;
         body.appendChild(tr);
       }
@@ -1676,7 +1682,7 @@ function balanceStatusClass(status) {
       if (consoleActionBusy) return;
       const detail = payload?.scope === "all"
         ? uiText("All accounts")
-        : `${uiText("Account")}: ${payload?.exchange || "--"}`;
+        : `${uiText("Account")}: ${displayExchange(payload?.exchange) || "--"}`;
       if (!dangerConfirm("Confirm cancel open orders?", detail)) return;
       consoleActionBusy = true;
       const originalText = button.textContent;
@@ -1768,7 +1774,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Strategy")}">${escapeHtml(strategy.label || strategy.id)}</td>
           <td data-label="${uiText("Status")}" class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled")}</td>
           <td data-label="${uiText("Live")}" class="${strategy.live ? "ok" : "missing"}">${strategy.live ? "YES" : "NO"}</td>
-          <td data-label="${uiText("Account")}">${escapeHtml(strategy.exchange_label || strategy.exchange || "--")}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(strategy.exchange, strategy.exchange_label) || "--")}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(strategy.symbol || "--")}</td>
           <td data-label="${uiText("Mode")}">${escapeHtml(strategy.mode || "--")}</td>
           <td data-label="${uiText("Action")}" class="strategy-action"></td>
@@ -1924,7 +1930,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td>${escapeHtml(strategy.label || displayStrategy(strategy.id))}</td>
           <td class="${strategy.configured ? "risk-ok" : "risk-off"}">${strategy.configured ? "yes" : "no"}</td>
-          <td>${escapeHtml(strategy.exchange_label || accountLabelForKey(strategy.exchange) || "--")}</td>
+          <td>${escapeHtml(displayExchange(strategy.exchange, strategy.exchange_label) || "--")}</td>
           <td>${escapeHtml(strategy.symbol || "--")}</td>
           <td class="${strategy.live ? "risk-ok" : "risk-off"}">${strategy.live ? "YES" : "NO"}</td>
           <td class="${readinessClass(strategy.status)}">${escapeHtml(strategy.status || "--")}</td>
@@ -1967,7 +1973,7 @@ function balanceStatusClass(status) {
       for (const exchange of exchanges || []) {
         const option = document.createElement("option");
         option.value = exchange.key;
-        option.textContent = exchange.label || exchange.key;
+        option.textContent = displayExchange(exchange.key, exchange.label) || exchange.key;
         select.appendChild(option);
       }
       if (selected && [...select.options].some((option) => option.value === selected)) {
@@ -2051,7 +2057,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${escapeHtml(market.asset)}</td>
-          <td>${escapeHtml(market.exchange)}</td>
+          <td>${escapeHtml(displayExchange(market.exchange, market.exchange_label))}</td>
           <td>${escapeHtml(market.symbol)}</td>
           <td>${escapeHtml(market.quote_currency)}</td>
           <td class="num" title="${escapeHtml(title)}">${escapeHtml(formatLimitValue(costMin, market.quote_currency))}</td>
@@ -2213,7 +2219,7 @@ function balanceStatusClass(status) {
       const unique = [];
       const seen = new Set();
       for (const [label, detail] of items) {
-        const normalized = String(detail || "").trim();
+        const normalized = friendlyAccountMessage(detail).trim();
         if (!normalized || seen.has(`${label}:${normalized}`)) continue;
         seen.add(`${label}:${normalized}`);
         unique.push([label, normalized]);
@@ -2244,8 +2250,8 @@ function balanceStatusClass(status) {
       text(
         "monitor-mm-detail",
         mmPlan
-          ? `${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · open ${mmRuntime.open_order_count ?? 0}${marketMakerStatusReason(marketMaker) ? ` · ${marketMakerStatusReason(marketMaker)}` : ""}`
-          : marketMakerStatusReason(marketMaker) || marketMaker.error || mmRuntime.reason || "--"
+          ? `${displayExchange(mmPlan.exchange, mmPlan.exchange_label)} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · open ${mmRuntime.open_order_count ?? 0}${marketMakerStatusReason(marketMaker) ? ` · ${friendlyAccountMessage(marketMakerStatusReason(marketMaker))}` : ""}`
+          : friendlyAccountMessage(marketMakerStatusReason(marketMaker) || marketMaker.error || mmRuntime.reason) || "--"
       );
 
       const auto = data.slow_execution || {};
@@ -2257,7 +2263,7 @@ function balanceStatusClass(status) {
       const firstTask = activeTasks[0] || autoTasks[0];
       const autoDetail = firstTask
         ? `${String(firstTask.config?.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${firstTask.status || "--"}`
-        : (auto.plan ? `${auto.plan.exchange} ${auto.plan.symbol} · ${String(auto.plan.side || "").toUpperCase()}` : "--");
+        : (auto.plan ? `${displayExchange(auto.plan.exchange, auto.plan.exchange_label)} ${auto.plan.symbol} · ${String(auto.plan.side || "").toUpperCase()}` : "--");
       text("monitor-auto-summary", autoStatus);
       text("monitor-auto-detail", autoDetail);
 
@@ -2370,11 +2376,11 @@ function balanceStatusClass(status) {
           title: "Market Maker",
           status: mmLifecycle.worst?.actual_state || mmStatus,
           summary: mmPlan
-            ? `${mmPlan.exchange || "--"} ${mmPlan.symbol || "--"}`
+            ? `${displayExchange(mmPlan.exchange, mmPlan.exchange_label) || "--"} ${mmPlan.symbol || "--"}`
             : `${marketMakerInstances(mm).length || 0} instance(s)`,
           detail: lifecycleCardDetail(mmLifecycle, mmPlan
             ? `mid ${fmt.format(mmPlan.mid_price)} · ${mmQuote} · open ${mmRuntime.open_order_count || 0}`
-            : marketMakerStatusReason(mm) || "Open to edit ladder and risk"),
+            : friendlyAccountMessage(marketMakerStatusReason(mm)) || "Open to edit ladder and risk"),
           target: "mm-section",
         },
         {
@@ -2382,7 +2388,7 @@ function balanceStatusClass(status) {
           status: autoLifecycle.worst?.actual_state || (activeTasks.length ? "running" : (auto.status || "disabled")),
           summary: activeTasks.length ? `${activeTasks.length}/${tasks.length} active task(s)` : (auto.status || "disabled"),
           detail: lifecycleCardDetail(autoLifecycle, firstTask
-            ? `${firstTaskConfig.exchange || "--"} ${firstTaskConfig.symbol || "--"} · ${String(firstTaskConfig.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${autoProgressText}`
+            ? `${displayExchange(firstTaskConfig.exchange, firstTaskConfig.exchange_label) || "--"} ${firstTaskConfig.symbol || "--"} · ${String(firstTaskConfig.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${autoProgressText}`
             : "Open to create or edit a task"),
           target: "slow-section",
         },
@@ -2390,7 +2396,7 @@ function balanceStatusClass(status) {
           title: "Cross-Exchange Rebalance",
           status: rebalanceLifecycle.worst?.actual_state || rebalanceRuntime.status || rebalance.status || "disabled",
           summary: rebalancePlan
-            ? `${rebalancePlan.buy_exchange} -> ${rebalancePlan.sell_exchange}`
+            ? `${displayExchange(rebalancePlan.buy_exchange, rebalancePlan.buy_exchange_label)} -> ${displayExchange(rebalancePlan.sell_exchange, rebalancePlan.sell_exchange_label)}`
             : (rebalance.status || "disabled"),
           detail: lifecycleCardDetail(rebalanceLifecycle, rebalancePlan
             ? `${rebalancePlan.base_asset} · ${Number(rebalanceRuntime.progress_pct || 0).toFixed(1)}% · cost ${Number(rebalancePlan.expected_cost_bps || 0).toFixed(2)} bps`
@@ -2433,7 +2439,7 @@ function balanceStatusClass(status) {
         const legs = (item.legs || []).map((leg) => `
           <span class="leg">
             <span class="${leg.side === "buy" ? "side-buy" : "side-sell"}">${leg.side.toUpperCase()}</span>
-            ${leg.exchange} ${leg.symbol}
+            ${escapeHtml(displayExchange(leg.exchange, leg.exchange_label))} ${escapeHtml(leg.symbol)}
             @ ${fmt.format(leg.average_price)}
           </span>
         `).join("");
@@ -2470,7 +2476,7 @@ function balanceStatusClass(status) {
       } else {
         for (const event of timelineEvents.slice(0, 30)) {
           const metrics = event.metrics || {};
-          const reason = event.reason || event.risk_triggers?.[0] || "--";
+          const reason = friendlyAccountMessage(event.reason || event.risk_triggers?.[0]) || "--";
           const latency = metrics.opportunity_to_submit_ms ?? metrics.opportunity_to_decision_ms ?? metrics.opportunity_age_ms;
           const slippage = metrics.max_slippage_bps;
           const statusClass = event.action === "blocked" || event.action === "execution_error" || event.action === "hedge_required"
@@ -2484,7 +2490,7 @@ function balanceStatusClass(status) {
             <td>${escapeHtml(displayStrategy(event.strategy || event.event_type || "--"))}</td>
             <td class="${statusClass}">${escapeHtml(event.action || "--")}</td>
             <td>${escapeHtml(event.status || "--")}</td>
-            <td>${escapeHtml((event.accounts || []).join(", ") || "--")}</td>
+            <td>${escapeHtml((event.accounts || []).map((account) => displayExchange(account)).join(", ") || "--")}</td>
             <td>${escapeHtml((event.symbols || []).join(", ") || "--")}</td>
             <td class="num">${latency == null ? "--" : `${Number(latency).toFixed(0)} ms`}</td>
             <td class="num">${slippage == null ? "--" : `${Number(slippage).toFixed(1)} bps`}</td>
@@ -2506,7 +2512,7 @@ function balanceStatusClass(status) {
 
       for (const event of events.slice(0, 20)) {
         const riskClass = event.risk_level === "blocked" ? "risk-blocked" : event.risk_level === "off" ? "risk-off" : "risk-ok";
-        const reason = event.reason || "--";
+        const reason = friendlyAccountMessage(event.reason) || "--";
         const eventId = event.event_id || "";
         const tr = document.createElement("tr");
         tr.innerHTML = `
@@ -2515,7 +2521,7 @@ function balanceStatusClass(status) {
           <td>${escapeHtml(displayStrategy(event.strategy))}</td>
           <td>${escapeHtml(event.mode || "--")}</td>
           <td>${escapeHtml(event.status || "--")}</td>
-          <td>${escapeHtml(event.exchange || "--")}</td>
+          <td>${escapeHtml(displayExchange(event.exchange, event.exchange_label) || "--")}</td>
           <td>${escapeHtml(event.symbol || "--")}</td>
           <td class="${event.side === "buy" ? "side-buy" : event.side === "sell" ? "side-sell" : ""}">${escapeHtml(event.side ? event.side.toUpperCase() : "--")}</td>
           <td class="num">${event.order_count ?? "--"}</td>
@@ -2546,8 +2552,10 @@ function balanceStatusClass(status) {
       }
       for (const event of auditEvents.slice(0, 30)) {
         const statusClass = event.status === "ok" ? "risk-ok" : "risk-blocked";
-        const detail = event.detail || event.error || "--";
-        const target = event.target || event.strategy || event.exchange || "--";
+        const detail = friendlyAccountMessage(event.detail || event.error) || "--";
+        const target = friendlyAccountMessage(
+          event.target || event.strategy || displayExchange(event.exchange, event.exchange_label),
+        ) || "--";
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${formatAge(event.logged_at)}</td>
@@ -2750,7 +2758,7 @@ function balanceStatusClass(status) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td data-label="${uiText("Side")}" class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
-        <td data-label="${uiText("Exchange")}">${plan.exchange}</td>
+        <td data-label="${uiText("Exchange")}">${escapeHtml(displayExchange(plan.exchange, plan.exchange_label))}</td>
         <td data-label="${uiText("Symbol")}">${plan.symbol}</td>
         <td data-label="${uiText("Order Price")}" class="num">${fmt.format(order.price)}</td>
         <td data-label="${uiText("Slice Amount")}" class="num">${compact.format(order.amount)}</td>
@@ -2907,7 +2915,7 @@ function balanceStatusClass(status) {
         ))
         .map((account) => ({
           value: account.id,
-          label: `${account.label || account.exchange} · ${account.exchange} · ${account.symbol}`,
+          label: `${account.label || displayExchange(account.exchange, account.exchange_label)} · ${displayExchange(account.exchange, account.exchange_label)} · ${account.symbol}`,
         }));
       const accountId = replaceBacktestOptions(
         document.getElementById("backtest-account"),
@@ -3064,7 +3072,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td title="${escapeHtml(run.id || "")}">${escapeHtml(shortId(run.id))}<br><span class="subtle">${escapeHtml(backtestEpoch(run.created_at))}</span></td>
           <td>${escapeHtml(run.strategy?.name || "--")}</td>
-          <td>${escapeHtml(run.account?.exchange || "--")}<br><span class="subtle">${escapeHtml(run.account?.symbol || "--")}</span></td>
+          <td>${escapeHtml(displayExchange(run.account?.exchange, run.account?.exchange_label) || "--")}<br><span class="subtle">${escapeHtml(run.account?.symbol || "--")}</span></td>
           <td>${escapeHtml(request.timeframe || "--")} · ${Number(request.history_bars || 0)} ${escapeHtml(uiText("bars"))}</td>
           <td class="num ${pnlClass(Number(metrics.return_pct || 0))}">${backtestPercent(metrics.return_pct)}</td>
           <td class="num">${backtestPercent(metrics.max_drawdown_pct)}</td>
@@ -3115,7 +3123,7 @@ function balanceStatusClass(status) {
       const progress = Math.max(0, Math.min(100, Number(selected?.progress_pct || 0)));
       document.getElementById("backtest-progress-fill").style.width = `${progress}%`;
       const market = selected?.account
-        ? `${selected.account.exchange || "--"} ${selected.account.symbol || "--"}`
+        ? `${displayExchange(selected.account.exchange, selected.account.exchange_label) || "--"} ${selected.account.symbol || "--"}`
         : "";
       const marketData = result?.market_data || {};
       const barSummary = Number(marketData.received_bars || 0) > 0
@@ -3228,7 +3236,7 @@ function balanceStatusClass(status) {
       const accounts = lastState?.strategy_center?.user_api_accounts || [];
       const rows = accounts.map((account) => ({
         value: account.id,
-        label: `${account.label || account.id} · ${account.exchange || "--"}`,
+        label: `${account.label || account.id} · ${displayExchange(account.exchange, account.exchange_label) || "--"}`,
         title: `${account.owner_email || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
       }));
       setSelectOptions(
@@ -3317,7 +3325,7 @@ function balanceStatusClass(status) {
           <td>${escapeHtml(displayStrategy(strategy.strategy_type))}</td>
           <td>${escapeHtml(strategy.owner_email || "--")}</td>
           <td>${escapeHtml(strategy.account_id || "--")}</td>
-          <td>${escapeHtml(strategy.exchange_label || accountLabelForKey(strategy.exchange) || "--")}<br><span class="subtle">${escapeHtml(strategy.symbol || strategy.asset || "--")}</span></td>
+          <td>${escapeHtml(displayExchange(strategy.exchange, strategy.exchange_label) || "--")}<br><span class="subtle">${escapeHtml(strategy.symbol || strategy.asset || "--")}</span></td>
           <td class="${strategy.enabled ? "ok" : "subtle"}">${strategy.live_enabled ? "live ready" : (strategy.status || (strategy.enabled ? "enabled" : "draft"))}</td>
           <td class="num">${money.format(strategy.pnl_quote || 0)}</td>
           <td class="num">${strategy.open_order_count || 0}</td>
@@ -3446,7 +3454,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || shortId(account.id))}</td>
           <td>${escapeHtml(account.owner_email || "--")}</td>
-          <td>${escapeHtml(account.exchange || "--")}<br><span class="subtle">${escapeHtml(account.market_type || "spot")}</span></td>
+          <td>${escapeHtml(displayExchange(account.exchange, account.exchange_label) || "--")}<br><span class="subtle">${escapeHtml(account.market_type || "spot")}</span></td>
           <td>${escapeHtml((account.asset_scope || []).join(", ") || "all")}</td>
           <td class="${missing.length ? "missing" : "ok"}">${escapeHtml(envStatus)}</td>
           <td>${escapeHtml(account.ip_label || "--")}</td>
@@ -4983,7 +4991,7 @@ function balanceStatusClass(status) {
           .map((row) => `${row.currency} ${fmt.format(row.total ?? row.free ?? 0)}`)
           .join(" · ");
         setUserWorkspaceNotice(
-          `${uiText("Connection healthy")} · ${account.exchange} ${account.symbol} · ${Number(check.latency_ms || 0).toFixed(0)}ms · ${check.open_order_count || 0} ${uiText("open orders")}${balances ? ` · ${balances}` : ""}`
+          `${uiText("Connection healthy")} · ${displayExchange(account.exchange, account.exchange_label)} ${account.symbol} · ${Number(check.latency_ms || 0).toFixed(0)}ms · ${check.open_order_count || 0} ${uiText("open orders")}${balances ? ` · ${balances}` : ""}`
         );
       } catch (error) {
         setUserWorkspaceNotice(`connection test failed: ${error.message || error}`);
@@ -5304,7 +5312,7 @@ function balanceStatusClass(status) {
           const venueType = ["hyperliquid", "polymarket", "dydx", "aster"].includes(account.exchange)
             ? "DEX"
             : "CEX";
-          name.textContent = `${account.label} · ${venueType} ${account.market_type} · ${account.exchange} ${account.symbol}`;
+          name.textContent = `${account.label} · ${venueType} ${account.market_type} · ${displayExchange(account.exchange, account.exchange_label)} ${account.symbol}`;
           label.append(input, name);
           container.appendChild(label);
         }
@@ -5616,7 +5624,7 @@ function balanceStatusClass(status) {
           <td>${formatTimestamp(Number(event.created_at || 0) * 1000)}</td>
           <td>${escapeHtml(strategy?.name || event.strategy_id || "--")}</td>
           <td class="${paperRuntimeStatusClass(event.status)}">${escapeHtml(uiText(event.event_type || event.status || "--"))}</td>
-          <td title="${escapeHtml(event.reason || "")}">${escapeHtml(event.reason || "--")}</td>
+          <td title="${escapeHtml(friendlyAccountMessage(event.reason))}">${escapeHtml(friendlyAccountMessage(event.reason) || "--")}</td>
         `;
         body.appendChild(tr);
       }
@@ -5655,9 +5663,9 @@ function balanceStatusClass(status) {
             : strategy.status === "blocked"
             ? "blocked"
             : runtime.status || "not_started";
-        const runtimeReason = runtimeTerminal
+        const runtimeReason = friendlyAccountMessage(runtimeTerminal
           ? runtime.reason || blockers[0] || ""
-          : blockers[0] || runtime.reason || "";
+          : blockers[0] || runtime.reason || "");
         const runtimeTitle = Array.from(
           new Set([runtimeReason, ...blockers].filter(Boolean))
         ).join("; ");
@@ -5666,7 +5674,7 @@ function balanceStatusClass(status) {
           || project?.quote_currency
           || "";
         const accounts = (strategy.accounts || [])
-          .map((account) => `${account.exchange} ${account.symbol}`)
+          .map((account) => `${displayExchange(account.exchange, account.exchange_label)} ${account.symbol}`)
           .join(" · ");
         const statusClass = paperRuntimeStatusClass(runtimeStatus);
         const progress = Number(runtime.progress_pct);
@@ -5911,7 +5919,7 @@ function balanceStatusClass(status) {
         : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
       const guard = config.block_conflicting_market_maker === false ? "MM guard off" : "MM guard on";
       const coordination = config.coordinate_market_maker ? "MM auto-coordinate" : "MM coordination off";
-      return `${config.exchange || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard} · ${coordination}`;
+      return `${displayExchange(config.exchange, config.exchange_label) || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard} · ${coordination}`;
     }
 
     function compareAutoTaskConfig(taskConfig, defaultConfig) {
@@ -5956,7 +5964,7 @@ function balanceStatusClass(status) {
       const details = compared
         .slice(0, 4)
         .map(({ task, diffs }) => {
-          const label = `${shortId(task.id)} ${task.config?.exchange || "--"} ${task.config?.symbol || "--"}`;
+          const label = `${shortId(task.id)} ${displayExchange(task.config?.exchange, task.config?.exchange_label) || "--"} ${task.config?.symbol || "--"}`;
           if (!diffs.length) return `<li><strong>${escapeHtml(label)}</strong>: matches default</li>`;
           const diffText = diffs.slice(0, 5).map((diff) => `${diff.label}: ${diff.task} vs ${diff.default}`).join("; ");
           const more = diffs.length > 5 ? `; +${diffs.length - 5} more` : "";
@@ -6088,7 +6096,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Task")}" title="${escapeHtml(task.id || "")}">${escapeHtml(shortId(task.id))}</td>
           <td data-label="${uiText("Status")}" class="${statusClass}" title="${escapeHtml(detailTitle)}">${escapeHtml(displayStatus)}</td>
           <td data-label="${uiText("Config")}" class="${configCell.className}" title="${escapeHtml(configCell.title)}">${configCell.html}</td>
-          <td data-label="${uiText("Account")}">${escapeHtml(config.exchange || "--")}</td>
+          <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(config.exchange, config.exchange_label) || "--")}</td>
           <td data-label="${uiText("Side")}" class="${config.side === "buy" ? "side-buy" : "side-sell"}">${escapeHtml(String(config.side || "--").toUpperCase())}</td>
           <td data-label="${uiText("Filled")}" class="num">${filledText}</td>
           <td data-label="${uiText("Remaining")}" class="num">${remainingText}</td>
@@ -6115,7 +6123,7 @@ function balanceStatusClass(status) {
             coordinationButton.textContent = uiText("Enable MM Coordination");
             coordinationButton.addEventListener("click", () => {
               const detail = [
-                `${uiText("Account")}: ${config.exchange || "--"}`,
+                `${uiText("Account")}: ${displayExchange(config.exchange, config.exchange_label) || "--"}`,
                 `${uiText("Trading pair")}: ${config.symbol || "--"}`,
                 `${uiText("Side")}: ${String(config.side || "--").toUpperCase()}`,
                 `${uiText("Total Quote")}: ${quoteCurrency(config.symbol)} ${money.format(config.total_quote || 0)}`,
@@ -6268,7 +6276,7 @@ function balanceStatusClass(status) {
           const wallet = String(row.wallet || "trading").toLowerCase() === "funding"
             ? uiText("Funding wallet")
             : uiText("Trading wallet");
-          return `${position.asset} · ${row.account || row.exchange} · ${wallet} ${compact.format(row.amount || 0)}`;
+          return `${position.asset} · ${row.account || displayExchange(row.exchange, row.exchange_label)} · ${wallet} ${compact.format(row.amount || 0)}`;
         }))
         .join(" | ");
     }
@@ -6628,7 +6636,7 @@ function balanceStatusClass(status) {
       const strategies = (tradingConsole?.strategies || []).map((strategy) => ({
         key: strategy.id,
         label: strategy.label || displayStrategy(strategy.id),
-        title: strategy.symbol ? `${strategy.exchange_label || strategy.exchange || "all"} · ${strategy.symbol}` : strategy.id,
+        title: strategy.symbol ? `${displayExchange(strategy.exchange, strategy.exchange_label) || "all"} · ${strategy.symbol}` : strategy.id,
       }));
       renderRiskToggleOptions(
         "risk-accounts",
@@ -7949,7 +7957,7 @@ function balanceStatusClass(status) {
         ready: missing.length === 0,
         detail: missing.length
           ? `${uiText("Missing")}: ${missing.join(", ")}`
-          : `${payload.exchange} · ${payload.symbol} · ${String(payload.side || "").toUpperCase()}`,
+          : `${displayExchange(payload.exchange)} · ${payload.symbol} · ${String(payload.side || "").toUpperCase()}`,
       };
     }
 
@@ -8018,7 +8026,7 @@ function balanceStatusClass(status) {
       const startOperator = side === "buy" ? "<=" : ">=";
       const stopOperator = side === "buy" ? ">=" : "<=";
       const details = [
-        `${uiText("Account")}: ${payload.exchange}`,
+        `${uiText("Account")}: ${displayExchange(payload.exchange)}`,
         `${uiText("Trading pair")}: ${payload.symbol}`,
         `${uiText("Instrument")}: ${payload.instrument_type}`,
         `${uiText("Side")}: ${side.toUpperCase()}`,
@@ -8672,10 +8680,10 @@ function balanceStatusClass(status) {
       const common = plan?.common_quote_currency || lastState?.config?.common_quote_currency || "USD";
       const coordination = lastPayload.coordination || {};
       const coordinationStatus = coordination.status || "";
-      const reason = runtime.halt_reason
+      const reason = friendlyAccountMessage(runtime.halt_reason
         || (lastPayload.risk?.reasons || [])[0]
         || (lastPayload.errors || [])[0]
-        || "";
+        || "");
       text(
         "rebalance-meta",
         `${mode} · ${status} · ${progressPct.toFixed(1)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(2)} bps` : ""}${coordinationStatus ? ` · MM ${coordinationStatus}` : ""}${reason ? ` · ${reason}` : ""}`,
@@ -8726,7 +8734,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${escapeHtml(uiText(row.role))}</td>
-          <td>${escapeHtml(row.exchange || "--")}</td>
+          <td>${escapeHtml(displayExchange(row.exchange, row.exchange_label) || "--")}</td>
           <td>${escapeHtml(row.symbol || "--")}</td>
           <td class="${row.side === "buy" ? "side-buy" : "side-sell"}">${row.side.toUpperCase()}</td>
           <td class="num">${fmt.format(row.price || 0)}</td>
@@ -9107,7 +9115,7 @@ function balanceStatusClass(status) {
         ? formatSymbolQuantity(task.filled_quote, task.symbol, "quote")
         : formatSymbolQuantity(task.filled_base, task.symbol, "base");
       const side = String(task.side || "--").toUpperCase();
-      return `${shortId(task.id)} · ${task.status || "--"} · ${task.exchange || "--"} ${task.symbol || "--"} · ${side} · ${filled}`;
+      return `${shortId(task.id)} · ${task.status || "--"} · ${displayExchange(task.exchange, task.exchange_label) || "--"} ${task.symbol || "--"} · ${side} · ${filled}`;
     }
 
     function renderCleanupPreview(tasks, mode = "preview") {
@@ -9278,39 +9286,41 @@ function balanceStatusClass(status) {
         ? "--"
         : Number(mmPlan.existing_spread_bps).toFixed(2);
       const mmInstanceText = mmInstances.length > 1 ? `${mmInstances.length} instances · ` : "";
-      const mmReason = marketMakerStatusReason(mmSelected) || marketMakerStatusReason(data.market_maker);
+      const mmReason = friendlyAccountMessage(
+        marketMakerStatusReason(mmSelected) || marketMakerStatusReason(data.market_maker),
+      );
       const mmReasonText = mmReason ? ` · ${mmReason}` : "";
-      text("mm-meta", mmPlan ? `${mmInstanceText}${mmSelected?.mode || data.market_maker?.mode || "dry_run"} · ${mmPlan.exchange} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}${mmReasonText}` : `${mmInstanceText}${mmSelected?.status || data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}${mmReasonText}`);
+      text("mm-meta", mmPlan ? `${mmInstanceText}${mmSelected?.mode || data.market_maker?.mode || "dry_run"} · ${displayExchange(mmPlan.exchange, mmPlan.exchange_label)} ${mmPlan.symbol} · mid ${fmt.format(mmPlan.mid_price)} · spread ${mmSpreadText} bps${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}${mmReasonText}` : `${mmInstanceText}${mmSelected?.status || data.market_maker?.status || "disabled"}${mmMarketDataText}${mmQuoteText}${mmFeatureText}${mmRuntimeText}${mmReasonText}`);
 
       const slowPlan = data.slow_execution?.plan;
       const slowPriceText = slowPlan?.order ? `order ${fmt.format(slowPlan.order.price)}` : (data.slow_execution?.status || "no order");
-      text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${slowPlan.exchange} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
+      text("slow-meta", slowPlan ? `${data.slow_execution.mode || "dry_run"} · ${displayExchange(slowPlan.exchange, slowPlan.exchange_label)} ${slowPlan.symbol} · ${slowPlan.side.toUpperCase()} · ${slowPriceText}` : (data.slow_execution?.status || "disabled"));
 
       const gridPlan = data.spot_grid?.plan;
-      const gridReason = (data.spot_grid?.safety?.reasons || [])[0] || data.spot_grid?.error || "";
+      const gridReason = friendlyAccountMessage((data.spot_grid?.safety?.reasons || [])[0] || data.spot_grid?.error);
       text(
         "grid-meta",
         gridPlan
-          ? `${data.spot_grid.mode || "dry_run"} · ${gridPlan.exchange} ${gridPlan.symbol} · mid ${fmt.format(gridPlan.mid_price)} · step ${Number(gridPlan.grid_step_bps || 0).toFixed(2)} bps · orders ${(gridPlan.orders || []).length}${gridReason ? ` · ${gridReason}` : ""}`
+          ? `${data.spot_grid.mode || "dry_run"} · ${displayExchange(gridPlan.exchange, gridPlan.exchange_label)} ${gridPlan.symbol} · mid ${fmt.format(gridPlan.mid_price)} · step ${Number(gridPlan.grid_step_bps || 0).toFixed(2)} bps · orders ${(gridPlan.orders || []).length}${gridReason ? ` · ${gridReason}` : ""}`
           : `${data.spot_grid?.status || "disabled"}${gridReason ? ` · ${gridReason}` : ""}`
       );
 
       const dcaPlan = data.dca?.plan;
-      const dcaReason = (data.dca?.safety?.reasons || [])[0] || data.dca?.error || "";
+      const dcaReason = friendlyAccountMessage((data.dca?.safety?.reasons || [])[0] || data.dca?.error);
       const dcaNext = dcaPlan?.next_order ? `next ${fmt.format(dcaPlan.next_order.price)}` : (dcaPlan?.reason || data.dca?.status || "disabled");
       text(
         "dca-meta",
         dcaPlan
-          ? `${data.dca.mode || "dry_run"} · ${dcaPlan.exchange} ${dcaPlan.symbol} · ${String(dcaPlan.side || "").toUpperCase()} · ${dcaNext} · ${dcaPlan.max_orders || 0} orders${dcaReason ? ` · ${dcaReason}` : ""}`
+          ? `${data.dca.mode || "dry_run"} · ${displayExchange(dcaPlan.exchange, dcaPlan.exchange_label)} ${dcaPlan.symbol} · ${String(dcaPlan.side || "").toUpperCase()} · ${dcaNext} · ${dcaPlan.max_orders || 0} orders${dcaReason ? ` · ${dcaReason}` : ""}`
           : `${data.dca?.status || "disabled"}${dcaReason ? ` · ${dcaReason}` : ""}`
       );
 
       const execPlan = data.execution_algo?.plan;
-      const execReason = (data.execution_algo?.safety?.reasons || [])[0] || data.execution_algo?.error || "";
+      const execReason = friendlyAccountMessage((data.execution_algo?.safety?.reasons || [])[0] || data.execution_algo?.error);
       text(
         "exec-meta",
         execPlan
-          ? `${data.execution_algo.mode || "dry_run"} · ${execPlan.exchange} ${execPlan.symbol} · ${String(execPlan.algo || "").toUpperCase()} ${String(execPlan.side || "").toUpperCase()} · ${formatSymbolQuantity(execPlan.total_quote || 0, execPlan.symbol, "quote")} · slices ${(execPlan.schedule || []).length}${execReason ? ` · ${execReason}` : ""}`
+          ? `${data.execution_algo.mode || "dry_run"} · ${displayExchange(execPlan.exchange, execPlan.exchange_label)} ${execPlan.symbol} · ${String(execPlan.algo || "").toUpperCase()} ${String(execPlan.side || "").toUpperCase()} · ${formatSymbolQuantity(execPlan.total_quote || 0, execPlan.symbol, "quote")} · slices ${(execPlan.schedule || []).length}${execReason ? ` · ${execReason}` : ""}`
           : `${data.execution_algo?.status || "disabled"}${execReason ? ` · ${execReason}` : ""}`
       );
 
