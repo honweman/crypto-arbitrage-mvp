@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from arbitrage_bot.exchanges import (
     limit_order_features,
     normalize_client_order_id_for_exchange,
 )
+from arbitrage_bot.user_workspace import UserApiConnection, UserWorkspaceStore
 
 
 class ExchangeProxyConfigTest(unittest.TestCase):
@@ -198,6 +200,69 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(client.options_payload["secret"], "direct-secret")
         self.assertEqual(client.options_payload["password"], "direct-passphrase")
         self.assertEqual(global_api_key_after, "global-key")
+
+    def test_encrypted_workspace_credentials_rotate_without_changing_runtime_key(self) -> None:
+        class FakeCoinbase:
+            instances = []
+
+            def __init__(self, options: dict[str, object]) -> None:
+                self.options_payload = options
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            async def close(self) -> None:
+                self.closed = True
+
+        class FakeCcxt:
+            coinbase = FakeCoinbase
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "workspace.sqlite3"
+            master_key = base64.urlsafe_b64encode(b"w" * 32).decode("ascii")
+            with patch.dict(os.environ, {"TEST_WORKSPACE_KEY": master_key}, clear=False):
+                store = UserWorkspaceStore(
+                    path,
+                    master_key_env="TEST_WORKSPACE_KEY",
+                )
+                connection = store.upsert_api_connection(
+                    UserApiConnection.from_dict(
+                        {
+                            "owner_email": "owner@example.com",
+                            "label": "Coinbase Main",
+                            "exchange": "coinbase",
+                            "withdrawal_disabled_confirmed": True,
+                            "trade_permission_confirmed": True,
+                        }
+                    ),
+                    credentials={"api_key": "first-key", "secret": "first-secret"},
+                )
+                cfg = ExchangeConfig(
+                    id="coinbase",
+                    label="coinbase-spot",
+                    credential_connection_id=connection.id,
+                    credential_owner_email=connection.owner_email,
+                    credential_store_path=str(path),
+                    credential_master_key_env="TEST_WORKSPACE_KEY",
+                )
+                manager = ExchangeManager()
+                with patch(
+                    "arbitrage_bot.exchanges.importlib.import_module",
+                    return_value=FakeCcxt,
+                ):
+                    first = manager.client(cfg)
+                    store.upsert_api_connection(
+                        connection,
+                        credentials={
+                            "api_key": "rotated-key",
+                            "secret": "rotated-secret",
+                        },
+                    )
+                    second = manager.client(cfg)
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first.options_payload["apiKey"], "first-key")
+        self.assertEqual(second.options_payload["apiKey"], "rotated-key")
+        self.assertEqual(second.options_payload["secret"], "rotated-secret")
 
     def test_decentralized_exchange_credentials_map_to_ccxt_signers(self) -> None:
         created = {}

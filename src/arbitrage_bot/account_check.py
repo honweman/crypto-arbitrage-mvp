@@ -9,7 +9,7 @@ from time import time
 from typing import Any, Iterable
 
 from .config import BotConfig, ExchangeConfig, load_config
-from .exchanges import ExchangeManager
+from .exchanges import ExchangeManager, workspace_credential_status
 from .models import OrderBookSnapshot
 from .web_config import market_maker_configs_for_runtime
 
@@ -86,6 +86,7 @@ def _symbols_by_exchange(cfg: BotConfig) -> dict[str, list[str]]:
 
 
 def _auth_env_status(exchange: ExchangeConfig) -> dict[str, Any]:
+    workspace = workspace_credential_status(exchange)
     fields = []
     missing = []
     set_names = []
@@ -107,11 +108,14 @@ def _auth_env_status(exchange: ExchangeConfig) -> dict[str, Any]:
             missing.append(env_name)
 
     return {
-        "configured": bool(fields),
+        "configured": bool(fields) or workspace["configured"],
         "fields": fields,
         "set_env": set_names,
-        "missing_env": missing,
-        "private_checks_enabled": bool(fields) and not missing,
+        "missing_env": [] if workspace["usable"] else missing,
+        "fallback_missing_env": missing if workspace["usable"] else [],
+        "private_checks_enabled": workspace["usable"] or (bool(fields) and not missing),
+        "storage": "encrypted" if workspace["configured"] else "environment",
+        "credential_connection_id": workspace["connection_id"],
     }
 
 

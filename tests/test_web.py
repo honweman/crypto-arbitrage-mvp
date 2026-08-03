@@ -275,6 +275,64 @@ class WebMonitorTest(unittest.TestCase):
             {"ACS": 110_000_000.0, "USDC": 50.0},
         )
 
+    def test_imported_workspace_balance_replaces_linked_platform_account(self) -> None:
+        merged = _merge_workspace_account_balances(
+            {
+                "status": "ok",
+                "accounts": [
+                    {
+                        "exchange": "bybit-spot",
+                        "label": "bybit-spot",
+                        "id": "bybit",
+                        "status": "ok",
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {"currency": "USDT", "total": 100.0}
+                            ],
+                        },
+                    },
+                    {
+                        "exchange": "coinbase-spot",
+                        "label": "coinbase-spot",
+                        "id": "coinbase",
+                        "status": "ok",
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {"currency": "USDC", "total": 50.0}
+                            ],
+                        },
+                    },
+                ],
+            },
+            {
+                "connections": [
+                    {
+                        "id": "bybit-main",
+                        "label": "Bybit Main",
+                        "exchange": "bybit",
+                        "runtime_keys": ["bybit-spot"],
+                        "status": "healthy",
+                        "checked_at": 200.0,
+                        "credentials_configured": True,
+                        "balances": [{"currency": "USDT", "total": 100.0}],
+                        "markets": [],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(merged["total_account_count"], 2)
+        self.assertEqual(
+            {row["label"] for row in merged["accounts"]},
+            {"Bybit Main", "coinbase-spot"},
+        )
+        self.assertEqual(
+            {row["currency"]: row["total"] for row in merged["totals"]},
+            {"USDT": 100.0, "USDC": 50.0},
+        )
+
     def test_workspace_balance_updates_top_portfolio_and_account_breakdown(self) -> None:
         account_balances = {
             "status": "ok",
@@ -336,11 +394,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-all-balances1" defer></script>',
+            '<script src="/static/app.js?v=20260803-unified-accounts1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-all-balances1" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-unified-accounts1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(

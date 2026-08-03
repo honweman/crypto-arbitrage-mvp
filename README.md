@@ -767,20 +767,35 @@ authorized on the server rather than a personal key, and pin
 intercepted. The workflow is deliberately manual-only — merging to `main`
 never deploys by itself.
 
-The config `label` is the account identity used by the rest of the bot. Multiple accounts on the same exchange should be configured as separate exchange entries with the same `id` and different labels:
+The config `label` is the stable runtime identity used by existing strategies. Multiple accounts on the same exchange must use different labels. New API credentials should be stored in the encrypted Exchange API Connections workspace; a runtime entry can reference that connection without changing its existing label:
 
 ```json
 {
   "id": "bybit",
   "label": "bybit-mm-a",
   "market_type": "spot",
-  "api_key_env": "BYBIT_MM_A_API_KEY",
-  "secret_env": "BYBIT_MM_A_SECRET",
+  "credential_connection_id": "connection-abcd1234",
+  "credential_owner_email": "owner@example.com",
+  "credential_store_path": "data/user_workspace.sqlite3",
+  "credential_master_key_env": "CRYPTO_ARB_CREDENTIAL_MASTER_KEY",
   "options": {
     "defaultType": "spot"
   }
 }
 ```
+
+Legacy environment-backed accounts can be migrated without exposing secrets on
+the command line. Load the service environment first, then run
+`scripts/migrate_runtime_accounts.py --config config.acs.json --owner
+owner@example.com --exchange coinbase --exchange bybit --exchange upbit
+--exchange bithumb --confirm-withdrawals-disabled --write-config-links`. The
+tool matches an existing encrypted account by credential fingerprint, groups
+spot and contract entries that use the same API, preserves all runtime labels,
+and writes a backup of the config before adding encrypted credential links.
+Rotating credentials in the dashboard then rebuilds cached exchange clients on
+their next API operation. Keep the old environment variables during the first
+deployment as a rollback fallback; remove them only after every linked account
+passes a private read-only check.
 
 If you need to route an account through a proxy instead of cloud-level static egress, keep the proxy URL in an environment variable and reference only the variable name in config:
 
@@ -835,7 +850,7 @@ When `registration_enabled` is true, users register with an email verification c
 
 Registered users can open `Security` from the dashboard header to bind Google Authenticator or another standard TOTP application. Enabling or disabling TOTP requires both the current password and a valid six-digit code, rotates the session version, and signs out every existing session. Once enabled, every username/password login also requires the current TOTP code. A verified email password reset disables TOTP and rotates its secret so a lost authenticator device cannot permanently lock the account; the user must bind it again after recovery. Setup pages containing the TOTP secret are returned with `Cache-Control: no-store`. When `credential_master_key_env` is configured, TOTP secrets are encrypted at rest with AES-GCM using the same master key as per-user exchange credentials; existing plaintext TOTP fields are migrated atomically at service startup.
 
-Each registered user gets isolated exchange accounts. An API connection is configured once with the exchange, API region, and trade-only credentials; users do not create separate spot and contract API records. The account automatically covers every market type supported by that venue, and its private balance snapshot appears in monitoring immediately. Users manage tradable currencies and select verified spot, perpetual, or futures pairs directly under the account. The server keeps the former project records only as internal pair-compatibility keys for existing strategies and migrations; they are not part of user setup. Upbit supports both Global and Indonesia (`id.Upbit`) API regions, and Bithumb user accounts use API v2.0.
+Each registered user gets isolated exchange accounts. An API connection is configured once with the exchange, API region, a unique account name, and trade-only credentials; users do not create separate spot and contract API records. Multiple APIs for the same exchange are supported as independent connections, for example `Bybit Main`, `Bybit MM 2`, and `Bybit Hedge`, each with its own encrypted credential record and immutable short ID. The account automatically covers every market type supported by that venue, and its private balance snapshot appears in monitoring immediately. Users manage tradable currencies and select verified spot, perpetual, or futures pairs directly under the account. The server keeps the former project records only as internal pair-compatibility keys for existing strategies and migrations; they are not part of user setup. Upbit supports both Global and Indonesia (`id.Upbit`) API regions, and Bithumb user accounts use API v2.0.
 
 Registered users can also verify an EVM wallet from MetaMask, imToken, or another
 EIP-1193-compatible wallet by signing a short-lived nonce. The server verifies

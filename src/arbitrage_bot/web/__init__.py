@@ -2965,6 +2965,11 @@ def _merge_workspace_account_balances(
         for row in merged.get("accounts", [])
         if isinstance(row, dict)
     ]
+    platform_keys = {
+        str(row.get("exchange") or "").strip()
+        for row in accounts
+        if str(row.get("source") or "") != "user_workspace"
+    }
     existing_connection_ids = {
         str(row.get("workspace_connection_id") or "")
         for row in accounts
@@ -2979,6 +2984,12 @@ def _merge_workspace_account_balances(
             continue
         connection_status = str(connection.get("status") or "unverified")
         checked_at = _number_or_none(connection.get("checked_at"))
+        runtime_keys = {
+            str(item or "").strip()
+            for item in connection.get("runtime_keys", []) or []
+            if str(item or "").strip()
+        }
+        linked_platform_keys = runtime_keys & platform_keys
         markets = [
             row
             for row in connection.get("markets", []) or []
@@ -3003,6 +3014,21 @@ def _merge_workspace_account_balances(
             for row in connection.get("balances", []) or []
             if isinstance(row, dict) and row.get("currency")
         ]
+        if linked_platform_keys and (
+            connection_status != "healthy" or checked_at is None or not balances
+        ):
+            # Keep the live platform snapshot until the imported encrypted account
+            # has completed its own private check. This prevents both double-counting
+            # and a temporary blank balance during migration.
+            continue
+        if linked_platform_keys:
+            accounts = [
+                row
+                for row in accounts
+                if str(row.get("exchange") or "").strip()
+                not in linked_platform_keys
+            ]
+            platform_keys.difference_update(linked_platform_keys)
         open_order_count = max(
             0,
             int(_number_or_none(connection.get("open_order_count")) or 0),
@@ -3064,6 +3090,7 @@ def _merge_workspace_account_balances(
                 ],
                 "source": "user_workspace",
                 "workspace_connection_id": connection_id,
+                "runtime_keys": sorted(runtime_keys),
                 "live_enabled": bool(connection.get("live_enabled")),
                 "latency_ms": _number_or_none(connection.get("latency_ms")),
                 "checked_at": checked_at,
@@ -6795,6 +6822,16 @@ async def _sync_workspace_connection(
     if not connection_id:
         connection_id = f"connection-{secrets.token_hex(6)}"
 
+    if not label:
+        label = (
+            existing_connection.label
+            if existing_connection is not None
+            else store.suggest_api_connection_label(
+                owner_email=user.email,
+                exchange=exchange,
+            )
+        )
+
     projects = store.list_projects(owner_email=user.email, is_admin=False)
 
     if exchange == "hyperliquid":
@@ -6832,8 +6869,7 @@ async def _sync_workspace_connection(
         {
             "id": connection_id,
             "owner_email": user.email,
-            "label": label
-            or (existing_connection.label if existing_connection else exchange.title()),
+            "label": label,
             "exchange": exchange,
             "market_type": market_type,
             "market_types": raw.get("market_types"),

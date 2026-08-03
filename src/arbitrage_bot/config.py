@@ -16,6 +16,10 @@ class ExchangeConfig:
     api_key_env: str | None = None
     secret_env: str | None = None
     password_env: str | None = None
+    credential_connection_id: str | None = None
+    credential_owner_email: str | None = None
+    credential_store_path: str | None = None
+    credential_master_key_env: str | None = None
     http_proxy_env: str | None = None
     https_proxy_env: str | None = None
     socks_proxy_env: str | None = None
@@ -550,6 +554,10 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
         api_key_env=raw.get("api_key_env"),
         secret_env=raw.get("secret_env"),
         password_env=raw.get("password_env"),
+        credential_connection_id=raw.get("credential_connection_id"),
+        credential_owner_email=raw.get("credential_owner_email"),
+        credential_store_path=raw.get("credential_store_path"),
+        credential_master_key_env=raw.get("credential_master_key_env"),
         http_proxy_env=raw.get("http_proxy_env"),
         https_proxy_env=raw.get("https_proxy_env"),
         socks_proxy_env=raw.get("socks_proxy_env"),

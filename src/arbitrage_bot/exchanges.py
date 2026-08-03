@@ -8,11 +8,13 @@ import importlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -36,6 +38,68 @@ LOGGER = logging.getLogger(__name__)
 BITHUMB_KRW_MIN_ORDER_COST = 5_000.0
 CLIENT_ORDER_ID_MAX_LENGTH = 36
 EXPLICIT_ABSENCE_MIN_AGE_SECONDS = 30.0
+
+
+def _workspace_credential_revision(cfg: ExchangeConfig) -> float | None:
+    connection_id = str(cfg.credential_connection_id or "").strip()
+    store_path = str(cfg.credential_store_path or "").strip()
+    if not connection_id or not store_path:
+        return None
+    path = Path(store_path)
+    if not path.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            row = connection.execute(
+                "SELECT updated_at FROM user_api_credentials WHERE account_id = ?",
+                (connection_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return float(row[0]) if row is not None else None
+
+
+def workspace_credential_status(cfg: ExchangeConfig) -> dict[str, Any]:
+    connection_id = str(cfg.credential_connection_id or "").strip()
+    owner_email = str(cfg.credential_owner_email or "").strip().lower()
+    store_path = str(cfg.credential_store_path or "").strip()
+    master_key_env = str(cfg.credential_master_key_env or "").strip()
+    configured = bool(connection_id and owner_email and store_path and master_key_env)
+    revision = _workspace_credential_revision(cfg) if configured else None
+    return {
+        "configured": configured and revision is not None,
+        "usable": configured
+        and revision is not None
+        and bool(os.environ.get(master_key_env)),
+        "connection_id": connection_id,
+        "owner_email": owner_email,
+        "store_path": store_path,
+        "master_key_env": master_key_env,
+        "master_key_set": bool(os.environ.get(master_key_env)) if master_key_env else False,
+        "revision": revision,
+    }
+
+
+def _workspace_credentials(cfg: ExchangeConfig) -> dict[str, str]:
+    status = workspace_credential_status(cfg)
+    if not status["configured"]:
+        return {}
+    if not status["master_key_set"]:
+        raise RuntimeError(
+            f"credential master key is unavailable for {cfg.key}"
+        )
+    # Imported lazily to keep public market-data clients independent of the
+    # encrypted user-account database.
+    from .user_workspace import UserWorkspaceStore
+
+    store = UserWorkspaceStore(
+        status["store_path"],
+        master_key_env=status["master_key_env"],
+    )
+    return store.decrypt_credentials(
+        account_id=status["connection_id"],
+        owner_email=status["owner_email"],
+    )
 
 
 REST_PROXY_ENV_OPTIONS = (
@@ -734,6 +798,7 @@ class ExchangeManager:
         order_journal_path: str | None = None,
     ) -> None:
         self._clients: dict[str, Any] = {}
+        self._workspace_credential_revisions: dict[str, float | None] = {}
         self._credentials_by_key = {
             str(key): {
                 str(field): str(value).replace("\\n", "\n")
@@ -775,15 +840,27 @@ class ExchangeManager:
             options["options"].setdefault("defaultType", cfg.market_type)
 
         direct_credentials = self._credentials_by_key.get(cfg.key, {})
-        api_key = direct_credentials.get("api_key") or _credential_from_env(
+        workspace_credentials = (
+            _workspace_credentials(cfg)
+            if cfg.credential_connection_id
+            and not (direct_credentials.get("api_key") and direct_credentials.get("secret"))
+            else {}
+        )
+        api_key = direct_credentials.get("api_key") or workspace_credentials.get(
+            "api_key"
+        ) or _credential_from_env(
             cfg.api_key_env
         )
-        secret = direct_credentials.get("secret") or _credential_from_env(
+        secret = direct_credentials.get("secret") or workspace_credentials.get(
+            "secret"
+        ) or _credential_from_env(
             cfg.secret_env
         )
         password = (
             direct_credentials.get("password")
             or direct_credentials.get("passphrase")
+            or workspace_credentials.get("password")
+            or workspace_credentials.get("passphrase")
             or _credential_from_env(cfg.password_env)
         )
         if api_key:
@@ -813,6 +890,7 @@ class ExchangeManager:
                 )
 
         client = exchange_cls(options)
+        workspace_credentials.clear()
         if cfg.id == "bithumb" and str(cfg.options.get("private_api", "")).lower() in {
             "v2",
             "v2.0",
@@ -829,8 +907,24 @@ class ExchangeManager:
         return client
 
     def client(self, cfg: ExchangeConfig) -> Any:
+        if cfg.key in self._clients and cfg.credential_connection_id:
+            revision = _workspace_credential_revision(cfg)
+            previous = self._workspace_credential_revisions.get(cfg.key)
+            if revision is not None and revision != previous:
+                stale_client = self._clients.pop(cfg.key)
+                close = getattr(stale_client, "close", None)
+                if callable(close):
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        try:
+                            asyncio.get_running_loop().create_task(result)
+                        except RuntimeError:
+                            result.close()
         if cfg.key not in self._clients:
             self._clients[cfg.key] = self._build_client(cfg)
+            self._workspace_credential_revisions[cfg.key] = (
+                _workspace_credential_revision(cfg)
+            )
         return self._clients[cfg.key]
 
     async def close(self) -> None:
@@ -840,6 +934,7 @@ class ExchangeManager:
         )
         self._clients.clear()
         self._credentials_by_key.clear()
+        self._workspace_credential_revisions.clear()
 
     async def fetch_order_book(
         self,

@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -6,6 +8,32 @@ from arbitrage_bot.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
+    def test_exchange_config_loads_encrypted_account_reference(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "config.acs.example.json"
+        raw = json.loads(source.read_text(encoding="utf-8"))
+        exchange = raw["spot_exchanges"][0]
+        exchange.update(
+            {
+                "credential_connection_id": "connection-coinbase-main",
+                "credential_owner_email": "owner@example.com",
+                "credential_store_path": "data/user_workspace.sqlite3",
+                "credential_master_key_env": "MASTER_KEY",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            cfg = load_config(path)
+
+        loaded = cfg.spot_exchanges[0]
+        self.assertEqual(
+            loaded.credential_connection_id,
+            "connection-coinbase-main",
+        )
+        self.assertEqual(loaded.credential_owner_email, "owner@example.com")
+        self.assertEqual(loaded.credential_store_path, "data/user_workspace.sqlite3")
+        self.assertEqual(loaded.credential_master_key_env, "MASTER_KEY")
+
     def test_acs_onchain_monitor_uses_top_15_and_labels(self) -> None:
         config_path = Path(__file__).resolve().parents[1] / "config.acs.example.json"
 

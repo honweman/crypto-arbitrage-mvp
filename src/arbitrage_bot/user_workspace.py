@@ -548,6 +548,7 @@ class UserApiConnection:
     market_type: str = "spot"
     market_types: tuple[str, ...] = ()
     api_variant: str = "default"
+    runtime_keys: tuple[str, ...] = ()
     withdrawal_disabled_confirmed: bool = False
     trade_permission_confirmed: bool = False
     connection_status: str = "unverified"
@@ -611,6 +612,9 @@ class UserApiConnection:
         status = str(raw.get("connection_status") or "unverified").strip().lower()
         if status not in CONNECTION_STATUSES:
             status = "unverified"
+        runtime_keys_raw = raw.get("runtime_keys")
+        if not isinstance(runtime_keys_raw, (list, tuple, set)):
+            runtime_keys_raw = ()
         now = _now()
         return cls(
             id=_clean_id(raw.get("id"), prefix="connection"),
@@ -620,6 +624,13 @@ class UserApiConnection:
             market_type=market_type,
             market_types=market_types,
             api_variant=api_variant,
+            runtime_keys=tuple(
+                dict.fromkeys(
+                    _clean_text(item, max_length=80)
+                    for item in runtime_keys_raw
+                    if str(item or "").strip()
+                )
+            ),
             withdrawal_disabled_confirmed=_strict_bool(
                 raw.get("withdrawal_disabled_confirmed"),
                 label="withdrawal-disabled confirmation",
@@ -656,6 +667,7 @@ class UserApiConnection:
             "market_types": list(self.market_types),
             "market_scope": "unified",
             "api_variant": self.api_variant,
+            "runtime_keys": list(self.runtime_keys),
             "withdrawal_disabled_confirmed": self.withdrawal_disabled_confirmed,
             "trade_permission_confirmed": self.trade_permission_confirmed,
             "connection_status": self.connection_status,
@@ -1383,6 +1395,24 @@ class UserWorkspaceStore:
                 "exchange and API region cannot be changed on an existing "
                 "connection; add a new connection instead"
             )
+        duplicate = next(
+            (
+                row
+                for row in self.list_api_connections(
+                    owner_email=api_connection.owner_email,
+                    is_admin=False,
+                )
+                if row.id != api_connection.id
+                and row.exchange == api_connection.exchange
+                and row.label.casefold() == api_connection.label.casefold()
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise ValueError(
+                f"account name already exists on {api_connection.exchange}: "
+                f"{api_connection.label}; use a distinct name for each API account"
+            )
         supplied = self._clean_credentials(credentials)
         if existing is None and not supplied:
             raise ValueError("configure required API credentials before saving")
@@ -1483,6 +1513,32 @@ class UserWorkspaceStore:
             ),
         )
         return self.upsert_api_connection(updated)
+
+    def suggest_api_connection_label(
+        self,
+        *,
+        owner_email: str,
+        exchange: str,
+    ) -> str:
+        exchange_id = str(exchange or "").strip().lower()
+        exchange_row = EXCHANGES_BY_ID.get(exchange_id)
+        if exchange_row is None:
+            raise ValueError(f"unsupported exchange: {exchange_id}")
+        existing = {
+            row.label.casefold()
+            for row in self.list_api_connections(
+                owner_email=owner_email,
+                is_admin=False,
+            )
+            if row.exchange == exchange_id
+        }
+        base = f"{exchange_row['label']} Main"
+        if base.casefold() not in existing:
+            return base
+        index = 2
+        while f"{exchange_row['label']} {index}".casefold() in existing:
+            index += 1
+        return f"{exchange_row['label']} {index}"
 
     def platform_projects(self) -> list[dict[str, Any]]:
         """Return project summary metadata only; never account or credential data."""
@@ -3600,6 +3656,7 @@ class UserWorkspaceStore:
                 "market_types": list(row.get("market_types") or []),
                 "market_scope": "unified",
                 "api_variant": row.get("api_variant") or "default",
+                "runtime_keys": list(row.get("runtime_keys") or []),
                 "withdrawal_disabled_confirmed": bool(
                     row.get("withdrawal_disabled_confirmed")
                 ),
@@ -3636,6 +3693,7 @@ class UserWorkspaceStore:
                     "market_types": [row.get("market_type") or "spot"],
                     "market_scope": "unified",
                     "api_variant": row.get("api_variant") or "default",
+                    "runtime_keys": [],
                     "withdrawal_disabled_confirmed": bool(
                         row.get("withdrawal_disabled_confirmed")
                     ),

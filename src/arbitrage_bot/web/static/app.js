@@ -4374,7 +4374,27 @@ function balanceStatusClass(status) {
       const defaultExchange = currentUserWorkspace?.exchange_catalog?.[0];
       setFieldValue("user-exchange-project", "");
       setFieldValue("user-exchange-id", defaultExchange?.id || "");
+      setFieldValue(
+        "user-exchange-label",
+        suggestedWorkspaceAccountLabel(defaultExchange?.id || "")
+      );
       syncUserExchangeMarketTypes();
+    }
+
+    function suggestedWorkspaceAccountLabel(exchangeId) {
+      const exchange = workspaceExchange(exchangeId);
+      if (!exchangeId || !exchange) return "";
+      if (exchangeId === "hyperliquid") return "Hyperliquid MetaMask";
+      const used = new Set(
+        (currentUserWorkspace?.connections || [])
+          .filter((connection) => connection.exchange === exchangeId)
+          .map((connection) => String(connection.label || "").trim().toLowerCase())
+      );
+      const base = `${exchange.label || exchangeId} Main`;
+      if (!used.has(base.toLowerCase())) return base;
+      let index = 2;
+      while (used.has(`${exchange.label || exchangeId} ${index}`.toLowerCase())) index += 1;
+      return `${exchange.label || exchangeId} ${index}`;
     }
 
     function userExchangeMarketKey(market) {
@@ -4692,8 +4712,6 @@ function balanceStatusClass(status) {
       const body = document.getElementById("user-exchange-accounts");
       if (!body) return;
       body.innerHTML = "";
-      const accounts = workspace?.accounts || [];
-      const accountMap = new Map(accounts.map((account) => [account.id, account]));
       const connections = workspace?.connections || [];
       if (connections.length === 0) {
         const tr = document.createElement("tr");
@@ -4702,7 +4720,6 @@ function balanceStatusClass(status) {
         return;
       }
       for (const connection of connections) {
-        const firstAccount = accountMap.get(connection.account_ids?.[0]);
         const marketLabels = (connection.markets || []).map((market) => (
           `${String(market.market_type || "spot").toUpperCase()} · ${market.symbol || "--"}`
         ));
@@ -4738,7 +4755,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.dataset.workspaceConnectionId = connection.id || "";
         tr.innerHTML = `
-          <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">${escapeHtml(connection.owner_email || firstAccount?.owner_email || "--")}</span></td>
+          <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">ID ${escapeHtml(String(connection.id || "").slice(-8))}${connection.runtime_keys?.length ? ` · ${escapeHtml(connection.runtime_keys.join(" / "))}` : ""}</span></td>
           <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${marketScope}${variantText}`)}</span></td>
           <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
           <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
@@ -5071,8 +5088,7 @@ function balanceStatusClass(status) {
       if (secret) credentials.secret = secret;
       if (passphrase) credentials.passphrase = passphrase;
       const account = {
-        label: document.getElementById("user-exchange-label").value.trim()
-          || `${exchange?.label || exchangeId}`,
+        label: document.getElementById("user-exchange-label").value.trim(),
         exchange: exchangeId,
         market_types: exchange?.market_types || [],
         api_variant: document.getElementById("user-exchange-api-variant").value,
@@ -9504,16 +9520,10 @@ function balanceStatusClass(status) {
 	        if (event.target?.id === "user-exchange-id" && !selectedUserExchangeAccountId) {
 	          const symbolSelect = document.getElementById("user-exchange-symbol");
 	          if (symbolSelect) symbolSelect.replaceChildren();
-	          const labelInput = document.getElementById("user-exchange-label");
-	          const currentLabel = labelInput?.value.trim() || "";
-	          if (!currentLabel || currentLabel === "Coinbase Main") {
-	            const exchange = workspaceExchange(event.target.value);
-	            if (labelInput) {
-	              labelInput.value = event.target.value === "hyperliquid"
-	                ? "Hyperliquid MetaMask"
-	                : `${exchange?.label || event.target.value} Main`;
-	            }
-	          }
+                  const labelInput = document.getElementById("user-exchange-label");
+                  if (labelInput) {
+                    labelInput.value = suggestedWorkspaceAccountLabel(event.target.value);
+                  }
 	        }
 	        syncUserExchangeMarketTypes();
 	      }
