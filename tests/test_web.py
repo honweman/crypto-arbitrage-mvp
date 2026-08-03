@@ -394,11 +394,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-unified-accounts2" defer></script>',
+            '<script src="/static/app.js?v=20260803-balance-filter1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-unified-accounts1" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-balance-filter1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -442,7 +442,9 @@ class WebMonitorTest(unittest.TestCase):
             "function renderAccountBalanceSummary(accountBalances)", 1
         )[1].split("function renderAccountBalances(accountBalances)", 1)[0]
         self.assertNotIn("accountBalancesForProfile", summary_body)
-        self.assertIn("SPOT_DUST_VALUE_USD = 10", APP_JS)
+        self.assertIn("BALANCE_MIN_QUANTITY = 1", APP_JS)
+        self.assertIn("BALANCE_MIN_VALUE_USDT = 10", APP_JS)
+        self.assertIn("function meetsBalanceDisplayThreshold(amount, valueCommon)", APP_JS)
         self.assertIn("function visibleBalanceRows(rows)", APP_JS)
         self.assertIn('uiText("All accounts")', summary_body)
         self.assertIn('id="user-exchange-test"', INDEX_HTML)

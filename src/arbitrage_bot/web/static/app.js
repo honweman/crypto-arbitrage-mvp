@@ -21,11 +21,8 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const LIVE_AUTO_BUY_SELL_CONFIRMATION = "ENABLE LIVE AUTO BUY SELL";
 	    const LIVE_MARKET_MAKER_CONFIRMATION = "ENABLE LIVE MARKET MAKER";
 	    const LIVE_REBALANCE_CONFIRMATION = "ENABLE LIVE REBALANCE";
-	    const SPOT_DUST_VALUE_USD = 10;
-	    const CASH_BALANCE_CURRENCIES = new Set([
-	      "USD", "USDC", "USDT", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD",
-	      "KRW", "EUR", "GBP", "JPY", "CNY", "CNH", "HKD", "SGD",
-	    ]);
+	    const BALANCE_MIN_QUANTITY = 1;
+	    const BALANCE_MIN_VALUE_USDT = 10;
 	    let refreshTimer = null;
 	    let mutationRefreshTimer = null;
 	    const PAGE_SECTION_IDS = {
@@ -792,24 +789,31 @@ function balanceStatusClass(status) {
       return null;
     }
 
-    function isDisplayableSpotBalance(row) {
+    function meetsBalanceDisplayThreshold(amount, valueCommon) {
+      const quantity = Number(amount);
+      if (!Number.isFinite(quantity) || Math.abs(quantity) < BALANCE_MIN_QUANTITY) {
+        return false;
+      }
+      if (valueCommon == null) return true;
+      const value = Number(valueCommon);
+      return !Number.isFinite(value) || Math.abs(value) >= BALANCE_MIN_VALUE_USDT;
+    }
+
+    function isDisplayableBalance(row) {
       const currency = String(row?.currency || "").toUpperCase();
-      if (!currency || CASH_BALANCE_CURRENCIES.has(currency)) return true;
-      const wallet = String(row?.wallet || "trading").toLowerCase();
-      if (["swap", "future", "futures", "derivatives"].includes(wallet)) return true;
-      const value = balanceCommonValue(row);
-      return value == null || Math.abs(value) >= SPOT_DUST_VALUE_USD;
+      return Boolean(currency)
+        && meetsBalanceDisplayThreshold(row?.total, balanceCommonValue(row));
     }
 
     function visibleBalanceRows(rows) {
       const source = rows || [];
-      const visible = source.filter(isDisplayableSpotBalance);
+      const visible = source.filter(isDisplayableBalance);
       return { visible, hiddenCount: source.length - visible.length };
     }
 
-    function hiddenSpotBalanceText(hiddenCount) {
+    function hiddenBalanceText(hiddenCount) {
       return hiddenCount > 0
-        ? `${hiddenCount} ${uiText("spot balance(s) below $10 hidden")}`
+        ? `${hiddenCount} ${uiText("balance(s) below 1 unit or 10 USDT hidden")}`
         : "";
     }
 
@@ -862,7 +866,7 @@ function balanceStatusClass(status) {
       const detailEl = document.getElementById("account-balances-detail");
       if (totals.length === 0) {
         valueEl.textContent = "--";
-        detailEl.textContent = hiddenSpotBalanceText(hiddenCount) || accountBalances?.status || "--";
+        detailEl.textContent = hiddenBalanceText(hiddenCount) || accountBalances?.status || "--";
         detailEl.title = detailEl.textContent;
         return;
       }
@@ -878,7 +882,7 @@ function balanceStatusClass(status) {
       const detail = [
         accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
         balanceDetail,
-        hiddenSpotBalanceText(hiddenCount),
+        hiddenBalanceText(hiddenCount),
       ].filter(Boolean).join(" · ");
       detailEl.textContent = detail;
       const totalsTitle = totals
@@ -891,7 +895,7 @@ function balanceStatusClass(status) {
       detailEl.title = [
         accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
         totalsTitle,
-        hiddenSpotBalanceText(hiddenCount),
+        hiddenBalanceText(hiddenCount),
       ].filter(Boolean).join(" | ");
     }
 
@@ -906,7 +910,7 @@ function balanceStatusClass(status) {
         filtered
           ? [
             `${filtered.status || "unknown"} · checked ${filtered.checked_account_count || 0}/${filtered.total_account_count || 0} · ${formatAge(filtered.last_finished)}`,
-            hiddenSpotBalanceText(hiddenCount),
+            hiddenBalanceText(hiddenCount),
           ].filter(Boolean).join(" · ")
           : ""
       );
@@ -928,7 +932,7 @@ function balanceStatusClass(status) {
           ? uiText("Live enabled")
           : account.status || "--";
         if (rows.length === 0) {
-          const message = hiddenSpotBalanceText(accountBalances.hiddenCount)
+          const message = hiddenBalanceText(accountBalances.hiddenCount)
             || account.balance?.error
             || account.balance?.skipped_reason
             || "No non-zero target balances.";
@@ -6184,17 +6188,45 @@ function balanceStatusClass(status) {
         .join(" | ");
     }
 
-    function formatCashDetail(portfolio) {
+    function displayablePortfolioPositions(portfolio) {
+      return (portfolio?.positions || []).filter((position) =>
+        meetsBalanceDisplayThreshold(
+          position?.position_base,
+          position?.position_value,
+        )
+      );
+    }
+
+    function displayablePortfolioCash(portfolio) {
       const balances = portfolio?.cash_balances || {};
+      const common = portfolio?.cash_balances_common || {};
+      return Object.entries(balances)
+        .map(([currency, amount]) => ({
+          currency,
+          amount: Number(amount || 0),
+          valueCommon: Object.prototype.hasOwnProperty.call(common, currency)
+            ? Number(common[currency])
+            : null,
+        }))
+        .filter((row) => meetsBalanceDisplayThreshold(row.amount, row.valueCommon));
+    }
+
+    function formatCashDetail(portfolio) {
       const preferredOrder = { USDC: 0, USDT: 1, USD: 2, KRW: 3 };
-      const pieces = Object.entries(balances)
-        .sort(([left], [right]) => {
-          const leftRank = preferredOrder[left] ?? 99;
-          const rightRank = preferredOrder[right] ?? 99;
-          return leftRank === rightRank ? left.localeCompare(right) : leftRank - rightRank;
+      const visibleCash = displayablePortfolioCash(portfolio);
+      const pieces = visibleCash
+        .sort((left, right) => {
+          const leftRank = preferredOrder[left.currency] ?? 99;
+          const rightRank = preferredOrder[right.currency] ?? 99;
+          return leftRank === rightRank
+            ? left.currency.localeCompare(right.currency)
+            : leftRank - rightRank;
         })
-        .map(([currency, amount]) => `${currency} ${compact.format(amount || 0)}`);
-      const missing = portfolio?.cash_missing_rates || [];
+        .map((row) => `${row.currency} ${compact.format(row.amount)}`);
+      const visibleCurrencies = new Set(visibleCash.map((row) => row.currency));
+      const missing = (portfolio?.cash_missing_rates || []).filter((currency) =>
+        visibleCurrencies.has(currency)
+      );
       if (missing.length > 0) {
         pieces.push(`missing ${missing.join("/")}`);
       }
@@ -6211,13 +6243,8 @@ function balanceStatusClass(status) {
       return value == null ? "value --" : `value $${money.format(value)}`;
     }
 
-    function formatPositionDetail(portfolio) {
-      const positions = portfolio?.positions || [];
-      if (positions.length === 0) {
-        return portfolio?.asset
-          ? `${portfolio.asset} ${formatPositionPrice(null, portfolio)} · ${formatPositionValue(null, portfolio)}`
-          : "--";
-      }
+    function formatPositionDetail(portfolio, positions = displayablePortfolioPositions(portfolio)) {
+      if (positions.length === 0) return "--";
       return positions
         .map((position) => {
           const accountCount = new Set(
@@ -6235,8 +6262,8 @@ function balanceStatusClass(status) {
         .join(" · ");
     }
 
-    function formatPositionAccountTitle(portfolio) {
-      return (portfolio?.positions || [])
+    function formatPositionAccountTitle(portfolio, positions = displayablePortfolioPositions(portfolio)) {
+      return positions
         .flatMap((position) => (position.account_breakdown || []).map((row) => {
           const wallet = String(row.wallet || "trading").toLowerCase() === "funding"
             ? uiText("Funding wallet")
@@ -6246,8 +6273,8 @@ function balanceStatusClass(status) {
         .join(" | ");
     }
 
-    function formatMarkDetail(portfolio) {
-      return (portfolio?.positions || [])
+    function formatMarkDetail(portfolio, positions = displayablePortfolioPositions(portfolio)) {
+      return positions
         .map((position) => {
           const mark = position.mark_price == null ? "--" : `$${fmt.format(position.mark_price)}`;
           return `${position.asset} ${mark}`;
@@ -6273,30 +6300,47 @@ function balanceStatusClass(status) {
         return;
       }
 
-      const positions = portfolio.positions || [];
-      const positionDetail = formatPositionDetail(portfolio);
+      const positions = displayablePortfolioPositions(portfolio);
+      const positionDetail = formatPositionDetail(portfolio, positions);
       if (positions.length > 1) {
         text("portfolio-position", `${positions.length} assets`);
         text("portfolio-position-detail", positionDetail);
-      } else {
-        text("portfolio-position", `${compact.format(portfolio.position_base || 0)} ${portfolio.asset || ""}`);
+      } else if (positions.length === 1) {
+        text("portfolio-position", `${compact.format(positions[0].position_base || 0)} ${positions[0].asset || ""}`);
         text("portfolio-position-detail", positionDetail);
+      } else {
+        text("portfolio-position", "--");
+        text("portfolio-position-detail", "--");
       }
-      document.getElementById("portfolio-position-detail").title = formatPositionAccountTitle(portfolio) || positionDetail;
-      const cashValue = portfolio.cash_value == null ? null : portfolio.cash_value;
+      document.getElementById("portfolio-position-detail").title = formatPositionAccountTitle(portfolio, positions) || positionDetail;
+      const visibleCash = displayablePortfolioCash(portfolio);
+      const cashValues = visibleCash
+        .map((row) => row.valueCommon)
+        .filter((value) => value != null && Number.isFinite(value));
+      const cashValue = visibleCash.length > 0 && cashValues.length > 0
+        ? cashValues.reduce((sum, value) => sum + value, 0)
+        : null;
       text("portfolio-cash", cashValue == null ? "--" : `$${money.format(cashValue)}`);
       const cashDetail = formatCashDetail(portfolio);
       text("portfolio-cash-detail", cashDetail);
       document.getElementById("portfolio-cash-detail").title = cashDetail;
-      const markDetail = formatMarkDetail(portfolio);
+      const markDetail = formatMarkDetail(portfolio, positions);
       text(
         "portfolio-mark",
         positions.length > 1
           ? "Mixed"
-          : portfolio.mark_price == null ? "--" : `$${fmt.format(portfolio.mark_price)}`
+          : positions.length === 1 && positions[0].mark_price != null
+            ? `$${fmt.format(positions[0].mark_price)}`
+            : "--"
       );
       document.getElementById("portfolio-mark").title = markDetail || "";
-      text("portfolio-value", portfolio.position_value == null ? "--" : `$${money.format(portfolio.position_value)}`);
+      const positionValues = positions
+        .map((position) => Number(position.position_value))
+        .filter(Number.isFinite);
+      const positionValue = positionValues.length > 0
+        ? positionValues.reduce((sum, value) => sum + value, 0)
+        : null;
+      text("portfolio-value", positionValue == null ? "--" : `$${money.format(positionValue)}`);
       setPnl("portfolio-total-pnl", portfolio.total_pnl);
       setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);
       setPnl("portfolio-arb-pnl", portfolio.sources?.arbitrage);
