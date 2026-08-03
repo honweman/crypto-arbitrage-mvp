@@ -132,6 +132,25 @@ def _matching_connection(
     return None
 
 
+def _sole_compatible_connection(
+    store: UserWorkspaceStore,
+    *,
+    owner_email: str,
+    group: RuntimeAccountGroup,
+) -> UserApiConnection | None:
+    candidates = [
+        connection
+        for connection in store.list_api_connections(
+            owner_email=owner_email,
+            is_admin=False,
+        )
+        if connection.exchange == group.exchange
+        and connection.api_variant == group.api_variant
+        and store.credential_status(connection.id)["configured"]
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _deterministic_connection_id(
     owner_email: str,
     group: RuntimeAccountGroup,
@@ -170,11 +189,42 @@ def import_runtime_accounts(
     for group in runtime_account_groups(cfg, exchange_ids=exchange_ids):
         credentials = _group_credentials(group)
         if not credentials.get("api_key") or not credentials.get("secret"):
+            existing = _sole_compatible_connection(
+                store,
+                owner_email=owner,
+                group=group,
+            )
+            if existing is not None:
+                raw = existing.to_dict()
+                raw["runtime_keys"] = sorted(
+                    set(existing.runtime_keys) | set(group.runtime_keys)
+                )
+                saved = store.upsert_api_connection(
+                    UserApiConnection.from_dict(raw)
+                )
+                for runtime_key in group.runtime_keys:
+                    runtime_links[runtime_key] = saved.id
+                imported.append(
+                    {
+                        "id": saved.id,
+                        "label": saved.label,
+                        "exchange": saved.exchange,
+                        "market_types": list(saved.market_types),
+                        "runtime_keys": list(saved.runtime_keys),
+                        "matched_existing": True,
+                        "linked_without_legacy_env": True,
+                    }
+                )
+                credentials.clear()
+                continue
             skipped.append(
                 {
                     "exchange": group.exchange,
                     "runtime_keys": list(group.runtime_keys),
-                    "reason": "required credential environment variables are missing",
+                    "reason": (
+                        "required credential environment variables are missing and "
+                        "the encrypted account match is not unique"
+                    ),
                 }
             )
             credentials.clear()
@@ -234,6 +284,7 @@ def import_runtime_accounts(
                 "market_types": list(saved.market_types),
                 "runtime_keys": list(saved.runtime_keys),
                 "matched_existing": existing is not None,
+                "linked_without_legacy_env": False,
             }
         )
         credentials.clear()

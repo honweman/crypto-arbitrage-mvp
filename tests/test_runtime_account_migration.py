@@ -146,6 +146,112 @@ class RuntimeAccountMigrationTest(unittest.TestCase):
                             credentials={"api_key": "key-2", "secret": "secret-2"},
                         )
 
+    def test_missing_legacy_env_links_the_only_encrypted_exchange_account(self) -> None:
+        base = load_config("config.acs.example.json")
+        cfg = replace(
+            base,
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    api_key_env="MISSING_BYBIT_KEY",
+                    secret_env="MISSING_BYBIT_SECRET",
+                )
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-swap",
+                    market_type="swap",
+                    api_key_env="MISSING_BYBIT_KEY",
+                    secret_env="MISSING_BYBIT_SECRET",
+                )
+            ],
+        )
+        master_key = base64.urlsafe_b64encode(b"u" * 32).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"TEST_MASTER_KEY": master_key},
+            clear=False,
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_MASTER_KEY",
+            )
+            existing = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "owner@example.com",
+                        "label": "Bybit Main",
+                        "exchange": "bybit",
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "encrypted-key", "secret": "encrypted-secret"},
+            )
+            result = import_runtime_accounts(
+                store,
+                cfg,
+                owner_email="owner@example.com",
+                withdrawal_disabled_confirmed=True,
+            )
+            saved = store.get_api_connection(existing.id)
+
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["runtime_links"]["bybit-spot"], existing.id)
+        self.assertEqual(result["runtime_links"]["bybit-swap"], existing.id)
+        self.assertTrue(result["imported"][0]["linked_without_legacy_env"])
+        self.assertEqual(set(saved.runtime_keys), {"bybit-spot", "bybit-swap"})
+
+    def test_missing_legacy_env_does_not_guess_between_multiple_accounts(self) -> None:
+        base = load_config("config.acs.example.json")
+        cfg = replace(
+            base,
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="bybit",
+                    label="bybit-spot",
+                    api_key_env="MISSING_BYBIT_KEY",
+                    secret_env="MISSING_BYBIT_SECRET",
+                )
+            ],
+            derivative_exchanges=[],
+        )
+        master_key = base64.urlsafe_b64encode(b"v" * 32).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"TEST_MASTER_KEY": master_key},
+            clear=False,
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_MASTER_KEY",
+            )
+            for label in ("Bybit Main", "Bybit 2"):
+                store.upsert_api_connection(
+                    UserApiConnection.from_dict(
+                        {
+                            "owner_email": "owner@example.com",
+                            "label": label,
+                            "exchange": "bybit",
+                            "withdrawal_disabled_confirmed": True,
+                            "trade_permission_confirmed": True,
+                        }
+                    ),
+                    credentials={"api_key": label, "secret": f"{label}-secret"},
+                )
+            result = import_runtime_accounts(
+                store,
+                cfg,
+                owner_email="owner@example.com",
+                withdrawal_disabled_confirmed=True,
+            )
+
+        self.assertEqual(result["runtime_links"], {})
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("not unique", result["skipped"][0]["reason"])
+
     def test_config_links_preserve_runtime_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
