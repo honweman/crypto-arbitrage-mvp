@@ -7134,10 +7134,18 @@ function balanceStatusClass(status) {
       if (!(payload.price_band_pct > 0)) missing.push(uiText("price band"));
       if (!(payload.quote_per_level > 0)) missing.push(uiText("quote per level"));
       if (!(payload.poll_seconds >= 1)) missing.push(uiText("refresh interval"));
+      const marketLimit = marketLimitFor(payload.exchange, payload.symbol);
+      const costMin = marketLimitValue(marketLimit, "cost_min");
+      const belowExchangeMinimum = costMin != null
+        && payload.quote_per_level > 0
+        && payload.quote_per_level < costMin;
+      const quote = quoteCurrency(payload.symbol);
       return {
-        ready: missing.length === 0,
+        ready: missing.length === 0 && !belowExchangeMinimum,
         detail: missing.length
           ? `${uiText("Missing")}: ${missing.join(", ")}`
+          : belowExchangeMinimum
+            ? `${uiText("quote per level")}: ${formatLimitValue(payload.quote_per_level, quote)} · ${uiText("Min notional")}: ${formatLimitValue(costMin, quote)}`
           : `${payload.exchange} · ${payload.symbol} · ${payload.levels} ${uiText("levels per side")}`,
       };
     }
