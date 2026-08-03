@@ -115,6 +115,12 @@ def merge_workspace_runtime_accounts(
     spot_keys = {row.key for row in cfg.spot_exchanges}
     derivative_keys = {row.key for row in cfg.derivative_exchanges}
     market_keys = {(row.exchange, row.symbol) for row in cfg.spot_markets}
+    account_enabled = dict(cfg.risk.account_enabled)
+    for exchange in (*workspace.spot_exchanges, *workspace.derivative_exchanges):
+        # Workspace accounts have already passed credential, permission, project,
+        # and account-enable checks. Make their risk switch explicit so the
+        # fail-closed live preflight and the execution risk gate agree.
+        account_enabled.setdefault(exchange.key, True)
     return replace(
         cfg,
         spot_exchanges=[
@@ -137,4 +143,5 @@ def merge_workspace_runtime_accounts(
                 if (row.exchange, row.symbol) not in market_keys
             ),
         ],
+        risk=replace(cfg.risk, account_enabled=account_enabled),
     )

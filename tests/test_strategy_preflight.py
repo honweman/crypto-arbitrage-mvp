@@ -251,3 +251,48 @@ def test_auto_buy_preflight_blocks_mm_orders_when_coordination_is_off() -> None:
 
     assert not result["ready"]
     assert any("mm-order-1" in blocker for blocker in result["blockers"])
+
+
+def test_workspace_market_maker_preflight_resolves_connection_balance_alias() -> None:
+    runtime_key = "workspace:connection-gate-main:spot"
+    cfg = _config()
+    cfg = replace(
+        cfg,
+        risk=replace(
+            cfg.risk,
+            account_enabled={runtime_key: True},
+            strategy_enabled={"market_maker": True},
+        ),
+    )
+    state = _state_payload("", tracked_order_ids=[])
+    state["markets"] = [
+        {
+            **state["markets"][0],
+            "exchange": runtime_key,
+        }
+    ]
+    state["account_balances"]["accounts"] = [
+        {
+            **state["account_balances"]["accounts"][0],
+            "exchange": "connection-gate-main",
+            "workspace_connection_id": "connection-gate-main",
+        }
+    ]
+    state["order_activity"]["open_orders"] = []
+
+    result = build_strategy_preflight(
+        cfg,
+        strategy_id="market_maker",
+        candidate={
+            "exchange": runtime_key,
+            "symbol": "ACS/USDC",
+            "levels": 2,
+            "quote_per_level": 2.0,
+        },
+        state_payload=state,
+    )
+
+    assert result["ready"], result["blockers"]
+    assert next(row for row in result["checks"] if row["id"].startswith("api:"))[
+        "status"
+    ] == "passed"

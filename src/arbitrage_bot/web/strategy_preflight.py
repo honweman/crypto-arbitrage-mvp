@@ -59,11 +59,26 @@ def _check(
 
 
 def _account_row(payload: dict[str, Any], exchange: str) -> dict[str, Any] | None:
-    return next(
+    exact = next(
         (
             row
             for row in payload.get("accounts", [])
             if isinstance(row, dict) and row.get("exchange") == exchange
+        ),
+        None,
+    )
+    if exact is not None or not exchange.startswith("workspace:"):
+        return exact
+    connection_and_type = exchange.removeprefix("workspace:")
+    connection_id, separator, _market_type = connection_and_type.rpartition(":")
+    if not separator or not connection_id:
+        return None
+    return next(
+        (
+            row
+            for row in payload.get("accounts", [])
+            if isinstance(row, dict)
+            and row.get("workspace_connection_id") == connection_id
         ),
         None,
     )

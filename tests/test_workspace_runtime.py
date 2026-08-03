@@ -4,6 +4,7 @@ import base64
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from arbitrage_bot.web_config import (
     slow_execution_accounts,
 )
 from arbitrage_bot.workspace_runtime import (
+    WorkspaceRuntimeAccounts,
     build_workspace_runtime_accounts,
     merge_workspace_runtime_accounts,
 )
@@ -105,6 +107,10 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
         )
         dynamic_keys = {row.key for row in dynamic}
         self.assertEqual(
+            {key: cfg.risk.account_enabled.get(key) for key in dynamic_keys},
+            {key: True for key in dynamic_keys},
+        )
+        self.assertEqual(
             {row.exchange for row in cfg.spot_markets if row.exchange in dynamic_keys},
             dynamic_keys,
         )
@@ -152,3 +158,27 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
         self.assertEqual(workspace.spot_exchanges, ())
         self.assertEqual(workspace.derivative_exchanges, ())
         self.assertEqual(workspace.spot_markets, ())
+
+    def test_explicit_workspace_risk_disable_is_preserved(self) -> None:
+        cfg = load_config("config.acs.example.json")
+        dynamic_key = "workspace:connection-gate:spot"
+        exchange = next(row for row in cfg.spot_exchanges if row.market_type == "spot")
+        dynamic_exchange = replace(
+            exchange,
+            id="gateio",
+            label=dynamic_key,
+            display_label="Gate Main · SPOT",
+        )
+        cfg = replace(
+            cfg,
+            risk=replace(
+                cfg.risk,
+                account_enabled={**cfg.risk.account_enabled, dynamic_key: False},
+            ),
+        )
+        merged = merge_workspace_runtime_accounts(
+            cfg,
+            WorkspaceRuntimeAccounts(spot_exchanges=(dynamic_exchange,)),
+        )
+
+        self.assertFalse(merged.risk.account_enabled[dynamic_key])
