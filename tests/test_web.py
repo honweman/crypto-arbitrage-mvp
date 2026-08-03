@@ -446,11 +446,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-account-egress1" defer></script>',
+            '<script src="/static/app.js?v=20260803-balance-rates1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-account-egress1" defer></script>',
+            '<script src="/static/i18n.js?v=20260803-balance-rates1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -498,6 +498,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("BALANCE_MIN_VALUE_USDT = 10", APP_JS)
         self.assertIn("function meetsBalanceDisplayThreshold(amount, valueCommon)", APP_JS)
         self.assertIn("if (valueCommon == null) return false;", APP_JS)
+        self.assertIn("USD_STABLE_CURRENCIES.has(currency)", APP_JS)
         self.assertIn("function visibleBalanceRows(rows)", APP_JS)
         self.assertIn('function displayExchange(exchange, explicitLabel = "")', APP_JS)
         self.assertIn("friendlyAccountMessage(value)", APP_JS)
@@ -920,7 +921,7 @@ class WebMonitorTest(unittest.TestCase):
         )
 
         self.assertEqual(status_overview["markets"], [])
-        self.assertEqual(status_overview["quote_rates"], {})
+        self.assertEqual(status_overview["quote_rates"], {"USD": 1.0})
         self.assertEqual(status_overview["readiness"], {})
         self.assertIn("totals", status_overview["account_balances"])
         self.assertNotIn("accounts", status_overview["account_balances"])

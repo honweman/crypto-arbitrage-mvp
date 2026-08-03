@@ -23,6 +23,11 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const LIVE_REBALANCE_CONFIRMATION = "ENABLE LIVE REBALANCE";
 	    const BALANCE_MIN_QUANTITY = 1;
 	    const BALANCE_MIN_VALUE_USDT = 10;
+	    const USD_STABLE_CURRENCIES = new Set([
+	      "USD", "USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP",
+	      "DAI", "PYUSD", "USDE", "USDS", "USD1", "RLUSD", "GUSD",
+	      "FRAX", "LUSD",
+	    ]);
 	    let refreshTimer = null;
 	    let mutationRefreshTimer = null;
 	    const PAGE_SECTION_IDS = {
@@ -776,6 +781,7 @@ function balanceStatusClass(status) {
       if (!currency) return null;
       const rate = Number(lastState?.quote_rates?.[currency]);
       if (Number.isFinite(rate) && rate > 0) return total * rate;
+      if (USD_STABLE_CURRENCIES.has(currency)) return total;
       const position = (lastState?.portfolio?.positions || []).find(
         (item) => String(item?.asset || "").toUpperCase() === currency
       );

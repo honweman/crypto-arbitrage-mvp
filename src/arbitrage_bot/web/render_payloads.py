@@ -621,7 +621,6 @@ def state_payload_for_view(
         "contract-strategies",
     )
     status_markets_full = is_status and _section_open(section_ids, "markets")
-    status_rates_full = is_status and _section_open(section_ids, "rates")
     status_readiness_full = is_status and _section_open(
         section_ids,
         "readiness-actions",
@@ -757,9 +756,9 @@ def state_payload_for_view(
         result.update(
             {
                 "markets": payload.get("markets", []) if status_markets_full else [],
-                "quote_rates": payload.get("quote_rates", {})
-                if status_rates_full
-                else {},
+                # Balance visibility and valuation need these rates even when
+                # the optional quote-rate table is collapsed.
+                "quote_rates": payload.get("quote_rates", {}),
                 "account_balances": _compact_account_balances_payload(
                     payload.get("account_balances", {}),
                     full=status_account_balances_full,
