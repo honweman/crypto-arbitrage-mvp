@@ -825,6 +825,12 @@ class MonitorState:
             cfg,
             self._workspace_runtime_accounts,
         )
+        risk_overrides = dict(self._risk_overrides)
+        account_enabled_override = risk_overrides.get("account_enabled")
+        if isinstance(account_enabled_override, dict):
+            account_enabled = dict(cfg.risk.account_enabled)
+            account_enabled.update(account_enabled_override)
+            risk_overrides["account_enabled"] = account_enabled
         legacy_market_maker = market_maker_config_with_id(
             replace(
                 cfg.market_maker,
@@ -863,7 +869,7 @@ class MonitorState:
                 if self._cash_and_carry_pairs_override is not None
                 else cfg.cash_and_carry_pairs
             ),
-            risk=replace(cfg.risk, **self._risk_overrides),
+            risk=replace(cfg.risk, **risk_overrides),
             market_maker=primary_market_maker,
             market_makers=market_maker_instances,
             slow_execution=replace(

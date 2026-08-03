@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import os
 import tempfile
 import unittest
@@ -8,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from arbitrage_bot.config import load_config
+from arbitrage_bot.config import ExchangeConfig, SpotMarketConfig, load_config
 from arbitrage_bot.user_workspace import (
     UserApiConnection,
     UserExchangeAccount,
@@ -20,6 +22,7 @@ from arbitrage_bot.web_config import (
     auto_buy_sell_exchanges,
     slow_execution_accounts,
 )
+from arbitrage_bot.web.state import MonitorState
 from arbitrage_bot.workspace_runtime import (
     WorkspaceRuntimeAccounts,
     build_workspace_runtime_accounts,
@@ -28,6 +31,83 @@ from arbitrage_bot.workspace_runtime import (
 
 
 class WorkspaceRuntimeAccountsTest(unittest.TestCase):
+    def test_runtime_risk_overrides_preserve_new_workspace_accounts(self) -> None:
+        cfg = load_config("config.acs.example.json")
+        runtime_key = "workspace:connection-gate:spot"
+        workspace = WorkspaceRuntimeAccounts(
+            spot_exchanges=(
+                ExchangeConfig(
+                    id="gateio",
+                    label=runtime_key,
+                    display_label="Gate Main · SPOT",
+                ),
+            ),
+            spot_markets=(
+                SpotMarketConfig(
+                    asset="ACS",
+                    exchange=runtime_key,
+                    symbol="ACS/USDT",
+                    quote_currency="USDT",
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "web_runtime_overrides.json"
+            store_path.write_text(
+                json.dumps(
+                    {
+                        "risk_overrides": {
+                            "account_enabled": {"coinbase-spot": True}
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            async def build_runtime_config():
+                state = MonitorState(
+                    cfg,
+                    1.0,
+                    runtime_store_path=str(store_path),
+                    workspace_runtime_accounts=workspace,
+                )
+                return state._runtime_config_unlocked(cfg)
+
+            runtime_cfg = asyncio.run(build_runtime_config())
+
+        self.assertTrue(runtime_cfg.risk.account_enabled[runtime_key])
+        self.assertTrue(runtime_cfg.risk.account_enabled["coinbase-spot"])
+
+    def test_runtime_risk_overrides_respect_explicit_workspace_disable(self) -> None:
+        cfg = load_config("config.acs.example.json")
+        runtime_key = "workspace:connection-gate:spot"
+        workspace = WorkspaceRuntimeAccounts(
+            spot_exchanges=(ExchangeConfig(id="gateio", label=runtime_key),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "web_runtime_overrides.json"
+            store_path.write_text(
+                json.dumps(
+                    {
+                        "risk_overrides": {
+                            "account_enabled": {runtime_key: False}
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            async def build_runtime_config():
+                state = MonitorState(
+                    cfg,
+                    1.0,
+                    runtime_store_path=str(store_path),
+                    workspace_runtime_accounts=workspace,
+                )
+                return state._runtime_config_unlocked(cfg)
+
+            runtime_cfg = asyncio.run(build_runtime_config())
+
+        self.assertFalse(runtime_cfg.risk.account_enabled[runtime_key])
+
     def test_gateio_and_htx_bindings_feed_all_core_spot_strategies(self) -> None:
         master_key = base64.urlsafe_b64encode(b"w" * 32).decode("ascii")
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
