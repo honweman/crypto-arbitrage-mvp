@@ -7777,20 +7777,10 @@ function balanceStatusClass(status) {
 
     function selectedSlowSymbol() {
       const customSymbol = document.getElementById("slow-custom-symbol")?.value.trim() || "";
-      if (selectedSlowInstrumentType() === "perpetual" && customSymbol) {
-        return customSymbol;
-      }
       return (
-        symbolSelectorValue("slow-account") ||
         customSymbol ||
+        symbolSelectorValue("slow-account") ||
         ""
-      );
-    }
-
-    function selectedSlowAccountConfig() {
-      return accountForKey(
-        lastState?.slow_execution?.accounts || [],
-        selectedSlowAccount(),
       );
     }
 
@@ -7832,20 +7822,6 @@ function balanceStatusClass(status) {
       const unlimited = document.getElementById("slow-unlimited");
       const sliceMode = document.getElementById("slow-slice-mode");
       const contractAction = document.getElementById("slow-contract-action");
-      const ownerReduceOnly = lastState?.auth?.mode === "user"
-        && lastState?.auth?.role !== "admin";
-      if (contractAction) {
-        for (const option of contractAction.options) {
-          const opening = option.value.startsWith("open_");
-          option.hidden = ownerReduceOnly && opening;
-          option.disabled = ownerReduceOnly && opening;
-        }
-        if (ownerReduceOnly && contractAction.value.startsWith("open_")) {
-          contractAction.value = contractAction.value.endsWith("_short")
-            ? "close_short"
-            : "close_long";
-        }
-      }
       if (fields) fields.hidden = instrumentType !== "perpetual";
       if (sideField) sideField.hidden = instrumentType === "perpetual";
       if (side) side.disabled = instrumentType === "perpetual";
@@ -7890,11 +7866,8 @@ function balanceStatusClass(status) {
         markSlowFormDirty();
         const customSymbol = document.getElementById("slow-custom-symbol");
         const configuredSymbol = symbolSelectorValue("slow-account");
-        const account = selectedSlowAccountConfig();
         if (customSymbol) {
-          customSymbol.value = account?.market_type === "swap" && configuredSymbol
-            ? configuredSymbol
-            : customSymbol.value;
+          customSymbol.value = configuredSymbol || "";
         }
         syncSlowInstrumentFields();
         updateSlowLabels();
@@ -8139,9 +8112,7 @@ function balanceStatusClass(status) {
         : "spot";
       renderSlowExecutionAccounts(config.accounts || accounts, config.exchange || "", config.symbol || "");
       document.getElementById("slow-side").value = config.side || "sell";
-      document.getElementById("slow-custom-symbol").value = config.instrument_type === "perpetual"
-        ? (config.symbol || "")
-        : "";
+      document.getElementById("slow-custom-symbol").value = config.symbol || "";
       document.getElementById("slow-contract-action").value = perpetualActionFromConfig(config);
       document.getElementById("slow-margin-mode").value = config.margin_mode || "isolated";
       setNumericField("slow-leverage", config.leverage || 1);

@@ -82,8 +82,9 @@ from arbitrage_bot.web import (
     _daily_report_due,
     _global_scan_health_warnings,
     _require_admin_user,
-    _require_user_reduce_only_perpetual,
+    _require_user_owned_execution,
     _require_user_assets,
+    _user_execution_preflight,
     _client_ip,
     _ip_allowed,
     _make_session_token,
@@ -4650,7 +4651,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(response.status == 403 for response in responses))
         self.assertTrue(all("admin role" in response.text for response in responses))
 
-    def test_non_admin_auto_buy_sell_only_allows_perpetual_reduce_only(self) -> None:
+    def test_non_admin_auto_buy_sell_accepts_owned_spot_and_perpetual(self) -> None:
         user = WebUser(
             email="trader@example.com",
             username="trader",
@@ -4664,16 +4665,122 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             position_side="long",
             side="sell",
         )
-        open_long = replace(close_long, position_effect="open")
+        _require_user_owned_execution(user, close_long)
+        _require_user_owned_execution(
+            user,
+            replace(close_long, position_effect="open"),
+        )
+        _require_user_owned_execution(
+            user,
+            replace(close_long, instrument_type="spot"),
+        )
 
-        _require_user_reduce_only_perpetual(user, close_long)
-        with self.assertRaisesRegex(PermissionError, "cannot open or increase"):
-            _require_user_reduce_only_perpetual(user, open_long)
-        with self.assertRaisesRegex(PermissionError, "closing only"):
-            _require_user_reduce_only_perpetual(
-                user,
-                replace(close_long, instrument_type="spot"),
-            )
+    async def test_owner_spot_execution_preflight_uses_private_balance(self) -> None:
+        cfg = make_config(
+            spot_exchanges=[
+                ExchangeConfig(
+                    id="binance",
+                    label="owner-spot",
+                    market_type="spot",
+                    credential_owner_email="trader@example.com",
+                )
+            ],
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_order_quote=50.0,
+                max_cycle_quote=50.0,
+            ),
+            quote_rates={"USD": 1.0, "USDT": 1.0},
+        )
+        task = SlowExecutionConfig(
+            enabled=True,
+            exchange="owner-spot",
+            symbol="BTC/USDT",
+            side="buy",
+            total_quote=20.0,
+            slice_base_min=0.001,
+            slice_base_max=0.001,
+            interval_seconds=10.0,
+        )
+        manager = AsyncMock()
+        manager.fetch_market_info.return_value = {
+            "active": True,
+            "spot": True,
+        }
+        manager.fetch_order_book.return_value = OrderBookSnapshot(
+            exchange="owner-spot",
+            symbol="BTC/USDT",
+            bids=[BookLevel(price=9_990.0, amount=2.0)],
+            asks=[BookLevel(price=10_000.0, amount=2.0)],
+        )
+        manager.prepare_limit_order.return_value = {"amount": 0.001}
+        manager.fetch_balance.return_value = {"USDT": {"free": 100.0}}
+        manager.fetch_open_orders.return_value = []
+
+        with patch("arbitrage_bot.web.ExchangeManager", return_value=manager):
+            result = await _user_execution_preflight(cfg, task)
+
+        self.assertTrue(result["ready"], result["blockers"])
+        self.assertEqual(result["status"], "ready")
+        manager.fetch_balance.assert_awaited_once()
+        manager.close.assert_awaited_once()
+
+    async def test_owner_perpetual_execution_preflight_allows_guarded_open(self) -> None:
+        cfg = make_config(
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="owner-swap",
+                    market_type="swap",
+                    credential_owner_email="trader@example.com",
+                )
+            ],
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_order_quote=50.0,
+                max_cycle_quote=50.0,
+                max_derivative_leverage=3.0,
+            ),
+            quote_rates={"USD": 1.0, "USDT": 1.0},
+        )
+        task = SlowExecutionConfig(
+            enabled=True,
+            exchange="owner-swap",
+            symbol="BTC/USDT:USDT",
+            side="buy",
+            total_quote=20.0,
+            slice_base_min=0.001,
+            slice_base_max=0.001,
+            interval_seconds=10.0,
+            instrument_type="perpetual",
+            position_effect="open",
+            position_side="long",
+            margin_mode="cross",
+            leverage=2.0,
+            max_position_quote=100.0,
+        )
+        manager = AsyncMock()
+        manager.fetch_market_info.return_value = {
+            "active": True,
+            "swap": True,
+        }
+        manager.fetch_order_book.return_value = OrderBookSnapshot(
+            exchange="owner-swap",
+            symbol="BTC/USDT:USDT",
+            bids=[BookLevel(price=9_990.0, amount=2.0)],
+            asks=[BookLevel(price=10_000.0, amount=2.0)],
+        )
+        manager.prepare_linear_contract_order.return_value = {"contracts": 1.0}
+        manager.fetch_positions.return_value = []
+        manager.fetch_open_orders.return_value = []
+
+        with patch("arbitrage_bot.web.ExchangeManager", return_value=manager):
+            result = await _user_execution_preflight(cfg, task)
+
+        self.assertTrue(result["ready"], result["blockers"])
+        manager.fetch_positions.assert_awaited_once()
+        manager.prepare_linear_contract_order.assert_awaited_once()
+        manager.close.assert_awaited_once()
 
     async def test_market_maker_cycle_finishes_before_shutdown(self) -> None:
         started = asyncio.Event()

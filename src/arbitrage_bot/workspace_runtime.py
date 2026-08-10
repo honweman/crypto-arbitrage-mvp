@@ -219,5 +219,15 @@ def isolated_workspace_runtime_config(
         spot_exchanges=list(workspace.spot_exchanges),
         derivative_exchanges=list(workspace.derivative_exchanges),
         spot_markets=list(workspace.spot_markets),
+        portfolio=replace(
+            cfg.portfolio,
+            enabled=False,
+            asset="",
+            position_base=0.0,
+            average_entry_price=0.0,
+            positions=[],
+            cash_balances={},
+            realized_pnl={},
+        ),
         risk=risk,
     )

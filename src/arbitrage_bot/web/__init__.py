@@ -5356,7 +5356,7 @@ async def _user_auto_buy_sell_payload(
     config_payload["accounts"] = accounts
     return {
         "status": "ready" if accounts else "account_required",
-        "mode": "owner_live_reduce_only",
+        "mode": "owner_live",
         "config": config_payload,
         "accounts": accounts,
         "tasks": task_snapshot,
@@ -6125,21 +6125,14 @@ def _schedule_started_config_guard(
     task.add_done_callback(tasks.discard)
 
 
-def _require_user_reduce_only_perpetual(
+def _require_user_owned_execution(
     user: WebUser | None,
     task_config: SlowExecutionConfig,
 ) -> None:
     if user is None or user.role == "admin":
         return
-    if task_config.instrument_type != "perpetual":
-        raise PermissionError(
-            "non-admin live Auto Buy/Sell currently supports reduce-only "
-            "perpetual closing only"
-        )
-    if task_config.position_effect != "reduce_only":
-        raise PermissionError(
-            "non-admin accounts cannot open or increase perpetual positions"
-        )
+    if task_config.instrument_type not in {"spot", "perpetual"}:
+        raise PermissionError("unsupported owner trading instrument")
 
 
 def _preflight_check(
@@ -6158,7 +6151,23 @@ def _preflight_check(
     }
 
 
-async def _user_reduce_only_preflight(
+def _private_balance_free(balance: dict[str, Any], currency: str) -> float:
+    row = balance.get(currency)
+    if isinstance(row, dict):
+        try:
+            return float(row.get("free") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    free = balance.get("free")
+    if isinstance(free, dict):
+        try:
+            return float(free.get(currency) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+async def _user_execution_preflight(
     runtime_cfg: BotConfig,
     task_config: SlowExecutionConfig,
 ) -> dict[str, Any]:
@@ -6181,27 +6190,32 @@ async def _user_reduce_only_preflight(
         )
         checks.append(
             _preflight_check(
-                "reduce_only",
-                "Reduce-only contract action",
-                task_config.instrument_type == "perpetual"
-                and task_config.position_effect == "reduce_only",
-                "Order will be submitted with reduceOnly=true",
+                "owner_account",
+                "Owner account scope",
+                bool(exchange.credential_owner_email),
+                "Order uses the signed-in user's encrypted API connection",
             )
         )
         market = await manager.fetch_market_info(exchange, symbol=task_config.symbol)
+        market = market if isinstance(market, dict) else {}
+        expected_market_type = (
+            market.get("swap") is not False
+            if task_config.instrument_type == "perpetual"
+            else market.get("spot") is not False
+        )
         market_ready = bool(
             market
             and market.get("active") is not False
-            and market.get("swap") is not False
+            and expected_market_type
         )
         checks.append(
             _preflight_check(
                 "market",
-                "Perpetual market",
+                "Live market",
                 market_ready,
-                "Active stablecoin linear perpetual market"
+                f"Active {task_config.instrument_type} market"
                 if market_ready
-                else "Perpetual market is unavailable or inactive",
+                else "Selected market is unavailable, inactive, or the wrong type",
             )
         )
         book = await manager.fetch_order_book(
@@ -6225,93 +6239,223 @@ async def _user_reduce_only_preflight(
                 else "Order book is unavailable",
             )
         )
-        raw_positions = await manager.fetch_positions(exchange, [task_config.symbol])
-        positions = [
-            row
-            for raw in raw_positions
-            if isinstance(raw, dict)
-            for row in [normalize_derivative_position(exchange, raw, risk=runtime_cfg.risk)]
-            if row is not None and row.get("symbol") == task_config.symbol
-        ]
-        matching = [
-            row for row in positions if row.get("side") == task_config.position_side
-        ]
-        current_base = sum(float(row.get("base_amount") or 0.0) for row in matching)
-        current_quote = sum(
-            float(row.get("notional_quote") or 0.0) for row in matching
+        forced_plan = build_slow_execution_plan(
+            book,
+            replace(task_config, start_price=0.0, stop_price=0.0),
+            random_fn=lambda: 1.0,
         )
+        if forced_plan.order is None:
+            raise ValueError(f"could not build an executable order: {forced_plan.status}")
+        order_base = float(forced_plan.order.amount)
+        order_quote = float(forced_plan.order.quote_notional)
+        if task_config.instrument_type == "perpetual":
+            prepared = await manager.prepare_linear_contract_order(
+                exchange,
+                symbol=task_config.symbol,
+                side=task_config.side,
+                base_amount=order_base,
+                price=forced_plan.order.price,
+            )
+        else:
+            prepared = await manager.prepare_limit_order(
+                exchange,
+                symbol=task_config.symbol,
+                side=task_config.side,
+                amount=order_base,
+                price=forced_plan.order.price,
+            )
         checks.append(
             _preflight_check(
-                "position",
-                "Existing position",
-                current_base > 0,
-                (
-                    f"{task_config.position_side} position {current_base:.12g} base / "
-                    f"{current_quote:.12g} quote"
-                    if current_base > 0
-                    else f"No {task_config.position_side} position is available to reduce"
-                ),
+                "order_validation",
+                "Exchange order limits",
+                bool(prepared),
+                "Amount, precision, and exchange minimums are valid",
             )
         )
-        position_modes = {
-            str(row.get("margin_mode") or "").lower()
-            for row in matching
-            if str(row.get("margin_mode") or "").strip()
-        }
-        margin_matches = not position_modes or task_config.margin_mode in position_modes
-        checks.append(
-            _preflight_check(
-                "margin_mode",
-                "Margin mode",
-                margin_matches,
-                (
-                    f"Configured {task_config.margin_mode} matches the position"
-                    if margin_matches
-                    else "Position uses "
-                    + ", ".join(sorted(position_modes))
-                    + f"; select {next(iter(sorted(position_modes)))}"
-                ),
+        quote_currency = task_config.symbol.split("/", 1)[-1].split(":", 1)[0]
+        quote_rate = (
+            1.0
+            if quote_currency.upper() == runtime_cfg.common_quote_currency.upper()
+            else float(runtime_cfg.quote_rates.get(quote_currency) or 0.0)
+        )
+        order_common = order_quote * quote_rate
+        order_within_risk = all(
+            limit <= 0 or order_common <= limit + 1e-9
+            for limit in (
+                runtime_cfg.risk.max_order_quote,
+                runtime_cfg.risk.max_cycle_quote,
             )
-        )
-        total_within_position = (
-            task_config.total_base <= current_base + max(current_base, 1.0) * 1e-9
-            if task_config.total_base > 0
-            else task_config.total_quote
-            <= current_quote + max(current_quote, 1.0) * 1e-9
-        )
-        checks.append(
-            _preflight_check(
-                "total_target",
-                "Total close target",
-                total_within_position,
-                "Total target does not exceed the current position"
-                if total_within_position
-                else "Total target exceeds the current position",
-            )
-        )
-        order_base = max(task_config.slice_base, task_config.slice_base_max)
-        order_quote = (
-            task_config.slice_quote
-            if task_config.slice_quote > 0
-            else order_base * reference_price
-        )
-        order_within_position = order_base <= current_base + max(current_base, 1.0) * 1e-9
-        order_within_risk = (
-            runtime_cfg.risk.max_order_quote <= 0
-            or order_quote <= runtime_cfg.risk.max_order_quote + 1e-9
         )
         checks.append(
             _preflight_check(
                 "order_size",
-                "Per-order close size",
-                order_within_position and order_within_risk,
+                "Per-order size",
+                order_within_risk,
                 (
                     f"Per-order maximum {order_base:.12g} base / "
-                    f"{order_quote:.12g} quote; risk limit "
+                    f"{order_quote:.12g} {quote_currency}; risk limit "
                     f"{runtime_cfg.risk.max_order_quote:.12g}"
                 ),
             )
         )
+
+        total_base = float(task_config.total_base)
+        total_quote = float(task_config.total_quote)
+        target_base = total_base if total_base > 0 else total_quote / reference_price
+        target_quote = total_quote if total_quote > 0 else total_base * reference_price
+        if task_config.unlimited_total:
+            target_base = order_base
+            target_quote = order_quote
+        increases_exposure = (
+            task_config.instrument_type == "spot" and task_config.side == "buy"
+        ) or (
+            task_config.instrument_type == "perpetual"
+            and task_config.position_effect == "open"
+        )
+        target_common = target_quote * quote_rate
+        exposure_ready = (
+            not increases_exposure
+            or runtime_cfg.risk.max_exposure_quote <= 0
+            or target_common <= runtime_cfg.risk.max_exposure_quote + 1e-9
+        )
+        checks.append(
+            _preflight_check(
+                "total_exposure",
+                "Task exposure limit",
+                exposure_ready,
+                (
+                    f"Task target {target_common:.12g} "
+                    f"{runtime_cfg.common_quote_currency}; maximum "
+                    f"{runtime_cfg.risk.max_exposure_quote:.12g}"
+                ),
+            )
+        )
+
+        if task_config.instrument_type == "spot":
+            balance = await manager.fetch_balance(exchange)
+            base_currency = task_config.symbol.split("/", 1)[0].upper()
+            balance_currency = (
+                quote_currency.upper() if task_config.side == "buy" else base_currency
+            )
+            required_balance = target_quote if task_config.side == "buy" else target_base
+            free_balance = _private_balance_free(balance, balance_currency)
+            balance_ready = required_balance <= free_balance + max(free_balance, 1.0) * 1e-9
+            checks.append(
+                _preflight_check(
+                    "balance",
+                    "Available spot balance",
+                    balance_ready,
+                    (
+                        f"Requires {required_balance:.12g} {balance_currency}; "
+                        f"free {free_balance:.12g} {balance_currency}"
+                    ),
+                )
+            )
+        else:
+            raw_positions = await manager.fetch_positions(exchange, [task_config.symbol])
+            positions = [
+                row
+                for raw in raw_positions
+                if isinstance(raw, dict)
+                for row in [
+                    normalize_derivative_position(exchange, raw, risk=runtime_cfg.risk)
+                ]
+                if row is not None
+                and str(row.get("symbol") or "").upper()
+                == task_config.symbol.upper()
+            ]
+            matching = [
+                row
+                for row in positions
+                if row.get("side") == task_config.position_side
+            ]
+            opposite = [
+                row
+                for row in positions
+                if row.get("side") in {"long", "short"}
+                and row.get("side") != task_config.position_side
+            ]
+            current_base = sum(
+                float(row.get("base_amount") or 0.0) for row in matching
+            )
+            current_quote = sum(
+                float(row.get("notional_quote") or 0.0) for row in matching
+            )
+            position_modes = {
+                str(row.get("margin_mode") or "").lower()
+                for row in matching
+                if str(row.get("margin_mode") or "").strip()
+            }
+            margin_matches = (
+                not position_modes or task_config.margin_mode in position_modes
+            )
+            checks.append(
+                _preflight_check(
+                    "margin_mode",
+                    "Margin mode",
+                    margin_matches,
+                    (
+                        f"Configured {task_config.margin_mode} matches the position"
+                        if margin_matches
+                        else "Position uses " + ", ".join(sorted(position_modes))
+                    ),
+                )
+            )
+            if task_config.position_effect == "reduce_only":
+                total_within_position = (
+                    current_base > 0
+                    and target_base
+                    <= current_base + max(current_base, 1.0) * 1e-9
+                )
+                checks.append(
+                    _preflight_check(
+                        "position",
+                        "Reduce-only position target",
+                        total_within_position,
+                        (
+                            f"Close target {target_base:.12g} base; current "
+                            f"{task_config.position_side} {current_base:.12g} base"
+                        ),
+                    )
+                )
+            else:
+                leverage_ready = (
+                    runtime_cfg.risk.max_derivative_leverage > 0
+                    and task_config.leverage
+                    <= runtime_cfg.risk.max_derivative_leverage + 1e-9
+                )
+                projected_quote = current_quote + target_quote
+                position_limit_ready = (
+                    not opposite
+                    and task_config.max_position_quote > 0
+                    and projected_quote
+                    <= task_config.max_position_quote
+                    + max(task_config.max_position_quote, 1.0) * 1e-9
+                )
+                checks.append(
+                    _preflight_check(
+                        "leverage",
+                        "Leverage limit",
+                        leverage_ready,
+                        (
+                            f"Requested {task_config.leverage:.12g}x; maximum "
+                            f"{runtime_cfg.risk.max_derivative_leverage:.12g}x"
+                        ),
+                    )
+                )
+                checks.append(
+                    _preflight_check(
+                        "position",
+                        "Perpetual position target",
+                        position_limit_ready,
+                        (
+                            f"Projected {projected_quote:.12g} {quote_currency}; "
+                            f"task maximum {task_config.max_position_quote:.12g}"
+                            if not opposite
+                            else "An opposite one-way position must be closed first"
+                        ),
+                    )
+                )
         open_orders = await manager.fetch_open_orders(
             exchange,
             symbol=task_config.symbol,
@@ -6319,15 +6463,13 @@ async def _user_reduce_only_preflight(
         checks.append(
             _preflight_check(
                 "open_orders",
-                "Existing orders on the contract",
+                "Existing orders on the market",
                 not open_orders,
                 "No existing open orders"
                 if not open_orders
                 else f"Cancel {len(open_orders)} existing order(s) before starting",
             )
         )
-        quote_currency = task_config.symbol.split("/", 1)[-1].split(":", 1)[0]
-        quote_rate = float(runtime_cfg.quote_rates.get(quote_currency) or 0.0)
         checks.append(
             _preflight_check(
                 "quote_rate",
@@ -6406,9 +6548,9 @@ async def api_strategy_preflight(request: web.Request) -> web.Response:
             )
             validate_task_config(task_config)
             validate_task_exchange_config(runtime_cfg, task_config)
-            _require_user_reduce_only_perpetual(user, task_config)
+            _require_user_owned_execution(user, task_config)
             candidate = slow_execution_config_to_dict(task_config)
-            result = await _user_reduce_only_preflight(runtime_cfg, task_config)
+            result = await _user_execution_preflight(runtime_cfg, task_config)
         else:
             _require_admin_user(user)
             candidate, assets = await _preflight_candidate_from_payload(
@@ -6497,9 +6639,14 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         candidate = replace(base_config, **overrides)
         validate_task_config(candidate)
         validate_task_exchange_config(runtime_cfg, candidate)
-        _require_user_reduce_only_perpetual(user, candidate)
+        _require_user_owned_execution(user, candidate)
         if user is None or user.role == "admin":
             _require_user_assets(user, [_base_asset_from_symbol(target_symbol)])
+        else:
+            _user_store(request).grant_asset(
+                email=user.email,
+                asset=_base_asset_from_symbol(target_symbol),
+            )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -9540,7 +9687,7 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             else await state.slow_execution_config(cfg.slow_execution)
         )
         task_config = replace(base_config, **{**overrides, "enabled": True})
-        _require_user_reduce_only_perpetual(user, task_config)
+        _require_user_owned_execution(user, task_config)
         if user is None or user.role == "admin":
             _require_user_assets(user, [_base_asset_from_symbol(task_config.symbol)])
         validate_task_config(task_config)
@@ -9567,6 +9714,11 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         )
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
+    if user is not None and user.role != "admin":
+        _user_store(request).grant_asset(
+            email=user.email,
+            asset=_base_asset_from_symbol(task_config.symbol),
+        )
     if user is None or user.role == "admin":
         await state.set_slow_execution_overrides(
             {

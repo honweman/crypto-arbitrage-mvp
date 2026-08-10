@@ -83,6 +83,9 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
         )
         self.assertEqual(cfg.risk.allowed_symbols, [])
         self.assertEqual(cfg.risk.blocked_symbols, [])
+        self.assertFalse(cfg.portfolio.enabled)
+        self.assertEqual(cfg.portfolio.positions, [])
+        self.assertEqual(cfg.portfolio.cash_balances, {})
 
     def test_runtime_risk_overrides_preserve_new_workspace_accounts(self) -> None:
         cfg = load_config("config.acs.example.json")

@@ -494,8 +494,10 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             )
 
         self.assertFalse(saved.trading_enabled)
+        self.assertFalse(saved.to_dict()["live_submit_allowed"])
         self.assertEqual(payload["risk_profile"]["max_open_orders"], 12)
         self.assertTrue(other.trading_enabled)
+        self.assertTrue(other.to_dict()["live_submit_allowed"])
         self.assertEqual(other.max_total_exposure_quote, 0.0)
         with self.assertRaisesRegex(ValueError, "must be non-negative"):
             UserRiskProfile.from_dict(

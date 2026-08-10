@@ -1078,7 +1078,7 @@ class UserRiskProfile:
             "max_daily_loss_quote": self.max_daily_loss_quote,
             "max_open_orders": self.max_open_orders,
             "max_active_strategies": self.max_active_strategies,
-            "live_submit_allowed": False,
+            "live_submit_allowed": self.trading_enabled,
             "updated_at": self.updated_at,
         }
 
