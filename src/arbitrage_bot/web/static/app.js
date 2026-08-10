@@ -6353,10 +6353,39 @@ function balanceStatusClass(status) {
         .join(" · ");
     }
 
+    function formatTotalAssetsDetail(portfolio, includeMissingCurrencies = false) {
+      if (portfolio?.total_asset_value == null) return "--";
+      const currency = portfolio?.total_asset_currency
+        || lastState?.config?.common_quote_currency
+        || "USD";
+      const pieces = [];
+      const positionValue = portfolio?.position_value == null
+        ? null
+        : Number(portfolio.position_value);
+      const cashValue = portfolio?.cash_value == null
+        ? null
+        : Number(portfolio.cash_value);
+      if (Number.isFinite(positionValue)) {
+        pieces.push(`${uiText("Positions")} ${currency} ${money.format(positionValue)}`);
+      }
+      if (Number.isFinite(cashValue)) {
+        pieces.push(`${uiText("Cash Position")} ${currency} ${money.format(cashValue)}`);
+      }
+      const missing = portfolio?.total_asset_missing_rates || [];
+      if (missing.length > 0) {
+        pieces.push(
+          includeMissingCurrencies
+            ? `${uiText("Missing prices")}: ${missing.join("/")}`
+            : `${uiText("Missing prices")} (${missing.length})`
+        );
+      }
+      return pieces.length > 0 ? pieces.join(" · ") : "--";
+    }
+
     function renderPortfolio(portfolio) {
       if (!portfolio || portfolio.status === "disabled") {
-        text("portfolio-position", "--");
-        text("portfolio-position-detail", "--");
+        text("portfolio-total-assets", "--");
+        text("portfolio-total-assets-detail", "--");
         text("portfolio-cash", "--");
         text("portfolio-cash-detail", "--");
         text("portfolio-mark", "--");
@@ -6373,17 +6402,24 @@ function balanceStatusClass(status) {
 
       const positions = displayablePortfolioPositions(portfolio);
       const positionDetail = formatPositionDetail(portfolio, positions);
-      if (positions.length > 1) {
-        text("portfolio-position", `${positions.length} assets`);
-        text("portfolio-position-detail", positionDetail);
-      } else if (positions.length === 1) {
-        text("portfolio-position", `${compact.format(positions[0].position_base || 0)} ${positions[0].asset || ""}`);
-        text("portfolio-position-detail", positionDetail);
-      } else {
-        text("portfolio-position", "--");
-        text("portfolio-position-detail", "--");
-      }
-      document.getElementById("portfolio-position-detail").title = formatPositionAccountTitle(portfolio, positions) || positionDetail;
+      const totalAssetValue = portfolio.total_asset_value == null
+        ? null
+        : Number(portfolio.total_asset_value);
+      const totalAssetCurrency = portfolio.total_asset_currency
+        || lastState?.config?.common_quote_currency
+        || "USD";
+      text(
+        "portfolio-total-assets",
+        Number.isFinite(totalAssetValue)
+          ? `${totalAssetCurrency} ${money.format(totalAssetValue)}`
+          : "--"
+      );
+      const totalAssetsDetail = formatTotalAssetsDetail(portfolio);
+      text("portfolio-total-assets-detail", totalAssetsDetail);
+      document.getElementById("portfolio-total-assets-detail").title = [
+        formatTotalAssetsDetail(portfolio, true),
+        formatPositionAccountTitle(portfolio, positions) || positionDetail,
+      ].filter((value) => value && value !== "--").join(" | ");
       const visibleCash = displayablePortfolioCash(portfolio);
       const cashValues = visibleCash
         .map((row) => row.valueCommon)

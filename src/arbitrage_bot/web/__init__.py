@@ -3288,6 +3288,7 @@ def _sync_portfolio_with_account_balances(
     ]
     position_assets: set[str] = set()
     position_values: list[float] = []
+    position_missing_rates: list[str] = []
     for position in positions:
         asset = str(position.get("asset") or "").upper()
         if not asset:
@@ -3301,6 +3302,8 @@ def _sync_portfolio_with_account_balances(
         )
         if position["position_value"] is not None:
             position_values.append(float(position["position_value"]))
+        elif position_base != 0.0:
+            position_missing_rates.append(asset)
         breakdown: list[dict[str, Any]] = []
         for account in accounts:
             for row in account.get("balance", {}).get("currencies", []) or []:
@@ -3359,6 +3362,17 @@ def _sync_portfolio_with_account_balances(
     payload["cash_balances_common"] = cash_common
     payload["cash_value"] = sum(cash_common.values())
     payload["cash_missing_rates"] = cash_missing
+    total_asset_missing_rates = sorted(
+        set([*position_missing_rates, *cash_missing])
+    )
+    valued_component_count = len(position_values) + len(cash_common)
+    payload["total_asset_value"] = (
+        sum(position_values) + sum(cash_common.values())
+        if valued_component_count > 0
+        else None
+    )
+    payload["total_asset_currency"] = quote_currency
+    payload["total_asset_missing_rates"] = total_asset_missing_rates
     payload["balance_source"] = "merged_live_accounts"
     payload["balance_status"] = (account_balances or {}).get("status")
     payload["balance_observed_at"] = (account_balances or {}).get("last_finished")

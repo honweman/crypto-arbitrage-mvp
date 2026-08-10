@@ -438,6 +438,9 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(portfolio["position_base"], 110_000_000.0)
         self.assertEqual(portfolio["position_value"], 22_000_000.0)
         self.assertEqual(portfolio["cash_value"], 50.0)
+        self.assertEqual(portfolio["total_asset_value"], 22_000_050.0)
+        self.assertEqual(portfolio["total_asset_currency"], "USD")
+        self.assertEqual(portfolio["total_asset_missing_rates"], [])
         self.assertEqual(
             portfolio["positions"][0]["account_breakdown"][0]["account"],
             "Bybit Main",
@@ -449,11 +452,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260803-balance-rates1" defer></script>',
+            '<script src="/static/app.js?v=20260810-total-assets1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260803-balance-rates1" defer></script>',
+            '<script src="/static/i18n.js?v=20260810-total-assets1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -1155,7 +1158,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("renderOptionsChain", HTML)
 
     def test_page_position_summary_includes_asset_price(self) -> None:
-        self.assertIn('id="portfolio-position-detail"', HTML)
+        self.assertIn('id="portfolio-total-assets-detail"', HTML)
         self.assertIn("function formatPositionPrice", HTML)
         self.assertIn("formatPositionValue", HTML)
         self.assertIn("price $", HTML)
