@@ -5,7 +5,12 @@ from typing import Iterable
 
 from .config import BotConfig, ExchangeConfig, SpotMarketConfig
 from .user_account_check import workspace_exchange_config
-from .user_workspace import api_connection_egress_blockers, UserWorkspaceStore
+from .user_workspace import (
+    api_connection_egress_blockers,
+    api_connection_is_fresh,
+    UserRiskProfile,
+    UserWorkspaceStore,
+)
 
 
 DEFAULT_WORKSPACE_FEE_BPS = {
@@ -34,6 +39,7 @@ def build_workspace_runtime_accounts(
     store: UserWorkspaceStore,
     *,
     owner_emails: Iterable[str],
+    include_unbound_market_types: bool = False,
 ) -> WorkspaceRuntimeAccounts:
     owners = {str(email).strip().lower() for email in owner_emails if str(email).strip()}
     if not owners:
@@ -69,6 +75,18 @@ def build_workspace_runtime_accounts(
         grouped.setdefault((connection.id, account.market_type), []).append(
             (account, project)
         )
+    if include_unbound_market_types:
+        for connection in connections.values():
+            if not (
+                connection.withdrawal_disabled_confirmed
+                and connection.trade_permission_confirmed
+                and configured.get(connection.id, {}).get("configured")
+                and api_connection_is_fresh(connection)
+            ):
+                continue
+            for market_type in connection.market_types:
+                if market_type in {"spot", "swap"}:
+                    grouped.setdefault((connection.id, market_type), [])
 
     spot_exchanges: list[ExchangeConfig] = []
     derivative_exchanges: list[ExchangeConfig] = []
@@ -153,4 +171,53 @@ def merge_workspace_runtime_accounts(
             ),
         ],
         risk=replace(cfg.risk, account_enabled=account_enabled),
+    )
+
+
+def isolated_workspace_runtime_config(
+    cfg: BotConfig,
+    workspace: WorkspaceRuntimeAccounts,
+    *,
+    risk_profile: UserRiskProfile,
+) -> BotConfig:
+    """Build a live runtime containing only one user's encrypted accounts."""
+
+    exchanges = [*workspace.spot_exchanges, *workspace.derivative_exchanges]
+    exchange_keys = [row.key for row in exchanges]
+    risk = replace(
+        cfg.risk,
+        trading_enabled=bool(risk_profile.trading_enabled),
+        allow_live_trading=bool(risk_profile.trading_enabled),
+        allow_slow_execution=True,
+        strategy_enabled={**cfg.risk.strategy_enabled, "slow_execution": True},
+        account_enabled={key: True for key in exchange_keys},
+        allowed_exchanges=exchange_keys,
+        blocked_exchanges=[],
+        # Platform symbol lists describe the administrator's strategy universe.
+        # Owner runtimes validate the exact live market and existing position in
+        # their reduce-only preflight instead of inheriting that unrelated scope.
+        allowed_symbols=[],
+        blocked_symbols=[],
+        max_exposure_quote=(
+            risk_profile.max_total_exposure_quote
+            if risk_profile.max_total_exposure_quote > 0
+            else cfg.risk.max_exposure_quote
+        ),
+        max_daily_loss_quote=(
+            risk_profile.max_daily_loss_quote
+            if risk_profile.max_daily_loss_quote > 0
+            else cfg.risk.max_daily_loss_quote
+        ),
+        max_open_orders=(
+            risk_profile.max_open_orders
+            if risk_profile.max_open_orders > 0
+            else cfg.risk.max_open_orders
+        ),
+    )
+    return replace(
+        cfg,
+        spot_exchanges=list(workspace.spot_exchanges),
+        derivative_exchanges=list(workspace.derivative_exchanges),
+        spot_markets=list(workspace.spot_markets),
+        risk=risk,
     )

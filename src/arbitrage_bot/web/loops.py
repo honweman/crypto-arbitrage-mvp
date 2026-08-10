@@ -85,6 +85,7 @@ from ..strategy_timeline import (
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..strategies.triangular import find_triangular_arbitrage_opportunities
 from ..trade_log import write_trade_event
+from ..user_workspace import UserWorkspaceStore
 from ..web_config import (
     _auto_buy_sell_symbols_by_exchange,
     _execution_symbols_by_exchange,
@@ -98,6 +99,10 @@ from ..web_config import (
     slow_execution_accounts,
     slow_execution_config_to_dict,
     spot_grid_config_to_dict,
+)
+from ..workspace_runtime import (
+    build_workspace_runtime_accounts,
+    isolated_workspace_runtime_config,
 )
 from . import (
     ACCOUNT_BALANCE_POLL_SECONDS,
@@ -1547,6 +1552,7 @@ async def auto_buy_sell_task_loop(
     cfg: BotConfig,
     state: MonitorState,
     tasks: AutoBuySellTaskService,
+    workspace_store: UserWorkspaceStore | None = None,
 ) -> None:
     manager = ExchangeManager()
     coordination_owners: dict[str, str] = {}
@@ -1562,6 +1568,24 @@ async def auto_buy_sell_task_loop(
                 for task in before.get("tasks", [])
                 if isinstance(task, dict) and task.get("id")
             }
+            configs_by_owner: dict[str, BotConfig] = {}
+            if workspace_store is not None:
+                owners = {
+                    str(task.get("owner_email") or "").strip().lower()
+                    for task in task_rows.values()
+                    if str(task.get("owner_email") or "").strip()
+                }
+                for owner_email in owners:
+                    workspace = build_workspace_runtime_accounts(
+                        workspace_store,
+                        owner_emails=[owner_email],
+                        include_unbound_market_types=True,
+                    )
+                    configs_by_owner[owner_email] = isolated_workspace_runtime_config(
+                        runtime_cfg,
+                        workspace,
+                        risk_profile=workspace_store.risk_profile(owner_email),
+                    )
             if not program_running or strategy_pauses.get("slow_execution", False):
                 desired_task_ids: set[str] = set()
             else:
@@ -1611,6 +1635,7 @@ async def auto_buy_sell_task_loop(
                 market_maker_paused=strategy_pauses.get("market_maker", False),
                 coordinated_market_maker_task_ids=ready_task_ids,
                 program_running=program_running,
+                configs_by_owner=configs_by_owner,
             )
             for task in payload.get("tasks", []):
                 if not isinstance(task, dict):

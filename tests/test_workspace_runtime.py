@@ -26,11 +26,64 @@ from arbitrage_bot.web.state import MonitorState
 from arbitrage_bot.workspace_runtime import (
     WorkspaceRuntimeAccounts,
     build_workspace_runtime_accounts,
+    isolated_workspace_runtime_config,
     merge_workspace_runtime_accounts,
 )
 
 
 class WorkspaceRuntimeAccountsTest(unittest.TestCase):
+    def test_owner_runtime_includes_healthy_unbound_spot_and_swap_account(self) -> None:
+        master_key = base64.urlsafe_b64encode(b"u" * 32).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"TEST_MASTER_KEY": master_key},
+            clear=False,
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_MASTER_KEY",
+            )
+            connection = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "owner@example.com",
+                        "label": "Binance Main",
+                        "exchange": "binance",
+                        "market_types": ["spot", "swap"],
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key", "secret": "secret"},
+            )
+            store.update_api_connection_check(
+                connection.id,
+                status="healthy",
+                check={"balances": [], "open_order_count": 0},
+            )
+
+            workspace = build_workspace_runtime_accounts(
+                store,
+                owner_emails=["owner@example.com"],
+                include_unbound_market_types=True,
+            )
+            cfg = isolated_workspace_runtime_config(
+                load_config("config.acs.example.json"),
+                workspace,
+                risk_profile=store.risk_profile("owner@example.com"),
+            )
+
+        self.assertEqual(len(cfg.spot_exchanges), 1)
+        self.assertEqual(len(cfg.derivative_exchanges), 1)
+        self.assertEqual(cfg.spot_exchanges[0].credential_owner_email, "owner@example.com")
+        self.assertEqual(cfg.derivative_exchanges[0].market_type, "swap")
+        self.assertEqual(
+            cfg.risk.allowed_exchanges,
+            [cfg.spot_exchanges[0].key, cfg.derivative_exchanges[0].key],
+        )
+        self.assertEqual(cfg.risk.allowed_symbols, [])
+        self.assertEqual(cfg.risk.blocked_symbols, [])
+
     def test_runtime_risk_overrides_preserve_new_workspace_accounts(self) -> None:
         cfg = load_config("config.acs.example.json")
         runtime_key = "workspace:connection-gate:spot"

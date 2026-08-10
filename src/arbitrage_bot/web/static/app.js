@@ -7831,6 +7831,21 @@ function balanceStatusClass(status) {
       const sideField = document.getElementById("slow-side-field");
       const unlimited = document.getElementById("slow-unlimited");
       const sliceMode = document.getElementById("slow-slice-mode");
+      const contractAction = document.getElementById("slow-contract-action");
+      const ownerReduceOnly = lastState?.auth?.mode === "user"
+        && lastState?.auth?.role !== "admin";
+      if (contractAction) {
+        for (const option of contractAction.options) {
+          const opening = option.value.startsWith("open_");
+          option.hidden = ownerReduceOnly && opening;
+          option.disabled = ownerReduceOnly && opening;
+        }
+        if (ownerReduceOnly && contractAction.value.startsWith("open_")) {
+          contractAction.value = contractAction.value.endsWith("_short")
+            ? "close_short"
+            : "close_long";
+        }
+      }
       if (fields) fields.hidden = instrumentType !== "perpetual";
       if (sideField) sideField.hidden = instrumentType === "perpetual";
       if (side) side.disabled = instrumentType === "perpetual";
@@ -7843,7 +7858,7 @@ function balanceStatusClass(status) {
           sliceMode.value = "configured";
           sliceMode.disabled = true;
         }
-        const action = document.getElementById("slow-contract-action")?.value || "close_long";
+        const action = contractAction?.value || "close_long";
         if (side) side.value = perpetualActionFields(action).side;
       } else {
         if (unlimited) unlimited.disabled = false;

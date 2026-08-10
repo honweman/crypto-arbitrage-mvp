@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -81,6 +82,7 @@ from arbitrage_bot.web import (
     _daily_report_due,
     _global_scan_health_warnings,
     _require_admin_user,
+    _require_user_reduce_only_perpetual,
     _require_user_assets,
     _client_ip,
     _ip_allowed,
@@ -138,7 +140,7 @@ from arbitrage_bot.web.loops import (
     _load_initial_rebalance_runtime,
 )
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
-from arbitrage_bot.web.users import WebUserStore, totp_code
+from arbitrage_bot.web.users import WebUser, WebUserStore, totp_code
 from arbitrage_bot.web_config import (
     cross_exchange_rebalance_config_from_payload,
     market_maker_config_from_payload,
@@ -4637,9 +4639,6 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 await api_market_maker(  # type: ignore[arg-type]
                     FakeRequest(app, "/api/market-maker")
                 ),
-                await api_create_auto_buy_sell_task(  # type: ignore[arg-type]
-                    FakeRequest(app, "/api/auto-buy-sell/tasks")
-                ),
                 await api_cancel_order(  # type: ignore[arg-type]
                     FakeRequest(app, "/api/orders/cancel")
                 ),
@@ -4650,6 +4649,31 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(all(response.status == 403 for response in responses))
         self.assertTrue(all("admin role" in response.text for response in responses))
+
+    def test_non_admin_auto_buy_sell_only_allows_perpetual_reduce_only(self) -> None:
+        user = WebUser(
+            email="trader@example.com",
+            username="trader",
+            password_hash="unused",
+            totp_secret="unused",
+            role="user",
+        )
+        close_long = SlowExecutionConfig(
+            instrument_type="perpetual",
+            position_effect="reduce_only",
+            position_side="long",
+            side="sell",
+        )
+        open_long = replace(close_long, position_effect="open")
+
+        _require_user_reduce_only_perpetual(user, close_long)
+        with self.assertRaisesRegex(PermissionError, "cannot open or increase"):
+            _require_user_reduce_only_perpetual(user, open_long)
+        with self.assertRaisesRegex(PermissionError, "closing only"):
+            _require_user_reduce_only_perpetual(
+                user,
+                replace(close_long, instrument_type="spot"),
+            )
 
     async def test_market_maker_cycle_finishes_before_shutdown(self) -> None:
         started = asyncio.Event()

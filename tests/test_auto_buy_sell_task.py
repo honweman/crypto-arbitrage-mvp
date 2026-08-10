@@ -155,6 +155,33 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
                     self._slow_cfg(start_price=0.1, stop_price=0.05)
                 )
 
+    async def test_tasks_are_isolated_by_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            first = await service.create_task(
+                self._slow_cfg(),
+                owner_email="first@example.com",
+            )
+            second = await service.create_task(
+                self._slow_cfg(),
+                owner_email="second@example.com",
+            )
+
+            first_snapshot = await service.snapshot(
+                owner_email="first@example.com",
+                is_admin=False,
+            )
+            with self.assertRaisesRegex(ValueError, "unknown Auto Buy/Sell task"):
+                await service.set_paused(
+                    second["id"],
+                    True,
+                    owner_email="first@example.com",
+                    is_admin=False,
+                )
+
+        self.assertEqual([row["id"] for row in first_snapshot["tasks"]], [first["id"]])
+        self.assertEqual(first_snapshot["tasks"][0]["owner_email"], "first@example.com")
+
     async def test_blocked_unfilled_task_can_enable_mm_coordination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "tasks.json"

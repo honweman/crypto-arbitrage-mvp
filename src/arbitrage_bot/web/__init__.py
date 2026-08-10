@@ -40,6 +40,7 @@ from .render_payloads import (
 from .strategy_preflight import (
     StrategyPreflightService,
     build_strategy_preflight,
+    candidate_hash,
 )
 from .users import (
     WebUser,
@@ -133,6 +134,7 @@ from ..alerts import AlertService
 from ..auto_buy_sell_task import (
     AutoBuySellTaskService,
     default_task_store_path,
+    slow_execution_config_from_dict,
     validate_task_config,
     validate_task_exchange_config,
 )
@@ -266,7 +268,10 @@ from ..user_workspace import (
     api_connection_is_fresh,
     required_credentials_for_exchange,
 )
-from ..workspace_runtime import build_workspace_runtime_accounts
+from ..workspace_runtime import (
+    build_workspace_runtime_accounts,
+    isolated_workspace_runtime_config,
+)
 from ..web_config import (
     _backtest_overrides_from_payload,
     _auto_buy_sell_symbols_by_exchange,
@@ -5287,6 +5292,80 @@ async def index(_: web.Request) -> web.Response:
     return web.Response(text=HTML, content_type="text/html")
 
 
+def _user_auto_buy_sell_runtime_config(
+    request: web.Request,
+    user: WebUser,
+    cfg: BotConfig,
+) -> BotConfig:
+    store = _user_workspace_store(request)
+    workspace = build_workspace_runtime_accounts(
+        store,
+        owner_emails=[user.email],
+        include_unbound_market_types=True,
+    )
+    return isolated_workspace_runtime_config(
+        cfg,
+        workspace,
+        risk_profile=store.risk_profile(user.email),
+    )
+
+
+async def _user_auto_buy_sell_payload(
+    request: web.Request,
+    user: WebUser,
+    cfg: BotConfig,
+) -> dict[str, Any]:
+    runtime_cfg = _user_auto_buy_sell_runtime_config(request, user, cfg)
+    accounts = slow_execution_accounts(
+        auto_buy_sell_exchanges(runtime_cfg),
+        _auto_buy_sell_symbols_by_exchange(runtime_cfg),
+        spot_markets=runtime_cfg.spot_markets,
+    )
+    tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
+    task_snapshot = await tasks.snapshot(
+        owner_email=user.email,
+        is_admin=False,
+    )
+    task_rows = task_snapshot.get("tasks") or []
+    if task_rows:
+        latest = max(
+            (row for row in task_rows if isinstance(row, dict)),
+            key=lambda row: float(row.get("updated_at") or 0.0),
+            default={},
+        )
+        raw_config = latest.get("config") if isinstance(latest, dict) else {}
+        default_config = (
+            slow_execution_config_from_dict(raw_config)
+            if isinstance(raw_config, dict) and raw_config
+            else SlowExecutionConfig()
+        )
+    else:
+        swap_account = next(
+            (row for row in accounts if row.get("market_type") == "swap"),
+            None,
+        )
+        default_config = replace(
+            SlowExecutionConfig(),
+            exchange=str((swap_account or {}).get("key") or ""),
+            instrument_type="perpetual",
+            position_effect="reduce_only",
+            position_side="long",
+            side="sell",
+        )
+    config_payload = slow_execution_config_to_dict(default_config)
+    config_payload["accounts"] = accounts
+    return {
+        "status": "ready" if accounts else "account_required",
+        "mode": "owner_live_reduce_only",
+        "config": config_payload,
+        "accounts": accounts,
+        "tasks": task_snapshot,
+        "plan": None,
+        "runtime": {},
+        "error": None if accounts else "add and test a trading API account",
+    }
+
+
 async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
@@ -5338,6 +5417,20 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         cfg=runtime_cfg,
         user=requesting_user,
     )
+    if requesting_user is not None and requesting_user.role != "admin":
+        user_runtime_cfg = _user_auto_buy_sell_runtime_config(
+            request,
+            requesting_user,
+            runtime_cfg,
+        )
+        filtered["slow_execution"] = await _user_auto_buy_sell_payload(
+            request,
+            requesting_user,
+            runtime_cfg,
+        )
+        config_payload = filtered.get("config")
+        if isinstance(config_payload, dict):
+            config_payload["risk"] = risk_config_to_dict(user_runtime_cfg.risk)
     if requesting_user is not None and workspace_payload is not None:
         filtered["account_balances"] = _merge_workspace_account_balances(
             filtered.get("account_balances"),
@@ -6032,12 +6125,251 @@ def _schedule_started_config_guard(
     task.add_done_callback(tasks.discard)
 
 
+def _require_user_reduce_only_perpetual(
+    user: WebUser | None,
+    task_config: SlowExecutionConfig,
+) -> None:
+    if user is None or user.role == "admin":
+        return
+    if task_config.instrument_type != "perpetual":
+        raise PermissionError(
+            "non-admin live Auto Buy/Sell currently supports reduce-only "
+            "perpetual closing only"
+        )
+    if task_config.position_effect != "reduce_only":
+        raise PermissionError(
+            "non-admin accounts cannot open or increase perpetual positions"
+        )
+
+
+def _preflight_check(
+    check_id: str,
+    label: str,
+    passed: bool,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "label": label,
+        "status": "passed" if passed else "blocked",
+        "detail": detail,
+        "scope": "",
+        "blocking": not passed,
+    }
+
+
+async def _user_reduce_only_preflight(
+    runtime_cfg: BotConfig,
+    task_config: SlowExecutionConfig,
+) -> dict[str, Any]:
+    candidate = slow_execution_config_to_dict(task_config)
+    exchange = _find_exchange_by_key(runtime_cfg, task_config.exchange)
+    manager = ExchangeManager()
+    checks: list[dict[str, Any]] = []
+    try:
+        checks.append(
+            _preflight_check(
+                "live_gate",
+                "Owner live gate",
+                runtime_cfg.risk.enabled
+                and runtime_cfg.risk.trading_enabled
+                and runtime_cfg.risk.allow_live_trading,
+                "Owner trading profile is enabled"
+                if runtime_cfg.risk.trading_enabled
+                else "Owner trading profile is disabled",
+            )
+        )
+        checks.append(
+            _preflight_check(
+                "reduce_only",
+                "Reduce-only contract action",
+                task_config.instrument_type == "perpetual"
+                and task_config.position_effect == "reduce_only",
+                "Order will be submitted with reduceOnly=true",
+            )
+        )
+        market = await manager.fetch_market_info(exchange, symbol=task_config.symbol)
+        market_ready = bool(
+            market
+            and market.get("active") is not False
+            and market.get("swap") is not False
+        )
+        checks.append(
+            _preflight_check(
+                "market",
+                "Perpetual market",
+                market_ready,
+                "Active stablecoin linear perpetual market"
+                if market_ready
+                else "Perpetual market is unavailable or inactive",
+            )
+        )
+        book = await manager.fetch_order_book(
+            exchange,
+            task_config.symbol,
+            runtime_cfg.order_book_depth,
+        )
+        book_ready = bool(book and book.bids and book.asks)
+        reference_price = 0.0
+        if book_ready and book is not None:
+            reference_price = float(
+                book.asks[0].price if task_config.side == "buy" else book.bids[0].price
+            )
+        checks.append(
+            _preflight_check(
+                "order_book",
+                "Live order book",
+                book_ready and reference_price > 0,
+                f"Executable reference price {reference_price:.12g}"
+                if reference_price > 0
+                else "Order book is unavailable",
+            )
+        )
+        raw_positions = await manager.fetch_positions(exchange, [task_config.symbol])
+        positions = [
+            row
+            for raw in raw_positions
+            if isinstance(raw, dict)
+            for row in [normalize_derivative_position(exchange, raw, risk=runtime_cfg.risk)]
+            if row is not None and row.get("symbol") == task_config.symbol
+        ]
+        matching = [
+            row for row in positions if row.get("side") == task_config.position_side
+        ]
+        current_base = sum(float(row.get("base_amount") or 0.0) for row in matching)
+        current_quote = sum(
+            float(row.get("notional_quote") or 0.0) for row in matching
+        )
+        checks.append(
+            _preflight_check(
+                "position",
+                "Existing position",
+                current_base > 0,
+                (
+                    f"{task_config.position_side} position {current_base:.12g} base / "
+                    f"{current_quote:.12g} quote"
+                    if current_base > 0
+                    else f"No {task_config.position_side} position is available to reduce"
+                ),
+            )
+        )
+        position_modes = {
+            str(row.get("margin_mode") or "").lower()
+            for row in matching
+            if str(row.get("margin_mode") or "").strip()
+        }
+        margin_matches = not position_modes or task_config.margin_mode in position_modes
+        checks.append(
+            _preflight_check(
+                "margin_mode",
+                "Margin mode",
+                margin_matches,
+                (
+                    f"Configured {task_config.margin_mode} matches the position"
+                    if margin_matches
+                    else "Position uses "
+                    + ", ".join(sorted(position_modes))
+                    + f"; select {next(iter(sorted(position_modes)))}"
+                ),
+            )
+        )
+        total_within_position = (
+            task_config.total_base <= current_base + max(current_base, 1.0) * 1e-9
+            if task_config.total_base > 0
+            else task_config.total_quote
+            <= current_quote + max(current_quote, 1.0) * 1e-9
+        )
+        checks.append(
+            _preflight_check(
+                "total_target",
+                "Total close target",
+                total_within_position,
+                "Total target does not exceed the current position"
+                if total_within_position
+                else "Total target exceeds the current position",
+            )
+        )
+        order_base = max(task_config.slice_base, task_config.slice_base_max)
+        order_quote = (
+            task_config.slice_quote
+            if task_config.slice_quote > 0
+            else order_base * reference_price
+        )
+        order_within_position = order_base <= current_base + max(current_base, 1.0) * 1e-9
+        order_within_risk = (
+            runtime_cfg.risk.max_order_quote <= 0
+            or order_quote <= runtime_cfg.risk.max_order_quote + 1e-9
+        )
+        checks.append(
+            _preflight_check(
+                "order_size",
+                "Per-order close size",
+                order_within_position and order_within_risk,
+                (
+                    f"Per-order maximum {order_base:.12g} base / "
+                    f"{order_quote:.12g} quote; risk limit "
+                    f"{runtime_cfg.risk.max_order_quote:.12g}"
+                ),
+            )
+        )
+        open_orders = await manager.fetch_open_orders(
+            exchange,
+            symbol=task_config.symbol,
+        )
+        checks.append(
+            _preflight_check(
+                "open_orders",
+                "Existing orders on the contract",
+                not open_orders,
+                "No existing open orders"
+                if not open_orders
+                else f"Cancel {len(open_orders)} existing order(s) before starting",
+            )
+        )
+        quote_currency = task_config.symbol.split("/", 1)[-1].split(":", 1)[0]
+        quote_rate = float(runtime_cfg.quote_rates.get(quote_currency) or 0.0)
+        checks.append(
+            _preflight_check(
+                "quote_rate",
+                "Quote conversion",
+                quote_rate > 0,
+                f"{quote_currency} conversion rate {quote_rate:.12g}"
+                if quote_rate > 0
+                else f"No conversion rate for {quote_currency}",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            _preflight_check(
+                "private_api",
+                "Private account verification",
+                False,
+                f"{exc.__class__.__name__}: {exc}",
+            )
+        )
+    finally:
+        await manager.close()
+    blockers = [row["detail"] for row in checks if row["status"] == "blocked"]
+    now = time.time()
+    return {
+        "status": "ready" if not blockers else "blocked",
+        "ready": not blockers,
+        "strategy_id": "slow_execution",
+        "candidate_hash": candidate_hash("slow_execution", candidate),
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": [],
+        "summary": {"planned_order_count": 1},
+        "checked_at": now,
+        "expires_at": now + 45.0,
+    }
+
+
 async def api_strategy_preflight(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
         user = _request_user(request)
-        _require_admin_user(user)
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -6048,21 +6380,52 @@ async def api_strategy_preflight(request: web.Request) -> web.Response:
             else dict(payload)
         )
         candidate_payload.pop("strategy_id", None)
-        candidate, assets = await _preflight_candidate_from_payload(
-            state,
-            cfg,
-            strategy_id=strategy_id,
-            payload=candidate_payload,
-        )
-        _require_user_assets(user, assets)
-        runtime_cfg = await state.runtime_config(cfg)
-        state_payload = await state.strategy_preflight_payload()
-        result = build_strategy_preflight(
-            runtime_cfg,
-            strategy_id=strategy_id,
-            candidate=candidate,
-            state_payload=state_payload,
-        )
+        if user is not None and user.role != "admin":
+            if strategy_id != "slow_execution":
+                _require_admin_user(user)
+            platform_cfg = await state.runtime_config(cfg)
+            runtime_cfg = _user_auto_buy_sell_runtime_config(
+                request,
+                user,
+                platform_cfg,
+            )
+            symbols_by_exchange = _auto_buy_sell_symbols_by_exchange(runtime_cfg)
+            accounts = slow_execution_accounts(
+                auto_buy_sell_exchanges(runtime_cfg),
+                symbols_by_exchange,
+                spot_markets=runtime_cfg.spot_markets,
+            )
+            overrides = _slow_execution_overrides_from_payload(
+                candidate_payload,
+                allowed_exchanges={row["key"] for row in accounts},
+                symbols_by_exchange=symbols_by_exchange,
+            )
+            task_config = replace(
+                SlowExecutionConfig(),
+                **{**overrides, "enabled": True},
+            )
+            validate_task_config(task_config)
+            validate_task_exchange_config(runtime_cfg, task_config)
+            _require_user_reduce_only_perpetual(user, task_config)
+            candidate = slow_execution_config_to_dict(task_config)
+            result = await _user_reduce_only_preflight(runtime_cfg, task_config)
+        else:
+            _require_admin_user(user)
+            candidate, assets = await _preflight_candidate_from_payload(
+                state,
+                cfg,
+                strategy_id=strategy_id,
+                payload=candidate_payload,
+            )
+            _require_user_assets(user, assets)
+            runtime_cfg = await state.runtime_config(cfg)
+            state_payload = await state.strategy_preflight_payload()
+            result = build_strategy_preflight(
+                runtime_cfg,
+                strategy_id=strategy_id,
+                candidate=candidate,
+                state_payload=state_payload,
+            )
         if result["ready"]:
             service: StrategyPreflightService = request.app[
                 "strategy_preflight_service"
@@ -6105,9 +6468,14 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
-        _require_admin_user(_request_user(request))
+        user = _request_user(request)
         payload = await request.json()
-        runtime_cfg = await state.runtime_config(cfg)
+        platform_cfg = await state.runtime_config(cfg)
+        runtime_cfg = (
+            _user_auto_buy_sell_runtime_config(request, user, platform_cfg)
+            if user is not None and user.role != "admin"
+            else platform_cfg
+        )
         symbols_by_exchange = _auto_buy_sell_symbols_by_exchange(runtime_cfg)
         accounts = slow_execution_accounts(
             auto_buy_sell_exchanges(runtime_cfg),
@@ -6120,27 +6488,34 @@ async def api_slow_execution(request: web.Request) -> web.Response:
             allowed_exchanges=allowed_exchanges,
             symbols_by_exchange=symbols_by_exchange,
         )
-        base_config = await state.slow_execution_config(runtime_cfg.slow_execution)
+        base_config = (
+            SlowExecutionConfig()
+            if user is not None and user.role != "admin"
+            else await state.slow_execution_config(runtime_cfg.slow_execution)
+        )
         target_symbol = str(overrides.get("symbol") or base_config.symbol)
         candidate = replace(base_config, **overrides)
         validate_task_config(candidate)
         validate_task_exchange_config(runtime_cfg, candidate)
-        _require_user_assets(
-            _request_user(request), [_base_asset_from_symbol(target_symbol)]
-        )
+        _require_user_reduce_only_perpetual(user, candidate)
+        if user is None or user.role == "admin":
+            _require_user_assets(user, [_base_asset_from_symbol(target_symbol)])
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    await state.set_slow_execution_overrides(
-        overrides,
-        cfg=cfg,
-        actor_email=_config_actor_email(request),
-        action="auto_buy_sell_defaults_update",
-    )
-    current_config = await state.slow_execution_config(cfg.slow_execution)
-    runtime_cfg = await state.runtime_config(cfg)
+    if user is None or user.role == "admin":
+        await state.set_slow_execution_overrides(
+            overrides,
+            cfg=cfg,
+            actor_email=_config_actor_email(request),
+            action="auto_buy_sell_defaults_update",
+        )
+        current_config = await state.slow_execution_config(cfg.slow_execution)
+        runtime_cfg = await state.runtime_config(cfg)
+    else:
+        current_config = candidate
     write_web_audit_event(
         runtime_cfg,
         request,
@@ -9132,7 +9507,7 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     guard_baseline: dict[str, Any] | None = None
     try:
-        _require_admin_user(_request_user(request))
+        user = _request_user(request)
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -9141,7 +9516,12 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
                 "starting Auto Buy/Sell requires "
                 f"confirm_live={LIVE_AUTO_BUY_SELL_CONFIRMATION}"
             )
-        runtime_cfg = await state.runtime_config(cfg)
+        platform_cfg = await state.runtime_config(cfg)
+        runtime_cfg = (
+            _user_auto_buy_sell_runtime_config(request, user, platform_cfg)
+            if user is not None and user.role != "admin"
+            else platform_cfg
+        )
         symbols_by_exchange = _auto_buy_sell_symbols_by_exchange(runtime_cfg)
         accounts = slow_execution_accounts(
             auto_buy_sell_exchanges(runtime_cfg),
@@ -9154,11 +9534,15 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             allowed_exchanges=allowed_exchanges,
             symbols_by_exchange=symbols_by_exchange,
         )
-        base_config = await state.slow_execution_config(cfg.slow_execution)
-        task_config = replace(base_config, **{**overrides, "enabled": True})
-        _require_user_assets(
-            _request_user(request), [_base_asset_from_symbol(task_config.symbol)]
+        base_config = (
+            SlowExecutionConfig()
+            if user is not None and user.role != "admin"
+            else await state.slow_execution_config(cfg.slow_execution)
         )
+        task_config = replace(base_config, **{**overrides, "enabled": True})
+        _require_user_reduce_only_perpetual(user, task_config)
+        if user is None or user.role == "admin":
+            _require_user_assets(user, [_base_asset_from_symbol(task_config.symbol)])
         validate_task_config(task_config)
         validate_task_exchange_config(runtime_cfg, task_config)
         _consume_strategy_preflight(
@@ -9167,25 +9551,32 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             candidate=slow_execution_config_to_dict(task_config),
             token=str(payload.get("preflight_token") or ""),
         )
-        guard_baseline = await state.config_versions(limit=1)
+        if user is None or user.role == "admin":
+            guard_baseline = await state.config_versions(limit=1)
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
     try:
-        task = await tasks.create_task(task_config)
+        task = await tasks.create_task(
+            task_config,
+            owner_email=(
+                user.email if user is not None and user.role != "admin" else ""
+            ),
+        )
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
-    await state.set_slow_execution_overrides(
-        {
-            **overrides,
-            "enabled": True,
-        },
-        cfg=cfg,
-        actor_email=_config_actor_email(request),
-        action="auto_buy_sell_task_create",
-    )
+    if user is None or user.role == "admin":
+        await state.set_slow_execution_overrides(
+            {
+                **overrides,
+                "enabled": True,
+            },
+            cfg=cfg,
+            actor_email=_config_actor_email(request),
+            action="auto_buy_sell_task_create",
+        )
     if guard_baseline is not None:
         current_version = await state.config_versions(limit=1)
         if current_version.get("current_version_id") != guard_baseline.get(
@@ -9198,9 +9589,17 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
                 previous_version_id=guard_baseline.get("current_version_id"),
                 expected_current_hash=str(current_version.get("current_hash") or ""),
             )
-    snapshot = await tasks.snapshot()
-    await state.set_auto_buy_sell_tasks(snapshot)
-    runtime_cfg = await state.runtime_config(cfg)
+    all_tasks_snapshot = await tasks.snapshot()
+    await state.set_auto_buy_sell_tasks(all_tasks_snapshot)
+    snapshot = await tasks.snapshot(
+        owner_email=user.email if user is not None else None,
+        is_admin=user is None or user.role == "admin",
+    )
+    runtime_cfg = (
+        await state.runtime_config(cfg)
+        if user is None or user.role == "admin"
+        else runtime_cfg
+    )
     write_web_audit_event(
         runtime_cfg,
         request,
@@ -9228,14 +9627,17 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     task_id = request.match_info.get("task_id", "")
     try:
-        _require_admin_user(_request_user(request))
+        user = _request_user(request)
         payload = await request.json()
         action = str(payload.get("action", "")).strip().lower()
         if action not in {"pause", "resume", "stop", "enable_mm_coordination"}:
             raise ValueError(
                 "action must be pause, resume, stop, or enable_mm_coordination"
             )
-        task_snapshot = await tasks.snapshot()
+        task_snapshot = await tasks.snapshot(
+            owner_email=user.email if user is not None else None,
+            is_admin=user is None or user.role == "admin",
+        )
         task_row = next(
             (
                 item
@@ -9250,36 +9652,61 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
                 if isinstance(task_row.get("config"), dict)
                 else {}
             )
-            _require_user_assets(
-                _request_user(request),
-                [_base_asset_from_symbol(str(task_config.get("symbol") or ""))],
-            )
+            if user is None or user.role == "admin":
+                _require_user_assets(
+                    user,
+                    [_base_asset_from_symbol(str(task_config.get("symbol") or ""))],
+                )
         if action == "enable_mm_coordination":
+            _require_admin_user(user)
             if payload.get("confirm_live") != LIVE_AUTO_BUY_SELL_CONFIRMATION:
                 raise ValueError(
                     "enabling live MM coordination requires "
                     f"confirm_live={LIVE_AUTO_BUY_SELL_CONFIRMATION}"
                 )
-            task = await tasks.enable_market_maker_coordination(task_id)
+            task = await tasks.enable_market_maker_coordination(
+                task_id,
+                owner_email=user.email if user is not None else None,
+                is_admin=user is None or user.role == "admin",
+            )
         elif action == "stop":
             manager = ExchangeManager()
-            runtime_cfg = await state.runtime_config(cfg)
-            cancel_open_orders = bool(payload.get("cancel_open_orders", True))
-            task = await tasks.stop_task(
-                task_id,
-                runtime_cfg,
-                manager,
-                cancel_open_orders=cancel_open_orders,
+            platform_cfg = await state.runtime_config(cfg)
+            runtime_cfg = (
+                _user_auto_buy_sell_runtime_config(request, user, platform_cfg)
+                if user is not None and user.role != "admin"
+                else platform_cfg
             )
+            cancel_open_orders = bool(payload.get("cancel_open_orders", True))
+            try:
+                task = await tasks.stop_task(
+                    task_id,
+                    runtime_cfg,
+                    manager,
+                    cancel_open_orders=cancel_open_orders,
+                    owner_email=user.email if user is not None else None,
+                    is_admin=user is None or user.role == "admin",
+                )
+            finally:
+                await manager.close()
         else:
-            task = await tasks.set_paused(task_id, action == "pause")
+            task = await tasks.set_paused(
+                task_id,
+                action == "pause",
+                owner_email=user.email if user is not None else None,
+                is_admin=user is None or user.role == "admin",
+            )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    snapshot = await tasks.snapshot()
-    await state.set_auto_buy_sell_tasks(snapshot)
+    all_tasks_snapshot = await tasks.snapshot()
+    await state.set_auto_buy_sell_tasks(all_tasks_snapshot)
+    snapshot = await tasks.snapshot(
+        owner_email=user.email if user is not None else None,
+        is_admin=user is None or user.role == "admin",
+    )
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
         runtime_cfg,
@@ -9303,7 +9730,7 @@ async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     try:
-        _require_admin_user(_request_user(request))
+        user = _request_user(request)
         payload = await request.json()
         if not bool(payload.get("terminal_only", True)):
             raise ValueError("only terminal task cleanup is supported")
@@ -9314,11 +9741,17 @@ async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
     if preview_only:
-        result = await tasks.preview_terminal_tasks()
+        result = await tasks.preview_terminal_tasks(
+            owner_email=user.email if user is not None else None,
+            is_admin=user is None or user.role == "admin",
+        )
         return web.json_response({"ok": True, "preview": True, **result})
 
-    result = await tasks.clear_terminal_tasks()
-    await state.set_auto_buy_sell_tasks(result["tasks"])
+    result = await tasks.clear_terminal_tasks(
+        owner_email=user.email if user is not None else None,
+        is_admin=user is None or user.role == "admin",
+    )
+    await state.set_auto_buy_sell_tasks(await tasks.snapshot())
     runtime_cfg = await state.runtime_config(cfg)
     write_web_audit_event(
         runtime_cfg,
@@ -9738,6 +10171,7 @@ def create_app(
                 cfg,
                 state,
                 auto_buy_sell_tasks,
+                user_workspace_store,
             ),
             "user_paper": lambda: user_paper_trading_task_loop(
                 user_paper_service,

@@ -269,6 +269,7 @@ def _is_final_filled_order(raw: dict[str, Any]) -> bool:
 class AutoBuySellTask:
     id: str
     config: dict[str, Any]
+    owner_email: str = ""
     status: str = "running"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -460,17 +461,24 @@ class AutoBuySellTaskService:
         self._lock = asyncio.Lock()
         self._tasks = self.store.load()
 
-    async def create_task(self, cfg: SlowExecutionConfig) -> dict[str, Any]:
+    async def create_task(
+        self,
+        cfg: SlowExecutionConfig,
+        *,
+        owner_email: str = "",
+    ) -> dict[str, Any]:
         validate_task_config(cfg)
+        owner = str(owner_email or "").strip().lower()
         task = AutoBuySellTask(
             id=uuid.uuid4().hex[:12],
             config=asdict(replace(cfg, enabled=True)),
+            owner_email=owner,
             status="running",
             started_at=time.time(),
             next_run_at=0.0,
         )
         async with self._lock:
-            duplicate = self._find_duplicate_unlocked(cfg)
+            duplicate = self._find_duplicate_unlocked(cfg, owner_email=owner)
             if duplicate is not None:
                 raise ValueError(
                     f"duplicate active Auto Buy/Sell task: {duplicate.id}"
@@ -479,9 +487,20 @@ class AutoBuySellTaskService:
             self.store.save(self._tasks)
             return task.to_dict()
 
-    async def set_paused(self, task_id: str, paused: bool) -> dict[str, Any]:
+    async def set_paused(
+        self,
+        task_id: str,
+        paused: bool,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
+    ) -> dict[str, Any]:
         async with self._lock:
-            task = self._get_task_unlocked(task_id)
+            task = self._get_task_unlocked(
+                task_id,
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
             if task.status == "stop_cancel_pending":
                 raise ValueError(
                     "cannot pause or resume while order cancellation is pending"
@@ -502,9 +521,16 @@ class AutoBuySellTaskService:
     async def enable_market_maker_coordination(
         self,
         task_id: str,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
     ) -> dict[str, Any]:
         async with self._lock:
-            task = self._get_task_unlocked(task_id)
+            task = self._get_task_unlocked(
+                task_id,
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
             if task.status in TERMINAL_TASK_STATUSES:
                 raise ValueError(
                     f"cannot enable MM coordination for terminal task: {task.status}"
@@ -553,9 +579,15 @@ class AutoBuySellTaskService:
         manager: ExchangeManager,
         *,
         cancel_open_orders: bool = True,
+        owner_email: str | None = None,
+        is_admin: bool = True,
     ) -> dict[str, Any]:
         async with self._lock:
-            task = self._get_task_unlocked(task_id)
+            task = self._get_task_unlocked(
+                task_id,
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
             task_cfg = task.exec_cfg
             open_order_ids = list(task.open_order_ids)
             if task.status in TERMINAL_TASK_STATUSES:
@@ -584,7 +616,11 @@ class AutoBuySellTaskService:
             )
 
         async with self._lock:
-            task = self._get_task_unlocked(task_id)
+            task = self._get_task_unlocked(
+                task_id,
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
             now = time.time()
             if cancel_payload is not None:
                 remaining_ids = list(cancel_payload.get("remaining_open_order_ids", []))
@@ -632,18 +668,38 @@ class AutoBuySellTaskService:
             self.store.save(self._tasks)
             return task.to_dict()
 
-    async def clear_terminal_tasks(self) -> dict[str, Any]:
+    async def clear_terminal_tasks(
+        self,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
+    ) -> dict[str, Any]:
         async with self._lock:
             removed_tasks = [
                 _cleanup_task_summary(task)
                 for task in self._tasks
                 if task.status in TERMINAL_TASK_STATUSES
+                and self._task_visible_to(
+                    task,
+                    owner_email=owner_email,
+                    is_admin=is_admin,
+                )
             ]
             self._tasks = [
-                task for task in self._tasks if task.status not in TERMINAL_TASK_STATUSES
+                task
+                for task in self._tasks
+                if task.status not in TERMINAL_TASK_STATUSES
+                or not self._task_visible_to(
+                    task,
+                    owner_email=owner_email,
+                    is_admin=is_admin,
+                )
             ]
             self.store.save(self._tasks)
-            snapshot = self._snapshot_unlocked()
+            snapshot = self._snapshot_unlocked(
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
         return {
             "removed_count": len(removed_tasks),
             "removed_task_ids": [task["id"] for task in removed_tasks],
@@ -651,12 +707,22 @@ class AutoBuySellTaskService:
             "tasks": snapshot,
         }
 
-    async def preview_terminal_tasks(self) -> dict[str, Any]:
+    async def preview_terminal_tasks(
+        self,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
+    ) -> dict[str, Any]:
         async with self._lock:
             terminal_tasks = [
                 _cleanup_task_summary(task)
                 for task in self._tasks
                 if task.status in TERMINAL_TASK_STATUSES
+                and self._task_visible_to(
+                    task,
+                    owner_email=owner_email,
+                    is_admin=is_admin,
+                )
             ]
         return {
             "removed_count": len(terminal_tasks),
@@ -664,9 +730,17 @@ class AutoBuySellTaskService:
             "removed_tasks": terminal_tasks,
         }
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def snapshot(
+        self,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
+    ) -> dict[str, Any]:
         async with self._lock:
-            return self._snapshot_unlocked()
+            return self._snapshot_unlocked(
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
 
     async def run_due_tasks(
         self,
@@ -677,6 +751,7 @@ class AutoBuySellTaskService:
         market_maker_paused: bool = False,
         coordinated_market_maker_task_ids: set[str] | None = None,
         program_running: bool = True,
+        configs_by_owner: dict[str, BotConfig] | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
             tasks = list(self._tasks)
@@ -698,9 +773,23 @@ class AutoBuySellTaskService:
                 continue
             if task.next_run_at > now:
                 continue
+            task_runtime_cfg = cfg
+            if task.owner_email:
+                task_runtime_cfg = (configs_by_owner or {}).get(task.owner_email)
+                if task_runtime_cfg is None:
+                    task.status = "error"
+                    task.last_status = "owner_runtime_unavailable"
+                    task.last_error = (
+                        "owner exchange runtime is unavailable; verify the account "
+                        "connection and dedicated egress route"
+                    )
+                    task.last_error_at = now
+                    task.next_run_at = now + max(1.0, task.exec_cfg.interval_seconds)
+                    changed = True
+                    continue
             await self._run_task_cycle(
                 task,
-                cfg,
+                task_runtime_cfg,
                 manager,
                 market_maker_paused=(
                     market_maker_paused
@@ -716,26 +805,67 @@ class AutoBuySellTaskService:
                 self.store.save(self._tasks)
             return self._snapshot_unlocked()
 
-    def _get_task_unlocked(self, task_id: str) -> AutoBuySellTask:
+    @staticmethod
+    def _task_visible_to(
+        task: AutoBuySellTask,
+        *,
+        owner_email: str | None,
+        is_admin: bool,
+    ) -> bool:
+        if is_admin:
+            return True
+        owner = str(owner_email or "").strip().lower()
+        return bool(owner) and task.owner_email == owner
+
+    def _get_task_unlocked(
+        self,
+        task_id: str,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
+    ) -> AutoBuySellTask:
         for task in self._tasks:
             if task.id == task_id:
+                if not self._task_visible_to(
+                    task,
+                    owner_email=owner_email,
+                    is_admin=is_admin,
+                ):
+                    break
                 return task
         raise ValueError(f"unknown Auto Buy/Sell task: {task_id}")
 
     def _find_duplicate_unlocked(
         self,
         cfg: SlowExecutionConfig,
+        *,
+        owner_email: str = "",
     ) -> AutoBuySellTask | None:
         signature = _task_duplicate_signature(cfg)
         for task in self._tasks:
             if task.status in TERMINAL_TASK_STATUSES:
                 continue
+            if task.owner_email != owner_email:
+                continue
             if _task_duplicate_signature(task.exec_cfg) == signature:
                 return task
         return None
 
-    def _snapshot_unlocked(self) -> dict[str, Any]:
-        task_rows = [task.to_dict() for task in self._tasks]
+    def _snapshot_unlocked(
+        self,
+        *,
+        owner_email: str | None = None,
+        is_admin: bool = True,
+    ) -> dict[str, Any]:
+        task_rows = [
+            task.to_dict()
+            for task in self._tasks
+            if self._task_visible_to(
+                task,
+                owner_email=owner_email,
+                is_admin=is_admin,
+            )
+        ]
         return {
             "status": "ok",
             "path": str(self.store.path),
