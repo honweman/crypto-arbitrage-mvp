@@ -148,7 +148,20 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                         "withdrawal_disabled_confirmed": True,
                         "trade_permission_confirmed": True,
                         "balance_snapshot": [
-                            {"currency": f"ASSET{index}", "total": index + 1}
+                            {
+                                "currency": f"ASSET{index}",
+                                "total": index + 1,
+                                **(
+                                    {
+                                        "valuation_price": 600.0,
+                                        "valuation_quote": "USDT",
+                                        "valuation_symbol": "ASSET0/USDT",
+                                        "valuation_at": 123.0,
+                                    }
+                                    if index == 0
+                                    else {}
+                                ),
+                            }
                             for index in range(150)
                         ],
                     }
@@ -182,6 +195,8 @@ class UserWorkspaceStoreTest(unittest.TestCase):
 
         self.assertEqual(normalized.market_types, ("spot", "swap"))
         self.assertEqual(len(normalized.balance_snapshot), 150)
+        self.assertEqual(normalized.balance_snapshot[0]["valuation_price"], 600.0)
+        self.assertEqual(normalized.balance_snapshot[0]["valuation_quote"], "USDT")
         self.assertEqual(stored["market_types"], ["spot", "swap"])
         self.assertEqual(stored["market_scope"], "unified")
 

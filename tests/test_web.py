@@ -450,13 +450,61 @@ class WebMonitorTest(unittest.TestCase):
             "funding",
         )
 
+    def test_workspace_dynamic_balance_price_is_included_in_total_assets(self) -> None:
+        account_balances = {
+            "status": "ok",
+            "last_finished": 200.0,
+            "totals": [
+                {"currency": "BNB", "total": 9.99250003},
+                {"currency": "USDT", "total": 100.0},
+            ],
+            "accounts": [
+                {
+                    "label": "Binance Main",
+                    "id": "binance",
+                    "balance": {
+                        "currencies": [
+                            {
+                                "currency": "BNB",
+                                "total": 9.99250003,
+                                "valuation_price": 600.0,
+                                "valuation_quote": "USDT",
+                            },
+                            {"currency": "USDT", "total": 100.0},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        portfolio = _sync_portfolio_with_account_balances(
+            {
+                "status": "private",
+                "quote_currency": "USD",
+                "positions": [],
+                "cash_balances": {},
+                "cash_balances_common": {},
+            },
+            account_balances,
+            quote_rates={"USDT": 1.0},
+        )
+
+        self.assertAlmostEqual(portfolio["total_asset_value"], 6_095.500018)
+        self.assertEqual(portfolio["total_asset_missing_rates"], [])
+        self.assertAlmostEqual(
+            account_balances["accounts"][0]["balance"]["currencies"][0][
+                "value_common"
+            ],
+            5_995.500018,
+        )
+
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260810-total-assets1" defer></script>',
+            '<script src="/static/app.js?v=20260810-balance-prices1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260810-total-assets1" defer></script>',
+            '<script src="/static/i18n.js?v=20260810-balance-prices1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(

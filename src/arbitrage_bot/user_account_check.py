@@ -11,6 +11,7 @@ from .user_workspace import UserApiConnection, UserExchangeAccount, UserProject
 
 DEFAULT_CHECK_TIMEOUT_SECONDS = 20.0
 DEFAULT_DISCOVERY_CACHE_SECONDS = 300.0
+BALANCE_VALUATION_QUOTES = ("USDT", "USDC", "USD", "FDUSD", "KRW")
 
 
 def _base_currency(symbol: str) -> str:
@@ -178,6 +179,92 @@ def _balance_rows(
         if any(row[field] not in {None, 0.0} for field in ("free", "used", "total")):
             rows.append(row)
     return rows
+
+
+def _ticker_price(ticker: dict[str, Any]) -> float | None:
+    for field in ("last", "close", "vwap"):
+        price = _number(ticker.get(field))
+        if price is not None and price > 0:
+            return price
+    bid = _number(ticker.get("bid"))
+    ask = _number(ticker.get("ask"))
+    if bid is not None and bid > 0 and ask is not None and ask > 0:
+        return (bid + ask) / 2
+    return bid if bid is not None and bid > 0 else ask if ask is not None and ask > 0 else None
+
+
+async def _fetch_balance_valuations(
+    client: Any,
+    markets: dict[str, Any],
+    balances: list[dict[str, Any]],
+    *,
+    timeout_seconds: float,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    fetch_tickers = getattr(client, "fetch_tickers", None)
+    if not callable(fetch_tickers):
+        return {}, []
+    currencies = {
+        str(row.get("currency") or "").upper()
+        for row in balances
+        if abs(float(row.get("total") or 0.0)) > 0
+    }
+    candidates: dict[str, tuple[str, str]] = {}
+    quote_priority = {quote: index for index, quote in enumerate(BALANCE_VALUATION_QUOTES)}
+    for market in (markets or {}).values():
+        if not isinstance(market, dict):
+            continue
+        base = str(market.get("base") or "").upper()
+        quote = str(market.get("quote") or "").upper()
+        symbol = str(market.get("symbol") or "")
+        if (
+            base not in currencies
+            or base in quote_priority
+            or quote not in quote_priority
+            or not symbol
+            or market.get("active") is False
+            or not _market_matches_type(market, "spot")
+        ):
+            continue
+        current = candidates.get(base)
+        if current is None or quote_priority[quote] < quote_priority[current[1]]:
+            candidates[base] = (symbol, quote)
+    if not candidates:
+        return {}, []
+    symbols = sorted({symbol for symbol, _quote in candidates.values()})
+    try:
+        tickers = await asyncio.wait_for(
+            fetch_tickers(symbols),
+            timeout=max(1.0, timeout_seconds),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        return {}, [f"balance valuation unavailable: {_safe_error(exc)}"]
+    if not isinstance(tickers, dict):
+        return {}, ["balance valuation unavailable: ticker response is invalid"]
+    observed_at = time.time()
+    valuations: dict[str, dict[str, Any]] = {}
+    for currency, (symbol, quote) in candidates.items():
+        ticker = tickers.get(symbol)
+        if not isinstance(ticker, dict):
+            ticker = next(
+                (
+                    row
+                    for row in tickers.values()
+                    if isinstance(row, dict) and str(row.get("symbol") or "") == symbol
+                ),
+                None,
+            )
+        price = _ticker_price(ticker) if isinstance(ticker, dict) else None
+        if price is None:
+            continue
+        valuations[currency] = {
+            "valuation_price": price,
+            "valuation_quote": quote,
+            "valuation_symbol": symbol,
+            "valuation_at": observed_at,
+        }
+    return valuations, []
 
 
 def _order_book_summary(book: Any) -> dict[str, Any]:
@@ -525,6 +612,8 @@ async def check_workspace_api_connection(
             )
             balances = _balance_rows(balance, currencies, wallet=wallet)
             warnings: list[str] = []
+            valuation_warnings: list[str] = []
+            valuations: dict[str, dict[str, Any]] = {}
             open_orders: list[dict[str, Any]] = []
             try:
                 fetched = await asyncio.wait_for(
@@ -566,6 +655,13 @@ async def check_workspace_api_connection(
                         "Bybit funding wallet unavailable: "
                         + _safe_error(exc, credentials)
                     )
+            if market_type == "spot":
+                valuations, valuation_warnings = await _fetch_balance_valuations(
+                    client,
+                    markets,
+                    balances,
+                    timeout_seconds=timeout_seconds,
+                )
             scope_results.append(
                 {
                     "market_type": market_type,
@@ -579,6 +675,8 @@ async def check_workspace_api_connection(
                     "balances": balances,
                     "open_order_count": len(open_orders),
                     "warnings": warnings,
+                    "valuations": valuations,
+                    "valuation_warnings": valuation_warnings,
                 }
             )
         except asyncio.CancelledError:
@@ -601,9 +699,13 @@ async def check_workspace_api_connection(
         }
 
     balance_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    valuations: dict[str, dict[str, Any]] = {}
     warnings = list(scope_errors)
+    valuation_warnings: list[str] = []
     for result in scope_results:
         warnings.extend(result["warnings"])
+        valuation_warnings.extend(result["valuation_warnings"])
+        valuations.update(result["valuations"])
         for row in result["balances"]:
             key = (str(row.get("currency") or ""), str(row.get("wallet") or "trading"))
             current = balance_rows.get(key)
@@ -611,6 +713,10 @@ async def check_workspace_api_connection(
                 current.get("total") or 0.0
             ):
                 balance_rows[key] = row
+    for row in balance_rows.values():
+        valuation = valuations.get(str(row.get("currency") or "").upper())
+        if valuation is not None:
+            row.update(valuation)
     return {
         "status": "healthy",
         "checked_at": time.time(),
@@ -626,6 +732,7 @@ async def check_workspace_api_connection(
         },
         "balances": list(balance_rows.values()),
         "balance_warnings": warnings,
+        "valuation_warnings": valuation_warnings,
         "open_order_count": sum(result["open_order_count"] for result in scope_results),
         "permissions": {
             "private_account_read": "verified",

@@ -3291,6 +3291,68 @@ def _sync_portfolio_with_account_balances(
         for row in (account_balances or {}).get("accounts", []) or []
         if isinstance(row, dict)
     ]
+    rates = {str(key).upper(): float(value) for key, value in (quote_rates or {}).items()}
+    quote_currency = str(payload.get("quote_currency") or "USD").upper()
+    rates.setdefault(quote_currency, 1.0)
+    for stable_currency in (
+        "USD",
+        "USDT",
+        "USDC",
+        "FDUSD",
+        "BUSD",
+        "TUSD",
+        "USDP",
+        "DAI",
+        "PYUSD",
+        "USDE",
+        "USDS",
+        "USD1",
+        "RLUSD",
+        "GUSD",
+        "FRAX",
+        "LUSD",
+    ):
+        rates.setdefault(stable_currency, 1.0)
+    dynamic_value_sums: dict[str, float] = {}
+    dynamic_amount_sums: dict[str, float] = {}
+    for account in accounts:
+        for row in account.get("balance", {}).get("currencies", []) or []:
+            if not isinstance(row, dict):
+                continue
+            currency = str(row.get("currency") or "").upper()
+            valuation_quote = str(row.get("valuation_quote") or "").upper()
+            amount = abs(_number_or_none(row.get("total")) or 0.0)
+            valuation_price = _number_or_none(row.get("valuation_price"))
+            quote_rate = rates.get(valuation_quote)
+            if (
+                currency
+                and amount > 0
+                and valuation_price is not None
+                and valuation_price > 0
+                and quote_rate is not None
+                and quote_rate > 0
+            ):
+                dynamic_value_sums[currency] = dynamic_value_sums.get(currency, 0.0) + (
+                    amount * valuation_price * quote_rate
+                )
+                dynamic_amount_sums[currency] = (
+                    dynamic_amount_sums.get(currency, 0.0) + amount
+                )
+    for currency, value_sum in dynamic_value_sums.items():
+        amount_sum = dynamic_amount_sums[currency]
+        if amount_sum > 0:
+            rates.setdefault(currency, value_sum / amount_sum)
+    for account in accounts:
+        for row in account.get("balance", {}).get("currencies", []) or []:
+            if not isinstance(row, dict):
+                continue
+            currency = str(row.get("currency") or "").upper()
+            rate = rates.get(currency)
+            amount = _number_or_none(row.get("total"))
+            if rate is not None and amount is not None:
+                row["price_common"] = rate
+                row["value_common"] = amount * rate
+
     position_assets: set[str] = set()
     position_values: list[float] = []
     position_missing_rates: list[str] = []
@@ -3300,7 +3362,7 @@ def _sync_portfolio_with_account_balances(
             continue
         position_assets.add(asset)
         position_base = totals.get(asset, float(position.get("position_base") or 0.0))
-        mark_price = _number_or_none(position.get("mark_price"))
+        mark_price = _number_or_none(position.get("mark_price")) or rates.get(asset)
         position["position_base"] = position_base
         position["position_value"] = (
             position_base * mark_price if mark_price is not None else None
@@ -3347,9 +3409,6 @@ def _sync_portfolio_with_account_balances(
     }
     old_cash = payload.get("cash_balances", {}) or {}
     old_common = payload.get("cash_balances_common", {}) or {}
-    rates = {str(key).upper(): float(value) for key, value in (quote_rates or {}).items()}
-    quote_currency = str(payload.get("quote_currency") or "USD").upper()
-    rates.setdefault(quote_currency, 1.0)
     for currency, amount in old_cash.items():
         numeric_amount = _number_or_none(amount)
         common_amount = _number_or_none(old_common.get(currency))

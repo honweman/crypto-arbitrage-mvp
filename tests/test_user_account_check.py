@@ -104,6 +104,14 @@ class FakeWorkspaceClient:
     async def fetch_open_orders(self):
         return [{"id": "open-1"}]
 
+    async def fetch_tickers(self, symbols):
+        prices = {"ACS/USDC": 0.2, "BTC/USDC": 60_000.0}
+        return {
+            symbol: {"symbol": symbol, "last": prices[symbol]}
+            for symbol in symbols
+            if symbol in prices
+        }
+
 
 class FakeBybitWorkspaceClient(FakeWorkspaceClient):
     async def fetch_balance(self, params=None):
@@ -130,6 +138,40 @@ class FakeBinanceWorkspaceManager(FakeWorkspaceManager):
         total = 25.0 if cfg.market_type == "spot" else 100.0
         return {
             "USDT": {"free": total, "used": 0.0, "total": total},
+        }
+
+
+class FakePricedWorkspaceClient(FakeWorkspaceClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.markets["BNB/USDT"] = {
+            "symbol": "BNB/USDT",
+            "base": "BNB",
+            "quote": "USDT",
+            "type": "spot",
+            "spot": True,
+            "active": True,
+        }
+
+    async def fetch_tickers(self, symbols):
+        return {
+            "BNB/USDT": {
+                "symbol": "BNB/USDT",
+                "bid": 599.0,
+                "ask": 601.0,
+            }
+        }
+
+
+class FakePricedWorkspaceManager(FakeWorkspaceManager):
+    def __init__(self, *, credentials_by_key=None) -> None:
+        super().__init__(credentials_by_key=credentials_by_key)
+        self.client_instance = FakePricedWorkspaceClient()
+
+    async def fetch_balance(self, _cfg):
+        return {
+            "BNB": {"free": 9.99, "used": 0.0, "total": 9.99},
+            "USDT": {"free": 100.0, "used": 0.0, "total": 100.0},
         }
 
 
@@ -398,6 +440,30 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             balances,
             {("USDT", "spot"): 25.0, ("USDT", "swap"): 100.0},
         )
+
+    async def test_unified_check_prices_non_stable_balances(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "Binance Main",
+                "exchange": "binance",
+                "market_types": ["spot"],
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakePricedWorkspaceManager,
+        )
+
+        bnb = next(row for row in result["balances"] if row["currency"] == "BNB")
+        self.assertEqual(bnb["valuation_price"], 600.0)
+        self.assertEqual(bnb["valuation_quote"], "USDT")
+        self.assertEqual(bnb["valuation_symbol"], "BNB/USDT")
+        self.assertEqual(result["valuation_warnings"], [])
 
     async def test_gateio_and_htx_keep_spot_and_contract_wallets_separate(self) -> None:
         for exchange in ("gateio", "htx"):

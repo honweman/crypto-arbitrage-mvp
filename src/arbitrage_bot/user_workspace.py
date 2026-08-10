@@ -102,6 +102,17 @@ def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
         wallet = str(item.get("wallet") or "trading").strip().lower()[:20]
         row["wallet"] = wallet or "trading"
         row["tradable"] = bool(item.get("tradable", True))
+        valuation_price = _optional_non_negative_float(item.get("valuation_price"))
+        valuation_quote = str(item.get("valuation_quote") or "").strip().upper()[:20]
+        if valuation_price is not None and valuation_price > 0 and valuation_quote:
+            row["valuation_price"] = valuation_price
+            row["valuation_quote"] = valuation_quote
+            row["valuation_symbol"] = str(
+                item.get("valuation_symbol") or ""
+            ).strip()[:80]
+            valuation_at = _optional_non_negative_float(item.get("valuation_at"))
+            if valuation_at is not None:
+                row["valuation_at"] = valuation_at
         rows.append(row)
     return tuple(rows)
 
