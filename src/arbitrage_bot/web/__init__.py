@@ -7621,6 +7621,13 @@ async def _sync_workspace_connection(
     saved: list[UserExchangeAccount] = []
     try:
         for project, market, binding_market_type in matches:
+            # An owned active project is the permission source for its asset.
+            # This also repairs projects created before self-service grants were
+            # introduced, without requiring an administrator migration.
+            _user_store(request).grant_asset(
+                email=user.email,
+                asset=project.asset,
+            )
             binding_symbol = str(market.get("symbol") or "").upper()
             existing = existing_by_market.get(
                 (binding_market_type, binding_symbol)
@@ -8445,6 +8452,10 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     raise PermissionError(
                         "project must be active before enabling account"
                     )
+                _user_store(request).grant_asset(
+                    email=project.owner_email,
+                    asset=project.asset,
+                )
                 _require_user_assets(user, [project.asset])
                 if not account.withdrawal_disabled_confirmed:
                     raise ValueError(
@@ -8663,6 +8674,10 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             raw["owner_email"] = owner
             raw["mode"] = "paper"
             strategy = UserStrategy.from_dict(raw)
+            _user_store(request).grant_asset(
+                email=project.owner_email,
+                asset=project.asset,
+            )
             _require_user_assets(user, [project.asset])
             if strategy.enabled:
                 readiness = store.strategy_readiness(strategy)
@@ -9692,6 +9707,21 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             _require_user_assets(user, [_base_asset_from_symbol(task_config.symbol)])
         validate_task_config(task_config)
         validate_task_exchange_config(runtime_cfg, task_config)
+        if user is not None and user.role != "admin":
+            profile = _user_workspace_store(request).risk_profile(user.email)
+            if profile.max_active_strategies > 0:
+                owner_tasks = await tasks.snapshot(
+                    owner_email=user.email,
+                    is_admin=False,
+                )
+                if (
+                    int(owner_tasks.get("active_count") or 0)
+                    >= profile.max_active_strategies
+                ):
+                    raise ValueError(
+                        "active Auto Buy/Sell task limit reached: "
+                        f"{profile.max_active_strategies}"
+                    )
         _consume_strategy_preflight(
             request,
             strategy_id="slow_execution",

@@ -198,6 +198,19 @@ def isolated_workspace_runtime_config(
         # their reduce-only preflight instead of inheriting that unrelated scope.
         allowed_symbols=[],
         blocked_symbols=[],
+        strategy_overrides={},
+        max_position_base_by_asset={},
+        max_exposure_quote_by_asset={},
+        max_order_quote=(
+            risk_profile.max_order_quote
+            if risk_profile.max_order_quote > 0
+            else cfg.risk.max_order_quote
+        ),
+        max_cycle_quote=(
+            risk_profile.max_cycle_quote
+            if risk_profile.max_cycle_quote > 0
+            else cfg.risk.max_cycle_quote
+        ),
         max_exposure_quote=(
             risk_profile.max_total_exposure_quote
             if risk_profile.max_total_exposure_quote > 0

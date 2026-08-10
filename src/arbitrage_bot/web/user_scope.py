@@ -44,8 +44,8 @@ def _configured_assets(cfg: BotConfig) -> list[str]:
 def _user_asset_scope(user: WebUser | None) -> set[str]:
     if user is None:
         return set()
-    if user.preferred_asset:
-        return {user.preferred_asset}
+    # preferred_asset is only a UI default. Authorization includes every asset
+    # the user has added through their own active projects.
     return set(user.allowed_assets)
 
 

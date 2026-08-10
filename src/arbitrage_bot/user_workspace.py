@@ -1021,6 +1021,8 @@ def account_connection_is_fresh(
 class UserRiskProfile:
     owner_email: str
     trading_enabled: bool = True
+    max_order_quote: float = 0.0
+    max_cycle_quote: float = 0.0
     max_total_exposure_quote: float = 0.0
     max_daily_loss_quote: float = 0.0
     max_open_orders: int = 0
@@ -1047,13 +1049,15 @@ class UserRiskProfile:
                 raise ValueError(f"{key} must be an integer")
             return int(value)
 
-        return cls(
+        profile = cls(
             owner_email=_clean_email(raw.get("owner_email")),
             trading_enabled=_strict_bool(
                 raw.get("trading_enabled"),
                 label="user trading enabled",
                 default=True,
             ),
+            max_order_quote=non_negative_float("max_order_quote", 0.0),
+            max_cycle_quote=non_negative_float("max_cycle_quote", 0.0),
             max_total_exposure_quote=non_negative_float(
                 "max_total_exposure_quote",
                 0.0,
@@ -1069,11 +1073,23 @@ class UserRiskProfile:
             ),
             updated_at=float(raw.get("updated_at") or _now()),
         )
+        if (
+            profile.max_order_quote > 0
+            and profile.max_cycle_quote > 0
+            and profile.max_cycle_quote < profile.max_order_quote
+        ):
+            raise ValueError(
+                "max_cycle_quote must be zero or greater than or equal to "
+                "max_order_quote"
+            )
+        return profile
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "owner_email": self.owner_email,
             "trading_enabled": self.trading_enabled,
+            "max_order_quote": self.max_order_quote,
+            "max_cycle_quote": self.max_cycle_quote,
             "max_total_exposure_quote": self.max_total_exposure_quote,
             "max_daily_loss_quote": self.max_daily_loss_quote,
             "max_open_orders": self.max_open_orders,

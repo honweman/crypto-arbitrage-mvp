@@ -480,6 +480,8 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                     {
                         "owner_email": "trader@example.com",
                         "trading_enabled": False,
+                        "max_order_quote": 50.0,
+                        "max_cycle_quote": 75.0,
                         "max_total_exposure_quote": 250.0,
                         "max_daily_loss_quote": 20.0,
                         "max_open_orders": 12,
@@ -495,6 +497,8 @@ class UserWorkspaceStoreTest(unittest.TestCase):
 
         self.assertFalse(saved.trading_enabled)
         self.assertFalse(saved.to_dict()["live_submit_allowed"])
+        self.assertEqual(saved.max_order_quote, 50.0)
+        self.assertEqual(saved.max_cycle_quote, 75.0)
         self.assertEqual(payload["risk_profile"]["max_open_orders"], 12)
         self.assertTrue(other.trading_enabled)
         self.assertTrue(other.to_dict()["live_submit_allowed"])
@@ -504,6 +508,16 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 {
                     "owner_email": "trader@example.com",
                     "max_daily_loss_quote": -1,
+                }
+            )
+
+    def test_user_risk_cycle_limit_cannot_be_lower_than_order_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_cycle_quote"):
+            UserRiskProfile.from_dict(
+                {
+                    "owner_email": "trader@example.com",
+                    "max_order_quote": 50.0,
+                    "max_cycle_quote": 25.0,
                 }
             )
 

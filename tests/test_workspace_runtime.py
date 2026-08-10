@@ -70,7 +70,11 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
             cfg = isolated_workspace_runtime_config(
                 load_config("config.acs.example.json"),
                 workspace,
-                risk_profile=store.risk_profile("owner@example.com"),
+                risk_profile=replace(
+                    store.risk_profile("owner@example.com"),
+                    max_order_quote=125.0,
+                    max_cycle_quote=250.0,
+                ),
             )
 
         self.assertEqual(len(cfg.spot_exchanges), 1)
@@ -83,6 +87,11 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
         )
         self.assertEqual(cfg.risk.allowed_symbols, [])
         self.assertEqual(cfg.risk.blocked_symbols, [])
+        self.assertEqual(cfg.risk.max_order_quote, 125.0)
+        self.assertEqual(cfg.risk.max_cycle_quote, 250.0)
+        self.assertEqual(cfg.risk.strategy_overrides, {})
+        self.assertEqual(cfg.risk.max_position_base_by_asset, {})
+        self.assertEqual(cfg.risk.max_exposure_quote_by_asset, {})
         self.assertFalse(cfg.portfolio.enabled)
         self.assertEqual(cfg.portfolio.positions, [])
         self.assertEqual(cfg.portfolio.cash_balances, {})

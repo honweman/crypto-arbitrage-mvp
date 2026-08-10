@@ -3112,7 +3112,7 @@ class WebMonitorTest(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "ACS"):
             _require_user_assets(unassigned_user, ["ACS"])
 
-    def test_state_payload_filters_to_user_asset_scope(self) -> None:
+    def test_state_payload_includes_all_allowed_assets_despite_preference(self) -> None:
         cfg = make_config(
             spot_markets=[
                 SpotMarketConfig(
@@ -3291,32 +3291,32 @@ class WebMonitorTest(unittest.TestCase):
 
         filtered = _filter_state_payload_for_user(payload, cfg=cfg, user=user)
 
-        self.assertEqual([row["asset"] for row in filtered["markets"]], ["ACS"])
+        self.assertEqual(
+            [row["asset"] for row in filtered["markets"]],
+            ["ACS", "BTC"],
+        )
         self.assertEqual(
             [row["asset"] for row in filtered["config"]["spot_markets"]],
-            ["ACS"],
+            ["ACS", "BTC"],
         )
         self.assertEqual(
             [row["asset"] for row in filtered["portfolio"]["positions"]],
-            ["ACS"],
+            ["ACS", "BTC"],
         )
-        self.assertEqual(len(filtered["opportunities"]), 1)
-        self.assertEqual(filtered["market_maker"]["status"], "out_of_scope")
-        self.assertEqual(
-            filtered["cross_exchange_rebalance"]["status"],
-            "out_of_scope",
-        )
+        self.assertEqual(len(filtered["opportunities"]), 2)
+        self.assertEqual(filtered["market_maker"]["status"], "planned")
+        self.assertEqual(filtered["cross_exchange_rebalance"]["status"], "planned")
         self.assertEqual(
             [task["id"] for task in filtered["slow_execution"]["tasks"]["tasks"]],
-            ["acs-task"],
+            ["acs-task", "btc-task"],
         )
         self.assertEqual(
             [row["id"] for row in filtered["order_activity"]["open_orders"]],
-            ["acs-order"],
+            ["acs-order", "btc-order"],
         )
         self.assertEqual(
             [row["id"] for row in filtered["order_activity"]["recent_trades"]],
-            ["acs-fill"],
+            ["acs-fill", "btc-fill"],
         )
         self.assertEqual(
             [
@@ -3325,28 +3325,32 @@ class WebMonitorTest(unittest.TestCase):
                     "currencies"
                 ]
             ],
-            ["ACS", "USDC"],
+            ["ACS", "BTC", "USDC"],
         )
         self.assertEqual(
             [row["id"] for row in filtered["trading_console"]["strategies"]],
-            ["slow_execution", "spot_spread"],
+            ["market_maker", "slow_execution", "spot_spread"],
         )
-        self.assertEqual(filtered["trading_console"]["strategies"][1]["symbol"], "ACS")
+        self.assertEqual(filtered["trading_console"]["strategies"][2]["symbol"], "ACS,BTC")
         self.assertEqual(
             [row["key"] for row in filtered["strategy_lifecycle"]["instances"]],
-            ["slow_execution:acs-task", "spot_spread:default"],
+            [
+                "slow_execution:acs-task",
+                "market_maker:btc",
+                "spot_spread:default",
+            ],
         )
         self.assertEqual(
-            filtered["strategy_lifecycle"]["instances"][1]["symbol"],
-            "ACS",
+            filtered["strategy_lifecycle"]["instances"][2]["symbol"],
+            "ACS,BTC",
         )
         self.assertEqual(
             filtered["strategy_lifecycle"]["summary"]["attention_count"],
-            0,
+            1,
         )
         self.assertEqual(filtered["auth"]["mode"], "user")
         self.assertEqual(filtered["auth"]["email"], "trader@example.com")
-        self.assertEqual(filtered["auth"]["asset_scope"], ["ACS"])
+        self.assertEqual(filtered["auth"]["asset_scope"], ["ACS", "BTC"])
 
     def test_add_security_headers_preserves_existing_values(self) -> None:
         response = web.Response()

@@ -594,7 +594,9 @@
         <summary>Advanced Risk Profile</summary>
         <div class="workspace-advanced-body">
           <form id="user-risk-profile-form" class="control-panel">
-            <label class="check-field"><input id="user-risk-trading-enabled" type="checkbox">Paper Trading Enabled</label>
+            <label class="check-field"><input id="user-risk-trading-enabled" type="checkbox">Trading Enabled</label>
+            <div class="field"><label for="user-risk-max-order">Max Order (common quote)</label><input id="user-risk-max-order" type="number" min="0" step="any"></div>
+            <div class="field"><label for="user-risk-max-cycle">Max Total / Cycle (common quote)</label><input id="user-risk-max-cycle" type="number" min="0" step="any"></div>
             <div class="field"><label for="user-risk-max-exposure">Max Total Exposure</label><input id="user-risk-max-exposure" type="number" min="0" step="any"></div>
             <div class="field"><label for="user-risk-max-loss">Max Daily Loss</label><input id="user-risk-max-loss" type="number" min="0" step="any"></div>
             <div class="field"><label for="user-risk-max-orders">Max Open Orders</label><input id="user-risk-max-orders" type="number" min="0" step="1"></div>

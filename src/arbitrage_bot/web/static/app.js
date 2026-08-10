@@ -4898,6 +4898,8 @@ function balanceStatusClass(status) {
       if (userRiskProfileDirty || userRiskProfileBusy) return;
       const profile = workspace?.risk_profile || {};
       setCheckedValue("user-risk-trading-enabled", profile.trading_enabled !== false);
+      setNumericField("user-risk-max-order", profile.max_order_quote || 0);
+      setNumericField("user-risk-max-cycle", profile.max_cycle_quote || 0);
       setNumericField("user-risk-max-exposure", profile.max_total_exposure_quote || 0);
       setNumericField("user-risk-max-loss", profile.max_daily_loss_quote || 0);
       setNumericField("user-risk-max-orders", profile.max_open_orders || 0);
@@ -4915,6 +4917,8 @@ function balanceStatusClass(status) {
           action: "update_risk_profile",
           risk_profile: {
             trading_enabled: document.getElementById("user-risk-trading-enabled").checked,
+            max_order_quote: numericValue("user-risk-max-order"),
+            max_cycle_quote: numericValue("user-risk-max-cycle"),
             max_total_exposure_quote: numericValue("user-risk-max-exposure"),
             max_daily_loss_quote: numericValue("user-risk-max-loss"),
             max_open_orders: numericValue("user-risk-max-orders"),
