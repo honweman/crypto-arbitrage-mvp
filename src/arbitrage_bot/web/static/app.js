@@ -7011,7 +7011,7 @@ function balanceStatusClass(status) {
       const body = document.getElementById(containerId);
       const list = Array.isArray(accounts) ? accounts : [];
       const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols, account.projects, account.markets]),
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols, account.projects, account.markets, account.account_source, account.market_scope, account.workspace_connection_id]),
         selectedExchange,
         selectedSymbol,
       });
@@ -7040,7 +7040,10 @@ function balanceStatusClass(status) {
       for (const account of list) {
         const option = document.createElement("option");
         option.value = account.key;
-        option.textContent = `${account.label || account.key} (${account.market_type || "spot"})`;
+        const sourceLabel = account.account_source === "user_api"
+          ? ` · ${uiText("My API")}`
+          : "";
+        option.textContent = `${account.label || account.key}${sourceLabel} (${account.market_type || "spot"})`;
         option.title = `${account.id || account.key} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
         accountSelect.appendChild(option);
       }
@@ -7062,6 +7065,19 @@ function balanceStatusClass(status) {
       symbolSelect.dataset.symbolSelector = inputName;
       symbolSelect.className = "account-select";
       symbolSelect.title = uiText("Trading pair");
+
+      const usesManualSymbol = () => {
+        const account = accountForKey(list, accountSelect.value);
+        return inputName === "slow-account"
+          && account?.market_scope === "all_supported_markets";
+      };
+
+      const syncSelectorVisibility = () => {
+        const manual = usesManualSymbol();
+        projectSelect.hidden = manual;
+        exchangeSelect.hidden = manual;
+        symbolSelect.hidden = manual;
+      };
 
       const fillProjects = (preferredProject = "") => {
         const account = accountForKey(list, accountSelect.value);
@@ -7155,6 +7171,7 @@ function balanceStatusClass(status) {
       };
 
       accountSelect.addEventListener("change", () => {
+        syncSelectorVisibility();
         fillProjects(projectSelectorValue(inputName));
         fillExchanges(accountSelect.value);
         fillSymbols("");
@@ -7182,6 +7199,7 @@ function balanceStatusClass(status) {
       fillProjects(selectedProjectForSymbol(list, selectedSymbol));
       fillExchanges(selectedExchange || accountSelect.value);
       fillSymbols(selectedSymbol || "");
+      syncSelectorVisibility();
       wrapper.appendChild(accountSelect);
       wrapper.appendChild(projectSelect);
       wrapper.appendChild(exchangeSelect);

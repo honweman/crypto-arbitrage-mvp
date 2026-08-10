@@ -500,7 +500,7 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260810-balance-prices1" defer></script>',
+            '<script src="/static/app.js?v=20260810-owner-accounts1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -2331,6 +2331,28 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(accounts[0]["markets"][0]["exchange_id"], "coinbase")
         self.assertEqual(accounts[0]["markets"][0]["symbol"], "ACS/USDC")
         self.assertEqual(accounts[0]["markets"][1]["asset"], "BTC")
+
+    def test_slow_execution_accounts_marks_unbound_owner_api_as_unrestricted(self) -> None:
+        accounts = slow_execution_accounts(
+            [
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="workspace:connection-binance:swap",
+                    display_label="Binance Main · SWAP",
+                    market_type="swap",
+                    credential_connection_id="connection-binance",
+                    credential_owner_email="trader@example.com",
+                )
+            ]
+        )
+
+        self.assertEqual(accounts[0]["account_source"], "user_api")
+        self.assertEqual(accounts[0]["market_scope"], "all_supported_markets")
+        self.assertEqual(
+            accounts[0]["workspace_connection_id"],
+            "connection-binance",
+        )
+        self.assertEqual(accounts[0]["symbols"], [])
 
     def test_strategy_universe_lists_selectable_markets(self) -> None:
         cfg = make_config(

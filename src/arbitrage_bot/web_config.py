@@ -375,18 +375,28 @@ def slow_execution_accounts(
             symbols,
             spot_markets=spot_markets,
         )
-        rows.append(
-            {
-                "key": exchange.key,
-                "label": exchange.display_label or exchange.key,
-                "id": exchange.id,
-                "market_type": exchange.market_type,
-                "symbol": symbols[0] if symbols else "",
-                "symbols": symbols,
-                "projects": sorted({row["asset"] for row in markets if row["asset"]}),
-                "markets": markets,
-            }
-        )
+        connection_id = str(exchange.credential_connection_id or "").strip()
+        row = {
+            "key": exchange.key,
+            "label": exchange.display_label or exchange.key,
+            "id": exchange.id,
+            "market_type": exchange.market_type,
+            "symbol": symbols[0] if symbols else "",
+            "symbols": symbols,
+            "projects": sorted({row["asset"] for row in markets if row["asset"]}),
+            "markets": markets,
+            "account_source": "user_api" if connection_id else "platform",
+            "market_scope": (
+                "configured_symbols"
+                if markets
+                else "all_supported_markets"
+                if connection_id
+                else "none"
+            ),
+        }
+        if connection_id:
+            row["workspace_connection_id"] = connection_id
+        rows.append(row)
     return rows
 
 
