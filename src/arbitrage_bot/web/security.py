@@ -50,6 +50,7 @@ from ..user_account_check import (
 )
 from ..user_paper_store import UserPaperTradingStore
 from ..user_workspace import UserWorkspaceStore
+from .permissions import require_resource_owner
 
 
 SESSION_COOKIE = "crypto_arb_session"
@@ -387,10 +388,7 @@ def _owner_email_from_payload(payload: dict[str, Any], user: WebUser | None) -> 
 
 
 def _require_owner_or_admin(user: WebUser | None, owner_email: str) -> None:
-    if user is None or user.role == "admin":
-        return
-    if str(owner_email or "").strip().lower() != user.email:
-        raise PermissionError("user can only manage their own strategy center records")
+    require_resource_owner(user, owner_email, admin_override=True)
 
 
 def _request_is_https(request: web.Request, cfg: BotConfig) -> bool:

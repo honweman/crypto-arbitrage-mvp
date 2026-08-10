@@ -452,11 +452,11 @@
         <span id="user-workspace-meta" class="subtle"></span>
         <span id="user-workspace-notice" class="subtle" role="status" aria-live="polite"></span>
       </div>
-      <div class="form-divider">Setup Progress</div>
+      <div class="form-divider">Account Permissions</div>
       <div id="user-setup-readiness" class="workspace-readiness" aria-live="polite"></div>
       <div class="workspace-quick-intro">
-        <strong>Quick Setup</strong>
-        <span class="subtle">Add each exchange account once, then manage its tradable currencies and pairs in one place.</span>
+        <strong>Unified Access</strong>
+        <span class="subtle">Add an API account once. Its owner can monitor and trade supported markets without separate project approval.</span>
       </div>
       <div class="workspace-step-title">
         <span class="workspace-step-number">1</span>
@@ -481,14 +481,14 @@
           <select id="user-exchange-api-variant"></select>
         </div>
         <div class="field wide-field">
-          <label for="user-exchange-assets">Tradable Currencies</label>
+          <label for="user-exchange-assets">Currency Filter (Optional)</label>
           <input id="user-exchange-assets" type="text" maxlength="160" placeholder="ACS, BTC, ETH">
         </div>
         <button id="user-exchange-load-markets" class="ghost-button" type="button">Load Trading Pairs</button>
         <div class="field wide-field">
           <label for="user-exchange-symbol">Trading Pairs</label>
           <select id="user-exchange-symbol" multiple size="6"></select>
-          <span class="field-hint">Select the spot and contract pairs this account may use. Existing pairs stay selected when editing.</span>
+          <span class="field-hint">Leave empty to allow every supported market, or select pairs to restrict this account.</span>
         </div>
         <div class="field wide-field">
           <label for="user-exchange-label">Account Name</label>
@@ -518,7 +518,7 @@
         <p id="user-exchange-egress-status" class="subtle wide-field" role="status">Single accounts may use the server default IP.</p>
         <div class="workspace-step-title workspace-step-inline wide-field">
           <span class="workspace-step-number">2</span>
-          <div><strong>Add API &amp; Sync</strong><span class="subtle">Credentials are encrypted once and shared only with this account's selected trading pairs.</span></div>
+          <div><strong>Add API &amp; Verify</strong><span class="subtle">Credentials are encrypted and belong only to the signed-in user. A read-only test verifies access.</span></div>
         </div>
         <div id="user-exchange-api-key-field" class="field">
           <label id="user-exchange-api-key-label" for="user-exchange-api-key">API Key</label>
@@ -2649,8 +2649,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260810-total-assets1" defer></script>
-  <script src="/static/app.js?v=20260810-total-assets1" defer></script>
+  <script src="/static/i18n.js?v=20260810-permissions1" defer></script>
+  <script src="/static/app.js?v=20260810-permissions1" defer></script>
 
 </body>
 </html>

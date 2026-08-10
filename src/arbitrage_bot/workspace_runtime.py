@@ -35,6 +35,39 @@ def _runtime_key(connection_id: str, market_type: str) -> str:
     return f"workspace:{connection_id}:{market_type}"
 
 
+def workspace_exchange_allowed_symbols(exchange: ExchangeConfig) -> set[str] | None:
+    """Return an explicit owner-selected symbol scope, or None for all markets."""
+
+    connection_id = str(exchange.credential_connection_id or "").strip()
+    owner_email = str(exchange.credential_owner_email or "").strip().lower()
+    store_path = str(exchange.credential_store_path or "").strip()
+    if not connection_id or not owner_email or not store_path:
+        return None
+    store = UserWorkspaceStore(
+        store_path,
+        master_key_env=exchange.credential_master_key_env,
+    )
+    active_projects = {
+        project.id
+        for project in store.list_projects(owner_email=owner_email, is_admin=False)
+        if project.status == "active"
+    }
+    bindings = [
+        account
+        for account in store.list_accounts(owner_email=owner_email, is_admin=False)
+        if account.connection_id == connection_id
+        and account.market_type == exchange.market_type
+    ]
+    if not bindings:
+        return None
+    return {
+        account.symbol.upper()
+        for account in bindings
+        if account.enabled
+        and account.project_id in active_projects
+    }
+
+
 def build_workspace_runtime_accounts(
     store: UserWorkspaceStore,
     *,

@@ -1356,7 +1356,10 @@ function balanceStatusClass(status) {
       if (mode === "user" && auth.email) emailEl.title = auth.email;
       else emailEl.title = emailEl.textContent;
       const available = auth?.available_assets || [];
-      const allowed = auth?.allowed_assets?.length ? auth.allowed_assets : available;
+      const permissionAssets = auth?.permissions?.assets;
+      const allowed = auth?.permission_model === "account_owner_v1"
+        ? (permissionAssets || [])
+        : (auth?.allowed_assets?.length ? auth.allowed_assets : available);
       const assets = [...new Set((allowed || []).filter(Boolean))].sort();
       select.innerHTML = "";
       const allOption = document.createElement("option");
@@ -4179,8 +4182,8 @@ function balanceStatusClass(status) {
       for (const connection of connections) {
         const steps = [
           Boolean(connection.credentials_configured),
-          connection.status === "healthy",
-          Boolean((connection.markets || []).length),
+          Boolean(connection.withdrawal_disabled_confirmed && connection.trade_permission_confirmed),
+          Boolean(connection.live_enabled),
         ];
         const completed = steps.filter(Boolean).length;
         const total = steps.length;
@@ -4223,9 +4226,9 @@ function balanceStatusClass(status) {
           !steps[0]
             ? "Save API credentials"
             : !steps[1]
-              ? "Test API connection"
+              ? "Confirm API safety permissions"
               : !steps[2]
-                ? "Select tradable currencies"
+                ? "Test API connection"
                 : "Account ready"
         );
         next.append(nextLabel, nextValue);
@@ -4241,8 +4244,8 @@ function balanceStatusClass(status) {
           focusWorkspaceControl(
             !steps[0]
               ? "user-exchange-api-key"
-              : !steps[2]
-                ? "user-exchange-assets"
+              : !steps[1]
+                ? "user-exchange-no-withdraw"
                 : "user-exchange-label"
           );
         });
@@ -4815,6 +4818,9 @@ function balanceStatusClass(status) {
         const visibleMarkets = marketLabels.slice(0, 3).join(" · ");
         const remainingMarkets = Math.max(0, marketLabels.length - 3);
         const marketsText = `${visibleMarkets}${remainingMarkets ? ` · +${remainingMarkets}` : ""}`;
+        const marketPermissionText = connection.market_scope === "all_supported_markets"
+          ? uiText("All supported markets")
+          : (marketsText || "--");
         const credentialText = connection.credentials_configured
           ? "Encrypted / configured"
           : "Missing";
@@ -4851,7 +4857,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td title="${escapeHtml(connection.id || "")}">${escapeHtml(connection.label || connection.id)}<br><span class="subtle">ID ${escapeHtml(String(connection.id || "").slice(-8))}${connection.runtime_keys?.length ? ` · ${escapeHtml(connection.runtime_keys.join(" / "))}` : ""}</span></td>
           <td>${escapeHtml(workspaceExchange(connection.exchange)?.label || connection.exchange)}<br><span class="subtle">${escapeHtml(`${marketScope}${variantText}`)} · ${escapeHtml(egressText)}</span></td>
-          <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketsText || "--")}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("synced markets"))}</span></td>
+          <td title="${escapeHtml(marketLabels.join(" · "))}">${escapeHtml(marketPermissionText)}<br><span class="subtle">${marketLabels.length} ${escapeHtml(uiText("selected markets"))}</span></td>
           <td class="${connection.credentials_configured ? "ok" : "missing"}">${escapeHtml(credentialText)}</td>
           <td class="${connectionClass}">${escapeHtml(uiText(statusText))}<br><span class="subtle">${escapeHtml(balanceStatus)} · ${connection.enabled_count || 0} ${escapeHtml(uiText("enabled"))}</span></td>
           <td><div class="workspace-table-actions"></div></td>

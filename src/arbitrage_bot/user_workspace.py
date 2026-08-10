@@ -817,6 +817,7 @@ def _public_api_connection_row(
     blockers = api_connection_egress_blockers(connection, peers)
     row["egress_ready"] = not blockers
     row["egress_blockers"] = blockers
+    row["connection_fresh"] = api_connection_is_fresh(connection)
     row["proxy_configured"] = "proxy_url" in (
         credential_status.get("fields") or []
     )
@@ -3956,6 +3957,7 @@ class UserWorkspaceStore:
                 "latency_ms": row.get("connection_latency_ms"),
                 "checked_at": row.get("connection_checked_at"),
                 "connection_status": row.get("connection_status") or "unverified",
+                "connection_fresh": bool(row.get("connection_fresh")),
                 "connection_error": row.get("connection_error") or "",
                 "updated_at": float(row.get("updated_at") or 0.0),
             }
@@ -4000,6 +4002,7 @@ class UserWorkspaceStore:
                     "latency_ms": row.get("connection_latency_ms"),
                     "checked_at": row.get("connection_checked_at"),
                     "connection_status": row.get("connection_status") or "unverified",
+                    "connection_fresh": bool(row.get("connection_fresh")),
                     "connection_error": row.get("connection_error") or "",
                     "updated_at": 0.0,
                 },
@@ -4044,10 +4047,22 @@ class UserWorkspaceStore:
                 if market_count and group["healthy_count"] == market_count
                 else group["connection_status"]
             )
-            group["live_enabled"] = bool(
+            group["market_scope"] = (
+                "selected_markets" if market_count else "all_supported_markets"
+            )
+            group["selected_market_count"] = market_count
+            group["permission_source"] = "account_owner"
+            group["trading_authorized"] = bool(
                 group["egress_ready"]
-                and market_count
-                and group["enabled_count"] == market_count
+                and group["credentials_configured"]
+                and group["withdrawal_disabled_confirmed"]
+                and group["trade_permission_confirmed"]
+                and group["connection_status"] == "healthy"
+                and group.get("connection_fresh")
+            )
+            group["live_enabled"] = bool(
+                group["trading_authorized"]
+                and (not market_count or group["enabled_count"] > 0)
             )
             connection_rows.append(group)
         connection_rows.sort(

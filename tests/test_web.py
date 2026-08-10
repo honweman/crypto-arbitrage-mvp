@@ -515,7 +515,11 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="user-exchange-source-ip"', INDEX_HTML)
         self.assertIn('id="user-exchange-expected-ip"', INDEX_HTML)
         self.assertIn('id="user-exchange-proxy-url"', INDEX_HTML)
-        self.assertIn('<strong>Quick Setup</strong>', INDEX_HTML)
+        self.assertIn('<strong>Unified Access</strong>', INDEX_HTML)
+        self.assertIn(
+            "without separate project approval",
+            INDEX_HTML,
+        )
         self.assertIn('<summary>Exchange Accounts</summary>', INDEX_HTML)
         self.assertIn('<summary>Project Management</summary>', INDEX_HTML)
         self.assertIn('id="profile-account"', INDEX_HTML)
@@ -8393,7 +8397,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app["self_service_project_migrations"], ["project-pending"])
             self.assertIsNotNone(migrated)
             self.assertEqual(migrated.status, "active")
-            self.assertIn("ACS", migrated_user.allowed_assets)
+            self.assertEqual(migrated_user.allowed_assets, [])
 
     async def test_user_workspace_self_service_project_and_encrypted_account_flow(
         self,
@@ -8808,9 +8812,20 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             unregistered_owner_response.status, 403, unregistered_owner_payload
         )
-        self.assertIn("only own their own funds", unregistered_owner_payload["error"])
-        self.assertIn("ACS", persisted_member.allowed_assets)
-        self.assertIn("BTC", persisted_member.allowed_assets)
+        self.assertIn(
+            "resource belongs to another user",
+            unregistered_owner_payload["error"],
+        )
+        self.assertEqual(persisted_member.allowed_assets, [])
+        self.assertEqual(settings_state["auth"]["permission_model"], "account_owner_v1")
+        self.assertEqual(
+            settings_state["auth"]["permissions"]["owner_email"],
+            member.email,
+        )
+        self.assertEqual(
+            settings_state["user_workspace"]["permissions"]["scope_source"],
+            "owned_api_connections",
+        )
         self.assertEqual(untested_enable_response.status, 400, untested_enable_payload)
         self.assertIn("connection test", untested_enable_payload["error"])
         self.assertEqual(connection_test_response.status, 200, connection_test_payload)

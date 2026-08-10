@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..config import BotConfig, CashAndCarryPair, SpotMarketConfig
+from .permissions import require_capability
 from .users import WebUser
 
 
@@ -61,8 +62,10 @@ def _user_can_access_asset(user: WebUser | None, asset: str) -> bool:
 
 
 def _require_admin_user(user: WebUser | None) -> None:
-    if user is not None and user.role != "admin":
-        raise PermissionError("admin role is required for this action")
+    try:
+        require_capability(user, "platform.manage")
+    except PermissionError as exc:
+        raise PermissionError("admin role is required for this action") from exc
 
 
 def _assets_from_spot_markets(markets: list[SpotMarketConfig]) -> list[str]:

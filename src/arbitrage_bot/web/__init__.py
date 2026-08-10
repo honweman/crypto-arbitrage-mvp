@@ -65,6 +65,11 @@ from .user_scope import (
 )
 
 from .preflight import PreflightError, collect_preflight_issues, enforce_preflight
+from .permissions import (
+    build_permission_scope,
+    require_owned_exchange,
+    require_resource_owner,
+)
 from .security import (
     LOGIN_FAILURE_WINDOW_SECONDS,
     LOGIN_LOCKOUT_SECONDS,
@@ -5418,6 +5423,13 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         )
     if workspace_payload is not None:
         payload["user_workspace"] = workspace_payload
+    permission_scope = (
+        build_permission_scope(requesting_user, workspace_payload)
+        if requesting_user is not None
+        else None
+    )
+    if workspace_payload is not None and permission_scope is not None:
+        workspace_payload["permissions"] = permission_scope
     if (
         requesting_user is not None
         and requesting_user.role == "admin"
@@ -5431,6 +5443,9 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         cfg=runtime_cfg,
         user=requesting_user,
     )
+    if permission_scope is not None:
+        filtered["auth"]["permission_model"] = permission_scope["model"]
+        filtered["auth"]["permissions"] = permission_scope
     if requesting_user is not None and requesting_user.role != "admin":
         user_runtime_cfg = _user_auto_buy_sell_runtime_config(
             request,
@@ -6184,6 +6199,8 @@ def _private_balance_free(balance: dict[str, Any], currency: str) -> float:
 async def _user_execution_preflight(
     runtime_cfg: BotConfig,
     task_config: SlowExecutionConfig,
+    *,
+    expected_owner_email: str = "",
 ) -> dict[str, Any]:
     candidate = slow_execution_config_to_dict(task_config)
     exchange = _find_exchange_by_key(runtime_cfg, task_config.exchange)
@@ -6206,7 +6223,11 @@ async def _user_execution_preflight(
             _preflight_check(
                 "owner_account",
                 "Owner account scope",
-                bool(exchange.credential_owner_email),
+                bool(exchange.credential_owner_email)
+                and (
+                    not expected_owner_email
+                    or exchange.credential_owner_email == expected_owner_email
+                ),
                 "Order uses the signed-in user's encrypted API connection",
             )
         )
@@ -6564,7 +6585,12 @@ async def api_strategy_preflight(request: web.Request) -> web.Response:
             validate_task_exchange_config(runtime_cfg, task_config)
             _require_user_owned_execution(user, task_config)
             candidate = slow_execution_config_to_dict(task_config)
-            result = await _user_execution_preflight(runtime_cfg, task_config)
+            require_owned_exchange(user, _find_exchange_by_key(runtime_cfg, task_config.exchange))
+            result = await _user_execution_preflight(
+                runtime_cfg,
+                task_config,
+                expected_owner_email=user.email,
+            )
         else:
             _require_admin_user(user)
             candidate, assets = await _preflight_candidate_from_payload(
@@ -6656,11 +6682,6 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         _require_user_owned_execution(user, candidate)
         if user is None or user.role == "admin":
             _require_user_assets(user, [_base_asset_from_symbol(target_symbol)])
-        else:
-            _user_store(request).grant_asset(
-                email=user.email,
-                asset=_base_asset_from_symbol(target_symbol),
-            )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -7255,9 +7276,6 @@ def _strategy_payload_from_request(
     raw["owner_email"] = _owner_email_from_payload(raw, user)
     strategy = StrategyInstance.from_dict(raw)
     _require_owner_or_admin(user, strategy.owner_email)
-    _require_user_assets(
-        user, [strategy.asset or _base_asset_from_symbol(strategy.symbol)]
-    )
     return strategy
 
 
@@ -7274,7 +7292,6 @@ def _api_account_payload_from_request(
     raw["owner_email"] = _owner_email_from_payload(raw, user)
     account = UserApiAccount.from_dict(raw)
     _require_owner_or_admin(user, account.owner_email)
-    _require_user_assets(user, account.asset_scope)
     return account
 
 
@@ -7295,16 +7312,12 @@ def _workspace_owner(
     existing_owner: str = "",
 ) -> str:
     owner = existing_owner or str(raw.get("owner_email") or user.email).strip().lower()
-    if owner != user.email:
-        raise PermissionError(
-            "users, including administrators, can only own their own funds"
-        )
+    require_resource_owner(user, owner)
     return owner
 
 
 def _require_workspace_owner(user: WebUser, owner_email: str) -> None:
-    if str(owner_email or "").strip().lower() != user.email:
-        raise PermissionError("this trading resource belongs to another user")
+    require_resource_owner(user, owner_email)
 
 
 def _workspace_connection_accounts(
@@ -7571,10 +7584,6 @@ async def _sync_workspace_connection(
                         }
                     )
                 )
-                _user_store(request).grant_asset(
-                    email=user.email,
-                    asset=selected_asset,
-                )
                 projects.append(project)
                 projects_by_pair[project_key] = project
             elif project.status != "active":
@@ -7635,13 +7644,6 @@ async def _sync_workspace_connection(
     saved: list[UserExchangeAccount] = []
     try:
         for project, market, binding_market_type in matches:
-            # An owned active project is the permission source for its asset.
-            # This also repairs projects created before self-service grants were
-            # introduced, without requiring an administrator migration.
-            _user_store(request).grant_asset(
-                email=user.email,
-                asset=project.asset,
-            )
             binding_symbol = str(market.get("symbol") or "").upper()
             existing = existing_by_market.get(
                 (binding_market_type, binding_symbol)
@@ -8044,11 +8046,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 else "active"
             )
             project = UserProject.from_dict(raw)
-            if project.status == "active":
-                _user_store(request).grant_asset(
-                    email=project.owner_email,
-                    asset=project.asset,
-                )
             project = store.upsert_project(project)
             connection_sync: list[dict[str, Any]] = []
             api_connections = (
@@ -8099,10 +8096,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
             _require_owner_or_admin(user, project.owner_email)
-            _user_store(request).grant_asset(
-                email=project.owner_email,
-                asset=project.asset,
-            )
             project = store.set_project_status(project.id, "active")
             audit_target = project.id
             audit_detail = f"activated user project {project.name}"
@@ -8116,10 +8109,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             project = store.get_project(project_id)
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
-            _user_store(request).admin_grant_asset(
-                email=project.owner_email,
-                asset=project.asset,
-            )
             project = store.set_project_status(project.id, "active")
             audit_target = project.id
             audit_detail = f"approved user project {project.name}"
@@ -8466,11 +8455,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     raise PermissionError(
                         "project must be active before enabling account"
                     )
-                _user_store(request).grant_asset(
-                    email=project.owner_email,
-                    asset=project.asset,
-                )
-                _require_user_assets(user, [project.asset])
                 if not account.withdrawal_disabled_confirmed:
                     raise ValueError(
                         "confirm that API withdrawal permission is disabled"
@@ -8688,11 +8672,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             raw["owner_email"] = owner
             raw["mode"] = "paper"
             strategy = UserStrategy.from_dict(raw)
-            _user_store(request).grant_asset(
-                email=project.owner_email,
-                asset=project.asset,
-            )
-            _require_user_assets(user, [project.asset])
             if strategy.enabled:
                 readiness = store.strategy_readiness(strategy)
                 if not readiness["ready"]:
@@ -8915,7 +8894,6 @@ async def api_user_backtests_post(request: web.Request) -> web.Response:
             if project is None:
                 raise ValueError(f"project not found: {project_id}")
             _require_workspace_owner(user, project.owner_email)
-            _require_user_assets(user, [project.asset])
             run = await service.create_run(
                 owner_email=project.owner_email,
                 project_id=project.id,
@@ -9055,15 +9033,6 @@ async def api_strategy_center(request: web.Request) -> web.Response:
                 label="strategy",
             )
             _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
-            _require_user_assets(
-                user,
-                [
-                    str(
-                        existing.get("asset")
-                        or _base_asset_from_symbol(str(existing.get("symbol") or ""))
-                    )
-                ],
-            )
             store_payload = store.delete_strategy(strategy_id)
             audit_action = "strategy_center_strategy_delete"
             target = strategy_id
@@ -9113,7 +9082,6 @@ async def api_strategy_center(request: web.Request) -> web.Response:
                 label="api account",
             )
             _require_owner_or_admin(user, str(existing.get("owner_email") or ""))
-            _require_user_assets(user, list(existing.get("asset_scope") or []))
             store_payload = store.delete_api_account(account_id)
             audit_action = "strategy_center_api_account_delete"
             target = account_id
@@ -9721,6 +9689,7 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
             _require_user_assets(user, [_base_asset_from_symbol(task_config.symbol)])
         validate_task_config(task_config)
         validate_task_exchange_config(runtime_cfg, task_config)
+        require_owned_exchange(user, _find_exchange_by_key(runtime_cfg, task_config.exchange))
         if user is not None and user.role != "admin":
             profile = _user_workspace_store(request).risk_profile(user.email)
             if profile.max_active_strategies > 0:
@@ -9758,11 +9727,6 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
         )
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
-    if user is not None and user.role != "admin":
-        _user_store(request).grant_asset(
-            email=user.email,
-            asset=_base_asset_from_symbol(task_config.symbol),
-        )
     if user is None or user.role == "admin":
         await state.set_slow_execution_overrides(
             {
@@ -10225,10 +10189,6 @@ def _activate_registered_pending_projects(
             continue
         if web_user_store.get_user(project.owner_email) is None:
             continue
-        web_user_store.grant_asset(
-            email=project.owner_email,
-            asset=project.asset,
-        )
         workspace_store.set_project_status(project.id, "active")
         activated.append(project.id)
     return activated

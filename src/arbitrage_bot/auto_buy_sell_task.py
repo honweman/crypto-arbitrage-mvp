@@ -18,6 +18,7 @@ from .exchanges import ExchangeManager
 from .slow_executor import build_plan, cancel_order_ids, run_cycle
 from .strategy_timeline import write_strategy_timeline_from_payload
 from .trade_log import write_trade_event
+from .workspace_runtime import workspace_exchange_allowed_symbols
 
 
 RUNNING_TASK_STATUSES = {
@@ -165,6 +166,12 @@ def validate_task_exchange_config(
     task_cfg: SlowExecutionConfig,
 ) -> None:
     exchange = _find_exchange(cfg, task_cfg.exchange)
+    allowed_symbols = workspace_exchange_allowed_symbols(exchange)
+    if allowed_symbols is not None and task_cfg.symbol.upper() not in allowed_symbols:
+        raise ValueError(
+            f"symbol is outside this account's selected trading scope: "
+            f"{task_cfg.symbol}"
+        )
     if task_cfg.instrument_type == "spot":
         if exchange.market_type != "spot":
             raise ValueError(
@@ -918,6 +925,7 @@ class AutoBuySellTaskService:
             if self._must_wait_for_next_slice(task, task_cfg, now):
                 return
 
+            validate_task_exchange_config(runtime_cfg, task_cfg)
             payload, _ = await run_cycle(
                 runtime_cfg,
                 manager,
