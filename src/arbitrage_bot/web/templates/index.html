@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260803-i18n2"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260803-all-balances1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260811-market-watch1">
 
 </head>
 <body>
@@ -64,6 +64,38 @@
       <h2>Quant Strategies</h2>
       <span class="page-mode-badge research">Paper by default</span>
     </div>
+
+    <section id="market-ticker" class="market-ticker" data-page="status" aria-label="Market Watch">
+      <div class="market-ticker-heading">
+        <div>
+          <span class="market-ticker-title">Market Watch</span>
+          <span id="market-ticker-updated" class="subtle">--</span>
+        </div>
+        <button id="market-ticker-edit" type="button" class="ghost-button market-ticker-button">Edit</button>
+      </div>
+      <div id="market-ticker-list" class="market-ticker-list" aria-live="polite">
+        <div class="market-ticker-empty subtle">Loading...</div>
+      </div>
+      <div id="market-ticker-editor" class="market-ticker-editor" hidden>
+        <div class="market-ticker-add">
+          <label>
+            <span>Market source</span>
+            <select id="market-ticker-account"></select>
+          </label>
+          <label>
+            <span>Trading pair</span>
+            <input id="market-ticker-symbol" type="text" placeholder="BTC/USDT or BTC/USDT:USDT" autocomplete="off">
+          </label>
+          <button id="market-ticker-add" type="button" class="control-button">Add</button>
+        </div>
+        <div id="market-ticker-draft" class="market-ticker-draft"></div>
+        <div class="market-ticker-actions">
+          <span id="market-ticker-feedback" class="subtle"></span>
+          <button id="market-ticker-cancel" type="button" class="ghost-button">Discard</button>
+          <button id="market-ticker-save" type="button" class="control-button">Save</button>
+        </div>
+      </div>
+    </section>
 
     <div class="portfolio-bar" data-page="status">
       <div class="metric">
@@ -2649,8 +2681,8 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260810-balance-prices1" defer></script>
-  <script src="/static/app.js?v=20260810-owner-accounts1" defer></script>
+  <script src="/static/i18n.js?v=20260811-market-watch1" defer></script>
+  <script src="/static/app.js?v=20260811-market-watch1" defer></script>
 
 </body>
 </html>

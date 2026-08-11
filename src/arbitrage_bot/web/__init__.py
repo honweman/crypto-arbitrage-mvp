@@ -37,6 +37,7 @@ from .render_payloads import (
     state_payload_for_view,
     strategy_center_payload_for_view,
 )
+from .market_tickers import MarketTickerService, MarketWatchlistStore
 from .strategy_preflight import (
     StrategyPreflightService,
     build_strategy_preflight,
@@ -2797,6 +2798,10 @@ def default_user_backtest_path(cfg: BotConfig) -> str:
     )
 
 
+def default_market_watchlist_path(cfg: BotConfig) -> str:
+    return str(Path(cfg.trade_log.path).with_name("market_watchlists.json"))
+
+
 def default_strategy_center_path(cfg: BotConfig) -> str:
     return cfg.strategy_center.path or str(
         Path(cfg.trade_log.path).with_name("strategy_center.sqlite3")
@@ -5534,6 +5539,36 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
 
 async def api_state(request: web.Request) -> web.Response:
     return web.json_response(await _state_payload_for_request(request))
+
+
+async def api_market_tickers(request: web.Request) -> web.Response:
+    user = _request_user(request)
+    owner_email = user.email if user is not None else "legacy@local"
+    service: MarketTickerService = request.app["market_ticker_service"]
+    try:
+        if request.method == "POST":
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
+            items = payload.get("items")
+            if not isinstance(items, list):
+                raise ValueError("items must be a list")
+            service.save(owner_email, items)
+            write_web_audit_event(
+                request.app["config"],
+                request,
+                action="market_watchlist_update",
+                target=owner_email,
+                detail=f"saved {len(items)} market ticker item(s)",
+                payload={"items": items},
+            )
+        result = await service.snapshot(
+            owner_email,
+            force=request.method == "POST",
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(result)
 
 
 STATE_STREAM_MIN_INTERVAL_SECONDS = 1.0
@@ -10311,6 +10346,9 @@ def create_app(
     )
     workspace_market_discovery = WorkspaceMarketDiscoveryService()
     workspace_account_checker = WorkspaceAccountCheckService()
+    market_ticker_service = MarketTickerService(
+        MarketWatchlistStore(default_market_watchlist_path(cfg))
+    )
     strategy_preflight_service = StrategyPreflightService()
     strategy_center_store = StrategyCenterStore(
         default_strategy_center_path(cfg),
@@ -10328,6 +10366,7 @@ def create_app(
     app["user_backtest_service"] = user_backtest_service
     app["workspace_market_discovery"] = workspace_market_discovery
     app["workspace_account_checker"] = workspace_account_checker
+    app["market_ticker_service"] = market_ticker_service
     app["strategy_preflight_service"] = strategy_preflight_service
     app["config_guard_tasks"] = set()
     app["strategy_center_store"] = strategy_center_store
@@ -10456,6 +10495,7 @@ def create_app(
                     await backup_task
             await user_backtest_service.close()
             await user_paper_service.close()
+            await market_ticker_service.close()
 
     app.cleanup_ctx.append(monitor_context)
 

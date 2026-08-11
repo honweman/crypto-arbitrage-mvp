@@ -830,6 +830,31 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(rows[0][4], 1.05)
 
+    async def test_fetch_tickers_batches_requested_symbols(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.symbols = None
+
+            async def fetch_tickers(self, symbols):
+                self.symbols = symbols
+                return {
+                    symbol: {"symbol": symbol, "last": index + 1.0}
+                    for index, symbol in enumerate(symbols)
+                }
+
+        cfg = ExchangeConfig(id="binance", label="binance-public")
+        client = FakeClient()
+        manager = ExchangeManager(order_journal_path="")
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        rows = await manager.fetch_tickers(
+            cfg,
+            ["BTC/USDT", "ETH/USDT", "BTC/USDT"],
+        )
+
+        self.assertEqual(client.symbols, ["BTC/USDT", "ETH/USDT"])
+        self.assertEqual(rows["ETH/USDT"]["last"], 2.0)
+
     async def test_bithumb_v2_fetch_closed_orders_paginates_requested_limit(
         self,
     ) -> None:

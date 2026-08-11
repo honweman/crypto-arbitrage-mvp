@@ -1139,6 +1139,52 @@ class ExchangeManager:
             if snapshot is not None
         }
 
+    async def fetch_tickers(
+        self,
+        cfg: ExchangeConfig,
+        symbols: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        requested = list(dict.fromkeys(str(symbol).strip() for symbol in symbols))
+        requested = [symbol for symbol in requested if symbol]
+        if not requested:
+            return {}
+        client = self.client(cfg)
+        fetch_many = getattr(client, "fetch_tickers", None)
+        try:
+            if callable(fetch_many):
+                try:
+                    raw = await fetch_many(requested)
+                except Exception:  # noqa: BLE001
+                    raw = None
+                if isinstance(raw, dict) and raw:
+                    return {
+                        str(symbol): ticker
+                        for symbol, ticker in raw.items()
+                        if isinstance(ticker, dict)
+                    }
+            fetch_one = getattr(client, "fetch_ticker", None)
+            if not callable(fetch_one):
+                return {}
+            rows = await asyncio.gather(
+                *(fetch_one(symbol) for symbol in requested),
+                return_exceptions=True,
+            )
+            return {
+                symbol: ticker
+                for symbol, ticker in zip(requested, rows)
+                if isinstance(ticker, dict)
+            }
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "failed to fetch tickers",
+                extra={
+                    "exchange": cfg.key,
+                    "symbols": requested,
+                    "error": str(exc),
+                },
+            )
+            return {}
+
     async def fetch_funding_rate(
         self,
         cfg: ExchangeConfig,

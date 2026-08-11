@@ -30,6 +30,10 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    ]);
 	    let refreshTimer = null;
 	    let mutationRefreshTimer = null;
+      let marketTickerPayload = null;
+      let marketTickerDraft = [];
+      let marketTickerLoading = false;
+      let marketTickerLoadedAt = 0;
 	    const PAGE_SECTION_IDS = {
 	      status: [
 	        "overview",
@@ -9359,6 +9363,201 @@ function balanceStatusClass(status) {
       }, delay);
     }
 
+    function formatTickerPrice(value) {
+      const price = Number(value);
+      if (!Number.isFinite(price) || price <= 0) return "--";
+      const maximumFractionDigits = price >= 1000
+        ? 2
+        : price >= 1
+          ? 4
+          : price >= 0.01
+            ? 6
+            : 10;
+      return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(price);
+    }
+
+    function renderMarketTickers(payload = marketTickerPayload) {
+      if (!payload) return;
+      marketTickerPayload = payload;
+      const list = document.getElementById("market-ticker-list");
+      const updated = document.getElementById("market-ticker-updated");
+      if (!list || !updated) return;
+      updated.textContent = payload.updated_at
+        ? `${uiText("24h")} · ${formatAge(payload.updated_at)}`
+        : "--";
+      list.innerHTML = "";
+      const rows = Array.isArray(payload.items) ? payload.items : [];
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "market-ticker-empty subtle";
+        empty.textContent = uiText("Data unavailable");
+        list.appendChild(empty);
+        return;
+      }
+      for (const row of rows) {
+        const item = document.createElement("div");
+        item.className = "market-ticker-item";
+        const percentage = Number(row.change_24h_pct);
+        const hasChange = row.change_24h_pct != null && Number.isFinite(percentage);
+        const changeClass = hasChange
+          ? percentage > 0
+            ? "positive"
+            : percentage < 0
+              ? "negative"
+              : ""
+          : "";
+        const changeText = hasChange
+          ? `${percentage > 0 ? "+" : ""}${percentage.toFixed(2)}%`
+          : "--";
+        item.innerHTML = `
+          <div class="market-ticker-symbol-row">
+            <span class="market-ticker-symbol" title="${escapeHtml(row.symbol || "")}">${escapeHtml(row.symbol || "--")}</span>
+            <span class="market-ticker-type">${escapeHtml(uiText(row.market_type === "swap" ? "Perpetual" : "Spot"))}</span>
+          </div>
+          <div class="market-ticker-price-row">
+            <span class="market-ticker-price">${escapeHtml(formatTickerPrice(row.price))}</span>
+            <span class="market-ticker-change ${changeClass}">${escapeHtml(changeText)}</span>
+          </div>
+          <div class="market-ticker-source" title="${escapeHtml(row.exchange_label || row.exchange || "")}">${escapeHtml(row.exchange_label || row.exchange || "--")}</div>
+        `;
+        list.appendChild(item);
+      }
+    }
+
+    function renderMarketTickerEditor() {
+      const accountSelect = document.getElementById("market-ticker-account");
+      const draft = document.getElementById("market-ticker-draft");
+      if (!accountSelect || !draft || !marketTickerPayload) return;
+      const accounts = Array.isArray(marketTickerPayload.accounts)
+        ? marketTickerPayload.accounts
+        : [];
+      const previousAccount = accountSelect.value;
+      accountSelect.innerHTML = "";
+      for (const account of accounts) {
+        const option = document.createElement("option");
+        option.value = account.key;
+        option.textContent = `${account.label} · ${uiText(account.market_type === "swap" ? "Perpetual" : "Spot")}`;
+        accountSelect.appendChild(option);
+      }
+      if (accounts.some((account) => account.key === previousAccount)) {
+        accountSelect.value = previousAccount;
+      }
+      draft.innerHTML = "";
+      for (const [index, row] of marketTickerDraft.entries()) {
+        const account = accounts.find((candidate) => candidate.key === row.exchange);
+        const item = document.createElement("span");
+        item.className = "market-ticker-draft-item";
+        const label = document.createElement("span");
+        label.textContent = `${row.symbol} · ${account?.label || row.exchange}`;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "market-ticker-remove";
+        remove.title = uiText("Remove");
+        remove.setAttribute("aria-label", uiText("Remove"));
+        remove.textContent = "×";
+        remove.addEventListener("click", () => {
+          marketTickerDraft.splice(index, 1);
+          renderMarketTickerEditor();
+        });
+        item.append(label, remove);
+        draft.appendChild(item);
+      }
+    }
+
+    function openMarketTickerEditor() {
+      if (!marketTickerPayload) return;
+      marketTickerDraft = (marketTickerPayload.watchlist || []).map((row) => ({ ...row }));
+      document.getElementById("market-ticker-editor").hidden = false;
+      document.getElementById("market-ticker-feedback").textContent = "";
+      renderMarketTickerEditor();
+    }
+
+    function closeMarketTickerEditor() {
+      document.getElementById("market-ticker-editor").hidden = true;
+      document.getElementById("market-ticker-feedback").textContent = "";
+    }
+
+    function addMarketTickerDraftItem() {
+      const accountSelect = document.getElementById("market-ticker-account");
+      const symbolInput = document.getElementById("market-ticker-symbol");
+      const feedback = document.getElementById("market-ticker-feedback");
+      let symbol = symbolInput.value.trim().toUpperCase().replaceAll(" ", "");
+      const account = (marketTickerPayload?.accounts || []).find(
+        (row) => row.key === accountSelect.value,
+      );
+      if (account?.market_type === "swap" && symbol.includes("/") && !symbol.includes(":")) {
+        symbol = `${symbol}:${symbol.split("/", 2)[1]}`;
+      }
+      if (!account || !/^[A-Z0-9._-]+\/[A-Z0-9._-]+(?::[A-Z0-9._-]+)?$/.test(symbol)) {
+        feedback.textContent = uiText("Use BASE/QUOTE or BASE/QUOTE:SETTLE format");
+        return;
+      }
+      if (marketTickerDraft.some((row) => row.exchange === account.key && row.symbol === symbol)) {
+        feedback.textContent = uiText("Market already added");
+        return;
+      }
+      if (marketTickerDraft.length >= 20) {
+        feedback.textContent = uiText("Maximum 20 markets");
+        return;
+      }
+      marketTickerDraft.push({ exchange: account.key, symbol });
+      symbolInput.value = "";
+      feedback.textContent = "";
+      renderMarketTickerEditor();
+    }
+
+    async function saveMarketTickerWatchlist() {
+      const feedback = document.getElementById("market-ticker-feedback");
+      const save = document.getElementById("market-ticker-save");
+      if (!marketTickerDraft.length) {
+        feedback.textContent = uiText("Add at least one market");
+        return;
+      }
+      save.disabled = true;
+      feedback.textContent = uiText("Saving");
+      try {
+        const response = await fetchWithTimeout("/api/market-tickers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: marketTickerDraft }),
+        }, 15000);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "watchlist save failed");
+        marketTickerLoadedAt = Date.now();
+        renderMarketTickers(payload);
+        closeMarketTickerEditor();
+      } catch (error) {
+        feedback.textContent = error.message || String(error);
+      } finally {
+        save.disabled = false;
+      }
+    }
+
+    async function loadMarketTickers(force = false) {
+      if (currentPage !== "status" || marketTickerLoading) return;
+      if (!force && marketTickerPayload && Date.now() - marketTickerLoadedAt < 8000) {
+        renderMarketTickers(marketTickerPayload);
+        return;
+      }
+      marketTickerLoading = true;
+      try {
+        const response = await fetchWithTimeout(
+          "/api/market-tickers",
+          { cache: "no-store" },
+          15000,
+        );
+        if (!response.ok) throw new Error(`market ticker request failed (${response.status})`);
+        const payload = await response.json();
+        marketTickerLoadedAt = Date.now();
+        renderMarketTickers(payload);
+      } catch (error) {
+        const updated = document.getElementById("market-ticker-updated");
+        if (updated) updated.textContent = uiText("Data unavailable");
+      } finally {
+        marketTickerLoading = false;
+      }
+    }
+
     function renderCommonState(data) {
       setHeaderStatus(data.status || "starting");
       renderAuthProfile(data.auth);
@@ -9518,6 +9717,7 @@ function balanceStatusClass(status) {
         finishVisiblePageRender();
         return;
       }
+      loadMarketTickers();
       renderOpenSection("readiness-actions", () => renderReadiness(data.readiness, data.runtime_store));
       renderOpenSection("markets", () => renderMarkets(data.markets));
       renderOpenSection("account-balances", () => renderAccountBalances(data.account_balances));
@@ -9883,6 +10083,10 @@ function balanceStatusClass(status) {
       }
       applyMobileTableLabels();
       updateCoreFormStates();
+      renderMarketTickers();
+      if (!document.getElementById("market-ticker-editor").hidden) {
+        renderMarketTickerEditor();
+      }
     });
     window.addEventListener("crypto-arb-theme-change", () => {
       if (currentUserBacktests) renderUserBacktests(currentUserBacktests);
@@ -9959,6 +10163,15 @@ function balanceStatusClass(status) {
       "click",
       () => openSettingsSection("risk-section"),
     );
+    document.getElementById("market-ticker-edit").addEventListener("click", openMarketTickerEditor);
+    document.getElementById("market-ticker-cancel").addEventListener("click", closeMarketTickerEditor);
+    document.getElementById("market-ticker-add").addEventListener("click", addMarketTickerDraftItem);
+    document.getElementById("market-ticker-save").addEventListener("click", saveMarketTickerWatchlist);
+    document.getElementById("market-ticker-symbol").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      addMarketTickerDraftItem();
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         clearRefreshTimer();

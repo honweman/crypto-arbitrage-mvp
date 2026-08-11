@@ -23,6 +23,7 @@ def register_routes(app: web.Application) -> None:
         api_dca,
         api_execution_algo,
         api_market_maker,
+        api_market_tickers,
         api_markets,
         api_profile,
         api_risk,
@@ -67,6 +68,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_static("/static/", STATIC_DIR, name="static", append_version=True)
     app.router.add_get("/api/state", api_state)
     app.router.add_get("/api/state/stream", api_state_stream)
+    app.router.add_get("/api/market-tickers", api_market_tickers)
+    app.router.add_post("/api/market-tickers", api_market_tickers)
     app.router.add_post("/api/profile", api_profile)
     app.router.add_post("/api/account", api_account)
     app.router.add_post("/api/control", api_control)
