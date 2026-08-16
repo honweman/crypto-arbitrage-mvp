@@ -681,7 +681,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260803-i18n2"),
-            INDEX_HTML.index("/static/styles.css?v=20260811-market-watch1"),
+            INDEX_HTML.index("/static/styles.css?v=20260816-wide-layout2"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -788,7 +788,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260811-market-watch1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260816-wide-layout2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
