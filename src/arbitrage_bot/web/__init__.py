@@ -6548,10 +6548,11 @@ async def _user_execution_preflight(
                     )
                 )
             else:
+                leverage_limit = runtime_cfg.risk.max_derivative_leverage
                 leverage_ready = (
-                    runtime_cfg.risk.max_derivative_leverage > 0
+                    leverage_limit > 0
                     and task_config.leverage
-                    <= runtime_cfg.risk.max_derivative_leverage + 1e-9
+                    <= leverage_limit + 1e-9
                 )
                 projected_quote = current_quote + target_quote
                 position_limit_ready = (
@@ -6567,8 +6568,11 @@ async def _user_execution_preflight(
                         "Leverage limit",
                         leverage_ready,
                         (
-                            f"Requested {task_config.leverage:.12g}x; maximum "
-                            f"{runtime_cfg.risk.max_derivative_leverage:.12g}x"
+                            "Perpetual opening is disabled: set Risk Controls > "
+                            f"Max Leverage to at least {task_config.leverage:.12g}x"
+                            if leverage_limit <= 0
+                            else f"Requested {task_config.leverage:.12g}x; maximum "
+                            f"{leverage_limit:.12g}x"
                         ),
                     )
                 )

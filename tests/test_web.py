@@ -500,11 +500,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260811-market-watch1" defer></script>',
+            '<script src="/static/app.js?v=20260818-leverage-guard1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260811-market-watch1" defer></script>',
+            '<script src="/static/i18n.js?v=20260818-leverage-guard1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -4861,6 +4861,64 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ready"], result["blockers"])
         manager.fetch_positions.assert_awaited_once()
         manager.prepare_linear_contract_order.assert_awaited_once()
+        manager.close.assert_awaited_once()
+
+    async def test_owner_perpetual_preflight_explains_disabled_leverage_cap(self) -> None:
+        cfg = make_config(
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="binanceusdm",
+                    label="owner-swap",
+                    market_type="swap",
+                    credential_owner_email="trader@example.com",
+                )
+            ],
+            risk=RiskConfig(
+                allow_live_trading=True,
+                max_order_quote=50.0,
+                max_cycle_quote=50.0,
+                max_derivative_leverage=0.0,
+            ),
+            quote_rates={"USD": 1.0, "USDT": 1.0},
+        )
+        task = SlowExecutionConfig(
+            enabled=True,
+            exchange="owner-swap",
+            symbol="BTC/USDT:USDT",
+            side="sell",
+            total_quote=20.0,
+            slice_base_min=0.001,
+            slice_base_max=0.001,
+            interval_seconds=10.0,
+            instrument_type="perpetual",
+            position_effect="open",
+            position_side="short",
+            margin_mode="cross",
+            leverage=3.0,
+            max_position_quote=100.0,
+        )
+        manager = AsyncMock()
+        manager.fetch_market_info.return_value = {"active": True, "swap": True}
+        manager.fetch_order_book.return_value = OrderBookSnapshot(
+            exchange="owner-swap",
+            symbol="BTC/USDT:USDT",
+            bids=[BookLevel(price=9_990.0, amount=2.0)],
+            asks=[BookLevel(price=10_000.0, amount=2.0)],
+        )
+        manager.fetch_positions.return_value = []
+        manager.fetch_open_orders.return_value = []
+
+        with patch("arbitrage_bot.web.ExchangeManager", return_value=manager):
+            result = await _user_execution_preflight(cfg, task)
+
+        self.assertFalse(result["ready"])
+        self.assertTrue(
+            any(
+                "set Risk Controls > Max Leverage to at least 3x" in blocker
+                for blocker in result["blockers"]
+            ),
+            result["blockers"],
+        )
         manager.close.assert_awaited_once()
 
     async def test_market_maker_cycle_finishes_before_shutdown(self) -> None:

@@ -443,6 +443,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function markSlowFormDirty() {
       slowFormDirty = true;
       updateCoreFormStates();
+      updateSlowLeverageHint();
       renderSlowExecutionWorkflow(lastState?.slow_execution);
     }
 
@@ -629,6 +630,51 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         accountsReady,
         detail,
       };
+    }
+
+    function slowDerivativeRiskReadiness(payload) {
+      if (payload.instrument_type !== "perpetual" || payload.position_effect !== "open") {
+        return {
+          ready: true,
+          detail: uiText("Reduce Only is not blocked by the opening leverage limit."),
+          limit: Number(lastState?.operations?.risk?.max_derivative_leverage
+            ?? lastState?.config?.risk?.max_derivative_leverage
+            ?? 0),
+        };
+      }
+      const risk = lastState?.operations?.risk || lastState?.config?.risk || {};
+      const limit = Number(risk.max_derivative_leverage || 0);
+      const requested = Number(payload.leverage || 0);
+      if (!(limit > 0)) {
+        return {
+          ready: false,
+          limit,
+          detail: `${uiText("Perpetual opening is disabled. Set Risk Controls > Max Leverage to at least")} ${fmt.format(requested || 1)}x`,
+        };
+      }
+      if (!(requested > 0) || requested > limit + 1e-9) {
+        return {
+          ready: false,
+          limit,
+          detail: `${uiText("Requested leverage exceeds the global risk maximum")}: ${fmt.format(requested)}x > ${fmt.format(limit)}x`,
+        };
+      }
+      return {
+        ready: true,
+        limit,
+        detail: `${uiText("Global risk maximum leverage")}: ${fmt.format(limit)}x`,
+      };
+    }
+
+    function updateSlowLeverageHint() {
+      const hint = document.getElementById("slow-leverage-hint");
+      const input = document.getElementById("slow-leverage");
+      if (!hint || !input) return;
+      const check = slowDerivativeRiskReadiness(slowExecutionPayloadFromForm());
+      hint.textContent = check.detail;
+      hint.classList.toggle("risk-warning", !check.ready);
+      if (check.limit > 0) input.max = String(check.limit);
+      else input.removeAttribute("max");
     }
 
     async function runStrategyPreflight(strategyId, candidate) {
@@ -7909,6 +7955,7 @@ function balanceStatusClass(status) {
         if (sliceMode) sliceMode.disabled = false;
       }
       updateSlowLabels();
+      updateSlowLeverageHint();
     }
 
     function renderSlowExecutionAccounts(accounts, selectedExchange, selectedSymbol) {
@@ -8081,6 +8128,7 @@ function balanceStatusClass(status) {
       const payload = slowExecutionPayloadFromForm();
       const parameters = slowExecutionFormReadiness(payload);
       const risk = coreLiveRiskReadiness("slow_execution", [payload.exchange]);
+      const derivativeRisk = slowDerivativeRiskReadiness(payload);
       const tasks = data.tasks?.tasks || [];
       const activeTasks = tasks.filter((task) => !AUTO_TERMINAL_STATUSES.has(task.status || ""));
       const routeTasks = activeTasks.filter((task) => {
@@ -8093,7 +8141,8 @@ function balanceStatusClass(status) {
         account: payload.exchange,
         symbol: payload.symbol,
       });
-      const readyToStart = parameters.ready && risk.ready;
+      const riskReady = risk.ready && derivativeRisk.ready;
+      const readyToStart = parameters.ready && riskReady;
       renderStrategyWorkflow("slow-workflow", [
         {
           title: "Parameters",
@@ -8103,9 +8152,9 @@ function balanceStatusClass(status) {
         },
         {
           title: "Risk Check",
-          state: risk.ready ? "ready" : "blocked",
-          label: risk.ready ? "Ready" : "Blocked",
-          detail: risk.detail,
+          state: riskReady ? "ready" : "blocked",
+          label: riskReady ? "Ready" : "Blocked",
+          detail: risk.ready ? derivativeRisk.detail : risk.detail,
         },
         lifecycleWorkflowStep(lifecycle, {
           title: "Task State",
@@ -8119,9 +8168,10 @@ function balanceStatusClass(status) {
       const createButton = document.getElementById("slow-create-task");
       const riskButton = document.getElementById("slow-open-risk");
       if (createButton) {
-        createButton.disabled = slowFormBusy || !parameters.ready || !risk.ready;
+        createButton.disabled = slowFormBusy || !parameters.ready || !riskReady;
       }
-      if (riskButton) riskButton.hidden = risk.ready;
+      if (riskButton) riskButton.hidden = riskReady;
+      updateSlowLeverageHint();
     }
 
     function slowExecutionConfirmationDetail(payload) {
@@ -9153,10 +9203,13 @@ function balanceStatusClass(status) {
       };
       const parameters = slowExecutionFormReadiness(payload);
       const risk = coreLiveRiskReadiness("slow_execution", [payload.exchange]);
-      if (!parameters.ready || !risk.ready) {
+      const derivativeRisk = slowDerivativeRiskReadiness(payload);
+      if (!parameters.ready || !risk.ready || !derivativeRisk.ready) {
         setStrategyFeedback(
           "slow-feedback",
-          parameters.ready ? risk.detail : parameters.detail,
+          parameters.ready
+            ? (risk.ready ? derivativeRisk.detail : risk.detail)
+            : parameters.detail,
           "error",
         );
         renderSlowExecutionWorkflow(lastState?.slow_execution);
@@ -10056,6 +10109,7 @@ function balanceStatusClass(status) {
     );
     window.addEventListener("crypto-arb-language-change", () => {
       updateSlowLabels();
+      updateSlowLeverageHint();
       updateRebalanceUnitLabels();
       setRebalanceFeedback(rebalanceFeedbackMessage, rebalanceFeedbackLevel);
       renderRebalanceReadiness(lastState?.cross_exchange_rebalance);
