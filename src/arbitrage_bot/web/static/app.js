@@ -2262,7 +2262,7 @@ function balanceStatusClass(status) {
         items.push(["MM", mmReason || `${mmRuntime.problem_instance_count} instance(s) need attention`]);
       }
       const autoTasks = data.slow_execution?.tasks?.tasks || [];
-      const autoProblem = autoTasks.find((task) => ["error", "blocked_by_risk", "waiting_for_start_price"].includes(task.status || ""));
+      const autoProblem = autoTasks.find((task) => ["error", "blocked_by_risk"].includes(task.status || ""));
       if (autoProblem) {
         items.push(["Auto", `${autoProblem.status || "--"} · ${autoTaskLastOrderText(autoProblem, autoProblem.config || {})}`]);
       }
@@ -6138,11 +6138,32 @@ function balanceStatusClass(status) {
     function autoTaskLastOrderText(task, config) {
       const order = task.last_plan?.order || null;
       const riskReasons = task.last_risk?.reasons || [];
-      if (!order) return riskReasons[0] || task.last_status || "--";
+      if (!order) {
+        return autoTaskStartGateStatus(task, config)
+          || riskReasons[0]
+          || task.last_error
+          || task.last_status
+          || "--";
+      }
       const side = String(order.side || config.side || "").toUpperCase();
       const amount = formatSymbolQuantity(order.amount, config.symbol, "base");
       const price = order.price == null ? "--" : fmt.format(order.price);
       return `${side} ${amount} @ ${price}`;
+    }
+
+    function autoTaskStartGateStatus(task, config) {
+      const plan = task.last_plan || {};
+      if (plan.status !== "waiting_for_start_price") return "";
+      const trigger = Number(plan.trigger_price);
+      const start = Number(config.start_price ?? plan.start_price);
+      if (!(trigger > 0) || !(start > 0)) return uiText("Waiting for start price");
+      const sell = String(config.side || plan.side || "").toLowerCase() === "sell";
+      const priceLabel = uiText(sell ? "Best bid" : "Best ask");
+      const comparison = sell ? "<" : ">";
+      const gap = Math.abs(start - trigger);
+      const gapBps = gap / start * 10_000;
+      const quote = quoteCurrency(config.symbol);
+      return `${uiText("Waiting for start price")}: ${priceLabel} ${fmt.format(trigger)} ${comparison} ${uiText("Start price")} ${fmt.format(start)} · ${uiText("Gap")} ${fmt.format(gap)} ${quote} (${gapBps.toFixed(2)} bps)`;
     }
 
     function autoTaskDetailTitle(task) {
@@ -6160,6 +6181,8 @@ function balanceStatusClass(status) {
         autoStopGateText(config),
       ];
       if (lastPlan.trigger_price != null) parts.push(`trigger: ${fmt.format(lastPlan.trigger_price)}`);
+      const gateStatus = autoTaskStartGateStatus(task, config);
+      if (gateStatus) parts.push(gateStatus);
       if (lastOrderId) parts.push(`last order: ${lastOrderId}`);
       for (const reason of task.last_risk?.reasons || []) {
         parts.push(`risk: ${reason}`);

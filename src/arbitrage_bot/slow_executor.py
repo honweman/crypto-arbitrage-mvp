@@ -611,6 +611,16 @@ async def run_cycle(
         or plan.status != "waiting_for_start_price",
         "next_submitted_quote": next_submitted_quote,
     }
+    if plan.status == "waiting_for_start_price":
+        price_label = "best bid" if plan.side == "sell" else "best ask"
+        comparison = "<" if plan.side == "sell" else ">"
+        gap = abs(plan.start_price - plan.trigger_price)
+        gap_bps = gap / plan.start_price * 10_000 if plan.start_price > 0 else 0.0
+        payload["reason"] = (
+            f"waiting for start price: {price_label} {plan.trigger_price:.12g} "
+            f"{comparison} start {plan.start_price:.12g}; "
+            f"gap {gap:.12g} ({gap_bps:.2f} bps)"
+        )
     conversion = _quote_conversion(cfg, plan.symbol)
     payload["quote_conversion"] = conversion
     quote_rate = conversion.get("quote_to_common_rate")
@@ -706,6 +716,12 @@ async def run_cycle(
         payload["risk"],
         perpetual_protection,
     )
+    if plan.status == "waiting_for_start_price":
+        payload["risk"]["warnings"] = [
+            warning
+            for warning in payload["risk"].get("warnings", [])
+            if warning != "no orders to evaluate"
+        ]
     payload["risk"]["currency"] = cfg.common_quote_currency
     payload["risk"]["quote_conversion"] = conversion
     if quote_rate is None:

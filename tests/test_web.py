@@ -500,11 +500,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260818-leverage-guard1" defer></script>',
+            '<script src="/static/app.js?v=20260818-start-gate1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260818-leverage-guard1" defer></script>',
+            '<script src="/static/i18n.js?v=20260818-start-gate1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(

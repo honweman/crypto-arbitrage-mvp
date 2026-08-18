@@ -17,6 +17,50 @@ from arbitrage_bot.slow_executor import run_cycle
 
 
 class SlowExecutorLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_waiting_start_price_explains_exact_sell_gate(self) -> None:
+        class FakeManager:
+            async def fetch_order_book(
+                self,
+                *_: object,
+                **__: object,
+            ) -> OrderBookSnapshot:
+                return OrderBookSnapshot(
+                    exchange="binance-perp",
+                    symbol="PIEVERSE/USDT:USDT",
+                    bids=[BookLevel(price=0.97985, amount=10_000.0)],
+                    asks=[BookLevel(price=0.97995, amount=10_000.0)],
+                )
+
+        payload, submitted_base = await run_cycle(
+            self._cfg(
+                slow_execution=SlowExecutionConfig(
+                    enabled=True,
+                    exchange="binance-perp",
+                    symbol="PIEVERSE/USDT:USDT",
+                    side="sell",
+                    total_base=100_000.0,
+                    slice_base_min=200.0,
+                    slice_base_max=300.0,
+                    start_price=0.98,
+                    stop_price=0.9,
+                ),
+                spot_exchanges=[
+                    ExchangeConfig(id="binance", label="binance-perp")
+                ],
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+            submitted_base=0.0,
+            live=False,
+            replace_existing=False,
+        )
+
+        self.assertEqual(payload["status"], "waiting_for_start_price")
+        self.assertEqual(payload["plan"]["trigger_price"], 0.97985)
+        self.assertIn("best bid 0.97985 < start 0.98", payload["reason"])
+        self.assertIn("gap 0.00015", payload["reason"])
+        self.assertNotIn("no orders to evaluate", payload["risk"]["warnings"])
+        self.assertEqual(submitted_base, 0.0)
+
     async def test_live_cycle_blocked_by_risk_does_not_advance_submitted_base(
         self,
     ) -> None:
