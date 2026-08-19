@@ -563,8 +563,12 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertTrue(features.batch_cancel)
         self.assertEqual(errors, [])
 
-    def test_gateio_and_htx_limit_order_features_allow_guarded_orders(self) -> None:
-        for exchange_id, client_ids in (("gateio", True), ("htx", False)):
+    def test_new_cex_limit_order_features_allow_guarded_orders(self) -> None:
+        for exchange_id, client_ids in (
+            ("gateio", True),
+            ("htx", False),
+            ("mexc", True),
+        ):
             with self.subTest(exchange=exchange_id):
                 cfg = ExchangeConfig(
                     id=exchange_id,
@@ -581,6 +585,14 @@ class ExchangeProxyConfigTest(unittest.TestCase):
                 self.assertFalse(features.batch_create)
                 self.assertFalse(features.batch_cancel)
                 self.assertEqual(errors, [])
+
+    def test_mexc_external_order_id_is_recoverable(self) -> None:
+        self.assertEqual(
+            ExchangeManager._raw_client_order_id(  # noqa: SLF001
+                {"info": {"externalOid": "crypto-arb-mm-mexc-1"}}
+            ),
+            "crypto-arb-mm-mexc-1",
+        )
 
     def test_gateio_client_order_id_is_prefixed_and_bounded(self) -> None:
         cfg = ExchangeConfig(id="gateio", label="gateio-swap", market_type="swap")
@@ -599,7 +611,7 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
-    async def test_gateio_and_htx_prepare_stable_linear_contract_orders(self) -> None:
+    async def test_new_cex_prepare_stable_linear_contract_orders(self) -> None:
         class FakeClient:
             async def load_markets(self) -> dict[str, object]:
                 return {
@@ -626,7 +638,7 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
             def price_to_precision(self, _: str, price: float) -> str:
                 return f"{price:.1f}"
 
-        for exchange_id in ("gateio", "htx"):
+        for exchange_id in ("gateio", "htx", "mexc"):
             with self.subTest(exchange=exchange_id):
                 cfg = ExchangeConfig(
                     id=exchange_id,
@@ -648,7 +660,7 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(prepared["contracts"], 12.0)
                 self.assertAlmostEqual(prepared["base_amount"], 0.012)
 
-    async def test_gateio_and_htx_configure_margin_mode_through_leverage(self) -> None:
+    async def test_new_cex_configure_margin_mode_through_leverage(self) -> None:
         class FakeClient:
             has = {"setMarginMode": False, "setLeverage": True}
 
@@ -659,7 +671,7 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 self.leverage_args = args
                 return {"configured": True}
 
-        for exchange_id in ("gateio", "htx"):
+        for exchange_id in ("gateio", "htx", "mexc"):
             with self.subTest(exchange=exchange_id):
                 cfg = ExchangeConfig(
                     id=exchange_id,

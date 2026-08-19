@@ -458,7 +458,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 exchange_catalog["aster"]["default_variant"],
                 "v3",
             )
-            for exchange_id in ("gateio", "htx"):
+            for exchange_id in ("gateio", "htx", "mexc"):
                 self.assertEqual(
                     exchange_catalog[exchange_id]["market_types"],
                     ["spot", "swap"],

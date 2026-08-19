@@ -193,6 +193,14 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "variants": [{"id": "default", "label": "Default"}],
     },
     {
+        "id": "mexc",
+        "label": "MEXC",
+        "market_types": ["spot", "swap"],
+        "required_credentials": ["api_key", "secret"],
+        "default_variant": "default",
+        "variants": [{"id": "default", "label": "Default"}],
+    },
+    {
         "id": "hyperliquid",
         "label": "Hyperliquid",
         "market_types": ["spot", "swap"],

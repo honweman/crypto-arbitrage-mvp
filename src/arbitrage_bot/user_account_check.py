@@ -38,7 +38,7 @@ def workspace_exchange_config(
     variant = str(api_variant or "default").strip().lower()
     options: dict[str, Any] = {}
 
-    if exchange_id in {"binance", "bybit", "gateio", "htx"}:
+    if exchange_id in {"binance", "bybit", "gateio", "htx", "mexc"}:
         options["defaultType"] = market
     if exchange_id == "htx" and market == "swap":
         options["defaultSubType"] = "linear"
@@ -601,12 +601,12 @@ async def check_workspace_api_connection(
                 if isinstance(value, dict)
                 and any(name in value for name in ("free", "used", "total"))
             )
-            # Binance keeps spot and USD-M futures in separate wallets.  Keeping
-            # both as a generic "trading" wallet would make the later merge drop
-            # one side whenever the same currency exists in both scopes.
+            # These exchanges keep spot and contract balances in separate wallets.
+            # A generic "trading" label would make the later merge drop one side
+            # whenever the same currency exists in both scopes.
             wallet = (
                 market_type
-                if api_connection.exchange in {"binance", "gateio", "htx"}
+                if api_connection.exchange in {"binance", "gateio", "htx", "mexc"}
                 and len(market_types) > 1
                 else "trading"
             )

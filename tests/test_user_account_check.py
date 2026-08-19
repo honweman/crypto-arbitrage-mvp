@@ -227,6 +227,12 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             api_variant="default",
             runtime_key="account-htx",
         )
+        mexc = workspace_exchange_config(
+            exchange="mexc",
+            market_type="swap",
+            api_variant="default",
+            runtime_key="account-mexc",
+        )
 
         self.assertEqual(upbit.options["hostname"], "id-api.upbit.com")
         self.assertEqual(bithumb.options["private_api"], "v2.0")
@@ -237,6 +243,8 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(htx.id, "htx")
         self.assertEqual(htx.options["defaultType"], "swap")
         self.assertEqual(htx.options["defaultSubType"], "linear")
+        self.assertEqual(mexc.id, "mexc")
+        self.assertEqual(mexc.options["defaultType"], "swap")
         self.assertEqual(
             hyperliquid_testnet.options["hostname"],
             "hyperliquid-testnet.xyz",
@@ -465,8 +473,10 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bnb["valuation_symbol"], "BNB/USDT")
         self.assertEqual(result["valuation_warnings"], [])
 
-    async def test_gateio_and_htx_keep_spot_and_contract_wallets_separate(self) -> None:
-        for exchange in ("gateio", "htx"):
+    async def test_multi_market_exchanges_keep_spot_and_contract_wallets_separate(
+        self,
+    ) -> None:
+        for exchange in ("gateio", "htx", "mexc"):
             with self.subTest(exchange=exchange):
                 FakeWorkspaceManager.instances.clear()
                 connection = UserApiConnection.from_dict(

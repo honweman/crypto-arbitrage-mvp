@@ -183,8 +183,8 @@ def validate_task_exchange_config(
         or exchange.market_type != "swap"
     ):
         raise ValueError(
-            "perpetual Auto Buy/Sell supports Binance USDM, Bybit, Gate.io, and "
-            "HTX stablecoin linear swap accounts only"
+            "perpetual Auto Buy/Sell supports Binance USDM, Bybit, Gate.io, HTX, "
+            "and MEXC stablecoin linear swap accounts only"
         )
 
 

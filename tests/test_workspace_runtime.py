@@ -173,7 +173,7 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
 
         self.assertFalse(runtime_cfg.risk.account_enabled[runtime_key])
 
-    def test_gateio_and_htx_bindings_feed_all_core_spot_strategies(self) -> None:
+    def test_new_cex_bindings_feed_all_core_spot_strategies(self) -> None:
         master_key = base64.urlsafe_b64encode(b"w" * 32).decode("ascii")
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
@@ -195,7 +195,11 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
                     }
                 )
             )
-            for exchange, label in (("gateio", "Gate Main"), ("htx", "HTX Main")):
+            for exchange, label in (
+                ("gateio", "Gate Main"),
+                ("htx", "HTX Main"),
+                ("mexc", "MEXC Main"),
+            ):
                 connection = store.upsert_api_connection(
                     UserApiConnection.from_dict(
                         {
@@ -245,10 +249,10 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
             )
 
         dynamic = [row for row in cfg.spot_exchanges if row.key.startswith("workspace:")]
-        self.assertEqual({row.id for row in dynamic}, {"gateio", "htx"})
+        self.assertEqual({row.id for row in dynamic}, {"gateio", "htx", "mexc"})
         self.assertEqual(
             {row.display_label for row in dynamic},
-            {"Gate Main · SPOT", "HTX Main · SPOT"},
+            {"Gate Main · SPOT", "HTX Main · SPOT", "MEXC Main · SPOT"},
         )
         dynamic_keys = {row.key for row in dynamic}
         self.assertEqual(

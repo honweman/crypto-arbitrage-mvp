@@ -19,7 +19,7 @@ STABLE_MARGIN_CURRENCIES = {
 }
 
 LINEAR_PERPETUAL_EXCHANGE_IDS = frozenset(
-    {"binanceusdm", "bybit", "gateio", "htx"}
+    {"binanceusdm", "bybit", "gateio", "htx", "mexc"}
 )
 
 
