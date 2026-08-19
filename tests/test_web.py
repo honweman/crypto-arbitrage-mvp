@@ -9030,7 +9030,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b"test-secret-value", paper_database_bytes)
 
 
-    async def test_second_exchange_account_is_saved_inactive_before_egress_setup(
+    async def test_exchange_account_egress_checks_are_isolated_per_user(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9113,6 +9113,23 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     save_payload = await save_response.json()
+                    same_owner_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "sync_account",
+                            "account": {
+                                "label": "Bybit Member 2",
+                                "exchange": "bybit",
+                                "withdrawal_disabled_confirmed": True,
+                                "trade_permission_confirmed": True,
+                                "credentials": {
+                                    "api_key": "member-key-2",
+                                    "secret": "member-secret-2",
+                                },
+                            },
+                        },
+                    )
+                    same_owner_payload = await same_owner_response.json()
                 finally:
                     await client.close()
 
@@ -9131,7 +9148,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             save_payload["workspace"]["connections"][0]["connection_status"],
             "unverified",
         )
-        self.assertIn("saved as inactive", save_payload["warnings"][0])
+        self.assertEqual(save_payload["warnings"], [])
+        self.assertEqual(same_owner_response.status, 200, same_owner_payload)
+        self.assertEqual(len(same_owner_payload["workspace"]["connections"]), 2)
+        self.assertIn("saved as inactive", same_owner_payload["warnings"][0])
         self.assertEqual(existing_blockers, [])
 
     async def test_api_connection_syncs_all_matching_user_projects(self) -> None:

@@ -92,7 +92,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 store.upsert_api_connection(
                     UserApiConnection.from_dict(
                         {
-                            "owner_email": "other@example.com",
+                            "owner_email": "trader@example.com",
                             "label": "Gate Second",
                             "exchange": "gateio",
                             "egress_mode": "source_ip",
@@ -102,6 +102,22 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                     ),
                     credentials={"api_key": "key-2", "secret": "secret-2"},
                 )
+            other_owner = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "other@example.com",
+                        "label": "Gate Main",
+                        "exchange": "gateio",
+                        "egress_mode": "source_ip",
+                        "egress_source_ip": "10.0.0.11",
+                        "egress_expected_ip": "203.0.113.10",
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key-3", "secret": "secret-3"},
+            )
+            self.assertEqual(other_owner.owner_email, "other@example.com")
 
     def test_multiple_same_exchange_accounts_require_verified_unique_egress(
         self,
@@ -115,7 +131,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         )
         second = UserApiConnection.from_dict(
             {
-                "owner_email": "two@example.com",
+                "owner_email": "one@example.com",
                 "label": "Bybit Two",
                 "exchange": "bybit",
                 "connection_status": "healthy",
@@ -141,7 +157,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         )
         staged = UserApiConnection.from_dict(
             {
-                "owner_email": "two@example.com",
+                "owner_email": "one@example.com",
                 "label": "Bybit Second",
                 "exchange": "bybit",
                 "egress_mode": "source_ip",
@@ -192,7 +208,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             second = store.upsert_api_connection(
                 UserApiConnection.from_dict(
                     {
-                        "owner_email": "two@example.com",
+                        "owner_email": "one@example.com",
                         "label": "Bybit Second",
                         "exchange": "bybit",
                         "egress_mode": "source_ip",
@@ -217,13 +233,53 @@ class UserWorkspaceStoreTest(unittest.TestCase):
 
             self.assertEqual(blocked_second.connection_status, "error")
             self.assertIn(
-                "another bybit account",
+                "account Bybit Main",
                 blocked_second.connection_error,
             )
             self.assertEqual(
                 store.get_api_connection(first.id).connection_status,
                 "healthy",
             )
+
+    def test_different_owners_do_not_share_exchange_egress_checks(self) -> None:
+        now = time.time()
+        first = UserApiConnection.from_dict(
+            {
+                "owner_email": "one@example.com",
+                "label": "Bybit One",
+                "exchange": "bybit",
+                "connection_status": "healthy",
+                "connection_checked_at": now,
+                "egress_mode": "source_ip",
+                "egress_source_ip": "172.19.60.74",
+                "egress_expected_ip": "8.222.193.180",
+                "egress_observed_ip": "8.222.193.180",
+                "egress_checked_at": now,
+            }
+        )
+        second = UserApiConnection.from_dict(
+            {
+                "owner_email": "two@example.com",
+                "label": "Bybit Two",
+                "exchange": "bybit",
+                "connection_status": "healthy",
+                "connection_checked_at": now,
+                "egress_mode": "source_ip",
+                "egress_source_ip": "172.19.60.74",
+                "egress_expected_ip": "8.222.193.180",
+                "egress_observed_ip": "8.222.193.180",
+                "egress_checked_at": now,
+            }
+        )
+
+        self.assertEqual(
+            api_connection_egress_blockers(first, [first, second], now=now),
+            [],
+        )
+        self.assertEqual(
+            api_connection_egress_blockers(second, [first, second], now=now),
+            [],
+        )
 
     def test_legacy_api_connection_is_normalized_and_keeps_large_balance_snapshot(
         self,

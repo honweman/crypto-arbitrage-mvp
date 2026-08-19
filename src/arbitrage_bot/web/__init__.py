@@ -7592,7 +7592,10 @@ async def _sync_workspace_connection(
     if existing_connection is None:
         same_exchange_accounts = [
             row
-            for row in store.list_api_connections(owner_email="", is_admin=True)
+            for row in store.list_api_connections(
+                owner_email=user.email,
+                is_admin=False,
+            )
             if row.exchange == connection_candidate.exchange
         ]
         if same_exchange_accounts:

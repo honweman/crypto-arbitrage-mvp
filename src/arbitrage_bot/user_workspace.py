@@ -778,14 +778,15 @@ def api_connection_egress_blockers(
     now: float | None = None,
 ) -> list[str]:
     current = float(now if now is not None else _now())
-    # A newly saved, unverified account is staged and cannot trade. Excluding it
-    # from an already-live peer's uniqueness check lets operators configure the
-    # new route without interrupting the existing account. The staged account
-    # still sees every fresh peer and must prove a unique route before activation.
+    # Egress uniqueness belongs to one login owner. Accounts owned by another
+    # user have separate credentials and must not affect this user's setup.
+    # Within an owner, a staged account is excluded from an already-live peer's
+    # check until it proves a unique route and becomes eligible for activation.
     same_exchange = [
         row
         for row in peers
         if row.exchange == connection.exchange
+        and row.owner_email == connection.owner_email
         and (
             row.id == connection.id
             or api_connection_is_fresh(row, now=current)
@@ -1615,8 +1616,8 @@ class UserWorkspaceStore:
                 (
                     row
                     for row in self.list_api_connections(
-                        owner_email="",
-                        is_admin=True,
+                        owner_email=api_connection.owner_email,
+                        is_admin=False,
                     )
                     if row.id != api_connection.id
                     and row.exchange == api_connection.exchange
@@ -1776,7 +1777,10 @@ class UserWorkspaceStore:
         if normalized_status == "healthy":
             peers = [
                 updated if row.id == updated.id else row
-                for row in self.list_api_connections(owner_email="", is_admin=True)
+                for row in self.list_api_connections(
+                    owner_email=updated.owner_email,
+                    is_admin=False,
+                )
             ]
             blockers = api_connection_egress_blockers(updated, peers)
             if blockers:
@@ -1793,6 +1797,7 @@ class UserWorkspaceStore:
                         for row in peers
                         if row.id != updated.id
                         and row.exchange == updated.exchange
+                        and row.owner_email == updated.owner_email
                         and api_connection_is_fresh(row)
                         and (
                             row_blockers := api_connection_egress_blockers(
@@ -1805,13 +1810,8 @@ class UserWorkspaceStore:
                 )
                 if peer_blocker is not None:
                     peer, blocker = peer_blocker
-                    peer_name = (
-                        f"account {peer.label}"
-                        if peer.owner_email == updated.owner_email
-                        else f"another {updated.exchange} account"
-                    )
                     message = _clean_text(
-                        f"{peer_name} must verify a unique public IP "
+                        f"account {peer.label} must verify a unique public IP "
                         f"before this account can be enabled: {blocker}",
                         max_length=240,
                     )
