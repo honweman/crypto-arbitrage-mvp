@@ -2375,6 +2375,17 @@ tbody tr:last-child td {
   .strategy-tile .value { font-size: 16px; }
   .metric .label,
   .strategy-tile .label { font-size: 10px; }
+  /* Composed status values ("open 0 · fills 0 · issues 0") do not fit on
+     one narrow line; wrap them instead of hiding the tail behind an
+     ellipsis, since the trailing segments carry the actual counts. */
+  .overview-row .value,
+  .metric .detail,
+  .strategy-tile .detail {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
   .language-switch span {
     display: none;
   }

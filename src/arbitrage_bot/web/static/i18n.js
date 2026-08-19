@@ -1152,6 +1152,13 @@
   // Pattern rules for dynamic strings the exact-match dictionary cannot
   // cover (counts, ages, prefixed labels). Applied after exact lookup.
   const ZH_PATTERNS = [
+    // Venue display labels are built as "<Exchange> <MarketType>", so match
+    // the suffix instead of enumerating every exchange.
+    [/^(.+) Perpetual$/, "$1 永续"],
+    [/^(.+) Spot$/, "$1 现货"],
+    [/^SPOT$/, "现货"],
+    [/^SWAP$/, "永续"],
+    [/^PERPETUAL$/, "永续"],
     [/^price (.+)$/, "价格 $1"],
     [/^price --$/, "价格 --"],
     [/^value (.+)$/, "价值 $1"],
@@ -2323,6 +2330,11 @@
   };
 
   const KO_PATTERNS = [
+    [/^(.+) Perpetual$/, "$1 무기한"],
+    [/^(.+) Spot$/, "$1 현물"],
+    [/^SPOT$/, "현물"],
+    [/^SWAP$/, "무기한"],
+    [/^PERPETUAL$/, "무기한"],
     [/^price (.+)$/, "가격 $1"],
     [/^price --$/, "가격 --"],
     [/^value (.+)$/, "가치 $1"],

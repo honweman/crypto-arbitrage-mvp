@@ -378,12 +378,16 @@ class ExchangeProxyConfigTest(unittest.TestCase):
                     source_ip="172.19.60.74",
                 )
                 manager = ExchangeManager()
+                # Patching importlib.import_module mutates the shared importlib
+                # module, which mock itself uses to resolve string targets. Enter
+                # the string-target patch first so it resolves against the real
+                # module instead of the fake ccxt stand-in.
                 with patch(
+                    "arbitrage_bot.exchanges._attach_source_ip_session"
+                ) as attach_session, patch(
                     "arbitrage_bot.exchanges.importlib.import_module",
                     return_value=FakeCcxt,
-                ), patch(
-                    "arbitrage_bot.exchanges._attach_source_ip_session"
-                ) as attach_session:
+                ):
                     first = manager.client(cfg)
                     second = manager.client(routed_cfg)
 
