@@ -1,0 +1,4 @@
+numpy>=1.24
+# optional: ~50x faster Monte-Carlo, pure-numpy fallback otherwise
+numba>=0.59
+pytest>=8.0

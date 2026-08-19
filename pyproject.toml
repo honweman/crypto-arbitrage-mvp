@@ -37,6 +37,9 @@ crypto-account-worker = "arbitrage_bot.account_worker:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+# research/ is a standalone thesis toolkit with its own (numpy/numba) deps and
+# minute-scale Monte-Carlo tests; it is not part of the bot's CI surface.
+norecursedirs = ["research"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/arbitrage_bot/web/__init__.py" = ["E402", "F401"]
