@@ -52,6 +52,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "markets-config",
 	      ],
 	      quant: [
+	        "user-quant-strategies",
 	        "backtest-points",
 	        "grid-orders",
 	        "dca-orders",
@@ -100,6 +101,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	      ],
 	      quant: [
 	        "quant-page-heading",
+	        "user-quant-strategies-section",
 	        "backtest-section",
 	        "spot-grid-section",
 	        "dca-section",
@@ -138,6 +140,30 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         el.classList.toggle("ui-feature-hidden", hidden);
         el.setAttribute("aria-hidden", hidden ? "true" : "false");
       });
+    }
+
+    function applyRoleVisibility(auth) {
+      const ownerMode = auth?.mode === "user" && auth?.role !== "admin";
+      document.body.classList.toggle("owner-mode", ownerMode);
+      document.querySelectorAll("[data-platform-only]").forEach((element) => {
+        element.classList.toggle("owner-hidden", ownerMode);
+        element.setAttribute("aria-hidden", ownerMode ? "true" : "false");
+      });
+      const tradingBadge = document.querySelector("#trading-page-heading .page-mode-badge");
+      const quantBadge = document.querySelector("#quant-page-heading .page-mode-badge");
+      if (tradingBadge) {
+        tradingBadge.textContent = uiText(ownerMode ? "My accounts · live confirmation required" : "Risk gated");
+      }
+      if (quantBadge) {
+        quantBadge.textContent = uiText(ownerMode ? "My strategies · paper execution" : "Paper by default");
+      }
+    }
+
+    function mountUserQuantStrategyLab() {
+      const host = document.getElementById("user-quant-strategies");
+      const lab = document.getElementById("user-strategy-lab");
+      if (!host || !lab || lab.parentElement === host) return;
+      host.appendChild(lab);
     }
 
     function pageFromLocation() {
@@ -1430,6 +1456,7 @@ function balanceStatusClass(status) {
           ? "Authenticator enabled"
           : "Authenticator not enabled";
       }
+      applyRoleVisibility(auth);
     }
 
     function renderProfileAccounts(accountBalances) {
@@ -4949,6 +4976,7 @@ function balanceStatusClass(status) {
       currentUserWorkspace = workspace || null;
       if (lastState) lastState.user_workspace = workspace;
       if (pageStateCache.settings) pageStateCache.settings.user_workspace = workspace;
+      if (pageStateCache.quant) pageStateCache.quant.user_workspace = workspace;
       renderUserWorkspace(workspace);
     }
 
@@ -5040,6 +5068,24 @@ function balanceStatusClass(status) {
       renderUserExchangeAccounts(workspace);
       renderUserStrategies(workspace);
       if (!formsDisabled) syncUserExchangeMarketTypes();
+    }
+
+    function renderUserQuantStrategies(workspace) {
+      currentUserWorkspace = workspace || currentUserWorkspace;
+      const access = currentUserWorkspace?.strategy_access?.quant || {};
+      text(
+        "user-quant-access-meta",
+        access.enabled === false
+          ? uiText("Registered account required")
+          : uiText("Owner scoped · paper execution")
+      );
+      const formsDisabled = !currentUserWorkspace
+        || currentUserWorkspace.status === "user_account_required"
+        || currentUserWorkspace.status === "error";
+      document.querySelectorAll("#user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
+        control.disabled = formsDisabled;
+      });
+      renderUserStrategies(currentUserWorkspace);
     }
 
     async function postUserWorkspace(payload) {
@@ -9754,7 +9800,8 @@ function balanceStatusClass(status) {
         finishVisiblePageRender();
         return;
       }
-      if (activePage === "quant") {
+	      if (activePage === "quant") {
+	        renderOpenSection("user-quant-strategies", () => renderUserQuantStrategies(data.user_workspace));
         renderOpenSection("carry-config", () => renderCashCarryConfig(data));
         renderOpenSection("funding-arb-form", () => renderFundingArbitragePanel(data.strategy_center));
         renderOpenSection("signal-bot-form", () => renderSignalBotPanel(data.strategy_center));
@@ -9954,7 +10001,8 @@ function balanceStatusClass(status) {
       };
     }
 
-    applyFeatureVisibility();
+	    mountUserQuantStrategyLab();
+	    applyFeatureVisibility();
     setupCompactSections();
     setActivePage(pageFromLocation(), { refresh: false });
     window.addEventListener("hashchange", () => {

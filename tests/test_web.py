@@ -502,7 +502,7 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260818-start-gate1" defer></script>',
+            '<script src="/static/app.js?v=20260819-owner-strategies1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -584,7 +584,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertNotIn('id="user-exchange-project" required', INDEX_HTML)
         self.assertNotIn('id="user-exchange-symbol" required', INDEX_HTML)
         self.assertIn('<summary>Advanced Risk Profile</summary>', INDEX_HTML)
-        self.assertIn('<summary>Paper Strategy Lab</summary>', INDEX_HTML)
+        self.assertIn('id="user-strategy-lab"', INDEX_HTML)
         self.assertNotIn('id="user-project-name" type="text" maxlength="80" placeholder="ACS Trading" required', INDEX_HTML)
         self.assertIn('id="backtest-section"', INDEX_HTML)
         self.assertIn('id="backtest-run"', INDEX_HTML)
@@ -687,7 +687,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260803-i18n2"),
-            INDEX_HTML.index("/static/styles.css?v=20260816-wide-layout2"),
+            INDEX_HTML.index("/static/styles.css?v=20260819-owner-strategies1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -794,7 +794,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260816-wide-layout2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260819-owner-strategies1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -1089,6 +1089,13 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="dca-section" data-page="quant"', HTML)
         self.assertIn('id="execution-section" data-page="quant"', HTML)
         self.assertIn('id="backtest-section" data-page="quant"', HTML)
+        self.assertIn(
+            'id="user-quant-strategies-section" data-page="quant"', HTML
+        )
+        self.assertIn('id="user-strategy-lab"', HTML)
+        self.assertIn("function applyRoleVisibility", APP_JS)
+        self.assertIn("function renderUserQuantStrategies", APP_JS)
+        self.assertIn("data-platform-only", HTML)
         self.assertIn('data-ui-feature="readiness" data-ui-hidden-default="true"', HTML)
         self.assertIn(
             'data-ui-feature="scan_status" data-ui-hidden-default="true"', HTML
@@ -8959,6 +8966,31 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             settings_state["user_workspace"]["permissions"]["scope_source"],
             "owned_api_connections",
+        )
+        self.assertTrue(
+            settings_state["user_workspace"]["strategy_access"]["core_trading"][
+                "enabled"
+            ]
+        )
+        self.assertEqual(
+            settings_state["user_workspace"]["strategy_access"]["core_trading"][
+                "live_strategy_types"
+            ],
+            ["auto_buy_sell"],
+        )
+        self.assertTrue(
+            settings_state["user_workspace"]["strategy_access"]["quant"]["enabled"]
+        )
+        self.assertFalse(
+            settings_state["user_workspace"]["strategy_access"]["quant"][
+                "live_submit_allowed"
+            ]
+        )
+        self.assertIn(
+            "market_maker",
+            settings_state["user_workspace"]["strategy_access"]["quant"][
+                "strategy_types"
+            ],
         )
         self.assertEqual(untested_enable_response.status, 400, untested_enable_payload)
         self.assertIn("connection test", untested_enable_payload["error"])

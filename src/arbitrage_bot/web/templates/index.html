@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260803-i18n2"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260816-wide-layout2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260819-owner-strategies1">
 
 </head>
 <body>
@@ -45,7 +45,7 @@
         <input id="theme-toggle" type="checkbox" aria-label="Dark mode">
         <span class="switch-track" aria-hidden="true"></span>
       </label>
-      <label class="program-switch" title="Pause or resume scans">
+      <label class="program-switch" title="Pause or resume scans" data-platform-only>
         Program
         <input id="program-toggle" type="checkbox" checked>
         <span class="switch-track"></span>
@@ -407,7 +407,7 @@
       </div>
     </section>
 
-    <section id="spot-arbitrage-section" data-page="trading" class="compact-section" data-ui-feature="market_config">
+    <section id="spot-arbitrage-section" data-page="trading" class="compact-section" data-ui-feature="market_config" data-platform-only>
       <div class="section-title">
         <h2>Spot Arbitrage</h2>
         <span id="markets-config-meta" class="subtle"></span>
@@ -448,7 +448,7 @@
       </div>
     </section>
 
-    <section id="cash-carry-section" data-page="quant" class="compact-section" data-ui-feature="cash_and_carry">
+    <section id="cash-carry-section" data-page="quant" class="compact-section" data-ui-feature="cash_and_carry" data-platform-only>
       <div class="section-title">
         <h2>Cash & Carry Pairs</h2>
         <span id="carry-config-meta" class="subtle"></span>
@@ -661,9 +661,7 @@
         </div>
       </details>
 
-      <details class="workspace-advanced-group">
-        <summary>Paper Strategy Lab</summary>
-        <div class="workspace-advanced-body">
+      <div id="user-strategy-lab" class="user-strategy-lab">
       <div class="workspace-strategy-header">
         <div>
           <strong>User Strategies</strong>
@@ -968,11 +966,18 @@
           </table>
         </div>
       </details>
-        </div>
-      </details>
+      </div>
     </section>
 
-    <section id="strategy-settings-section" data-page="trading" class="compact-section section-open">
+    <section id="user-quant-strategies-section" data-page="quant" class="compact-section section-open">
+      <div class="section-title">
+        <h2>My Quant Strategies</h2>
+        <span id="user-quant-access-meta" class="subtle">Owner scoped · paper execution</span>
+      </div>
+      <div id="user-quant-strategies"></div>
+    </section>
+
+    <section id="strategy-settings-section" data-page="trading" class="compact-section section-open" data-platform-only>
       <div class="section-title">
         <h2>Strategy Settings</h2>
         <span id="strategy-settings-meta" class="subtle"></span>
@@ -980,7 +985,7 @@
       <div id="strategy-settings-cards" class="strategy-settings-grid"></div>
     </section>
 
-    <section id="risk-section" data-page="settings" class="compact-section">
+    <section id="risk-section" data-page="settings" class="compact-section" data-platform-only>
       <div class="section-title">
         <h2>Risk Controls</h2>
         <span id="risk-control-meta" class="subtle"></span>
@@ -1280,7 +1285,7 @@
       </div>
     </section>
 
-    <section id="funding-arbitrage-section" data-page="quant" class="compact-section" data-ui-feature="funding_arbitrage">
+    <section id="funding-arbitrage-section" data-page="quant" class="compact-section" data-ui-feature="funding_arbitrage" data-platform-only>
       <div class="section-title">
         <h2>Funding Arbitrage</h2>
         <span id="funding-arb-meta" class="subtle"></span>
@@ -1342,7 +1347,7 @@
       </form>
     </section>
 
-    <section id="signal-bot-section" data-page="quant" class="compact-section" data-ui-feature="signal_bot">
+    <section id="signal-bot-section" data-page="quant" class="compact-section" data-ui-feature="signal_bot" data-platform-only>
       <div class="section-title">
         <h2>Signal Bot</h2>
         <span id="signal-bot-meta" class="subtle"></span>
@@ -1396,7 +1401,7 @@
       </div>
     </section>
 
-    <section id="derivatives-section" data-page="quant" class="compact-section" data-ui-feature="derivatives">
+    <section id="derivatives-section" data-page="quant" class="compact-section" data-ui-feature="derivatives" data-platform-only>
       <div class="section-title">
         <h2>Derivatives Risk</h2>
         <span id="derivatives-risk-meta" class="subtle"></span>
@@ -1422,7 +1427,7 @@
       </div>
     </section>
 
-    <section id="funding-basis-section" data-page="quant" class="compact-section" data-ui-feature="funding_basis cash_and_carry">
+    <section id="funding-basis-section" data-page="quant" class="compact-section" data-ui-feature="funding_basis cash_and_carry" data-platform-only>
       <div class="section-title">
         <h2>Funding / Basis</h2>
         <span id="funding-basis-meta" class="subtle"></span>
@@ -1446,7 +1451,7 @@
       </div>
     </section>
 
-    <section id="contract-strategies-section" data-page="quant" class="compact-section" data-ui-feature="contract_strategies derivatives">
+    <section id="contract-strategies-section" data-page="quant" class="compact-section" data-ui-feature="contract_strategies derivatives" data-platform-only>
       <div class="section-title">
         <h2>Contract Strategies</h2>
         <span id="contract-strategies-meta" class="subtle"></span>
@@ -1469,7 +1474,7 @@
       </div>
     </section>
 
-    <section id="options-arbitrage-section" data-page="quant" class="compact-section" data-ui-feature="options_arbitrage derivatives">
+    <section id="options-arbitrage-section" data-page="quant" class="compact-section" data-ui-feature="options_arbitrage derivatives" data-platform-only>
       <div class="section-title">
         <h2>Options Arbitrage</h2>
         <span id="options-arbitrage-meta" class="subtle"></span>
@@ -1886,7 +1891,7 @@
       </div>
     </section>
 
-    <section id="rebalance-section" data-page="trading" class="compact-section">
+    <section id="rebalance-section" data-page="trading" class="compact-section" data-platform-only>
       <div class="section-title">
         <h2>Cross-Exchange Rebalance</h2>
         <span id="rebalance-meta" class="subtle"></span>
@@ -1993,7 +1998,7 @@
       </div>
     </section>
 
-    <section id="spot-grid-section" data-page="quant" class="compact-section" data-ui-feature="spot_grid">
+    <section id="spot-grid-section" data-page="quant" class="compact-section" data-ui-feature="spot_grid" data-platform-only>
       <div class="section-title">
         <h2>Spot Grid</h2>
         <span id="grid-meta" class="subtle"></span>
@@ -2088,7 +2093,7 @@
       </div>
     </section>
 
-    <section id="dca-section" data-page="quant" class="compact-section" data-ui-feature="dca">
+    <section id="dca-section" data-page="quant" class="compact-section" data-ui-feature="dca" data-platform-only>
       <div class="section-title">
         <h2>DCA Bot</h2>
         <span id="dca-meta" class="subtle"></span>
@@ -2182,7 +2187,7 @@
       </div>
     </section>
 
-    <section id="execution-section" data-page="quant" class="compact-section" data-ui-feature="execution_algo">
+    <section id="execution-section" data-page="quant" class="compact-section" data-ui-feature="execution_algo" data-platform-only>
       <div class="section-title">
         <h2>TWAP / VWAP / POV</h2>
         <span id="exec-meta" class="subtle"></span>
@@ -2409,7 +2414,7 @@
       </details>
     </section>
 
-    <section id="mm-section" data-page="trading" class="compact-section">
+    <section id="mm-section" data-page="trading" class="compact-section" data-platform-only>
       <div class="section-title">
         <h2>Market Maker</h2>
         <span id="mm-meta" class="subtle"></span>
@@ -2683,7 +2688,7 @@
   </main>
 
   <script src="/static/i18n.js?v=20260818-start-gate1" defer></script>
-  <script src="/static/app.js?v=20260818-start-gate1" defer></script>
+  <script src="/static/app.js?v=20260819-owner-strategies1" defer></script>
 
 </body>
 </html>

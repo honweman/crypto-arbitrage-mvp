@@ -802,6 +802,11 @@ section {
   display: block !important;
 }
 
+[data-platform-only].owner-hidden,
+[data-page][data-platform-only].owner-hidden {
+  display: none !important;
+}
+
 .page-heading[data-page].active-page {
   display: flex !important;
 }
@@ -1037,7 +1042,8 @@ h2 {
   margin-top: 10px;
 }
 
-#user-workspace-section table {
+#user-workspace-section table,
+#user-quant-strategies-section table {
   min-width: 760px;
 }
 
@@ -1303,8 +1309,14 @@ h2 {
   margin-right: auto;
 }
 
-#user-workspace-section .paper-activity-table {
+#user-workspace-section .paper-activity-table,
+#user-quant-strategies-section .paper-activity-table {
   min-width: 680px;
+}
+
+#user-quant-strategies-section .user-strategy-lab {
+  margin-top: 0;
+  border-top: 0;
 }
 
 table {

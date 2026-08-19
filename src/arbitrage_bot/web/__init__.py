@@ -68,6 +68,7 @@ from .user_scope import (
 from .preflight import PreflightError, collect_preflight_issues, enforce_preflight
 from .permissions import (
     build_permission_scope,
+    require_capability,
     require_owned_exchange,
     require_resource_owner,
 )
@@ -2814,6 +2815,20 @@ def build_user_workspace_payload(
     user: WebUser | None,
     paper_store: UserPaperTradingStore | None = None,
 ) -> dict[str, Any]:
+    strategy_access = {
+        "scope": "platform" if user is not None and user.role == "admin" else "owner",
+        "core_trading": {
+            "enabled": user is not None,
+            "live_strategy_types": ["auto_buy_sell"] if user is not None else [],
+            "requires_live_confirmation": True,
+        },
+        "quant": {
+            "enabled": user is not None,
+            "mode": "paper",
+            "live_submit_allowed": False,
+            "strategy_types": [],
+        },
+    }
     empty_paper = {
         "status": "user_account_required" if user is None else "unavailable",
         "mode": "paper",
@@ -2846,6 +2861,7 @@ def build_user_workspace_payload(
             "exchange_catalog": [],
             "dex_venue_catalog": [],
             "strategy_catalog": [],
+            "strategy_access": strategy_access,
             "paper": empty_paper,
             "vault_available": store.cipher.available,
             "summary": {
@@ -2881,6 +2897,12 @@ def build_user_workspace_payload(
             owner_email=user.email,
             is_admin=False,
         )
+        strategy_access["quant"]["strategy_types"] = [
+            str(row.get("id") or "")
+            for row in payload.get("strategy_catalog", [])
+            if isinstance(row, dict) and str(row.get("id") or "")
+        ]
+        payload["strategy_access"] = strategy_access
         if paper_store is None:
             paper = empty_paper
         else:
@@ -2947,6 +2969,7 @@ def build_user_workspace_payload(
             "exchange_catalog": [],
             "dex_venue_catalog": [],
             "strategy_catalog": [],
+            "strategy_access": strategy_access,
             "paper": {**empty_paper, "status": "error"},
             "vault_available": store.cipher.available,
             "summary": {
@@ -5471,7 +5494,12 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     }
     workspace_payload: dict[str, Any] | None = None
     if view in (None, "settings") or (
-        view == "quant" and (sections is None or "backtest-points" in quant_sections)
+        view == "quant"
+        and (
+            sections is None
+            or "backtest-points" in quant_sections
+            or "user-quant-strategies" in quant_sections
+        )
     ):
         workspace_payload = build_user_workspace_payload(
             _user_workspace_store(request),
@@ -7841,6 +7869,16 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         action = str(payload.get("action") or "").strip().lower()
         if not action:
             raise ValueError("action is required")
+        if action in {
+            "upsert_strategy",
+            "set_strategy_enabled",
+            "clone_strategy",
+            "delete_strategy",
+            "reset_strategy_paper",
+        }:
+            require_capability(user, "strategy.manage")
+        elif action == "update_risk_profile":
+            require_capability(user, "risk.manage")
         raw_target = (
             payload.get("account")
             if isinstance(payload.get("account"), dict)
