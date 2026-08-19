@@ -27,6 +27,7 @@ from .hyperliquid_auth import (
     new_agent_credentials,
 )
 from .user_strategies import (
+    LIVE_USER_STRATEGY_TYPES,
     USER_STRATEGY_DEFINITIONS,
     UserStrategy,
     strategy_parameter_blockers,
@@ -3135,7 +3136,9 @@ class UserWorkspaceStore:
                     owner_email=updated.owner_email,
                     is_admin=False,
                 )
-                if row.id != updated.id and row.enabled
+                if row.id != updated.id
+                and row.enabled
+                and row.mode == updated.mode
             ]
             if (
                 profile.max_active_strategies > 0
@@ -3364,7 +3367,13 @@ class UserWorkspaceStore:
         risk_profile: UserRiskProfile | None = None,
     ) -> dict[str, Any]:
         blockers = list(strategy_parameter_blockers(strategy))
-        warnings = ["paper mode only; live order submission is disabled"]
+        warnings: list[str] = []
+        if strategy.mode == "paper":
+            warnings.append("legacy paper strategy; live order submission is disabled")
+        elif strategy.strategy_type not in LIVE_USER_STRATEGY_TYPES:
+            blockers.append(
+                f"live owner execution is unavailable for {strategy.strategy_type}"
+            )
         definition = USER_STRATEGY_DEFINITIONS[strategy.strategy_type]
         if project is None:
             blockers.append("project is unavailable")
@@ -3493,8 +3502,12 @@ class UserWorkspaceStore:
         unique_blockers = list(dict.fromkeys(blockers))
         return {
             "ready": not unique_blockers,
-            "mode": "paper",
-            "live_submit_allowed": False,
+            "mode": strategy.mode,
+            "live_submit_allowed": bool(
+                strategy.mode == "live"
+                and strategy.strategy_type in LIVE_USER_STRATEGY_TYPES
+                and profile.trading_enabled
+            ),
             "blockers": unique_blockers,
             "warnings": warnings,
         }
@@ -3556,17 +3569,17 @@ class UserWorkspaceStore:
             },
             {
                 "id": "strategy_created",
-                "label": "Paper strategy created",
+                "label": "Strategy created",
                 "complete": bool(strategies),
             },
             {
                 "id": "strategy_ready",
-                "label": "Paper strategy checks passed",
+                "label": "Strategy checks passed",
                 "complete": bool(ready_strategies),
             },
             {
                 "id": "strategy_running",
-                "label": "Paper strategy running",
+                "label": "Strategy running",
                 "complete": bool(running_strategies),
             },
         ]
@@ -3596,7 +3609,7 @@ class UserWorkspaceStore:
         elif not strategies:
             next_action = {
                 "code": "create_strategy",
-                "label": "Create a paper strategy",
+                "label": "Create a strategy",
             }
         elif not ready_strategies:
             next_action = {
@@ -3607,21 +3620,27 @@ class UserWorkspaceStore:
         elif not running_strategies:
             next_action = {
                 "code": "enable_strategy",
-                "label": "Enable the paper strategy",
+                "label": "Enable the strategy",
                 "strategy_id": ready_strategies[0].id,
             }
         else:
             next_action = {
                 "code": "complete",
-                "label": "Paper strategy is running",
+                "label": "Strategy is running",
                 "strategy_id": running_strategies[0].id,
             }
 
         completed_steps = sum(1 for step in steps if step["complete"])
         return {
             "ready": bool(running_strategies),
-            "mode": "paper",
-            "live_submit_allowed": False,
+            "mode": (
+                "live"
+                if any(strategy.mode == "live" for strategy in strategies)
+                else "paper"
+            ),
+            "live_submit_allowed": any(
+                strategy.mode == "live" for strategy in running_strategies
+            ),
             "status": "ready" if running_strategies else str(next_action["code"]),
             "steps": steps,
             "completed_steps": completed_steps,
@@ -4270,7 +4289,7 @@ class UserWorkspaceStore:
             row["readiness"] = readiness
             row["effective_enabled"] = strategy.enabled and readiness["ready"]
             row["status"] = (
-                "paper_ready"
+                ("live_ready" if strategy.mode == "live" else "paper_ready")
                 if row["effective_enabled"]
                 else "blocked"
                 if strategy.enabled

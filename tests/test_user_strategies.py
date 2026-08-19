@@ -74,7 +74,7 @@ class UserStrategyTest(unittest.TestCase):
             UserExchangeAccount.from_dict({**account.to_dict(), "enabled": True})
         )
 
-    def test_user_strategy_is_paper_only_and_rejects_secret_fields(self) -> None:
+    def test_user_strategy_supports_live_mm_and_rejects_unsafe_values(self) -> None:
         base = {
             "owner_email": "trader@example.com",
             "project_id": "project-acs",
@@ -87,8 +87,18 @@ class UserStrategyTest(unittest.TestCase):
         self.assertFalse(strategy.to_dict()["live_enabled"])
         self.assertEqual(strategy.parameters["levels"], 2)
         self.assertEqual(len(user_strategy_catalog()), 7)
-        with self.assertRaisesRegex(ValueError, "paper-only"):
-            UserStrategy.from_dict({**base, "live_enabled": True})
+        live = UserStrategy.from_dict({**base, "live_enabled": True})
+        self.assertEqual(live.mode, "live")
+        self.assertTrue(live.to_dict()["live_enabled"])
+        self.assertEqual(live.parameters["reprice_hysteresis_bps"], 3.0)
+        with self.assertRaisesRegex(ValueError, "live owner execution"):
+            UserStrategy.from_dict(
+                {
+                    **base,
+                    "strategy_type": "spot_grid",
+                    "live_enabled": True,
+                }
+            )
         with self.assertRaisesRegex(ValueError, "credential values"):
             UserStrategy.from_dict(
                 {**base, "parameters": {"api_key": "must-not-be-stored"}}

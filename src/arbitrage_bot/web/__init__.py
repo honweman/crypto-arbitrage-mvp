@@ -263,7 +263,8 @@ from ..user_paper_engine import (
     user_paper_trading_task_loop,
 )
 from ..user_paper_store import UserPaperTradingStore
-from ..user_strategies import UserStrategy
+from ..user_live_strategies import user_market_maker_instance_id
+from ..user_strategies import LIVE_USER_STRATEGY_TYPES, UserStrategy
 from ..user_workspace import (
     UserApiConnection,
     UserExchangeAccount,
@@ -2822,12 +2823,14 @@ def build_user_workspace_payload(
             "strategy_types": (
                 ["auto_buy_sell", "market_maker"] if user is not None else []
             ),
-            "live_strategy_types": ["auto_buy_sell"] if user is not None else [],
+            "live_strategy_types": (
+                ["auto_buy_sell", "market_maker"] if user is not None else []
+            ),
             "requires_live_confirmation": True,
         },
         "quant": {
-            "enabled": user is not None,
-            "mode": "paper",
+            "enabled": False,
+            "mode": "live",
             "live_submit_allowed": False,
             "strategy_types": [],
         },
@@ -2900,49 +2903,45 @@ def build_user_workspace_payload(
             owner_email=user.email,
             is_admin=False,
         )
-        strategy_access["quant"]["strategy_types"] = [
-            str(row.get("id") or "")
+        payload["strategy_catalog"] = [
+            row
             for row in payload.get("strategy_catalog", [])
-            if isinstance(row, dict) and str(row.get("id") or "")
+            if isinstance(row, dict) and row.get("live_supported")
         ]
+        payload["strategies"] = [
+            row
+            for row in payload.get("strategies", [])
+            if isinstance(row, dict) and row.get("mode") == "live"
+        ]
+        payload["summary"].update(
+            {
+                "strategy_count": len(payload["strategies"]),
+                "enabled_strategy_count": sum(
+                    bool(row.get("enabled")) for row in payload["strategies"]
+                ),
+                "ready_strategy_count": sum(
+                    bool(row.get("effective_enabled"))
+                    for row in payload["strategies"]
+                ),
+                "blocked_strategy_count": sum(
+                    bool(row.get("enabled"))
+                    and not bool(row.get("effective_enabled"))
+                    for row in payload["strategies"]
+                ),
+            }
+        )
         payload["strategy_access"] = strategy_access
-        if paper_store is None:
-            paper = empty_paper
-        else:
-            try:
-                paper = paper_store.public_payload(
-                    owner_email=user.email,
-                    is_admin=False,
-                )
-            except (OSError, sqlite3.Error, ValueError) as exc:
-                paper = {**empty_paper, "status": "error", "error": str(exc)}
-        states = {
-            str(row.get("strategy_id") or ""): row
-            for row in paper.get("states", [])
-            if isinstance(row, dict)
-        }
-        counts = paper.get("counts") if isinstance(paper.get("counts"), dict) else {}
         for strategy in payload["strategies"]:
-            strategy_id = str(strategy.get("id") or "")
-            strategy["paper_runtime"] = states.get(
-                strategy_id,
-                {
-                    "strategy_id": strategy_id,
-                    "mode": "paper",
-                    "live_submit_allowed": False,
-                    "status": "not_started",
-                    "reason": "paper simulation has not started",
-                    "fill_count": 0,
-                    "open_order_count": 0,
-                    "total_pnl_common": 0.0,
-                    "daily_pnl_common": 0.0,
-                },
+            strategy["runtime_instance_id"] = user_market_maker_instance_id(
+                UserStrategy.from_dict(strategy)
             )
-            strategy["paper_counts"] = counts.get(
-                strategy_id,
-                {"state_count": 0, "fill_count": 0, "event_count": 0},
-            )
-        payload["paper"] = paper
+            strategy["live_runtime"] = {
+                "status": "starting" if strategy.get("enabled") else "paused",
+                "mode": "live",
+                "reason": "waiting for the owner strategy runtime",
+                "open_order_count": 0,
+            }
+        payload["paper"] = empty_paper
         payload["platform_projects"] = (
             [
                 project
@@ -2952,12 +2951,8 @@ def build_user_workspace_payload(
             if user.role == "admin"
             else []
         )
-        payload["summary"]["paper_running_count"] = int(
-            paper.get("summary", {}).get("running_count") or 0
-        )
-        payload["summary"]["paper_fill_count"] = int(
-            paper.get("summary", {}).get("fill_count") or 0
-        )
+        payload["summary"]["paper_running_count"] = 0
+        payload["summary"]["paper_fill_count"] = 0
         return payload
     except (OSError, sqlite3.Error, ValueError) as exc:
         return {
@@ -5525,6 +5520,28 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         )
     if workspace_payload is not None:
         payload["user_workspace"] = workspace_payload
+        market_maker_runtime = await state.market_maker_runtime()
+        runtime_by_id = {
+            str(row.get("id") or ""): row
+            for row in market_maker_runtime.get("instances", [])
+            if isinstance(row, dict) and row.get("id")
+        }
+        for strategy in workspace_payload.get("strategies", []):
+            if not isinstance(strategy, dict):
+                continue
+            runtime_id = str(strategy.get("runtime_instance_id") or "")
+            runtime = runtime_by_id.get(runtime_id)
+            if runtime is not None:
+                strategy["live_runtime"] = runtime
+            elif strategy.get("enabled"):
+                blockers = (strategy.get("readiness") or {}).get("blockers") or []
+                strategy["live_runtime"] = {
+                    "id": runtime_id,
+                    "status": "blocked" if blockers else "starting",
+                    "mode": "live",
+                    "reason": blockers[0] if blockers else "runtime is starting",
+                    "open_order_count": 0,
+                }
     permission_scope = (
         build_permission_scope(requesting_user, workspace_payload)
         if requesting_user is not None
@@ -8827,9 +8844,19 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if owner != project.owner_email:
                 raise ValueError("project and strategy owners must match")
             raw["owner_email"] = owner
-            raw["mode"] = "paper"
+            raw["mode"] = "live"
+            raw["live_enabled"] = True
             strategy = UserStrategy.from_dict(raw)
+            if strategy.strategy_type not in LIVE_USER_STRATEGY_TYPES:
+                raise ValueError(
+                    f"live owner execution is not available for {strategy.strategy_type}"
+                )
             if strategy.enabled:
+                if payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION:
+                    raise ValueError(
+                        "enabling or changing a live owner Market Maker requires "
+                        f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
+                    )
                 readiness = store.strategy_readiness(strategy)
                 if not readiness["ready"]:
                     raise ValueError(
@@ -8838,7 +8865,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     )
             strategy = store.upsert_strategy(strategy)
             audit_target = strategy.id
-            audit_detail = f"saved paper strategy {strategy.name}"
+            audit_detail = f"saved live owner strategy {strategy.name}"
             audit_payload = strategy.to_dict()
         elif action == "set_strategy_enabled":
             strategy_id = str(
@@ -8853,6 +8880,15 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raise ValueError("enabled must be true or false")
             updated = replace(strategy, enabled=enabled)
             if enabled:
+                if strategy.mode != "live":
+                    raise ValueError(
+                        "legacy paper strategies must be saved as a live strategy before enabling"
+                    )
+                if payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION:
+                    raise ValueError(
+                        "enabling a live owner Market Maker requires "
+                        f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
+                    )
                 readiness = store.strategy_readiness(updated)
                 if not readiness["ready"]:
                     raise ValueError(
@@ -8862,12 +8898,12 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             strategy = store.upsert_strategy(updated)
             audit_target = strategy.id
             audit_detail = (
-                f"{'resumed' if enabled else 'paused'} paper strategy {strategy.name}"
+                f"{'resumed' if enabled else 'paused'} owner strategy {strategy.name}"
             )
             audit_payload = {
                 "strategy_id": strategy.id,
                 "enabled": strategy.enabled,
-                "mode": "paper",
+                "mode": strategy.mode,
             }
         elif action == "clone_strategy":
             strategy_id = str(
@@ -8887,7 +8923,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             raw["enabled"] = False
             copied = store.upsert_strategy(UserStrategy.from_dict(raw))
             audit_target = copied.id
-            audit_detail = f"copied paper strategy {strategy.id} to {copied.id}"
+            audit_detail = f"copied owner strategy {strategy.id} to {copied.id}"
             audit_payload = {
                 "source_strategy_id": strategy.id,
                 "strategy": copied.to_dict(),
@@ -8904,8 +8940,8 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             store.delete_strategy(strategy.id)
             _user_paper_store(request).delete_strategy(strategy.id)
             audit_target = strategy.id
-            audit_detail = f"deleted paper strategy {strategy.name}"
-            audit_payload = {"strategy_id": strategy.id, "mode": "paper"}
+            audit_detail = f"deleted owner strategy {strategy.name}"
+            audit_payload = {"strategy_id": strategy.id, "mode": strategy.mode}
         elif action == "reset_strategy_paper":
             strategy_id = str(
                 payload.get("strategy_id") or payload.get("id") or ""
@@ -8914,6 +8950,8 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if strategy is None:
                 raise ValueError(f"strategy not found: {strategy_id}")
             _require_workspace_owner(user, strategy.owner_email)
+            if strategy.mode != "paper":
+                raise ValueError("paper reset is only available for legacy paper strategies")
             reset_counts = _user_paper_store(request).reset_strategy(strategy)
             audit_target = strategy.id
             audit_detail = f"reset paper simulation {strategy.name}"
@@ -10506,7 +10544,11 @@ def create_app(
                 interval,
                 strategy_center_store=strategy_center_store,
             ),
-            "market_maker": lambda: market_maker_task_loop(cfg, state),
+            "market_maker": lambda: market_maker_task_loop(
+                cfg,
+                state,
+                user_workspace_store,
+            ),
             "cross_exchange_rebalance": lambda: cross_exchange_rebalance_task_loop(
                 cfg, state
             ),

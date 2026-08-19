@@ -20,6 +20,20 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
             "quote_per_level": 1.0,
             "refresh_seconds": 10.0,
             "post_only": True,
+            "depth_shape": "linear",
+            "min_order_quote": 0.0,
+            "min_distance_bps": 0.0,
+            "reprice_threshold_bps": 5.0,
+            "reprice_hysteresis_bps": 3.0,
+            "full_reprice_threshold_bps": 25.0,
+            "adaptive_reprice_enabled": False,
+            "adaptive_reprice_spread_fraction": 0.05,
+            "max_cancels_per_cycle": 0,
+            "max_order_book_gap_bps": 0.0,
+            "inventory_control_enabled": False,
+            "inventory_target_base": 0.0,
+            "inventory_band_base": 0.0,
+            "inventory_max_deviation_base": 0.0,
         },
     },
     "auto_buy_sell": {
@@ -109,6 +123,10 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+# Only strategies with an owner-isolated production executor belong here. Paper
+# strategies remain readable for migration, but are never promoted implicitly.
+LIVE_USER_STRATEGY_TYPES = frozenset({"market_maker"})
 
 DEFAULT_USER_STRATEGY_RISK: dict[str, Any] = {
     "max_order_quote": 5.0,
@@ -271,6 +289,9 @@ def _clean_parameters(strategy_type: str, value: Any) -> dict[str, Any]:
     merged = {**defaults, **raw}
 
     if strategy_type == "market_maker":
+        depth_shape = str(merged["depth_shape"] or "").strip().lower()
+        if depth_shape not in {"linear", "flat"}:
+            raise ValueError("depth_shape must be linear or flat")
         return {
             "levels": _bounded_int(
                 merged["levels"], label="levels", minimum=1, maximum=50
@@ -294,6 +315,66 @@ def _clean_parameters(strategy_type: str, value: Any) -> dict[str, Any]:
             ),
             "post_only": _strict_bool(
                 merged["post_only"], label="post_only", default=True
+            ),
+            "depth_shape": depth_shape,
+            "min_order_quote": _finite_float(
+                merged["min_order_quote"], label="min_order_quote"
+            ),
+            "min_distance_bps": _finite_float(
+                merged["min_distance_bps"],
+                label="min_distance_bps",
+                maximum=10_000.0,
+            ),
+            "reprice_threshold_bps": _finite_float(
+                merged["reprice_threshold_bps"],
+                label="reprice_threshold_bps",
+                maximum=10_000.0,
+            ),
+            "reprice_hysteresis_bps": _finite_float(
+                merged["reprice_hysteresis_bps"],
+                label="reprice_hysteresis_bps",
+                maximum=10_000.0,
+            ),
+            "full_reprice_threshold_bps": _finite_float(
+                merged["full_reprice_threshold_bps"],
+                label="full_reprice_threshold_bps",
+                maximum=10_000.0,
+            ),
+            "adaptive_reprice_enabled": _strict_bool(
+                merged["adaptive_reprice_enabled"],
+                label="adaptive_reprice_enabled",
+            ),
+            "adaptive_reprice_spread_fraction": _finite_float(
+                merged["adaptive_reprice_spread_fraction"],
+                label="adaptive_reprice_spread_fraction",
+                maximum=1.0,
+            ),
+            "max_cancels_per_cycle": _bounded_int(
+                merged["max_cancels_per_cycle"],
+                label="max_cancels_per_cycle",
+                minimum=0,
+                maximum=10_000,
+            ),
+            "max_order_book_gap_bps": _finite_float(
+                merged["max_order_book_gap_bps"],
+                label="max_order_book_gap_bps",
+                maximum=10_000.0,
+            ),
+            "inventory_control_enabled": _strict_bool(
+                merged["inventory_control_enabled"],
+                label="inventory_control_enabled",
+            ),
+            "inventory_target_base": _finite_float(
+                merged["inventory_target_base"],
+                label="inventory_target_base",
+            ),
+            "inventory_band_base": _finite_float(
+                merged["inventory_band_base"],
+                label="inventory_band_base",
+            ),
+            "inventory_max_deviation_base": _finite_float(
+                merged["inventory_max_deviation_base"],
+                label="inventory_max_deviation_base",
             ),
         }
     if strategy_type == "auto_buy_sell":
@@ -581,21 +662,24 @@ class UserStrategy:
         if not isinstance(raw, dict):
             raise ValueError("user strategy must be an object")
         _reject_secret_values(raw)
-        if _strict_bool(
+        live_enabled = _strict_bool(
             raw.get("live_enabled"),
             label="live_enabled",
             default=False,
-        ):
-            raise ValueError("user strategies are paper-only; live_enabled is not allowed")
-        mode = str(raw.get("mode") or "paper").strip().lower()
-        if mode != "paper":
-            raise ValueError("user strategies currently support paper mode only")
+        )
+        mode = str(raw.get("mode") or ("live" if live_enabled else "paper")).strip().lower()
+        if mode not in {"paper", "live"}:
+            raise ValueError("user strategy mode must be paper or live")
         strategy_type = str(
             raw.get("strategy_type") or raw.get("type") or ""
         ).strip().lower()
         definition = USER_STRATEGY_DEFINITIONS.get(strategy_type)
         if definition is None:
             raise ValueError(f"unsupported user strategy type: {strategy_type}")
+        if mode == "live" and strategy_type not in LIVE_USER_STRATEGY_TYPES:
+            raise ValueError(
+                f"live owner execution is not available for {strategy_type}"
+            )
         account_ids = _normalized_account_ids(raw.get("account_ids"))
         if len(account_ids) > int(definition["max_accounts"]):
             raise ValueError(
@@ -627,7 +711,7 @@ class UserStrategy:
             "account_ids": list(self.account_ids),
             "enabled": self.enabled,
             "mode": self.mode,
-            "live_enabled": False,
+            "live_enabled": self.mode == "live",
             "parameters": dict(self.parameters),
             "risk": dict(self.risk),
             "created_at": self.created_at,
@@ -729,7 +813,8 @@ def user_strategy_catalog() -> list[dict[str, Any]]:
         {
             "id": strategy_type,
             "label": definition["label"],
-            "mode": "paper",
+            "mode": "live" if strategy_type in LIVE_USER_STRATEGY_TYPES else "paper",
+            "live_supported": strategy_type in LIVE_USER_STRATEGY_TYPES,
             "min_accounts": definition["min_accounts"],
             "max_accounts": definition["max_accounts"],
             "default_parameters": json.loads(

@@ -1357,7 +1357,7 @@ class UserPaperTradingService:
             is_admin=True,
         )
         for strategy in strategies:
-            if not strategy.enabled:
+            if strategy.mode != "paper" or not strategy.enabled:
                 continue
             state = self.paper_store.get_state(strategy.id)
             if state is not None and (
@@ -1411,7 +1411,7 @@ class UserPaperTradingService:
             )
             enabled_by_owner: dict[str, list[UserStrategy]] = {}
             for strategy in strategies:
-                if strategy.enabled:
+                if strategy.mode == "paper" and strategy.enabled:
                     enabled_by_owner.setdefault(strategy.owner_email, []).append(
                         strategy
                     )
@@ -1475,6 +1475,8 @@ class UserPaperTradingService:
             errors = 0
             conflicts = 0
             for strategy in strategies:
+                if strategy.mode != "paper":
+                    continue
                 state = self.paper_store.get_state(strategy.id)
                 project = self.workspace_store.get_project(strategy.project_id)
                 if project is None:

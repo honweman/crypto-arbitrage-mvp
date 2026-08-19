@@ -502,11 +502,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260819-ui2" defer></script>',
+            '<script src="/static/app.js?v=20260819-ui3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260819-ui2" defer></script>',
+            '<script src="/static/i18n.js?v=20260819-ui3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -682,33 +682,34 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260819-ui2"></script>',
+            '<script src="/static/theme.js?v=20260819-ui3"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index("/static/theme.js?v=20260819-ui2"),
-            INDEX_HTML.index("/static/styles.css?v=20260819-ui2"),
+            INDEX_HTML.index("/static/theme.js?v=20260819-ui3"),
+            INDEX_HTML.index("/static/styles.css?v=20260819-ui3"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
         self.assertIn(':root[data-theme="dark"]', STYLES_CSS)
         self.assertIn(":root:not([data-theme])", STYLES_CSS)
 
-    def test_page_includes_paper_only_user_strategy_controls(self) -> None:
+    def test_page_includes_owner_live_market_maker_controls(self) -> None:
         self.assertIn('id="user-strategy-form"', INDEX_HTML)
         self.assertIn('id="user-strategy-accounts"', INDEX_HTML)
         self.assertIn('id="user-strategy-risk-order"', INDEX_HTML)
         self.assertIn('id="user-strategy-risk-total"', INDEX_HTML)
         self.assertIn('id="user-strategy-risk-fee"', INDEX_HTML)
-        self.assertIn('id="user-paper-events"', INDEX_HTML)
+        self.assertIn('id="user-strategy-mm-reprice"', INDEX_HTML)
+        self.assertIn('id="user-strategy-mm-inventory-enabled"', INDEX_HTML)
         self.assertIn('id="user-strategies"', INDEX_HTML)
         strategy_form = INDEX_HTML.split('id="user-strategy-form"', 1)[1].split(
             "</form>",
             1,
         )[0]
-        self.assertNotIn("live_enabled", strategy_form)
-        self.assertNotIn("Live Ready", strategy_form)
-        self.assertIn("Paper simulation only", strategy_form)
+        self.assertIn("Live Enabled", strategy_form)
+        self.assertIn("Live orders use only the selected account", strategy_form)
+        self.assertNotIn("Paper simulation only", strategy_form)
 
     def test_market_maker_payload_keeps_multiple_instances(self) -> None:
         coinbase = MarketMakerConfig(
@@ -794,7 +795,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260819-ui2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260819-ui3">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -8799,46 +8800,19 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                                 "project_id": project["id"],
                                 "strategy_type": "market_maker",
                                 "account_ids": [account["id"]],
-                                "enabled": True,
+                                "enabled": False,
                             },
                         },
                     )
                     strategy_payload = await strategy_response.json()
                     strategy = strategy_payload["workspace"]["strategies"][0]
-                    stored_strategy = app["user_workspace_store"].get_strategy(
-                        strategy["id"]
-                    )
-                    app["user_paper_store"].persist_cycle(
-                        stored_strategy,
-                        {
-                            "run_id": "paper-api-test",
-                            "status": "running",
-                            "reason": "paper test state",
-                            "fill_count": 3,
-                            "open_order_count": 2,
-                            "total_pnl_common": 1.25,
-                            "daily_pnl_common": 0.25,
-                            "common_quote_currency": "USD",
-                        },
-                    )
-                    paper_state_payload = await (
-                        await client.get("/api/state?view=settings")
-                    ).json()
-                    paper_reset_response = await client.post(
-                        "/api/user-workspace",
-                        json={
-                            "action": "reset_strategy_paper",
-                            "strategy_id": strategy["id"],
-                        },
-                    )
-                    paper_reset_payload = await paper_reset_response.json()
                     live_strategy_response = await client.post(
                         "/api/user-workspace",
                         json={
                             "action": "upsert_strategy",
                             "strategy": {
                                 "id": strategy["id"],
-                                "live_enabled": True,
+                                "enabled": True,
                             },
                         },
                     )
@@ -8920,9 +8894,6 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
             persisted_member = app["web_user_store"].get_user(member.email)
             database_bytes = workspace_path.read_bytes()
-            paper_database_bytes = workspace_path.with_name(
-                "user_paper_trading.sqlite3"
-            ).read_bytes()
 
         self.assertEqual(project_response.status, 200, project_payload)
         self.assertEqual(project["status"], "active")
@@ -8996,9 +8967,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             settings_state["user_workspace"]["strategy_access"]["core_trading"][
                 "live_strategy_types"
             ],
-            ["auto_buy_sell"],
+            ["auto_buy_sell", "market_maker"],
         )
-        self.assertTrue(
+        self.assertFalse(
             settings_state["user_workspace"]["strategy_access"]["quant"]["enabled"]
         )
         self.assertFalse(
@@ -9006,11 +8977,11 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 "live_submit_allowed"
             ]
         )
-        self.assertIn(
-            "market_maker",
+        self.assertEqual(
             settings_state["user_workspace"]["strategy_access"]["quant"][
                 "strategy_types"
             ],
+            [],
         )
         self.assertEqual(
             trading_state["user_workspace"]["strategy_access"]["scope"],
@@ -9035,23 +9006,12 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(enable_payload["workspace"]["accounts"][0]["enabled"])
         self.assertTrue(enable_payload["workspace"]["accounts"][0]["connection_fresh"])
         self.assertEqual(strategy_response.status, 200, strategy_payload)
-        self.assertEqual(strategy["status"], "paper_ready")
-        self.assertTrue(strategy["effective_enabled"])
-        self.assertFalse(strategy["readiness"]["live_submit_allowed"])
-        paper_strategy = paper_state_payload["user_workspace"]["strategies"][0]
-        self.assertEqual(paper_strategy["paper_runtime"]["status"], "running")
-        self.assertEqual(paper_strategy["paper_runtime"]["fill_count"], 3)
-        self.assertEqual(paper_strategy["paper_counts"]["state_count"], 1)
-        self.assertEqual(paper_reset_response.status, 200, paper_reset_payload)
-        self.assertEqual(paper_reset_payload["paper_reset"]["state_count"], 1)
-        self.assertEqual(
-            paper_reset_payload["workspace"]["strategies"][0]["paper_runtime"][
-                "status"
-            ],
-            "not_started",
-        )
+        self.assertEqual(strategy["status"], "paused")
+        self.assertFalse(strategy["effective_enabled"])
+        self.assertTrue(strategy["readiness"]["live_submit_allowed"])
+        self.assertEqual(strategy["mode"], "live")
         self.assertEqual(live_strategy_response.status, 400, live_strategy_payload)
-        self.assertIn("paper-only", live_strategy_payload["error"])
+        self.assertIn("confirm_live", live_strategy_payload["error"])
         self.assertEqual(
             account_delete_blocked_response.status,
             400,
@@ -9073,10 +9033,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             pause_strategy_payload["workspace"]["strategies"][0]["enabled"]
         )
-        self.assertEqual(resume_strategy_response.status, 200, resume_strategy_payload)
-        self.assertTrue(
-            resume_strategy_payload["workspace"]["strategies"][0]["enabled"]
-        )
+        self.assertEqual(resume_strategy_response.status, 400, resume_strategy_payload)
+        self.assertIn("confirm_live", resume_strategy_payload["error"])
         self.assertEqual(exchange_change_response.status, 400, exchange_change_payload)
         self.assertIn("re-enter API key", exchange_change_payload["error"])
         self.assertEqual(scope_change_response.status, 200, scope_change_payload)
@@ -9090,8 +9048,6 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(b"test-api-key-value", database_bytes)
         self.assertNotIn(b"test-secret-value", database_bytes)
-        self.assertNotIn(b"test-api-key-value", paper_database_bytes)
-        self.assertNotIn(b"test-secret-value", paper_database_bytes)
 
 
     async def test_exchange_account_egress_checks_are_isolated_per_user(

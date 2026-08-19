@@ -85,6 +85,10 @@ from ..strategy_timeline import (
 from ..strategies.spot_spread import find_converted_spot_spread_opportunities
 from ..strategies.triangular import find_triangular_arbitrage_opportunities
 from ..trade_log import write_trade_event
+from ..user_live_strategies import (
+    user_market_maker_binding,
+    user_market_maker_bindings,
+)
 from ..user_workspace import UserWorkspaceStore
 from ..web_config import (
     _auto_buy_sell_symbols_by_exchange,
@@ -3259,10 +3263,29 @@ async def _load_initial_rebalance_runtime(
     return current_path, runtime
 
 
+def _private_balance_total(balance: dict[str, Any], currency: str) -> float:
+    code = str(currency or "").upper()
+    total = balance.get("total")
+    if isinstance(total, dict):
+        try:
+            return float(total.get(code) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    row = balance.get(code)
+    if isinstance(row, dict):
+        try:
+            return float(row.get("total") or row.get("free") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 async def _market_maker_instance_task_loop(
     cfg: BotConfig,
     state: MonitorState,
     instance_id: str,
+    user_workspace_store: UserWorkspaceStore | None = None,
+    user_strategy_id: str = "",
 ) -> None:
     manager = ExchangeManager()
     orderbook_cache = OrderBookCache(manager)
@@ -3276,6 +3299,7 @@ async def _market_maker_instance_task_loop(
     previous_mid_price: float | None = None
     previous_plan: dict[str, Any] | None = None
     last_maker_cfg = None
+    last_instance_runtime_cfg: BotConfig | None = None
     active_maker_cfg = None
     previous_live_allowed = False
     last_start_recovery: dict[str, Any] | None = None
@@ -3309,11 +3333,34 @@ async def _market_maker_instance_task_loop(
                 ),
                 None,
             )
+            if (
+                maker_cfg is None
+                and user_workspace_store is not None
+                and user_strategy_id
+            ):
+                user_strategy = user_workspace_store.get_strategy(user_strategy_id)
+                user_binding = (
+                    user_market_maker_binding(
+                        runtime_cfg,
+                        user_workspace_store,
+                        user_strategy,
+                    )
+                    if user_strategy is not None
+                    else None
+                )
+                if user_binding is not None:
+                    runtime_cfg = user_binding.runtime_config
+                    maker_cfg = user_binding.config
             if maker_cfg is None:
                 cancel_payload = None
-                if open_order_ids and last_maker_cfg is not None:
+                removal_sync: dict[str, Any] | None = None
+                if (
+                    open_order_ids
+                    and last_maker_cfg is not None
+                    and last_instance_runtime_cfg is not None
+                ):
                     cancel_cfg = replace(
-                        runtime_cfg,
+                        last_instance_runtime_cfg,
                         market_maker=replace(
                             last_maker_cfg,
                             exchange=open_order_exchange,
@@ -3333,23 +3380,45 @@ async def _market_maker_instance_task_loop(
                         cancel_payload,
                         source="market_maker_task",
                     )
-                    open_order_ids = []
-                    open_order_exchange = ""
-                    open_order_symbol = ""
+                    removal_sync = await _market_maker_open_order_snapshot(
+                        cancel_cfg,
+                        manager,
+                        open_order_ids,
+                    )
+                    open_order_ids = [
+                        str(order_id)
+                        for order_id in removal_sync.get("order_ids", [])
+                        if order_id
+                    ]
+                    if not open_order_ids and not removal_sync.get("error"):
+                        open_order_exchange = ""
+                        open_order_symbol = ""
+                removal_pending = bool(
+                    open_order_ids or (removal_sync or {}).get("error")
+                )
                 runtime = {
                     **runtime,
                     "id": instance_id,
-                    "status": "removed",
+                    "status": "remove_cancel_retry" if removal_pending else "removed",
                     "mode": "paused",
-                    "reason": "market maker instance removed",
-                    "open_order_ids": [],
-                    "open_order_count": 0,
+                    "reason": (
+                        "market maker instance was removed; cancellation confirmation is pending"
+                        if removal_pending
+                        else "market maker instance removed"
+                    ),
+                    "open_order_ids": open_order_ids,
+                    "open_order_count": len(open_order_ids),
                     "placed_count": placed_count,
                     "canceled_count": canceled_count,
                     "last_execution": cancel_payload,
+                    "open_order_sync_error": (removal_sync or {}).get("error"),
+                    "last_error": (removal_sync or {}).get("error"),
                     "updated_at": time.time(),
                 }
                 await state.set_market_maker_instance_runtime(instance_id, runtime)
+                if removal_pending:
+                    await asyncio.sleep(1.0)
+                    continue
                 return
             maker_cfg = replace(maker_cfg, id=instance_id)
             last_maker_cfg = maker_cfg
@@ -3358,6 +3427,7 @@ async def _market_maker_instance_task_loop(
                 market_maker=maker_cfg,
                 market_makers=[maker_cfg],
             )
+            last_instance_runtime_cfg = runtime_cfg
             interval = max(1.0, maker_cfg.poll_seconds)
             started = time.monotonic()
             strategy_pauses = await state.strategy_pauses()
@@ -3679,12 +3749,26 @@ async def _market_maker_instance_task_loop(
                     force_replace = force_replace_reason is not None
                     if force_replace:
                         previous_plan_for_cycle = None
-                    portfolio_snapshot = await state.portfolio_payload()
-                    inventory_base = _portfolio_position_for_symbol(
-                        portfolio_snapshot,
-                        maker_cfg.symbol,
-                        cfg=runtime_cfg,
+                    exchange_cfg = _find_exchange_by_key(
+                        runtime_cfg,
+                        maker_cfg.exchange,
                     )
+                    if (
+                        maker_cfg.inventory_control_enabled
+                        and exchange_cfg.credential_owner_email
+                    ):
+                        balance = await manager.fetch_balance(exchange_cfg)
+                        inventory_base = _private_balance_total(
+                            balance,
+                            maker_cfg.symbol.split("/", 1)[0],
+                        )
+                    else:
+                        portfolio_snapshot = await state.portfolio_payload()
+                        inventory_base = _portfolio_position_for_symbol(
+                            portfolio_snapshot,
+                            maker_cfg.symbol,
+                            cfg=runtime_cfg,
+                        )
                     # When force-replacing (fills detected) don't pass open_orders:
                     # _previous_plan_from_open_orders would otherwise reconstruct a
                     # "previous plan" from whatever orders remain, which can trick
@@ -3849,6 +3933,7 @@ async def _complete_market_maker_cycle_on_shutdown(
 async def market_maker_task_loop(
     cfg: BotConfig,
     state: MonitorState,
+    user_workspace_store: UserWorkspaceStore | None = None,
 ) -> None:
     tasks: dict[str, asyncio.Task[None]] = {}
     await state.set_market_maker_runtime(
@@ -3869,6 +3954,20 @@ async def market_maker_task_loop(
         while True:
             runtime_cfg = await state.runtime_config(cfg)
             maker_configs = market_maker_configs_for_runtime(runtime_cfg)
+            user_strategy_ids: dict[str, str] = {}
+            if user_workspace_store is not None:
+                user_bindings = user_market_maker_bindings(
+                    runtime_cfg,
+                    user_workspace_store,
+                )
+                user_strategy_ids = {
+                    binding.config.id: binding.strategy_id
+                    for binding in user_bindings
+                }
+                maker_configs = [
+                    *maker_configs,
+                    *(binding.config for binding in user_bindings),
+                ]
             configured_ids = {maker_cfg.id for maker_cfg in maker_configs}
 
             for instance_id, task in list(tasks.items()):
@@ -3897,7 +3996,13 @@ async def market_maker_task_loop(
                 if maker_cfg.id in tasks:
                     continue
                 tasks[maker_cfg.id] = asyncio.create_task(
-                    _market_maker_instance_task_loop(cfg, state, maker_cfg.id)
+                    _market_maker_instance_task_loop(
+                        cfg,
+                        state,
+                        maker_cfg.id,
+                        user_workspace_store,
+                        user_strategy_ids.get(maker_cfg.id, ""),
+                    )
                 )
 
             for instance_id in list(tasks):
