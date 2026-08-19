@@ -2819,6 +2819,9 @@ def build_user_workspace_payload(
         "scope": "platform" if user is not None and user.role == "admin" else "owner",
         "core_trading": {
             "enabled": user is not None,
+            "strategy_types": (
+                ["auto_buy_sell", "market_maker"] if user is not None else []
+            ),
             "live_strategy_types": ["auto_buy_sell"] if user is not None else [],
             "requires_live_confirmation": True,
         },
@@ -5489,16 +5492,23 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         view=view,
         sections=sections,
     )
-    quant_sections = {
+    requested_sections = {
         item.strip() for item in str(sections or "").split(",") if item.strip()
     }
     workspace_payload: dict[str, Any] | None = None
-    if view in (None, "settings") or (
-        view == "quant"
-        and (
-            sections is None
-            or "backtest-points" in quant_sections
-            or "user-quant-strategies" in quant_sections
+    if (
+        view in (None, "settings")
+        or (
+            view == "trading"
+            and (sections is None or "user-market-maker" in requested_sections)
+        )
+        or (
+            view == "quant"
+            and (
+                sections is None
+                or "backtest-points" in requested_sections
+                or "user-quant-strategies" in requested_sections
+            )
         )
     ):
         workspace_payload = build_user_workspace_payload(

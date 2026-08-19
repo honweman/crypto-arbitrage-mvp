@@ -4,6 +4,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
 	    const PAGE_IDS = new Set(["status", "trading", "quant", "settings", "records"]);
 	    const CORE_CONTROL_SECTION_IDS = new Set([
+	      "user-market-maker-section",
 	      "mm-section",
 	      "slow-section",
 	      "rebalance-section",
@@ -45,6 +46,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "holders",
 	      ],
 	      trading: [
+	        "user-market-maker",
 	        "strategy-settings-cards",
 	        "mm-orders",
 	        "slow-orders",
@@ -93,6 +95,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    const PAGE_DOM_ORDER = {
 	      trading: [
 	        "trading-page-heading",
+	        "user-market-maker-section",
 	        "strategy-settings-section",
 	        "mm-section",
 	        "slow-section",
@@ -119,6 +122,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     let configVersionPayload = null;
     let configVersionLoadAt = 0;
     let configVersionLoading = false;
+    let userStrategyViewFilter = "";
 
     function uiFeatureNamesFor(el) {
       return String(el?.dataset?.uiFeature || "")
@@ -149,6 +153,10 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         element.classList.toggle("owner-hidden", ownerMode);
         element.setAttribute("aria-hidden", ownerMode ? "true" : "false");
       });
+      document.querySelectorAll("[data-owner-only]").forEach((element) => {
+        element.classList.toggle("role-hidden", !ownerMode);
+        element.setAttribute("aria-hidden", ownerMode ? "false" : "true");
+      });
       const tradingBadge = document.querySelector("#trading-page-heading .page-mode-badge");
       const quantBadge = document.querySelector("#quant-page-heading .page-mode-badge");
       if (tradingBadge) {
@@ -157,13 +165,26 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       if (quantBadge) {
         quantBadge.textContent = uiText(ownerMode ? "My strategies · paper execution" : "Paper by default");
       }
+      mountUserStrategyLab(currentPage);
     }
 
-    function mountUserQuantStrategyLab() {
-      const host = document.getElementById("user-quant-strategies");
+    function mountUserStrategyLab(page = currentPage) {
+      const ownerMarketMaker = document.body.classList.contains("owner-mode")
+        && page === "trading";
+      const host = document.getElementById(
+        ownerMarketMaker ? "user-market-maker" : "user-quant-strategies"
+      );
       const lab = document.getElementById("user-strategy-lab");
-      if (!host || !lab || lab.parentElement === host) return;
-      host.appendChild(lab);
+      if (!host || !lab) return;
+      userStrategyViewFilter = ownerMarketMaker ? "market_maker" : "";
+      if (lab.parentElement !== host) host.appendChild(lab);
+      const title = lab.querySelector(".workspace-strategy-header strong");
+      if (title) title.textContent = uiText(ownerMarketMaker ? "My Market Maker" : "User Strategies");
+      const createButton = document.getElementById("user-strategy-new");
+      if (createButton) createButton.textContent = uiText(ownerMarketMaker ? "New MM" : "New Strategy");
+      const typeSelect = document.getElementById("user-strategy-type");
+      if (typeSelect) typeSelect.disabled = ownerMarketMaker;
+      if (currentUserWorkspace) renderUserStrategies(currentUserWorkspace);
     }
 
     function pageFromLocation() {
@@ -190,6 +211,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 		    function setActivePage(page, options = {}) {
 		      const activePage = PAGE_IDS.has(page) ? page : "status";
 		      currentPage = activePage;
+		      mountUserStrategyLab(activePage);
 		      if (activePage !== "quant") scheduleUserBacktestPoll(false);
 	      clearRefreshTimer();
 	      applyFeatureVisibility();
@@ -5088,6 +5110,26 @@ function balanceStatusClass(status) {
       renderUserStrategies(currentUserWorkspace);
     }
 
+    function renderUserMarketMakerStrategies(workspace) {
+      currentUserWorkspace = workspace || currentUserWorkspace;
+      const access = currentUserWorkspace?.strategy_access?.core_trading || {};
+      text(
+        "user-mm-access-meta",
+        access.enabled === false
+          ? uiText("Registered account required")
+          : uiText("My accounts · paper execution")
+      );
+      mountUserStrategyLab("trading");
+      const formsDisabled = !currentUserWorkspace
+        || currentUserWorkspace.status === "user_account_required"
+        || currentUserWorkspace.status === "error";
+      document.querySelectorAll("#user-strategy-form input, #user-strategy-form select, #user-strategy-form button, #user-strategy-new").forEach((control) => {
+        control.disabled = formsDisabled
+          || (control.id === "user-strategy-type" && Boolean(userStrategyViewFilter));
+      });
+      renderUserStrategies(currentUserWorkspace);
+    }
+
     async function postUserWorkspace(payload) {
       const res = await fetch("/api/user-workspace", {
         method: "POST",
@@ -5432,12 +5474,14 @@ function balanceStatusClass(status) {
     }
 
     function workspaceStrategyTypeOptions(selectedType = "") {
-      const rows = (currentUserWorkspace?.strategy_catalog || []).map((definition) => ({
-        value: definition.id,
-        label: uiText(definition.label || definition.id),
-        title: `${definition.min_accounts}-${definition.max_accounts} accounts · paper`,
-      }));
-      const selected = selectedType || rows[0]?.value || "market_maker";
+      const rows = (currentUserWorkspace?.strategy_catalog || [])
+        .filter((definition) => !userStrategyViewFilter || definition.id === userStrategyViewFilter)
+        .map((definition) => ({
+          value: definition.id,
+          label: uiText(definition.label || definition.id),
+          title: `${definition.min_accounts}-${definition.max_accounts} accounts · paper`,
+        }));
+      const selected = userStrategyViewFilter || selectedType || rows[0]?.value || "market_maker";
       setSelectOptions("user-strategy-type", rows, selected, "Select strategy");
       return selected;
     }
@@ -5618,6 +5662,11 @@ function balanceStatusClass(status) {
     }
 
     function openUserStrategyForm(strategy = null, preferredProjectId = "") {
+      if (
+        userStrategyViewFilter
+        && strategy
+        && strategy.strategy_type !== userStrategyViewFilter
+      ) return;
       selectedUserStrategyId = strategy?.id || "";
       userStrategyFormDirty = false;
       const form = document.getElementById("user-strategy-form");
@@ -5626,7 +5675,9 @@ function balanceStatusClass(status) {
       const projectId = workspaceStrategyProjectOptions(
         strategy?.project_id || preferredProjectId
       );
-      const strategyType = workspaceStrategyTypeOptions(strategy?.strategy_type || "");
+      const strategyType = workspaceStrategyTypeOptions(
+        userStrategyViewFilter || strategy?.strategy_type || ""
+      );
       const definition = workspaceStrategyDefinition(strategyType);
       const project = workspaceProject(projectId);
       setFieldValue(
@@ -5769,11 +5820,11 @@ function balanceStatusClass(status) {
       return "subtle";
     }
 
-    function renderUserPaperEvents(workspace) {
+    function renderUserPaperEvents(workspace, visibleStrategies = null) {
       const details = document.getElementById("user-paper-activity");
       const body = document.getElementById("user-paper-events");
       if (!details || !body) return;
-      const strategies = workspace?.strategies || [];
+      const strategies = visibleStrategies || workspace?.strategies || [];
       details.hidden = strategies.length === 0;
       body.innerHTML = "";
       const paper = workspace?.paper || {};
@@ -5783,7 +5834,10 @@ function balanceStatusClass(status) {
         `${summary.fill_count || 0} ${uiText("fills")} · ${summary.open_order_count || 0} ${uiText("open")}`
       );
       const strategyMap = new Map(strategies.map((strategy) => [strategy.id, strategy]));
-      const events = paper.events || [];
+      const visibleStrategyIds = new Set(strategies.map((strategy) => strategy.id));
+      const events = (paper.events || []).filter(
+        (event) => visibleStrategyIds.has(event.strategy_id)
+      );
       if (events.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="4">${escapeHtml(uiText("No paper activity yet."))}</td>`;
@@ -5807,13 +5861,18 @@ function balanceStatusClass(status) {
       const body = document.getElementById("user-strategies");
       if (!body) return;
       body.innerHTML = "";
-      const strategies = workspace?.strategies || [];
-      const summary = workspace?.summary || {};
+      const strategies = (workspace?.strategies || []).filter(
+        (strategy) => !userStrategyViewFilter || strategy.strategy_type === userStrategyViewFilter
+      );
+      const readyCount = strategies.filter((strategy) => strategy.effective_enabled).length;
+      const runningCount = strategies.filter((strategy) => (
+        strategy.enabled && !strategy.paper_runtime?.terminal
+      )).length;
       text(
         "user-strategy-meta",
-        `${summary.paper_running_count || 0} ${uiText("running")} · ${summary.ready_strategy_count || 0}/${summary.strategy_count || 0} ${uiText("ready")}`
+        `${runningCount} ${uiText("running")} · ${readyCount}/${strategies.length} ${uiText("ready")}`
       );
-      renderUserPaperEvents(workspace);
+      renderUserPaperEvents(workspace, strategies);
       if (strategies.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="7">${escapeHtml(uiText("No user strategies yet."))}</td>`;
@@ -9781,6 +9840,7 @@ function balanceStatusClass(status) {
       lastVisibleRenderAt[activePage] = now;
       if (activePage === "trading") {
         if (Array.isArray(data.market_limits)) currentMarketLimits = data.market_limits;
+        renderOpenSection("user-market-maker", () => renderUserMarketMakerStrategies(data.user_workspace));
         renderOpenSection("strategy-settings-cards", () => renderStrategySettingCards(data));
         renderOpenSection("mm-orders", () => {
           renderMarketMakerConfig(data.market_maker);
@@ -10001,7 +10061,7 @@ function balanceStatusClass(status) {
       };
     }
 
-	    mountUserQuantStrategyLab();
+	    mountUserStrategyLab();
 	    applyFeatureVisibility();
     setupCompactSections();
     setActivePage(pageFromLocation(), { refresh: false });

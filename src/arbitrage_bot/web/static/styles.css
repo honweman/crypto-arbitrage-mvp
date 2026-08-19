@@ -807,6 +807,11 @@ section {
   display: none !important;
 }
 
+[data-owner-only].role-hidden,
+[data-page][data-owner-only].role-hidden {
+  display: none !important;
+}
+
 .page-heading[data-page].active-page {
   display: flex !important;
 }
@@ -1310,11 +1315,13 @@ h2 {
 }
 
 #user-workspace-section .paper-activity-table,
-#user-quant-strategies-section .paper-activity-table {
+#user-quant-strategies-section .paper-activity-table,
+#user-market-maker-section .paper-activity-table {
   min-width: 680px;
 }
 
-#user-quant-strategies-section .user-strategy-lab {
+#user-quant-strategies-section .user-strategy-lab,
+#user-market-maker-section .user-strategy-lab {
   margin-top: 0;
   border-top: 0;
 }
