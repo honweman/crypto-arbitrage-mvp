@@ -4488,6 +4488,11 @@ function balanceStatusClass(status) {
 
     function syncUserExchangeEgressFields(connection = null) {
       const mode = document.getElementById("user-exchange-egress-mode")?.value || "default";
+      const exchangeId = document.getElementById("user-exchange-id")?.value || "";
+      const connectionId = document.getElementById("user-exchange-account-id")?.value || "";
+      const sameExchangePeers = (currentUserWorkspace?.connections || []).filter(
+        (row) => row.exchange === exchangeId && row.id !== connectionId,
+      );
       const sourceField = document.getElementById("user-exchange-source-ip-field");
       const proxyField = document.getElementById("user-exchange-proxy-url-field");
       if (sourceField) sourceField.hidden = mode !== "source_ip";
@@ -4500,6 +4505,9 @@ function balanceStatusClass(status) {
         status.className = "ok wide-field";
       } else if (blockers.length) {
         status.textContent = blockers.map((item) => friendlyAccountMessage(item)).join(" · ");
+        status.className = "missing wide-field";
+      } else if (sameExchangePeers.length && mode === "default") {
+        status.textContent = uiText("Another account already uses this exchange. Select a dedicated source IP or proxy; the new account stays inactive until its public IP is verified.");
         status.className = "missing wide-field";
       } else if (mode === "default") {
         status.textContent = uiText("Single accounts may use the server default IP.");

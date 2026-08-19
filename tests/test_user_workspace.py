@@ -118,6 +118,8 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 "owner_email": "two@example.com",
                 "label": "Bybit Two",
                 "exchange": "bybit",
+                "connection_status": "healthy",
+                "connection_checked_at": time.time(),
             }
         )
 
@@ -125,6 +127,103 @@ class UserWorkspaceStoreTest(unittest.TestCase):
 
         self.assertIn("expected public IP is required", blockers)
         self.assertIn("egress public IP has not been verified", blockers)
+
+    def test_staged_second_account_does_not_interrupt_existing_account(self) -> None:
+        now = time.time()
+        existing = UserApiConnection.from_dict(
+            {
+                "owner_email": "one@example.com",
+                "label": "Bybit Main",
+                "exchange": "bybit",
+                "connection_status": "healthy",
+                "connection_checked_at": now,
+            }
+        )
+        staged = UserApiConnection.from_dict(
+            {
+                "owner_email": "two@example.com",
+                "label": "Bybit Second",
+                "exchange": "bybit",
+                "egress_mode": "source_ip",
+                "egress_source_ip": "172.19.60.74",
+                "egress_expected_ip": "8.222.193.180",
+            }
+        )
+
+        existing_blockers = api_connection_egress_blockers(
+            existing,
+            [existing, staged],
+            now=now,
+        )
+        staged_blockers = api_connection_egress_blockers(
+            staged,
+            [existing, staged],
+            now=now,
+        )
+
+        self.assertEqual(existing_blockers, [])
+        self.assertIn("egress public IP has not been verified", staged_blockers)
+
+    def test_second_account_activation_waits_for_existing_route_verification(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_MASTER_KEY": MASTER_KEY},
+            clear=False,
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_MASTER_KEY",
+            )
+            first = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "one@example.com",
+                        "label": "Bybit Main",
+                        "exchange": "bybit",
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key-1", "secret": "secret-1"},
+            )
+            first = store.update_api_connection_check(first.id, status="healthy")
+            second = store.upsert_api_connection(
+                UserApiConnection.from_dict(
+                    {
+                        "owner_email": "two@example.com",
+                        "label": "Bybit Second",
+                        "exchange": "bybit",
+                        "egress_mode": "source_ip",
+                        "egress_source_ip": "172.19.60.74",
+                        "egress_expected_ip": "8.222.193.180",
+                        "withdrawal_disabled_confirmed": True,
+                        "trade_permission_confirmed": True,
+                    }
+                ),
+                credentials={"api_key": "key-2", "secret": "secret-2"},
+            )
+
+            blocked_second = store.update_api_connection_check(
+                second.id,
+                status="healthy",
+                check={
+                    "egress_observed_ip": "8.222.193.180",
+                    "egress_checked_at": time.time(),
+                    "egress_error": "",
+                },
+            )
+
+            self.assertEqual(blocked_second.connection_status, "error")
+            self.assertIn(
+                "another bybit account",
+                blocked_second.connection_error,
+            )
+            self.assertEqual(
+                store.get_api_connection(first.id).connection_status,
+                "healthy",
+            )
 
     def test_legacy_api_connection_is_normalized_and_keeps_large_balance_snapshot(
         self,

@@ -777,7 +777,20 @@ def api_connection_egress_blockers(
     *,
     now: float | None = None,
 ) -> list[str]:
-    same_exchange = [row for row in peers if row.exchange == connection.exchange]
+    current = float(now if now is not None else _now())
+    # A newly saved, unverified account is staged and cannot trade. Excluding it
+    # from an already-live peer's uniqueness check lets operators configure the
+    # new route without interrupting the existing account. The staged account
+    # still sees every fresh peer and must prove a unique route before activation.
+    same_exchange = [
+        row
+        for row in peers
+        if row.exchange == connection.exchange
+        and (
+            row.id == connection.id
+            or api_connection_is_fresh(row, now=current)
+        )
+    ]
     dedicated_required = len(same_exchange) > 1
     if connection.egress_mode == "default" and not dedicated_required:
         return []
@@ -793,7 +806,6 @@ def api_connection_egress_blockers(
     ):
         blockers.append("observed public IP does not match the expected IP")
     checked_at = float(connection.egress_checked_at or 0.0)
-    current = float(now if now is not None else _now())
     if connection.egress_observed_ip and not (
         0.0 <= current - checked_at <= CONNECTION_MAX_AGE_SECONDS
     ):
@@ -1774,6 +1786,41 @@ class UserWorkspaceStore:
                     connection_error=_clean_text(blockers[0], max_length=240),
                     egress_error=_clean_text(blockers[0], max_length=240),
                 )
+            else:
+                peer_blocker = next(
+                    (
+                        (row, row_blockers[0])
+                        for row in peers
+                        if row.id != updated.id
+                        and row.exchange == updated.exchange
+                        and api_connection_is_fresh(row)
+                        and (
+                            row_blockers := api_connection_egress_blockers(
+                                row,
+                                peers,
+                            )
+                        )
+                    ),
+                    None,
+                )
+                if peer_blocker is not None:
+                    peer, blocker = peer_blocker
+                    peer_name = (
+                        f"account {peer.label}"
+                        if peer.owner_email == updated.owner_email
+                        else f"another {updated.exchange} account"
+                    )
+                    message = _clean_text(
+                        f"{peer_name} must verify a unique public IP "
+                        f"before this account can be enabled: {blocker}",
+                        max_length=240,
+                    )
+                    updated = replace(
+                        updated,
+                        connection_status="error",
+                        connection_error=message,
+                        egress_error=message,
+                    )
         return self.upsert_api_connection(updated)
 
     def suggest_api_connection_label(

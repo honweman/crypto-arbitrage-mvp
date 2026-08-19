@@ -7588,6 +7588,7 @@ async def _sync_workspace_connection(
         }
     )
     connection_candidate = UserApiConnection.from_dict(connection_raw)
+    staged_egress_warning = ""
     if existing_connection is None:
         same_exchange_accounts = [
             row
@@ -7595,26 +7596,19 @@ async def _sync_workspace_connection(
             if row.exchange == connection_candidate.exchange
         ]
         if same_exchange_accounts:
-            if connection_candidate.egress_mode == "default":
-                raise ValueError(
-                    "a second account on the same exchange requires a dedicated "
-                    "source IP or proxy"
-                )
-            future_peers = [*same_exchange_accounts, connection_candidate]
-            if any(
-                api_connection_egress_blockers(row, future_peers)
-                for row in same_exchange_accounts
-            ):
-                raise ValueError(
-                    "configure and verify a dedicated public IP for the existing "
-                    f"{connection_candidate.exchange} account before adding another"
-                )
+            staged_egress_warning = (
+                f"saved as inactive: {connection_candidate.exchange} already has "
+                "another API account; assign and verify a unique public IP for each "
+                "account before enabling this one"
+            )
     api_connection = store.upsert_api_connection(
         connection_candidate,
         credentials=supplied or None,
     )
     matches: list[tuple[UserProject, dict[str, Any], str]] = []
     warnings: list[str] = []
+    if staged_egress_warning:
+        warnings.append(staged_egress_warning)
     selected_market_rows = raw.get("markets")
     replace_markets = bool(raw.get("replace_markets")) and isinstance(
         selected_market_rows, list
@@ -7833,6 +7827,9 @@ async def _refresh_admin_workspace_runtime_accounts(request: web.Request) -> Non
 async def api_user_workspace(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     store = _user_workspace_store(request)
+    action = ""
+    user: WebUser | None = None
+    safe_error_target = ""
     try:
         user = _require_workspace_user(_request_user(request))
         payload = await request.json()
@@ -7841,6 +7838,17 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         action = str(payload.get("action") or "").strip().lower()
         if not action:
             raise ValueError("action is required")
+        raw_target = (
+            payload.get("account")
+            if isinstance(payload.get("account"), dict)
+            else payload
+        )
+        safe_error_target = str(
+            raw_target.get("connection_id")
+            or raw_target.get("exchange")
+            or raw_target.get("id")
+            or ""
+        )[:120]
 
         audit_target = ""
         audit_detail = ""
@@ -8953,10 +8961,37 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         response_payload.update(response_extra)
         return web.json_response(response_payload)
     except PermissionError as exc:
+        write_web_audit_event(
+            cfg,
+            request,
+            action=f"user_workspace_{action or 'invalid'}",
+            status="blocked",
+            target=safe_error_target,
+            detail="workspace update rejected",
+            error=str(exc),
+        )
         return web.json_response({"error": str(exc)}, status=403)
     except RuntimeError as exc:
+        write_web_audit_event(
+            cfg,
+            request,
+            action=f"user_workspace_{action or 'invalid'}",
+            status="error",
+            target=safe_error_target,
+            detail="workspace update unavailable",
+            error=str(exc),
+        )
         return web.json_response({"error": str(exc)}, status=503)
     except (json.JSONDecodeError, sqlite3.Error, ValueError) as exc:
+        write_web_audit_event(
+            cfg,
+            request,
+            action=f"user_workspace_{action or 'invalid'}",
+            status="error",
+            target=safe_error_target,
+            detail="workspace update failed validation",
+            error=str(exc),
+        )
         return web.json_response({"error": str(exc)}, status=400)
 
 

@@ -151,9 +151,11 @@ from arbitrage_bot.web_config import (
 from arbitrage_bot.strategy_timeline import write_strategy_timeline_from_payload
 from arbitrage_bot.user_strategies import UserStrategy
 from arbitrage_bot.user_workspace import (
+    UserApiConnection,
     UserExchangeAccount,
     UserProject,
     UserWorkspaceStore,
+    api_connection_egress_blockers,
 )
 
 
@@ -563,6 +565,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="user-exchange-source-ip"', INDEX_HTML)
         self.assertIn('id="user-exchange-expected-ip"', INDEX_HTML)
         self.assertIn('id="user-exchange-proxy-url"', INDEX_HTML)
+        self.assertIn(
+            "Another account already uses this exchange.",
+            APP_JS,
+        )
         self.assertIn('<strong>Unified Access</strong>', INDEX_HTML)
         self.assertIn(
             "without separate project approval",
@@ -9023,6 +9029,110 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b"test-api-key-value", paper_database_bytes)
         self.assertNotIn(b"test-secret-value", paper_database_bytes)
 
+
+    async def test_second_exchange_account_is_saved_inactive_before_egress_setup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_store_path = data_dir / "web_users.json"
+            user_store = WebUserStore(user_store_path)
+            admin = user_store.create_user(
+                email="admin@example.com",
+                username="admin01",
+                password="Strong-pass-1!",
+            )
+            member = user_store.create_user(
+                email="member@example.com",
+                username="member01",
+                password="Strong-pass-2!",
+            )
+            workspace_path = data_dir / "user_workspace.sqlite3"
+            cfg = make_config(
+                web_security=WebSecurityConfig(
+                    password_env=None,
+                    cookie_secret_env=None,
+                    allowed_ips_env=None,
+                    cookie_secure=False,
+                    user_store_path=str(user_store_path),
+                    user_workspace_path=str(workspace_path),
+                    credential_master_key_env="TEST_CREDENTIAL_MASTER_KEY",
+                )
+            )
+            master_key = base64.urlsafe_b64encode(b"e" * 32).decode("ascii")
+            with patch.dict(
+                os.environ,
+                {"TEST_CREDENTIAL_MASTER_KEY": master_key},
+                clear=False,
+            ):
+                workspace = UserWorkspaceStore(
+                    workspace_path,
+                    master_key_env="TEST_CREDENTIAL_MASTER_KEY",
+                )
+                existing = workspace.upsert_api_connection(
+                    UserApiConnection.from_dict(
+                        {
+                            "owner_email": admin.email,
+                            "label": "Bybit Main",
+                            "exchange": "bybit",
+                            "withdrawal_disabled_confirmed": True,
+                            "trade_permission_confirmed": True,
+                        }
+                    ),
+                    credentials={"api_key": "admin-key", "secret": "admin-secret"},
+                )
+                existing = workspace.update_api_connection_check(
+                    existing.id,
+                    status="healthy",
+                )
+                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    await client.post(
+                        "/login",
+                        data={
+                            "username": member.username,
+                            "password": "Strong-pass-2!",
+                        },
+                    )
+                    save_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "sync_account",
+                            "account": {
+                                "label": "Bybit Second",
+                                "exchange": "bybit",
+                                "withdrawal_disabled_confirmed": True,
+                                "trade_permission_confirmed": True,
+                                "credentials": {
+                                    "api_key": "member-key",
+                                    "secret": "member-secret",
+                                },
+                            },
+                        },
+                    )
+                    save_payload = await save_response.json()
+                finally:
+                    await client.close()
+
+                all_connections = workspace.list_api_connections(
+                    owner_email="",
+                    is_admin=True,
+                )
+                existing_blockers = api_connection_egress_blockers(
+                    existing,
+                    all_connections,
+                )
+
+        self.assertEqual(save_response.status, 200, save_payload)
+        self.assertEqual(len(save_payload["workspace"]["connections"]), 1)
+        self.assertEqual(
+            save_payload["workspace"]["connections"][0]["connection_status"],
+            "unverified",
+        )
+        self.assertIn("saved as inactive", save_payload["warnings"][0])
+        self.assertEqual(existing_blockers, [])
 
     async def test_api_connection_syncs_all_matching_user_projects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
