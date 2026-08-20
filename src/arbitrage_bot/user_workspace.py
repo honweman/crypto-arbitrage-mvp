@@ -53,6 +53,7 @@ SYMBOL_RE = re.compile(
 )
 CREDENTIAL_FIELDS = {"api_key", "secret", "passphrase", "password", "proxy_url"}
 EGRESS_MODES = {"default", "source_ip", "proxy"}
+USER_STRATEGY_DEFAULT_TYPES = {"auto_buy_sell"}
 
 
 def _clean_ip_address(value: Any, *, label: str) -> str:
@@ -1287,6 +1288,13 @@ class UserWorkspaceStore:
                     updated_at REAL NOT NULL,
                     payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS user_strategy_defaults (
+                    owner_email TEXT NOT NULL,
+                    strategy_type TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY(owner_email, strategy_type)
+                );
                 CREATE TABLE IF NOT EXISTS user_wallet_connections (
                     id TEXT PRIMARY KEY,
                     owner_email TEXT NOT NULL,
@@ -1905,6 +1913,62 @@ class UserWorkspaceStore:
             )
             connection.commit()
         return updated
+
+    @staticmethod
+    def _strategy_default_type(strategy_type: str) -> str:
+        value = str(strategy_type or "").strip().lower()
+        if value not in USER_STRATEGY_DEFAULT_TYPES:
+            raise ValueError(f"unsupported user strategy default: {value or 'missing'}")
+        return value
+
+    def strategy_default(
+        self,
+        owner_email: str,
+        strategy_type: str,
+    ) -> dict[str, Any]:
+        self._ensure()
+        owner = _clean_email(owner_email)
+        kind = self._strategy_default_type(strategy_type)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM user_strategy_defaults "
+                "WHERE owner_email = ? AND strategy_type = ?",
+                (owner, kind),
+            ).fetchone()
+        if row is None:
+            return {}
+        payload = json.loads(row["payload"])
+        if not isinstance(payload, dict):
+            raise ValueError("stored user strategy default is invalid")
+        return payload
+
+    def upsert_strategy_default(
+        self,
+        owner_email: str,
+        strategy_type: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("user strategy default must be an object")
+        owner = _clean_email(owner_email)
+        kind = self._strategy_default_type(strategy_type)
+        stored = json.loads(self._dump(payload))
+        updated_at = _now()
+        self._ensure()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_strategy_defaults(
+                    owner_email, strategy_type, updated_at, payload
+                ) VALUES(?, ?, ?, ?)
+                ON CONFLICT(owner_email, strategy_type) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    payload = excluded.payload
+                """,
+                (owner, kind, updated_at, self._dump(stored)),
+            )
+            connection.commit()
+        return stored
 
     def list_accounts(
         self,
@@ -3890,6 +3954,7 @@ class UserWorkspaceStore:
                 "user_exchange_accounts",
                 "user_projects",
                 "user_risk_profiles",
+                "user_strategy_defaults",
             ):
                 cursor = connection.execute(
                     f"DELETE FROM {table} WHERE owner_email = ?",  # noqa: S608
@@ -3986,7 +4051,12 @@ class UserWorkspaceStore:
                 "WHERE owner_email = ?",
                 (new, old),
             )
-            for table in ("user_strategies", "user_projects", "user_risk_profiles"):
+            for table in (
+                "user_strategies",
+                "user_projects",
+                "user_risk_profiles",
+                "user_strategy_defaults",
+            ):
                 cursor = connection.execute(
                     f"UPDATE {table} SET owner_email = ? WHERE owner_email = ?",  # noqa: S608
                     (new, old),

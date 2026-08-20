@@ -691,6 +691,65 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 }
             )
 
+    def test_strategy_defaults_are_owner_scoped_reassigned_and_purged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env=None,
+            )
+            saved = store.upsert_strategy_default(
+                "trader@example.com",
+                "auto_buy_sell",
+                {
+                    "exchange": "workspace:coinbase-main:spot",
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                    "total_quote": 25.0,
+                },
+            )
+
+            self.assertEqual(saved["total_quote"], 25.0)
+            self.assertEqual(
+                store.strategy_default(
+                    "trader@example.com",
+                    "auto_buy_sell",
+                )["symbol"],
+                "ACS/USDC",
+            )
+            self.assertEqual(
+                store.strategy_default("other@example.com", "auto_buy_sell"),
+                {},
+            )
+
+            moved = store.reassign_owner(
+                "trader@example.com",
+                "renamed@example.com",
+            )
+            self.assertEqual(moved["user_strategy_defaults"], 1)
+            self.assertEqual(
+                store.strategy_default("trader@example.com", "auto_buy_sell"),
+                {},
+            )
+            self.assertEqual(
+                store.strategy_default("renamed@example.com", "auto_buy_sell")[
+                    "exchange"
+                ],
+                "workspace:coinbase-main:spot",
+            )
+
+            removed = store.purge_owner("renamed@example.com")
+            self.assertEqual(removed["user_strategy_defaults"], 1)
+            self.assertEqual(
+                store.strategy_default("renamed@example.com", "auto_buy_sell"),
+                {},
+            )
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                store.upsert_strategy_default(
+                    "renamed@example.com",
+                    "platform_risk",
+                    {},
+                )
+
     def test_project_readiness_guides_each_onboarding_step(self) -> None:
         with (
             tempfile.TemporaryDirectory() as tmp,

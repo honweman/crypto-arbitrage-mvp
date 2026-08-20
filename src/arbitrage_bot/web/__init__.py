@@ -2818,7 +2818,8 @@ def build_user_workspace_payload(
     paper_store: UserPaperTradingStore | None = None,
 ) -> dict[str, Any]:
     strategy_access = {
-        "scope": "platform" if user is not None and user.role == "admin" else "owner",
+        "scope": "owner",
+        "platform_manage": bool(user is not None and user.role == "admin"),
         "core_trading": {
             "enabled": user is not None,
             "strategy_types": (
@@ -5665,7 +5666,8 @@ def _owner_live_trading_console(
     return {
         "status": "ok",
         "owner_scoped": True,
-        "cancel_allowed": False,
+        "cancel_allowed": True,
+        "cancel_scope": "owner",
         "live_trading": live_base,
         "strategies": strategies,
         "accounts": accounts,
@@ -5720,27 +5722,50 @@ async def _user_auto_buy_sell_payload(
         is_admin=False,
     )
     task_rows = task_snapshot.get("tasks") or []
-    if task_rows:
+    stored_default = _user_workspace_store(request).strategy_default(
+        user.email,
+        "auto_buy_sell",
+    )
+    default_config: SlowExecutionConfig | None = None
+    if stored_default:
+        try:
+            candidate = slow_execution_config_from_dict(stored_default)
+            validate_task_config(candidate)
+            validate_task_exchange_config(runtime_cfg, candidate)
+            default_config = candidate
+        except ValueError:
+            default_config = None
+    if default_config is None and task_rows:
         latest = max(
             (row for row in task_rows if isinstance(row, dict)),
             key=lambda row: float(row.get("updated_at") or 0.0),
             default={},
         )
         raw_config = latest.get("config") if isinstance(latest, dict) else {}
-        default_config = (
-            slow_execution_config_from_dict(raw_config)
-            if isinstance(raw_config, dict) and raw_config
-            else SlowExecutionConfig()
-        )
-    else:
-        swap_account = next(
+        if isinstance(raw_config, dict) and raw_config:
+            try:
+                candidate = slow_execution_config_from_dict(raw_config)
+                validate_task_config(candidate)
+                validate_task_exchange_config(runtime_cfg, candidate)
+                default_config = candidate
+            except ValueError:
+                default_config = None
+    if default_config is None:
+        preferred_account = next(
             (row for row in accounts if row.get("market_type") == "swap"),
-            None,
+            accounts[0] if accounts else None,
+        )
+        market_type = str((preferred_account or {}).get("market_type") or "spot")
+        symbols = (preferred_account or {}).get("symbols") or []
+        symbol = str(
+            (preferred_account or {}).get("symbol")
+            or (symbols[0] if symbols else "")
         )
         default_config = replace(
             SlowExecutionConfig(),
-            exchange=str((swap_account or {}).get("key") or ""),
-            instrument_type="perpetual",
+            exchange=str((preferred_account or {}).get("key") or ""),
+            symbol=symbol,
+            instrument_type="perpetual" if market_type == "swap" else "spot",
             position_effect="reduce_only",
             position_side="long",
             side="sell",
@@ -7008,6 +7033,8 @@ async def api_strategy_preflight(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     try:
         user = _request_user(request)
+        require_capability(user, "strategy.manage")
+        require_capability(user, "account.trade")
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -7112,6 +7139,8 @@ async def api_slow_execution(request: web.Request) -> web.Response:
     cfg: BotConfig = request.app["config"]
     try:
         user = _request_user(request)
+        require_capability(user, "strategy.manage")
+        require_capability(user, "account.trade")
         payload = await request.json()
         platform_cfg = await state.runtime_config(cfg)
         runtime_cfg = (
@@ -7159,6 +7188,11 @@ async def api_slow_execution(request: web.Request) -> web.Response:
         runtime_cfg = await state.runtime_config(cfg)
     else:
         current_config = candidate
+        _user_workspace_store(request).upsert_strategy_default(
+            user.email,
+            "auto_buy_sell",
+            slow_execution_config_to_dict(current_config),
+        )
     write_web_audit_event(
         runtime_cfg,
         request,
@@ -8205,6 +8239,34 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         if not action:
             raise ValueError("action is required")
         if action in {
+            "wallet_challenge",
+            "verify_wallet",
+            "prepare_hyperliquid_agent",
+            "complete_hyperliquid_agent",
+            "cancel_hyperliquid_agent",
+            "delete_wallet",
+            "test_wallet_venue",
+            "refresh_venue_connection",
+            "refresh_all_venue_connections",
+            "delete_venue_connection",
+        }:
+            require_capability(user, "security.manage")
+        elif action in {
+            "upsert_project",
+            "activate_project",
+            "approve_project",
+            "disable_project",
+            "delete_project",
+            "sync_account",
+            "test_connection",
+            "discover_markets",
+            "test_account",
+            "upsert_account",
+            "delete_connection",
+            "delete_account",
+        }:
+            require_capability(user, "account.manage")
+        elif action in {
             "upsert_strategy",
             "set_strategy_enabled",
             "clone_strategy",
@@ -8933,6 +8995,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                         + ", ".join(missing)
                     )
             if account.enabled:
+                require_capability(user, "account.trade")
                 if project.status != "active":
                     raise PermissionError(
                         "project must be active before enabling account"
@@ -9160,6 +9223,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     f"live owner execution is not available for {strategy.strategy_type}"
                 )
             if strategy.enabled:
+                require_capability(user, "account.trade")
                 if payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION:
                     raise ValueError(
                         "enabling or changing a live owner Market Maker requires "
@@ -9188,6 +9252,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raise ValueError("enabled must be true or false")
             updated = replace(strategy, enabled=enabled)
             if enabled:
+                require_capability(user, "account.trade")
                 if strategy.mode != "live":
                     raise ValueError(
                         "legacy paper strategies must be saved as a live strategy before enabling"
@@ -10182,6 +10247,8 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
     guard_baseline: dict[str, Any] | None = None
     try:
         user = _request_user(request)
+        require_capability(user, "strategy.manage")
+        require_capability(user, "account.trade")
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -10318,6 +10385,8 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
     task_id = request.match_info.get("task_id", "")
     try:
         user = _request_user(request)
+        require_capability(user, "strategy.manage")
+        require_capability(user, "account.trade")
         payload = await request.json()
         action = str(payload.get("action", "")).strip().lower()
         if action not in {"pause", "resume", "stop", "enable_mm_coordination"}:
@@ -10348,7 +10417,6 @@ async def api_control_auto_buy_sell_task(request: web.Request) -> web.Response:
                     [_base_asset_from_symbol(str(task_config.get("symbol") or ""))],
                 )
         if action == "enable_mm_coordination":
-            _require_admin_user(user)
             if payload.get("confirm_live") != LIVE_AUTO_BUY_SELL_CONFIRMATION:
                 raise ValueError(
                     "enabling live MM coordination requires "
@@ -10421,6 +10489,7 @@ async def api_cleanup_auto_buy_sell_tasks(request: web.Request) -> web.Response:
     tasks: AutoBuySellTaskService = request.app["auto_buy_sell_tasks"]
     try:
         user = _request_user(request)
+        require_capability(user, "strategy.manage")
         payload = await request.json()
         if not bool(payload.get("terminal_only", True)):
             raise ValueError("only terminal task cleanup is supported")
@@ -10578,14 +10647,27 @@ async def api_cancel_order(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
-        _require_admin_user(_request_user(request))
+        user = _request_user(request)
+        require_capability(user, "account.trade")
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
-        _require_user_assets(
-            _request_user(request),
-            [_base_asset_from_symbol(str(payload.get("symbol") or ""))],
+        platform_cfg = await state.runtime_config(cfg)
+        runtime_cfg = (
+            _user_auto_buy_sell_runtime_config(request, user, platform_cfg)
+            if user is not None and user.role != "admin"
+            else platform_cfg
         )
+        exchange = _find_exchange_by_key(
+            runtime_cfg,
+            str(payload.get("exchange") or "").strip(),
+        )
+        require_owned_exchange(user, exchange)
+        if user is None or user.role == "admin":
+            _require_user_assets(
+                user,
+                [_base_asset_from_symbol(str(payload.get("symbol") or ""))],
+            )
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
@@ -10593,7 +10675,6 @@ async def api_cancel_order(request: web.Request) -> web.Response:
 
     manager = ExchangeManager()
     try:
-        runtime_cfg = await state.runtime_config(cfg)
         runtime_slow_execution = runtime_cfg.slow_execution
         result = await cancel_order_payload(
             runtime_cfg,
@@ -10606,7 +10687,8 @@ async def api_cancel_order(request: web.Request) -> web.Response:
             manager,
             runtime_slow_execution,
         )
-        await state.set_order_activity(order_activity)
+        if user is None or user.role == "admin":
+            await state.set_order_activity(order_activity)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     except Exception as exc:  # noqa: BLE001
@@ -10625,10 +10707,20 @@ async def api_cancel_bulk_orders(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
     try:
-        _require_admin_user(_request_user(request))
+        user = _request_user(request)
+        require_capability(user, "account.trade")
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
+        platform_cfg = await state.runtime_config(cfg)
+        runtime_cfg = (
+            _user_auto_buy_sell_runtime_config(request, user, platform_cfg)
+            if user is not None and user.role != "admin"
+            else platform_cfg
+        )
+        exchange_key = str(payload.get("exchange") or "").strip()
+        if exchange_key:
+            require_owned_exchange(user, _find_exchange_by_key(runtime_cfg, exchange_key))
     except PermissionError as exc:
         return web.json_response({"error": str(exc)}, status=403)
     except (json.JSONDecodeError, ValueError) as exc:
@@ -10636,7 +10728,6 @@ async def api_cancel_bulk_orders(request: web.Request) -> web.Response:
 
     manager = ExchangeManager()
     try:
-        runtime_cfg = await state.runtime_config(cfg)
         runtime_slow_execution = runtime_cfg.slow_execution
         result = await cancel_bulk_orders_payload(
             runtime_cfg,
@@ -10649,7 +10740,8 @@ async def api_cancel_bulk_orders(request: web.Request) -> web.Response:
             manager,
             runtime_slow_execution,
         )
-        await state.set_order_activity(order_activity)
+        if user is None or user.role == "admin":
+            await state.set_order_activity(order_activity)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     except Exception as exc:  # noqa: BLE001

@@ -314,16 +314,23 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     }
 
     function openSettingsSection(sectionId) {
-      const section = document.getElementById(sectionId);
+      const ownerRisk = sectionId === "risk-section"
+        && document.body.classList.contains("owner-mode");
+      const resolvedSectionId = ownerRisk ? "user-workspace-section" : sectionId;
+      const section = document.getElementById(resolvedSectionId);
       if (!section || isUiFeatureHidden(section)) return;
       const targetPage = PAGE_IDS.has(section.dataset.page) ? section.dataset.page : "settings";
       if (currentPage !== targetPage) setActivePage(targetPage, { refresh: false });
-      closeOtherCoreControlSections(sectionId);
+      closeOtherCoreControlSections(resolvedSectionId);
       section.classList.add("section-open");
       const title = section.querySelector(".section-title");
       if (title) title.setAttribute("aria-expanded", "true");
       refreshOpenedSection(section);
-      section.scrollIntoView({ behavior: "smooth", block: "start" });
+      const focus = ownerRisk
+        ? document.getElementById("user-risk-profile-form")?.closest("details")
+        : section;
+      if (ownerRisk && focus) focus.open = true;
+      (focus || section).scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
     function dangerConfirm(message, detail = "") {

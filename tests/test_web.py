@@ -96,12 +96,15 @@ from arbitrage_bot.web import (
     _session_identity,
     _session_valid,
     _sync_portfolio_with_account_balances,
+    _user_auto_buy_sell_payload,
     api_create_auto_buy_sell_task,
     api_control_auto_buy_sell_task,
+    api_cancel_bulk_orders,
     api_cancel_order,
     api_cross_exchange_rebalance,
     api_market_maker,
     api_risk,
+    api_slow_execution,
     api_strategy_center,
     build_daily_report_message,
     default_web_audit_path,
@@ -493,7 +496,8 @@ class WebMonitorTest(unittest.TestCase):
         )
 
         self.assertTrue(payload["owner_scoped"])
-        self.assertFalse(payload["cancel_allowed"])
+        self.assertTrue(payload["cancel_allowed"])
+        self.assertEqual(payload["cancel_scope"], "owner")
         self.assertTrue(payload["live_trading"])
         self.assertEqual(payload["accounts"][0]["open_order_count"], 1)
         self.assertEqual(len(payload["strategies"]), 2)
@@ -1436,6 +1440,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("data-owner-only", HTML)
         self.assertIn('id="user-strategy-lab"', HTML)
         self.assertIn("function applyRoleVisibility", APP_JS)
+        self.assertIn('sectionId === "risk-section"', APP_JS)
+        self.assertIn('resolvedSectionId = ownerRisk ? "user-workspace-section"', APP_JS)
         self.assertIn("function renderUserQuantStrategies", APP_JS)
         self.assertIn("function renderUserMarketMakerStrategies", APP_JS)
         self.assertIn(
@@ -5081,9 +5087,6 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 await api_market_maker(  # type: ignore[arg-type]
                     FakeRequest(app, "/api/market-maker")
                 ),
-                await api_cancel_order(  # type: ignore[arg-type]
-                    FakeRequest(app, "/api/orders/cancel")
-                ),
                 await api_strategy_center(  # type: ignore[arg-type]
                     FakeRequest(app, "/api/strategy-center")
                 ),
@@ -5091,6 +5094,305 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(all(response.status == 403 for response in responses))
         self.assertTrue(all("admin role" in response.text for response in responses))
+
+    async def test_non_admin_can_cancel_only_orders_from_owned_runtime(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            method = "POST"
+
+            def __init__(
+                self,
+                app: dict[str, object],
+                path: str,
+                payload: dict[str, object],
+            ) -> None:
+                self.app = app
+                self.path = path
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                if key == "user_email":
+                    return "trader@example.com"
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            user_store = WebUserStore(Path(tmp) / "users.json")
+            user_store.create_user(
+                email="admin@example.com",
+                username="admin",
+                password="AdminPass!234",
+            )
+            user_store.create_user(
+                email="trader@example.com",
+                username="trader",
+                password="TraderPass!234",
+            )
+            owner_exchange = ExchangeConfig(
+                id="bybit",
+                label="workspace:owner-bybit:spot",
+                market_type="spot",
+                credential_owner_email="trader@example.com",
+            )
+            owner_cfg = make_config(
+                spot_exchanges=[owner_exchange],
+                spot_markets=[
+                    SpotMarketConfig(
+                        asset="ACS",
+                        exchange=owner_exchange.key,
+                        symbol="ACS/USDT",
+                        quote_currency="USDT",
+                    )
+                ],
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=str(Path(tmp) / "trade-events.jsonl"),
+                ),
+            )
+            state = MonitorState(owner_cfg, 1.0)
+            app: dict[str, object] = {
+                "web_user_store": user_store,
+                "monitor_state": state,
+                "config": owner_cfg,
+            }
+            activity = {
+                "status": "ok",
+                "open_orders": [],
+                "open_order_count": 0,
+            }
+            manager = AsyncMock()
+            manager.close = AsyncMock()
+            single_payload = {
+                "exchange": owner_exchange.key,
+                "symbol": "ACS/USDT",
+                "order_id": "owner-order-1",
+            }
+
+            with (
+                patch(
+                    "arbitrage_bot.web._user_auto_buy_sell_runtime_config",
+                    return_value=owner_cfg,
+                ),
+                patch("arbitrage_bot.web.ExchangeManager", return_value=manager),
+                patch(
+                    "arbitrage_bot.web.cancel_order_payload",
+                    new=AsyncMock(return_value={"ok": True}),
+                ) as cancel_one,
+                patch(
+                    "arbitrage_bot.web.cancel_bulk_orders_payload",
+                    new=AsyncMock(return_value={"ok": True}),
+                ) as cancel_bulk,
+                patch(
+                    "arbitrage_bot.web.fetch_order_activity_payload",
+                    new=AsyncMock(return_value=activity),
+                ),
+                patch.object(
+                    state,
+                    "set_order_activity",
+                    new=AsyncMock(),
+                ) as set_platform_activity,
+            ):
+                single = await api_cancel_order(
+                    FakeRequest(  # type: ignore[arg-type]
+                        app,
+                        "/api/orders/cancel",
+                        single_payload,
+                    )
+                )
+                bulk = await api_cancel_bulk_orders(
+                    FakeRequest(  # type: ignore[arg-type]
+                        app,
+                        "/api/orders/cancel-bulk",
+                        {"scope": "all"},
+                    )
+                )
+
+        self.assertEqual(single.status, 200, single.text)
+        self.assertEqual(bulk.status, 200, bulk.text)
+        self.assertIs(cancel_one.await_args.args[0], owner_cfg)
+        self.assertIs(cancel_bulk.await_args.args[0], owner_cfg)
+        set_platform_activity.assert_not_awaited()
+
+    async def test_non_admin_cancel_rejects_foreign_exchange_owner(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/orders/cancel"
+            method = "POST"
+
+            def __init__(self, app: dict[str, object]) -> None:
+                self.app = app
+
+            def get(self, key: str, default: object = None) -> object:
+                if key == "user_email":
+                    return "trader@example.com"
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return {
+                    "exchange": "workspace:foreign:spot",
+                    "symbol": "ACS/USDT",
+                    "order_id": "foreign-order-1",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            user_store = WebUserStore(Path(tmp) / "users.json")
+            user_store.create_user(
+                email="admin@example.com",
+                username="admin",
+                password="AdminPass!234",
+            )
+            user_store.create_user(
+                email="trader@example.com",
+                username="trader",
+                password="TraderPass!234",
+            )
+            foreign_cfg = make_config(
+                spot_exchanges=[
+                    ExchangeConfig(
+                        id="bybit",
+                        label="workspace:foreign:spot",
+                        market_type="spot",
+                        credential_owner_email="other@example.com",
+                    )
+                ]
+            )
+            state = MonitorState(foreign_cfg, 1.0)
+            app: dict[str, object] = {
+                "web_user_store": user_store,
+                "monitor_state": state,
+                "config": foreign_cfg,
+            }
+            with patch(
+                "arbitrage_bot.web._user_auto_buy_sell_runtime_config",
+                return_value=foreign_cfg,
+            ):
+                response = await api_cancel_order(  # type: ignore[arg-type]
+                    FakeRequest(app)
+                )
+
+        self.assertEqual(response.status, 403)
+        self.assertIn("not owned by this user", response.text)
+
+    async def test_owner_auto_buy_sell_defaults_persist_across_refresh(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/auto-buy-sell"
+            method = "POST"
+
+            def __init__(
+                self,
+                app: dict[str, object],
+                payload: dict[str, object],
+            ) -> None:
+                self.app = app
+                self._payload = payload
+
+            def get(self, key: str, default: object = None) -> object:
+                if key == "user_email":
+                    return "trader@example.com"
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            user_store = WebUserStore(Path(tmp) / "users.json")
+            user_store.create_user(
+                email="admin@example.com",
+                username="admin",
+                password="AdminPass!234",
+            )
+            user = user_store.create_user(
+                email="trader@example.com",
+                username="trader",
+                password="TraderPass!234",
+            )
+            workspace_store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env=None,
+            )
+            owner_exchange = ExchangeConfig(
+                id="coinbase",
+                label="workspace:coinbase-main:spot",
+                market_type="spot",
+                credential_owner_email=user.email,
+            )
+            owner_cfg = make_config(
+                spot_exchanges=[owner_exchange],
+                spot_markets=[
+                    SpotMarketConfig(
+                        asset="ACS",
+                        exchange=owner_exchange.key,
+                        symbol="ACS/USDC",
+                        quote_currency="USDC",
+                    )
+                ],
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=str(Path(tmp) / "trade-events.jsonl"),
+                ),
+            )
+            state = MonitorState(owner_cfg, 1.0)
+            tasks = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            app: dict[str, object] = {
+                "web_user_store": user_store,
+                "user_workspace_store": workspace_store,
+                "monitor_state": state,
+                "config": owner_cfg,
+                "auto_buy_sell_tasks": tasks,
+            }
+            request = FakeRequest(
+                app,
+                {
+                    "enabled": False,
+                    "exchange": owner_exchange.key,
+                    "symbol": "ACS/USDC",
+                    "side": "buy",
+                    "instrument_type": "spot",
+                    "total_quote": 25.0,
+                    "slice_base_min": 100.0,
+                    "slice_base_max": 100.0,
+                    "interval_seconds": 30.0,
+                    "price_mode": "taker",
+                },
+            )
+
+            with patch(
+                "arbitrage_bot.web._user_auto_buy_sell_runtime_config",
+                return_value=owner_cfg,
+            ):
+                initial = await _user_auto_buy_sell_payload(
+                    request,  # type: ignore[arg-type]
+                    user,
+                    owner_cfg,
+                    runtime_cfg=owner_cfg,
+                )
+                response = await api_slow_execution(request)  # type: ignore[arg-type]
+                refreshed = await _user_auto_buy_sell_payload(
+                    request,  # type: ignore[arg-type]
+                    user,
+                    owner_cfg,
+                    runtime_cfg=owner_cfg,
+                )
+            saved = workspace_store.strategy_default(user.email, "auto_buy_sell")
+
+        self.assertEqual(response.status, 200, response.text)
+        self.assertEqual(initial["config"]["instrument_type"], "spot")
+        self.assertEqual(initial["config"]["exchange"], owner_exchange.key)
+        self.assertEqual(initial["config"]["symbol"], "ACS/USDC")
+        self.assertEqual(saved["exchange"], owner_exchange.key)
+        self.assertEqual(saved["symbol"], "ACS/USDC")
+        self.assertEqual(saved["side"], "buy")
+        self.assertEqual(saved["total_quote"], 25.0)
+        self.assertEqual(refreshed["config"]["exchange"], owner_exchange.key)
+        self.assertEqual(refreshed["config"]["symbol"], "ACS/USDC")
+        self.assertEqual(refreshed["config"]["side"], "buy")
+        self.assertEqual(refreshed["config"]["total_quote"], 25.0)
 
     def test_non_admin_auto_buy_sell_accepts_owned_spot_and_perpetual(self) -> None:
         user = WebUser(
@@ -5808,6 +6110,106 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("confirm_live", denied.text)
         self.assertEqual(approved.status, 200, approved.text)
         self.assertTrue(json.loads(approved.text)["task"]["config"]["coordinate_market_maker"])
+
+    async def test_owner_can_enable_mm_coordination_only_for_owned_task(self) -> None:
+        class FakeRequest:
+            headers = {"User-Agent": "unit-test"}
+            remote = "127.0.0.1"
+            path = "/api/auto-buy-sell/tasks/auto-1/control"
+            method = "POST"
+
+            def __init__(
+                self,
+                app: dict[str, object],
+                task_id: str,
+                email: str,
+            ) -> None:
+                self.app = app
+                self.match_info = {"task_id": task_id}
+                self.email = email
+
+            def get(self, key: str, default: object = None) -> object:
+                if key == "user_email":
+                    return self.email
+                return default
+
+            async def json(self) -> dict[str, object]:
+                return {
+                    "action": "enable_mm_coordination",
+                    "confirm_live": "ENABLE LIVE AUTO BUY SELL",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                trade_log=TradeLogConfig(
+                    enabled=False,
+                    path=os.path.join(tmp, "trade_events.jsonl"),
+                ),
+            )
+            user_store = WebUserStore(Path(tmp) / "users.json")
+            user_store.create_user(
+                email="admin@example.com",
+                username="admin",
+                password="AdminPass!234",
+            )
+            user_store.create_user(
+                email="owner@example.com",
+                username="owner",
+                password="OwnerPass!234",
+            )
+            user_store.create_user(
+                email="other@example.com",
+                username="other",
+                password="OtherPass!234",
+            )
+            state = MonitorState(cfg, 1.0)
+            tasks = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            task = await tasks.create_task(
+                SlowExecutionConfig(
+                    enabled=True,
+                    exchange="coinbase-spot",
+                    symbol="ACS/USDC",
+                    side="buy",
+                    total_quote=10_000.0,
+                    slice_base_min=50_000.0,
+                    slice_base_max=80_000.0,
+                ),
+                owner_email="owner@example.com",
+            )
+            tasks._tasks[0].status = "blocked_by_risk"
+            tasks._tasks[0].last_risk = {
+                "approved": False,
+                "self_trade_guard": {"blocked": True},
+            }
+            tasks.store.save(tasks._tasks)
+            app: dict[str, object] = {
+                "web_user_store": user_store,
+                "monitor_state": state,
+                "config": cfg,
+                "auto_buy_sell_tasks": tasks,
+            }
+
+            denied = await api_control_auto_buy_sell_task(
+                FakeRequest(  # type: ignore[arg-type]
+                    app,
+                    task["id"],
+                    "other@example.com",
+                )
+            )
+            approved = await api_control_auto_buy_sell_task(
+                FakeRequest(  # type: ignore[arg-type]
+                    app,
+                    task["id"],
+                    "owner@example.com",
+                )
+            )
+
+        self.assertEqual(denied.status, 400)
+        self.assertIn("unknown Auto Buy/Sell task", denied.text)
+        self.assertEqual(approved.status, 200, approved.text)
+        self.assertTrue(
+            json.loads(approved.text)["task"]["config"]["coordinate_market_maker"]
+        )
 
     async def test_login_lockout_after_repeated_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9300,6 +9702,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             ],
             ["auto_buy_sell", "market_maker"],
         )
+        self.assertFalse(
+            settings_state["user_workspace"]["strategy_access"]["platform_manage"]
+        )
         self.assertEqual(
             settings_state["user_workspace"]["strategy_access"]["core_trading"][
                 "live_strategy_types"
@@ -9323,6 +9728,15 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             trading_state["user_workspace"]["strategy_access"]["scope"],
             "owner",
+        )
+        self.assertEqual(
+            admin_settings_state["user_workspace"]["strategy_access"]["scope"],
+            "owner",
+        )
+        self.assertTrue(
+            admin_settings_state["user_workspace"]["strategy_access"][
+                "platform_manage"
+            ]
         )
         self.assertEqual(
             trading_state["user_workspace"]["strategies"][0]["owner_email"],
