@@ -24,6 +24,7 @@ from .workspace_runtime import workspace_exchange_allowed_symbols
 RUNNING_TASK_STATUSES = {
     "running",
     "recovering",
+    "coordinating_mm",
     "waiting_for_start_price",
     "waiting_for_fill",
     "waiting_for_interval",
@@ -937,7 +938,15 @@ class AutoBuySellTaskService:
                 replace_existing=False,
             )
             payload["task_id"] = task.id
-            task.last_status = str(payload.get("status") or "")
+            cycle_status = str(payload.get("status") or "")
+            if _waiting_for_market_maker_coordination(task_cfg, payload):
+                cycle_status = "coordinating_mm"
+                payload["status"] = cycle_status
+                payload["coordination_pending"] = True
+                payload["reason"] = (
+                    "waiting for the conflicting market maker side to be withdrawn"
+                )
+            task.last_status = cycle_status
             task.last_plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
             task.last_risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else None
             task.last_execution = (
@@ -1444,6 +1453,35 @@ def _task_status_from_cycle_status(status: str) -> str:
     if status == "planned":
         return "running"
     return status or "running"
+
+
+def _waiting_for_market_maker_coordination(
+    cfg: SlowExecutionConfig,
+    payload: dict[str, Any],
+) -> bool:
+    if (
+        str(payload.get("status") or "") != "blocked_by_risk"
+        or not cfg.coordinate_market_maker
+        or not cfg.block_conflicting_market_maker
+    ):
+        return False
+    risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
+    guard = (
+        risk.get("self_trade_guard")
+        if isinstance(risk.get("self_trade_guard"), dict)
+        else {}
+    )
+    guard_reasons = {
+        str(reason).strip()
+        for reason in guard.get("reasons", []) or []
+        if str(reason).strip()
+    }
+    risk_reasons = {
+        str(reason).strip()
+        for reason in risk.get("reasons", []) or []
+        if str(reason).strip()
+    }
+    return bool(guard.get("blocked") and guard_reasons) and risk_reasons <= guard_reasons
 
 
 def _task_is_complete(task: AutoBuySellTask, cfg: SlowExecutionConfig) -> bool:

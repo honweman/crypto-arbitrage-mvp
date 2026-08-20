@@ -334,6 +334,7 @@ def _auto_actual(task: Mapping[str, Any], desired: str) -> str:
     if status == "error":
         return "error"
     if status in {
+        "coordinating_mm",
         "waiting_for_start_price",
         "waiting_for_fill",
         "waiting_for_interval",

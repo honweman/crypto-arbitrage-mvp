@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -201,6 +202,77 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["last_status"], "mm_coordination_enabled")
         self.assertTrue(updated["config"]["coordinate_market_maker"])
         self.assertTrue(loaded.exec_cfg.coordinate_market_maker)
+
+    async def test_enabled_mm_coordination_is_waiting_not_risk_blocked(self) -> None:
+        manager = FakeTaskManager()
+        with tempfile.TemporaryDirectory() as tmp:
+            slow_cfg = replace(
+                self._slow_cfg(),
+                coordinate_market_maker=True,
+            )
+            cfg = replace(
+                self._cfg(tmp, slow_execution=slow_cfg),
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                ),
+            )
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            created = await service.create_task(slow_cfg)
+
+            waiting = await service.run_due_tasks(cfg, manager)
+            service._tasks[0].next_run_at = 0.0
+            resumed = await service.run_due_tasks(
+                cfg,
+                manager,
+                coordinated_market_maker_task_ids={created["id"]},
+            )
+
+        waiting_task = waiting["tasks"][0]
+        resumed_task = resumed["tasks"][0]
+        self.assertEqual(waiting_task["status"], "coordinating_mm")
+        self.assertEqual(waiting_task["last_status"], "coordinating_mm")
+        self.assertTrue(waiting_task["last_risk"]["self_trade_guard"]["blocked"])
+        self.assertEqual(manager.created, 1)
+        self.assertEqual(resumed_task["status"], "waiting_for_fill")
+
+    async def test_mm_coordination_does_not_hide_other_risk_blocks(self) -> None:
+        manager = FakeTaskManager()
+        with tempfile.TemporaryDirectory() as tmp:
+            slow_cfg = replace(
+                self._slow_cfg(),
+                coordinate_market_maker=True,
+            )
+            cfg = replace(
+                self._cfg(
+                    tmp,
+                    slow_execution=slow_cfg,
+                    risk=RiskConfig(
+                        allow_live_trading=True,
+                        require_post_only=False,
+                        max_order_quote=0.0001,
+                    ),
+                ),
+                market_maker=MarketMakerConfig(
+                    enabled=True,
+                    live_enabled=True,
+                    exchange="bybit-spot",
+                    symbol="ACS/USDT",
+                ),
+            )
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(slow_cfg)
+
+            result = await service.run_due_tasks(cfg, manager)
+
+        task = result["tasks"][0]
+        self.assertEqual(task["status"], "blocked_by_risk")
+        self.assertTrue(
+            any("max_order_quote" in reason for reason in task["last_risk"]["reasons"])
+        )
+        self.assertEqual(manager.created, 0)
 
     async def test_mm_coordination_upgrade_rejects_submitted_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
