@@ -143,6 +143,45 @@ class AssetLedgerStoreTest(unittest.TestCase):
         store.record_monitor_checkpoint(_balances(), _activity(), observed_at=1010)
         self.assertEqual(store.summary(now=1011)["counts"]["ledger_fills"], 1)
 
+    def test_strategy_fill_source_is_idempotent_and_queryable(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        trade = {
+            **_activity()["accounts"][0]["recent_trades"][0],
+            "strategy_instance_id": "user-mm-123",
+            "source": "market_maker",
+        }
+        first = store.record_fills(
+            account_key="workspace:connection-1:spot",
+            trades=[trade],
+            source="market-maker:user-mm-123",
+            observed_at=1000,
+        )
+        second = store.record_fills(
+            account_key="workspace:connection-1:spot",
+            trades=[trade],
+            source="market-maker:user-mm-123",
+            observed_at=1010,
+        )
+
+        self.assertEqual(first["new_fill_count"], 1)
+        self.assertEqual(second["new_fill_count"], 0)
+        rows = store.recent_fills(
+            observation_sources=["market-maker:user-mm-123"],
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "trade-1")
+        self.assertEqual(rows[0]["source"], "market_maker")
+        self.assertEqual(
+            rows[0]["observation_source"],
+            "market-maker:user-mm-123",
+        )
+        self.assertEqual(
+            store.recent_fills(
+                observation_sources=["market-maker:user-mm-other"],
+            ),
+            [],
+        )
+
     def test_balance_identity_difference_is_audited(self) -> None:
         payload = _balances()
         payload["accounts"][0]["balance"]["currencies"][0]["total"] = 120

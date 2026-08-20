@@ -18,6 +18,7 @@ from eth_account.messages import encode_defunct
 
 from arbitrage_bot.config import (
     AlertConfig,
+    AssetLedgerConfig,
     AssetPosition,
     BacktestConfig,
     BotConfig,
@@ -40,6 +41,7 @@ from arbitrage_bot.config import (
     TradeLogConfig,
     WebSecurityConfig,
 )
+from arbitrage_bot.asset_ledger import AssetLedgerStore
 from arbitrage_bot.auto_buy_sell_task import AutoBuySellTaskService
 from arbitrage_bot.cross_exchange_rebalancer import (
     new_rebalance_runtime,
@@ -67,6 +69,7 @@ from arbitrage_bot.web import (
     _market_maker_force_replace_reason,
     _monitor_auto_stop_decision,
     _monitor_reconciliation_warmup_active,
+    _owner_live_market_maker_order_activity,
     _market_maker_order_sync_delta,
     _market_maker_overrides_from_payload,
     _preflight_candidate_from_payload,
@@ -139,6 +142,7 @@ from arbitrage_bot.web.strategy_preflight import (
 from arbitrage_bot.web.loops import (
     _complete_market_maker_cycle_on_shutdown,
     _load_initial_rebalance_runtime,
+    _market_maker_fill_rows,
 )
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUser, WebUserStore, totp_code
@@ -226,6 +230,125 @@ def make_config(
 
 
 class WebMonitorTest(unittest.TestCase):
+    def test_user_market_maker_fill_rows_require_strategy_attribution(self) -> None:
+        exchange = ExchangeConfig(
+            id="bybit",
+            label="workspace:connection-1:spot",
+            display_label="Bybit Main",
+        )
+        maker = MarketMakerConfig(
+            id="user-mm-123",
+            exchange=exchange.key,
+            symbol="ACS/USDT",
+            client_order_prefix="arb-umm-strategy123",
+        )
+        raw_trades = [
+            {
+                "id": "fill-prefix",
+                "order": "order-prefix",
+                "symbol": "ACS/USDT",
+                "side": "buy",
+                "price": 0.1,
+                "amount": 10.0,
+                "cost": 1.0,
+                "timestamp": 1000,
+                "info": {
+                    "orderLinkId": "arb-umm-strategy123-user-abc",
+                },
+            },
+            {
+                "id": "fill-order",
+                "order": "known-order",
+                "symbol": "ACS/USDT",
+                "side": "sell",
+                "price": 0.11,
+                "amount": 10.0,
+                "cost": 1.1,
+                "timestamp": 2000,
+                "info": {},
+            },
+            {
+                "id": "fill-other",
+                "order": "other-order",
+                "symbol": "ACS/USDT",
+                "side": "sell",
+                "price": 0.12,
+                "amount": 10.0,
+                "cost": 1.2,
+                "timestamp": 3000,
+                "info": {"orderLinkId": "another-strategy"},
+            },
+        ]
+
+        rows = _market_maker_fill_rows(
+            exchange,
+            maker,
+            raw_trades,
+            known_order_ids={"known-order"},
+        )
+
+        self.assertEqual([row["id"] for row in rows], ["fill-order", "fill-prefix"])
+        self.assertTrue(all(row["source"] == "market_maker" for row in rows))
+        self.assertTrue(
+            all(row["strategy_instance_id"] == "user-mm-123" for row in rows)
+        )
+
+    def test_owner_market_maker_activity_reads_only_owner_strategy_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_cfg = AssetLedgerConfig(
+                enabled=True,
+                path=str(Path(temp_dir) / "asset-ledger.sqlite3"),
+            )
+            store = AssetLedgerStore(ledger_cfg)
+            for instance_id in ("user-mm-owner", "user-mm-other"):
+                store.record_fills(
+                    account_key=f"workspace:{instance_id}:spot",
+                    trades=[
+                        {
+                            "exchange": f"workspace:{instance_id}:spot",
+                            "label": instance_id,
+                            "id": f"fill-{instance_id}",
+                            "order_id": f"order-{instance_id}",
+                            "symbol": "ACS/USDT",
+                            "side": "buy",
+                            "price": 0.1,
+                            "amount": 10.0,
+                            "cost": 1.0,
+                            "timestamp": 1000,
+                            "source": "market_maker",
+                        }
+                    ],
+                    source=f"market-maker:{instance_id}",
+                    observed_at=1.0,
+                )
+            cfg = replace(make_config(), asset_ledger=ledger_cfg)
+            payload = _owner_live_market_maker_order_activity(
+                cfg,
+                {
+                    "strategies": [
+                        {
+                            "name": "Owner MM",
+                            "strategy_type": "market_maker",
+                            "mode": "live",
+                            "runtime_instance_id": "user-mm-owner",
+                            "live_runtime": {
+                                "config": {
+                                    "exchange": "workspace:user-mm-owner:spot",
+                                    "symbol": "ACS/USDT",
+                                },
+                                "open_order_ids": ["open-owner"],
+                                "updated_at": 2.0,
+                            },
+                        }
+                    ]
+                },
+            )
+
+        self.assertTrue(payload["owner_scoped"])
+        self.assertEqual(payload["open_order_count"], 1)
+        self.assertEqual(payload["recent_trade_count"], 1)
+        self.assertEqual(payload["recent_trades"][0]["id"], "fill-user-mm-owner")
+
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(
             {

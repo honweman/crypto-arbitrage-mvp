@@ -138,6 +138,7 @@ from ..account_check import (
     _summarize_balance,
 )
 from ..alerts import AlertService
+from ..asset_ledger import AssetLedgerStore
 from ..auto_buy_sell_task import (
     AutoBuySellTaskService,
     default_task_store_path,
@@ -5381,6 +5382,7 @@ def _global_scan_health_warnings(
 
 from .loops import (
     _daily_report_due,
+    _market_maker_fill_source,
     _market_maker_force_replace_reason,
     _market_maker_order_sync_delta,
     auto_buy_sell_task_loop,
@@ -5390,6 +5392,129 @@ from .loops import (
     monitor_loop,
     spot_grid_task_loop,
 )
+
+
+def _owner_live_market_maker_order_activity(
+    cfg: BotConfig,
+    workspace_payload: dict[str, Any],
+) -> dict[str, Any]:
+    strategies = [
+        row
+        for row in workspace_payload.get("strategies", [])
+        if isinstance(row, dict)
+        and row.get("mode") == "live"
+        and row.get("strategy_type") == "market_maker"
+    ]
+    sources = [
+        _market_maker_fill_source(str(row.get("runtime_instance_id") or ""))
+        for row in strategies
+        if row.get("runtime_instance_id")
+    ]
+    fills = AssetLedgerStore(cfg.asset_ledger).recent_fills(
+        observation_sources=sources,
+        limit=100,
+    )
+    open_orders: list[dict[str, Any]] = []
+    for strategy in strategies:
+        runtime = (
+            strategy.get("live_runtime")
+            if isinstance(strategy.get("live_runtime"), dict)
+            else {}
+        )
+        runtime_config = (
+            runtime.get("config") if isinstance(runtime.get("config"), dict) else {}
+        )
+        for order_id in runtime.get("open_order_ids", []) or []:
+            if not order_id:
+                continue
+            open_orders.append(
+                {
+                    "exchange": runtime_config.get("exchange") or "",
+                    "label": strategy.get("name") or "Market Maker",
+                    "id": str(order_id),
+                    "client_order_id": "",
+                    "symbol": runtime_config.get("symbol") or "",
+                    "side": "",
+                    "type": "limit",
+                    "status": "open",
+                    "source": "market_maker",
+                    "strategy_instance_id": strategy.get("runtime_instance_id") or "",
+                    "price": None,
+                    "amount": None,
+                    "filled": None,
+                    "remaining": None,
+                    "cost": None,
+                    "fee": None,
+                    "timestamp": runtime.get("updated_at"),
+                    "datetime": None,
+                }
+            )
+    account_rows: dict[str, dict[str, Any]] = {}
+    for row in [*open_orders, *fills]:
+        exchange = str(row.get("exchange") or row.get("account_key") or "")
+        account = account_rows.setdefault(
+            exchange,
+            {
+                "exchange": exchange,
+                "label": row.get("label") or exchange,
+                "status": "ok",
+                "warnings": [],
+                "errors": [],
+                "symbols": [],
+                "open_orders": [],
+                "closed_orders": [],
+                "recent_trades": [],
+            },
+        )
+        symbol = str(row.get("symbol") or "")
+        if symbol and symbol not in account["symbols"]:
+            account["symbols"].append(symbol)
+        target = "open_orders" if row in open_orders else "recent_trades"
+        account[target].append(row)
+    for account in account_rows.values():
+        account["open_order_count"] = len(account["open_orders"])
+        account["closed_order_count"] = 0
+        account["recent_trade_count"] = len(account["recent_trades"])
+    latest_timestamp_ms = max(
+        (float(row.get("timestamp") or 0.0) for row in fills),
+        default=0.0,
+    )
+    return {
+        "status": "ok" if cfg.asset_ledger.enabled else "disabled",
+        "accounts": list(account_rows.values()),
+        "open_orders": open_orders,
+        "closed_orders": [],
+        "recent_trades": fills,
+        "pnl_summary": {
+            "currency": cfg.common_quote_currency,
+            "window": "recent_fills",
+        },
+        "daily_pnl": {
+            "currency": cfg.common_quote_currency,
+            "trade_count": len(fills),
+            "total_realized_pnl": 0.0,
+            "total_fees": 0.0,
+            "total_notional": 0.0,
+            "sources": {},
+        },
+        "open_order_count": len(open_orders),
+        "closed_order_count": 0,
+        "recent_trade_count": len(fills),
+        "checked_account_count": len(account_rows),
+        "total_account_count": len(strategies),
+        "last_finished": latest_timestamp_ms / 1000.0 if latest_timestamp_ms else None,
+        "errors": [],
+        "warnings": [],
+        "owner_scoped": True,
+        "reconciliation": {
+            "status": "ok",
+            "issue_count": 0,
+            "notice_count": 0,
+            "total_item_count": 0,
+            "level_counts": {"error": 0, "warning": 0, "info": 0},
+            "issues": [],
+        },
+    }
 
 
 async def index(_: web.Request) -> web.Response:
@@ -5492,7 +5617,7 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     }
     workspace_payload: dict[str, Any] | None = None
     if (
-        view in (None, "settings")
+        view in (None, "settings", "records")
         or (
             view == "trading"
             and (sections is None or "user-market-maker" in requested_sections)
@@ -5542,6 +5667,11 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
                     "reason": blockers[0] if blockers else "runtime is starting",
                     "open_order_count": 0,
                 }
+        if requesting_user is not None and requesting_user.role != "admin":
+            payload["order_activity"] = _owner_live_market_maker_order_activity(
+                runtime_cfg,
+                workspace_payload,
+            )
     permission_scope = (
         build_permission_scope(requesting_user, workspace_payload)
         if requesting_user is not None

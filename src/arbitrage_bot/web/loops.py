@@ -19,7 +19,7 @@ from .market_maker_alerts import market_maker_problem_warnings
 from .state import MonitorState
 
 from ..alerts import AlertService
-from ..asset_ledger import attach_ledger_checkpoint
+from ..asset_ledger import AssetLedgerStore, attach_ledger_checkpoint
 from ..auto_buy_sell_task import (
     TERMINAL_TASK_STATUSES,
     AutoBuySellTaskService,
@@ -118,6 +118,7 @@ from . import (
     _find_exchange_by_key,
     _global_scan_health_warnings,
     _missing_market_warnings,
+    _normalize_trade,
     _onchain_error_payload,
     _risk_account_enabled,
     _risk_strategy_enabled,
@@ -1924,12 +1925,111 @@ def _raw_client_order_id(raw: dict[str, Any]) -> str:
         raw.get("clientOid"),
         info.get("clientOrderId"),
         info.get("client_order_id"),
+        info.get("clientOrderID"),
+        info.get("clientOid"),
         info.get("client_oid"),
+        info.get("orderLinkId"),
+        info.get("order_link_id"),
+        info.get("externalOid"),
+        info.get("identifier"),
     )
     for value in candidates:
         if value:
             return str(value)
     return ""
+
+
+MARKET_MAKER_FILL_SYNC_SECONDS = 30.0
+MARKET_MAKER_FILL_SYNC_LIMIT = 200
+
+
+def _market_maker_fill_source(instance_id: str) -> str:
+    return f"market-maker:{instance_id}"
+
+
+def _market_maker_fill_rows(
+    exchange: Any,
+    maker_cfg: Any,
+    raw_trades: list[dict[str, Any]],
+    *,
+    known_order_ids: set[str],
+) -> list[dict[str, Any]]:
+    prefix = str(maker_cfg.client_order_prefix or "").strip()
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, float | None]] = set()
+    for raw in raw_trades:
+        if not isinstance(raw, dict):
+            continue
+        info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+        order_id = str(raw.get("order") or info.get("orderId") or "")
+        client_order_id = _raw_client_order_id(raw)
+        comparable_client_id = (
+            client_order_id[2:]
+            if client_order_id.startswith("t-")
+            else client_order_id
+        )
+        belongs_to_instance = bool(
+            (prefix and comparable_client_id.startswith(prefix))
+            or (order_id and order_id in known_order_ids)
+        )
+        if not belongs_to_instance:
+            continue
+        row = {
+            **_normalize_trade(exchange, raw, maker_cfg.symbol),
+            "client_order_id": client_order_id,
+            "source": "market_maker",
+            "strategy": "market_maker",
+            "strategy_instance_id": maker_cfg.id,
+        }
+        identity = (
+            str(row.get("id") or ""),
+            str(row.get("order_id") or ""),
+            row.get("timestamp"),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows.append(row)
+    return sorted(
+        rows,
+        key=lambda row: float(row.get("timestamp") or 0.0),
+        reverse=True,
+    )
+
+
+async def _sync_market_maker_fills(
+    cfg: BotConfig,
+    manager: ExchangeManager,
+    maker_cfg: Any,
+    *,
+    known_order_ids: set[str],
+) -> dict[str, Any]:
+    exchange = _find_exchange_by_key(cfg, maker_cfg.exchange)
+    raw_trades = await manager.fetch_my_trades(
+        exchange,
+        symbol=maker_cfg.symbol,
+        limit=MARKET_MAKER_FILL_SYNC_LIMIT,
+    )
+    rows = _market_maker_fill_rows(
+        exchange,
+        maker_cfg,
+        raw_trades,
+        known_order_ids=known_order_ids,
+    )
+    ledger_result = AssetLedgerStore(cfg.asset_ledger).record_fills(
+        account_key=maker_cfg.exchange,
+        trades=rows,
+        source=_market_maker_fill_source(maker_cfg.id),
+    )
+    return {
+        **ledger_result,
+        "fill_count": len(rows),
+        "latest_fill_at": (
+            max(float(row.get("timestamp") or 0.0) for row in rows) / 1000.0
+            if rows
+            else None
+        ),
+    }
 
 
 async def _market_maker_open_order_snapshot(
@@ -3304,6 +3404,85 @@ async def _market_maker_instance_task_loop(
     previous_live_allowed = False
     last_start_recovery: dict[str, Any] | None = None
     start_reconciliation_block_reason: str | None = None
+    known_order_ids: set[str] = set()
+    last_fill_sync_monotonic = 0.0
+    fill_sync: dict[str, Any] = {
+        "status": "waiting" if user_strategy_id else "not_required",
+        "recent_fill_count": 0,
+        "new_fill_count": 0,
+        "latest_fill_at": None,
+        "last_finished": None,
+        "error": None,
+    }
+
+    async def publish_runtime(payload: dict[str, Any]) -> None:
+        await state.set_market_maker_instance_runtime(
+            instance_id,
+            {
+                **payload,
+                "fill_sync": dict(fill_sync),
+            },
+        )
+
+    async def sync_user_fills(
+        runtime_cfg: BotConfig,
+        maker_cfg: Any,
+        *,
+        force: bool = False,
+    ) -> None:
+        nonlocal fill_sync, last_fill_sync_monotonic
+        if not user_strategy_id:
+            return
+        now_monotonic = time.monotonic()
+        if (
+            not force
+            and now_monotonic - last_fill_sync_monotonic
+            < MARKET_MAKER_FILL_SYNC_SECONDS
+        ):
+            return
+        last_fill_sync_monotonic = now_monotonic
+        try:
+            result = await _sync_market_maker_fills(
+                runtime_cfg,
+                manager,
+                maker_cfg,
+                known_order_ids=known_order_ids,
+            )
+            fill_sync = {
+                "status": "ok",
+                "recent_fill_count": int(result.get("fill_count") or 0),
+                "new_fill_count": int(result.get("new_fill_count") or 0),
+                "latest_fill_at": result.get("latest_fill_at"),
+                "last_finished": time.time(),
+                "error": None,
+            }
+            if fill_sync["new_fill_count"]:
+                write_trade_event(
+                    runtime_cfg.trade_log,
+                    {
+                        "type": "market_maker_fill_sync",
+                        "strategy": "market_maker",
+                        "runtime_strategy": "market_maker",
+                        "strategy_instance_id": instance_id,
+                        "mode": "live",
+                        "status": "fills_recorded",
+                        "plan": {
+                            "exchange": maker_cfg.exchange,
+                            "symbol": maker_cfg.symbol,
+                        },
+                        "fill_count": fill_sync["new_fill_count"],
+                        "recent_fill_count": fill_sync["recent_fill_count"],
+                        "latest_fill_at": fill_sync["latest_fill_at"],
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            fill_sync = {
+                **fill_sync,
+                "status": "error",
+                "new_fill_count": 0,
+                "last_finished": time.time(),
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
     runtime: dict[str, Any] = {
         "id": instance_id,
         "status": "starting",
@@ -3322,7 +3501,7 @@ async def _market_maker_instance_task_loop(
         "updated_at": time.time(),
     }
     try:
-        await state.set_market_maker_instance_runtime(instance_id, runtime)
+        await publish_runtime(runtime)
         while True:
             runtime_cfg = await state.runtime_config(cfg)
             maker_cfg = next(
@@ -3354,6 +3533,15 @@ async def _market_maker_instance_task_loop(
             if maker_cfg is None:
                 cancel_payload = None
                 removal_sync: dict[str, Any] | None = None
+                if (
+                    user_strategy_id
+                    and last_maker_cfg is not None
+                    and last_instance_runtime_cfg is not None
+                ):
+                    await sync_user_fills(
+                        last_instance_runtime_cfg,
+                        last_maker_cfg,
+                    )
                 if (
                     open_order_ids
                     and last_maker_cfg is not None
@@ -3415,7 +3603,7 @@ async def _market_maker_instance_task_loop(
                     "last_error": (removal_sync or {}).get("error"),
                     "updated_at": time.time(),
                 }
-                await state.set_market_maker_instance_runtime(instance_id, runtime)
+                await publish_runtime(runtime)
                 if removal_pending:
                     await asyncio.sleep(1.0)
                     continue
@@ -3548,6 +3736,7 @@ async def _market_maker_instance_task_loop(
                 open_order_sync: dict[str, Any] | None = None
                 if live_allowed or open_order_ids or coordination_hold is not None:
                     tracked_before_sync = list(open_order_ids)
+                    known_order_ids.update(tracked_before_sync)
                     open_order_snapshot = await _market_maker_open_order_snapshot(
                         runtime_cfg,
                         manager,
@@ -3577,6 +3766,7 @@ async def _market_maker_instance_task_loop(
                         open_order_ids,
                         open_order_snapshot,
                     )
+                await sync_user_fills(runtime_cfg, maker_cfg)
                 if not live_allowed:
                     cancel_payload = None
                     open_orders_by_id = {
@@ -3695,7 +3885,7 @@ async def _market_maker_instance_task_loop(
                         "coordination_hold": coordination_hold,
                         "updated_at": time.time(),
                     }
-                    await state.set_market_maker_instance_runtime(instance_id, runtime)
+                    await publish_runtime(runtime)
                 else:
                     if open_order_snapshot.get("error"):
                         cycle_count += 1
@@ -3720,9 +3910,7 @@ async def _market_maker_instance_task_loop(
                             "coordination_hold": None,
                             "updated_at": time.time(),
                         }
-                        await state.set_market_maker_instance_runtime(
-                            instance_id, runtime
-                        )
+                        await publish_runtime(runtime)
                         sleep_for = max(0.0, interval - (time.monotonic() - started))
                         if sleep_for > 0:
                             await asyncio.sleep(sleep_for)
@@ -3841,6 +4029,11 @@ async def _market_maker_instance_task_loop(
                         if isinstance(payload.get("execution"), dict)
                         else {}
                     )
+                    known_order_ids.update(
+                        str(order_id)
+                        for order_id in execution.get("placed_order_ids", [])
+                        if order_id
+                    )
                     placed_count += int(execution.get("placed_count", 0) or 0)
                     canceled_count += int(execution.get("canceled_count", 0) or 0)
                     if int(execution.get("canceled_count", 0) or 0) > 0:
@@ -3898,7 +4091,7 @@ async def _market_maker_instance_task_loop(
                         "coordination_hold": None,
                         "updated_at": time.time(),
                     }
-                    await state.set_market_maker_instance_runtime(instance_id, runtime)
+                    await publish_runtime(runtime)
                     if shutdown_requested:
                         raise asyncio.CancelledError
             except Exception as exc:  # noqa: BLE001
@@ -3909,7 +4102,7 @@ async def _market_maker_instance_task_loop(
                     "last_error": f"{exc.__class__.__name__}: {exc}",
                     "updated_at": time.time(),
                 }
-                await state.set_market_maker_instance_runtime(instance_id, runtime)
+                await publish_runtime(runtime)
 
             sleep_for = max(0.0, interval - (time.monotonic() - started))
             if sleep_for > 0:

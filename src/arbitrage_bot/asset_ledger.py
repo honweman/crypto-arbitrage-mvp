@@ -635,7 +635,35 @@ class AssetLedgerStore:
                         _json(order),
                     ),
                 )
-        for trade in account.get("recent_trades", []) or []:
+        self._record_fills(
+            conn,
+            account_key,
+            account.get("recent_trades", []) or [],
+            observed_at,
+            source,
+        )
+        if not unchanged_snapshot:
+            self._insert_event(
+                conn,
+                event_type="order_snapshot",
+                account_key=account_key,
+                payload=account,
+                observed_at=observed_at,
+                source=source,
+                external_id=snapshot_id,
+            )
+        return snapshot_id, diffs
+
+    def _record_fills(
+        self,
+        conn: sqlite3.Connection,
+        account_key: str,
+        trades: Iterable[dict[str, Any]],
+        observed_at: float,
+        source: str,
+    ) -> int:
+        new_fill_count = 0
+        for trade in trades:
             if not isinstance(trade, dict):
                 continue
             fill_key = _fill_key(account_key, trade)
@@ -705,6 +733,7 @@ class AssetLedgerStore:
                 (fill_key, source, observed_at, observed_at),
             )
             if source_observed is None:
+                new_fill_count += 1
                 self._insert_event(
                     conn,
                     event_type="fill_observed",
@@ -716,17 +745,92 @@ class AssetLedgerStore:
                     external_id=fill_key,
                     effective_at=_number(trade.get("timestamp")),
                 )
-        if not unchanged_snapshot:
-            self._insert_event(
+        return new_fill_count
+
+    def record_fills(
+        self,
+        *,
+        account_key: str,
+        trades: Iterable[dict[str, Any]],
+        source: str,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.enabled:
+            return {"enabled": False, "new_fill_count": 0}
+        observed_at = float(observed_at or time.time())
+        rows = [dict(trade) for trade in trades if isinstance(trade, dict)]
+        with closing(_connect(self.cfg.path)) as conn:
+            conn.execute("begin immediate")
+            new_fill_count = self._record_fills(
                 conn,
-                event_type="order_snapshot",
-                account_key=account_key,
-                payload=account,
-                observed_at=observed_at,
-                source=source,
-                external_id=snapshot_id,
+                account_key,
+                rows,
+                observed_at,
+                source,
             )
-        return snapshot_id, diffs
+            conn.commit()
+        return {
+            "enabled": True,
+            "account_key": account_key,
+            "observed_count": len(rows),
+            "new_fill_count": new_fill_count,
+            "observed_at": observed_at,
+        }
+
+    def recent_fills(
+        self,
+        *,
+        observation_sources: Iterable[str],
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        sources = sorted(
+            {
+                str(source).strip()
+                for source in observation_sources
+                if str(source).strip()
+            }
+        )
+        if not sources or limit <= 0:
+            return []
+        placeholders = ",".join("?" for _ in sources)
+        query = f"""
+            select f.*, o.source observation_source
+            from ledger_fills f
+            join fill_source_observations o on o.fill_key = f.fill_key
+            where o.source in ({placeholders})
+            order by coalesce(f.timestamp_ms, f.last_observed_at * 1000) desc
+            limit ?
+        """  # noqa: S608 - placeholders are generated internally
+        with closing(_connect(self.cfg.path)) as conn:
+            rows = conn.execute(query, (*sources, int(limit))).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            result.append(
+                {
+                    **payload,
+                    "account_key": row["account_key"],
+                    "exchange": payload.get("exchange") or row["account_key"],
+                    "id": payload.get("id") or row["trade_id"],
+                    "order_id": payload.get("order_id") or row["order_id"],
+                    "symbol": payload.get("symbol") or row["symbol"],
+                    "side": payload.get("side") or row["side"],
+                    "source": payload.get("source") or row["source"],
+                    "price": payload.get("price", row["price"]),
+                    "amount": payload.get("amount", row["amount"]),
+                    "cost": payload.get("cost", row["cost"]),
+                    "timestamp": payload.get("timestamp", row["timestamp_ms"]),
+                    "observation_source": row["observation_source"],
+                }
+            )
+        return result
 
     def record_monitor_checkpoint(
         self,
