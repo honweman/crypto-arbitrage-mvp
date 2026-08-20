@@ -70,6 +70,7 @@ from arbitrage_bot.web import (
     _monitor_auto_stop_decision,
     _monitor_reconciliation_warmup_active,
     _owner_live_market_maker_order_activity,
+    _owner_live_trading_console,
     _market_maker_order_sync_delta,
     _market_maker_overrides_from_payload,
     _preflight_candidate_from_payload,
@@ -348,6 +349,145 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["open_order_count"], 1)
         self.assertEqual(payload["recent_trade_count"], 1)
         self.assertEqual(payload["recent_trades"][0]["id"], "fill-user-mm-owner")
+
+    def test_owner_trading_console_includes_mm_and_auto_buy_sell(self) -> None:
+        exchange = ExchangeConfig(
+            id="bybit",
+            label="workspace:connection-1:spot",
+            display_label="Bybit Main",
+        )
+        cfg = make_config(
+            spot_exchanges=[exchange],
+            risk=RiskConfig(allow_live_trading=True),
+        )
+        order_activity = {
+            "open_orders": [{"exchange": exchange.key, "id": "order-1"}],
+            "open_order_count": 1,
+            "recent_trade_count": 2,
+        }
+        payload = _owner_live_trading_console(
+            cfg,
+            {
+                "strategies": [
+                    {
+                        "id": "strategy-1",
+                        "name": "ACS MM",
+                        "strategy_type": "market_maker",
+                        "enabled": True,
+                        "effective_enabled": True,
+                        "accounts": [
+                            {
+                                "exchange": "bybit",
+                                "label": "Bybit Main",
+                                "symbol": "ACS/USDT",
+                            }
+                        ],
+                        "live_runtime": {
+                            "status": "unchanged",
+                            "mode": "live",
+                            "config": {
+                                "exchange": exchange.key,
+                                "symbol": "ACS/USDT",
+                            },
+                        },
+                    }
+                ]
+            },
+            order_activity,
+            {
+                "tasks": {
+                    "tasks": [
+                        {
+                            "id": "auto-1",
+                            "status": "waiting_for_interval",
+                            "config": {
+                                "exchange": exchange.key,
+                                "symbol": "ACS/USDT",
+                            },
+                        },
+                        {
+                            "id": "auto-complete",
+                            "status": "complete",
+                            "config": {
+                                "exchange": exchange.key,
+                                "symbol": "ACS/USDT",
+                            },
+                        },
+                    ]
+                }
+            },
+        )
+
+        self.assertTrue(payload["owner_scoped"])
+        self.assertFalse(payload["cancel_allowed"])
+        self.assertTrue(payload["live_trading"])
+        self.assertEqual(payload["accounts"][0]["open_order_count"], 1)
+        self.assertEqual(len(payload["strategies"]), 2)
+        self.assertEqual(
+            payload["strategies"][0]["owner_strategy_id"],
+            "strategy-1",
+        )
+        self.assertEqual(
+            payload["strategies"][1]["owner_auto_task_id"],
+            "auto-1",
+        )
+
+    def test_non_admin_preserves_only_explicit_owner_console_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            store.create_user(
+                email="admin@example.com",
+                password="Strong-pass-1!",
+            )
+            user = store.create_user(
+                email="owner@example.com",
+                password="Strong-pass-1!",
+            )
+        cfg = make_config()
+        owner_activity = {
+            "status": "ok",
+            "owner_scoped": True,
+            "accounts": [],
+            "open_orders": [{"symbol": "ACS/USDT", "id": "owner-order"}],
+            "closed_orders": [],
+            "recent_trades": [{"symbol": "ACS/USDT", "id": "owner-fill"}],
+            "open_order_count": 1,
+            "recent_trade_count": 1,
+        }
+        owner_console = {
+            "status": "ok",
+            "owner_scoped": True,
+            "accounts": [],
+            "strategies": [{"id": "owner-mm", "symbol": "ACS/USDT"}],
+        }
+
+        filtered = _filter_state_payload_for_user(
+            {
+                "config": {},
+                "order_activity": owner_activity,
+                "trading_console": owner_console,
+            },
+            cfg=cfg,
+            user=user,
+        )
+        private = _filter_state_payload_for_user(
+            {
+                "config": {},
+                "order_activity": {
+                    "open_orders": [{"symbol": "ACS/USDT", "id": "platform"}]
+                },
+                "trading_console": {
+                    "strategies": [{"id": "platform", "symbol": "ACS/USDT"}]
+                },
+            },
+            cfg=cfg,
+            user=user,
+        )
+
+        self.assertEqual(filtered["order_activity"]["open_order_count"], 1)
+        self.assertEqual(filtered["trading_console"]["status"], "ok")
+        self.assertEqual(private["order_activity"]["status"], "private")
+        self.assertEqual(private["trading_console"]["status"], "private")
 
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(

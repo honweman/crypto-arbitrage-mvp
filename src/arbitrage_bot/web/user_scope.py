@@ -603,15 +603,28 @@ def _filter_state_payload_for_user(
     filter_strategy_section(payload.get("dca"))
     filter_strategy_section(payload.get("execution_algo"))
     filter_strategy_section(payload.get("backtest"))
-    filter_order_activity(payload.get("order_activity"))
+    order_activity_payload = payload.get("order_activity")
+    owner_order_activity = (
+        isinstance(order_activity_payload, dict)
+        and order_activity_payload.get("owner_scoped") is True
+    )
+    if not owner_order_activity:
+        filter_order_activity(order_activity_payload)
     filter_account_balances(payload.get("account_balances"))
-    filter_trading_console(payload.get("trading_console"))
+    trading_console_payload = payload.get("trading_console")
+    owner_trading_console = (
+        isinstance(trading_console_payload, dict)
+        and trading_console_payload.get("owner_scoped") is True
+    )
+    if not owner_trading_console:
+        filter_trading_console(trading_console_payload)
     filter_strategy_lifecycle(payload.get("strategy_lifecycle"))
     filter_readiness(payload.get("readiness"))
     filter_strategy_center(payload.get("strategy_center"))
     if user.role != "admin":
         # Platform live accounts belong to the platform operator. User-owned
-        # accounts, strategies, orders and P/L are exposed only via user_workspace.
+        # payloads carry an explicit owner_scoped marker after they have been
+        # built from the request user's isolated runtime configuration.
         payload["portfolio"] = {
             "status": "private",
             "positions": [],
@@ -625,33 +638,35 @@ def _filter_state_payload_for_user(
             "checked_account_count": 0,
             "total_account_count": 0,
         }
-        payload["order_activity"] = {
-            "status": "private",
-            "accounts": [],
-            "open_orders": [],
-            "closed_orders": [],
-            "recent_trades": [],
-            "open_order_count": 0,
-            "closed_order_count": 0,
-            "recent_trade_count": 0,
-            "pnl_summary": {},
-            "daily_pnl": None,
-            "strategy_performance": {
+        if not owner_order_activity:
+            payload["order_activity"] = {
                 "status": "private",
-                "rows": [],
-                "row_count": 0,
-                "summary": {},
-            },
-            "reconciliation": {"status": "private", "issues": []},
-        }
-        payload["trading_console"] = {
-            "status": "private",
-            "accounts": [],
-            "strategies": [],
-            "open_orders": [],
-            "recent_trades": [],
-            "open_order_count": 0,
-        }
+                "accounts": [],
+                "open_orders": [],
+                "closed_orders": [],
+                "recent_trades": [],
+                "open_order_count": 0,
+                "closed_order_count": 0,
+                "recent_trade_count": 0,
+                "pnl_summary": {},
+                "daily_pnl": None,
+                "strategy_performance": {
+                    "status": "private",
+                    "rows": [],
+                    "row_count": 0,
+                    "summary": {},
+                },
+                "reconciliation": {"status": "private", "issues": []},
+            }
+        if not owner_trading_console:
+            payload["trading_console"] = {
+                "status": "private",
+                "accounts": [],
+                "strategies": [],
+                "open_orders": [],
+                "recent_trades": [],
+                "open_order_count": 0,
+            }
         payload["strategy_lifecycle"] = {
             "status": "private",
             "instances": [],

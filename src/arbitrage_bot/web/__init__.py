@@ -5517,6 +5517,140 @@ def _owner_live_market_maker_order_activity(
     }
 
 
+def _owner_live_trading_console(
+    cfg: BotConfig,
+    workspace_payload: dict[str, Any],
+    order_activity: dict[str, Any],
+    auto_buy_sell_payload: dict[str, Any],
+) -> dict[str, Any]:
+    open_counts: dict[str, int] = {}
+    for order in order_activity.get("open_orders", []) or []:
+        exchange_key = str(order.get("exchange") or "")
+        if exchange_key:
+            open_counts[exchange_key] = open_counts.get(exchange_key, 0) + 1
+
+    exchanges = _all_account_exchanges(cfg)
+    exchange_labels = {
+        exchange.key: exchange.display_label or exchange.label or exchange.key
+        for exchange in exchanges
+    }
+    accounts = [
+        {
+            "key": exchange.key,
+            "label": exchange_labels[exchange.key],
+            "id": exchange.id,
+            "market_type": exchange.market_type,
+            "enabled": _risk_account_enabled(cfg, exchange.key),
+            "open_order_count": open_counts.get(exchange.key, 0),
+        }
+        for exchange in exchanges
+    ]
+
+    strategies: list[dict[str, Any]] = []
+    for strategy in workspace_payload.get("strategies", []) or []:
+        if (
+            not isinstance(strategy, dict)
+            or strategy.get("strategy_type") != "market_maker"
+        ):
+            continue
+        runtime = (
+            strategy.get("live_runtime")
+            if isinstance(strategy.get("live_runtime"), dict)
+            else {}
+        )
+        runtime_config = (
+            runtime.get("config") if isinstance(runtime.get("config"), dict) else {}
+        )
+        strategy_accounts = [
+            row for row in strategy.get("accounts", []) or [] if isinstance(row, dict)
+        ]
+        first_account = strategy_accounts[0] if strategy_accounts else {}
+        exchange_key = str(
+            runtime_config.get("exchange") or first_account.get("exchange") or ""
+        )
+        symbol = str(
+            runtime_config.get("symbol") or first_account.get("symbol") or ""
+        )
+        enabled = bool(strategy.get("enabled"))
+        runtime_mode = str(runtime.get("mode") or "live")
+        runtime_status = str(
+            runtime.get("status") or ("starting" if enabled else "paused")
+        )
+        strategies.append(
+            {
+                "id": f"owner_market_maker:{strategy.get('id') or ''}",
+                "owner_strategy_id": str(strategy.get("id") or ""),
+                "label": strategy.get("name") or "Market Maker",
+                "configured": True,
+                "exchange": exchange_key,
+                "exchange_label": exchange_labels.get(
+                    exchange_key,
+                    first_account.get("label") or exchange_key,
+                ),
+                "symbol": symbol,
+                "paused": not enabled,
+                "live": enabled and runtime_mode == "live",
+                "mode": "paused" if not enabled else runtime_mode,
+                "status": runtime_status,
+                "strategy_allowed": bool(strategy.get("effective_enabled")),
+                "account_enabled": _risk_account_enabled(cfg, exchange_key),
+                "live_ready": runtime_status not in {"blocked", "error"},
+            }
+        )
+
+    terminal_statuses = {
+        "complete",
+        "stopped",
+        "stopped_by_price",
+        "below_min_order_quote",
+    }
+    task_snapshot = auto_buy_sell_payload.get("tasks")
+    task_rows = (
+        task_snapshot.get("tasks", []) if isinstance(task_snapshot, dict) else []
+    )
+    for task in task_rows:
+        if not isinstance(task, dict):
+            continue
+        status = str(task.get("status") or "")
+        if status in terminal_statuses:
+            continue
+        config = task.get("config") if isinstance(task.get("config"), dict) else {}
+        exchange_key = str(config.get("exchange") or "")
+        strategies.append(
+            {
+                "id": f"owner_auto_buy_sell:{task.get('id') or ''}",
+                "owner_auto_task_id": str(task.get("id") or ""),
+                "label": "Auto Buy/Sell",
+                "configured": True,
+                "exchange": exchange_key,
+                "exchange_label": exchange_labels.get(exchange_key, exchange_key),
+                "symbol": str(config.get("symbol") or ""),
+                "paused": status == "paused",
+                "live": status != "paused",
+                "mode": "paused" if status == "paused" else "live",
+                "status": status or "running",
+                "strategy_allowed": cfg.risk.allow_slow_execution,
+                "account_enabled": _risk_account_enabled(cfg, exchange_key),
+                "live_ready": status not in {"blocked_by_risk", "error"},
+            }
+        )
+
+    live_base = (
+        cfg.risk.enabled and cfg.risk.trading_enabled and cfg.risk.allow_live_trading
+    )
+    return {
+        "status": "ok",
+        "owner_scoped": True,
+        "cancel_allowed": False,
+        "live_trading": live_base,
+        "strategies": strategies,
+        "accounts": accounts,
+        "open_order_count": int(order_activity.get("open_order_count") or 0),
+        "recent_trade_count": int(order_activity.get("recent_trade_count") or 0),
+        "updated_at": time.time(),
+    }
+
+
 async def index(_: web.Request) -> web.Response:
     return web.Response(text=HTML, content_type="text/html")
 
@@ -5543,8 +5677,14 @@ async def _user_auto_buy_sell_payload(
     request: web.Request,
     user: WebUser,
     cfg: BotConfig,
+    *,
+    runtime_cfg: BotConfig | None = None,
 ) -> dict[str, Any]:
-    runtime_cfg = _user_auto_buy_sell_runtime_config(request, user, cfg)
+    runtime_cfg = runtime_cfg or _user_auto_buy_sell_runtime_config(
+        request,
+        user,
+        cfg,
+    )
     accounts = slow_execution_accounts(
         auto_buy_sell_exchanges(runtime_cfg),
         _auto_buy_sell_symbols_by_exchange(runtime_cfg),
@@ -5603,6 +5743,20 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     payload = await state.get(view=view, sections=sections)
     runtime_cfg = await state.runtime_config(cfg)
     requesting_user = _request_user(request)
+    owner_runtime_cfg: BotConfig | None = None
+    owner_auto_buy_sell_payload: dict[str, Any] | None = None
+    if requesting_user is not None and requesting_user.role != "admin":
+        owner_runtime_cfg = _user_auto_buy_sell_runtime_config(
+            request,
+            requesting_user,
+            runtime_cfg,
+        )
+        owner_auto_buy_sell_payload = await _user_auto_buy_sell_payload(
+            request,
+            requesting_user,
+            runtime_cfg,
+            runtime_cfg=owner_runtime_cfg,
+        )
     payload["strategy_center"] = strategy_center_payload_for_view(
         build_strategy_center_payload(
             runtime_cfg,
@@ -5668,9 +5822,16 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
                     "open_order_count": 0,
                 }
         if requesting_user is not None and requesting_user.role != "admin":
-            payload["order_activity"] = _owner_live_market_maker_order_activity(
-                runtime_cfg,
+            owner_order_activity = _owner_live_market_maker_order_activity(
+                owner_runtime_cfg or runtime_cfg,
                 workspace_payload,
+            )
+            payload["order_activity"] = owner_order_activity
+            payload["trading_console"] = _owner_live_trading_console(
+                owner_runtime_cfg or runtime_cfg,
+                workspace_payload,
+                owner_order_activity,
+                owner_auto_buy_sell_payload or {},
             )
     permission_scope = (
         build_permission_scope(requesting_user, workspace_payload)
@@ -5696,19 +5857,12 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         filtered["auth"]["permission_model"] = permission_scope["model"]
         filtered["auth"]["permissions"] = permission_scope
     if requesting_user is not None and requesting_user.role != "admin":
-        user_runtime_cfg = _user_auto_buy_sell_runtime_config(
-            request,
-            requesting_user,
-            runtime_cfg,
-        )
-        filtered["slow_execution"] = await _user_auto_buy_sell_payload(
-            request,
-            requesting_user,
-            runtime_cfg,
-        )
+        filtered["slow_execution"] = owner_auto_buy_sell_payload or {}
         config_payload = filtered.get("config")
         if isinstance(config_payload, dict):
-            config_payload["risk"] = risk_config_to_dict(user_runtime_cfg.risk)
+            config_payload["risk"] = risk_config_to_dict(
+                (owner_runtime_cfg or runtime_cfg).risk
+            )
     if requesting_user is not None and workspace_payload is not None:
         filtered["account_balances"] = _merge_workspace_account_balances(
             filtered.get("account_balances"),

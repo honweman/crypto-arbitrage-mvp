@@ -1844,6 +1844,9 @@ function balanceStatusClass(status) {
     function renderConsoleAccountActions(tradingConsole) {
       const body = document.getElementById("console-account-actions");
       body.innerHTML = "";
+      const cancelAllowed = tradingConsole?.cancel_allowed !== false;
+      body.hidden = !cancelAllowed;
+      if (!cancelAllowed) return;
       const accounts = tradingConsole?.accounts || [];
       if (accounts.length === 0) {
         const empty = document.createElement("span");
@@ -1892,7 +1895,23 @@ function balanceStatusClass(status) {
         button.className = strategy.paused ? "control-button" : "danger-button";
         button.type = "button";
         button.textContent = strategy.paused ? "Resume" : "Pause";
-        button.addEventListener("click", () => setStrategyPaused(strategy.id, !strategy.paused, button));
+        if (strategy.owner_strategy_id) {
+          const ownerStrategy = (currentUserWorkspace?.strategies || []).find(
+            (row) => row.id === strategy.owner_strategy_id
+          );
+          button.disabled = !ownerStrategy;
+          if (ownerStrategy) {
+            button.addEventListener("click", () => toggleUserStrategy(ownerStrategy, button));
+          }
+        } else if (strategy.owner_auto_task_id) {
+          button.addEventListener("click", () => controlAutoBuySellTask(
+            strategy.owner_auto_task_id,
+            strategy.paused ? "resume" : "pause",
+            button
+          ));
+        } else {
+          button.addEventListener("click", () => setStrategyPaused(strategy.id, !strategy.paused, button));
+        }
         action.appendChild(button);
         body.appendChild(tr);
       }
@@ -1908,11 +1927,15 @@ function balanceStatusClass(status) {
           : ""
       );
       const allButton = document.getElementById("console-cancel-all");
-      allButton.disabled = openOrders <= 0;
-      allButton.onclick = () => cancelBulkOrders({ scope: "all" }, allButton);
+      const cancelAllowed = tradingConsole?.cancel_allowed !== false;
+      allButton.hidden = !cancelAllowed;
+      allButton.disabled = !cancelAllowed || openOrders <= 0;
+      allButton.onclick = cancelAllowed
+        ? () => cancelBulkOrders({ scope: "all" }, allButton)
+        : null;
       renderConsoleAccountActions(tradingConsole);
       renderConsoleStrategies(tradingConsole);
-      renderOpenOrders(orderActivity, "console-open-orders", true);
+      renderOpenOrders(orderActivity, "console-open-orders", cancelAllowed);
       renderRecentFills(orderActivity, "console-recent-fills");
     }
 
