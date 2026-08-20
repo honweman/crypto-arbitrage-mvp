@@ -5424,29 +5424,53 @@ def _owner_live_market_maker_order_activity(
         runtime_config = (
             runtime.get("config") if isinstance(runtime.get("config"), dict) else {}
         )
-        for order_id in runtime.get("open_order_ids", []) or []:
+        runtime_orders = {
+            str(row.get("id") or ""): row
+            for row in runtime.get("open_orders", []) or []
+            if isinstance(row, dict) and row.get("id")
+        }
+        order_ids = [
+            str(order_id)
+            for order_id in runtime.get("open_order_ids", []) or []
+            if order_id
+        ]
+        if runtime.get("open_order_details_complete") is True:
+            order_ids = [order_id for order_id in order_ids if order_id in runtime_orders]
+        for order_id in order_ids:
             if not order_id:
                 continue
+            detail = runtime_orders.get(order_id, {})
+            timestamp = detail.get("timestamp")
+            if timestamp is None:
+                updated_at = runtime.get("updated_at")
+                timestamp = float(updated_at) * 1000.0 if updated_at else None
             open_orders.append(
                 {
-                    "exchange": runtime_config.get("exchange") or "",
-                    "label": strategy.get("name") or "Market Maker",
+                    "exchange": detail.get("exchange")
+                    or runtime_config.get("exchange")
+                    or "",
+                    "label": detail.get("label")
+                    or strategy.get("name")
+                    or "Market Maker",
                     "id": str(order_id),
-                    "client_order_id": "",
-                    "symbol": runtime_config.get("symbol") or "",
-                    "side": "",
-                    "type": "limit",
-                    "status": "open",
+                    "client_order_id": detail.get("client_order_id") or "",
+                    "symbol": detail.get("symbol")
+                    or runtime_config.get("symbol")
+                    or "",
+                    "side": detail.get("side") or "",
+                    "type": detail.get("type") or "limit",
+                    "status": detail.get("status") or "open",
                     "source": "market_maker",
                     "strategy_instance_id": strategy.get("runtime_instance_id") or "",
-                    "price": None,
-                    "amount": None,
-                    "filled": None,
-                    "remaining": None,
-                    "cost": None,
-                    "fee": None,
-                    "timestamp": runtime.get("updated_at"),
-                    "datetime": None,
+                    "price": detail.get("price"),
+                    "average": detail.get("average"),
+                    "amount": detail.get("amount"),
+                    "filled": detail.get("filled"),
+                    "remaining": detail.get("remaining"),
+                    "cost": detail.get("cost"),
+                    "fee": detail.get("fee"),
+                    "timestamp": timestamp,
+                    "datetime": detail.get("datetime"),
                 }
             )
     account_rows: dict[str, dict[str, Any]] = {}

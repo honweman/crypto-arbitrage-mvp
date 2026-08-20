@@ -118,6 +118,7 @@ from . import (
     _find_exchange_by_key,
     _global_scan_health_warnings,
     _missing_market_warnings,
+    _normalize_order,
     _normalize_trade,
     _onchain_error_payload,
     _risk_account_enabled,
@@ -2089,6 +2090,34 @@ async def _market_maker_open_order_snapshot(
     }
 
 
+def _market_maker_runtime_open_orders(
+    cfg: BotConfig,
+    maker_cfg: Any,
+    open_order_snapshot: dict[str, Any],
+    active_order_ids: list[str],
+) -> list[dict[str, Any]]:
+    exchange = _find_exchange_by_key(cfg, maker_cfg.exchange)
+    active_ids = {str(order_id) for order_id in active_order_ids if order_id}
+    rows: list[dict[str, Any]] = []
+    for raw in open_order_snapshot.get("open_orders", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        order_id = _raw_order_id(raw)
+        if not order_id or order_id not in active_ids:
+            continue
+        row = _normalize_order(exchange, raw, maker_cfg.symbol)
+        row.update(
+            {
+                "label": exchange.display_label or exchange.label or exchange.key,
+                "source": "market_maker",
+                "strategy": "market_maker",
+                "strategy_instance_id": maker_cfg.id,
+            }
+        )
+        rows.append(row)
+    return rows
+
+
 def _market_maker_order_sync_delta(
     previous_order_ids: list[str],
     open_order_snapshot: dict[str, Any],
@@ -3491,6 +3520,8 @@ async def _market_maker_instance_task_loop(
         "open_order_exchange": "",
         "open_order_symbol": "",
         "open_order_count": 0,
+        "open_orders": [],
+        "open_order_details_complete": False,
         "placed_count": 0,
         "canceled_count": 0,
         "cycle_count": 0,
@@ -3581,6 +3612,18 @@ async def _market_maker_instance_task_loop(
                     if not open_order_ids and not removal_sync.get("error"):
                         open_order_exchange = ""
                         open_order_symbol = ""
+                removal_open_orders = (
+                    _market_maker_runtime_open_orders(
+                        cancel_cfg,
+                        last_maker_cfg,
+                        removal_sync,
+                        open_order_ids,
+                    )
+                    if removal_sync is not None
+                    and last_maker_cfg is not None
+                    and last_instance_runtime_cfg is not None
+                    else []
+                )
                 removal_pending = bool(
                     open_order_ids or (removal_sync or {}).get("error")
                 )
@@ -3596,6 +3639,12 @@ async def _market_maker_instance_task_loop(
                     ),
                     "open_order_ids": open_order_ids,
                     "open_order_count": len(open_order_ids),
+                    "open_orders": removal_open_orders,
+                    "open_order_details_complete": bool(
+                        removal_sync
+                        and removal_sync.get("source") == "exchange"
+                        and not removal_sync.get("error")
+                    ),
                     "placed_count": placed_count,
                     "canceled_count": canceled_count,
                     "last_execution": cancel_payload,
@@ -3766,6 +3815,12 @@ async def _market_maker_instance_task_loop(
                         open_order_ids,
                         open_order_snapshot,
                     )
+                runtime_open_orders = _market_maker_runtime_open_orders(
+                    runtime_cfg,
+                    maker_cfg,
+                    open_order_snapshot,
+                    open_order_ids,
+                )
                 await sync_user_fills(runtime_cfg, maker_cfg)
                 if not live_allowed:
                     cancel_payload = None
@@ -3826,6 +3881,12 @@ async def _market_maker_instance_task_loop(
                         if not open_order_ids and not open_order_snapshot.get("error"):
                             open_order_exchange = ""
                             open_order_symbol = ""
+                    runtime_open_orders = _market_maker_runtime_open_orders(
+                        runtime_cfg,
+                        maker_cfg,
+                        open_order_snapshot,
+                        open_order_ids,
+                    )
                     sync_error = open_order_snapshot.get("error")
                     conflicting_open_order_count = len(open_order_ids)
                     if side_scoped_coordination and not sync_error:
@@ -3864,6 +3925,11 @@ async def _market_maker_instance_task_loop(
                         "open_order_exchange": open_order_exchange,
                         "open_order_symbol": open_order_symbol,
                         "open_order_count": len(open_order_ids),
+                        "open_orders": runtime_open_orders,
+                        "open_order_details_complete": bool(
+                            open_order_snapshot.get("source") == "exchange"
+                            and not open_order_snapshot.get("error")
+                        ),
                         "open_order_source": open_order_snapshot.get("source"),
                         "open_order_sync_error": open_order_snapshot.get("error"),
                         "open_order_sync": open_order_sync,
@@ -3898,6 +3964,8 @@ async def _market_maker_instance_task_loop(
                             "open_order_exchange": open_order_exchange,
                             "open_order_symbol": open_order_symbol,
                             "open_order_count": len(open_order_ids),
+                            "open_orders": runtime_open_orders,
+                            "open_order_details_complete": False,
                             "open_order_source": open_order_snapshot.get("source"),
                             "open_order_sync_error": open_order_snapshot.get("error"),
                             "open_order_sync": open_order_sync,
@@ -4064,6 +4132,23 @@ async def _market_maker_instance_task_loop(
                     elif payload.get("status") == "placed":
                         open_order_exchange = ""
                         open_order_symbol = ""
+                    detail_snapshot = open_order_snapshot
+                    if execution.get("placed_count") or execution.get(
+                        "canceled_count"
+                    ):
+                        confirmed_snapshot = await _market_maker_open_order_snapshot(
+                            runtime_cfg,
+                            manager,
+                            open_order_ids,
+                        )
+                        if not confirmed_snapshot.get("error"):
+                            detail_snapshot = confirmed_snapshot
+                    runtime_open_orders = _market_maker_runtime_open_orders(
+                        runtime_cfg,
+                        maker_cfg,
+                        detail_snapshot,
+                        open_order_ids,
+                    )
                     runtime = {
                         "status": payload.get("status", "unknown"),
                         "mode": "live",
@@ -4073,6 +4158,12 @@ async def _market_maker_instance_task_loop(
                         "open_order_exchange": open_order_exchange,
                         "open_order_symbol": open_order_symbol,
                         "open_order_count": len(open_order_ids),
+                        "open_orders": runtime_open_orders,
+                        "open_order_details_complete": bool(
+                            detail_snapshot.get("source") == "exchange"
+                            and not detail_snapshot.get("error")
+                        ),
+                        "open_order_detail_source": detail_snapshot.get("source"),
                         "open_order_source": open_order_snapshot.get("source"),
                         "open_order_sync_error": open_order_snapshot.get("error"),
                         "open_order_sync": open_order_sync,

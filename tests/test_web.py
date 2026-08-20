@@ -144,6 +144,7 @@ from arbitrage_bot.web.loops import (
     _complete_market_maker_cycle_on_shutdown,
     _load_initial_rebalance_runtime,
     _market_maker_fill_rows,
+    _market_maker_runtime_open_orders,
 )
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUser, WebUserStore, totp_code
@@ -231,6 +232,52 @@ def make_config(
 
 
 class WebMonitorTest(unittest.TestCase):
+    def test_market_maker_runtime_orders_keep_real_public_order_details(self) -> None:
+        exchange = ExchangeConfig(
+            id="bybit",
+            label="workspace:connection-1:spot",
+            display_label="Bybit Main",
+        )
+        maker = MarketMakerConfig(
+            id="user-mm-123",
+            exchange=exchange.key,
+            symbol="ACS/USDT",
+        )
+        rows = _market_maker_runtime_open_orders(
+            make_config(spot_exchanges=[exchange]),
+            maker,
+            {
+                "open_orders": [
+                    {
+                        "id": "active-order",
+                        "symbol": "ACS/USDT",
+                        "side": "buy",
+                        "type": "limit",
+                        "status": "open",
+                        "price": 0.102,
+                        "amount": 25.0,
+                        "filled": 0.0,
+                        "remaining": 25.0,
+                        "timestamp": 1_787_199_700_000,
+                        "info": {"apiSecret": "must-not-leak"},
+                    },
+                    {
+                        "id": "untracked-order",
+                        "symbol": "ACS/USDT",
+                        "price": 0.2,
+                    },
+                ]
+            },
+            ["active-order"],
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "active-order")
+        self.assertEqual(rows[0]["price"], 0.102)
+        self.assertEqual(rows[0]["timestamp"], 1_787_199_700_000)
+        self.assertEqual(rows[0]["label"], "Bybit Main")
+        self.assertNotIn("info", rows[0])
+
     def test_user_market_maker_fill_rows_require_strategy_attribution(self) -> None:
         exchange = ExchangeConfig(
             id="bybit",
@@ -338,6 +385,27 @@ class WebMonitorTest(unittest.TestCase):
                                     "symbol": "ACS/USDT",
                                 },
                                 "open_order_ids": ["open-owner"],
+                                "open_orders": [
+                                    {
+                                        "exchange": "workspace:user-mm-owner:spot",
+                                        "label": "Bybit Main",
+                                        "id": "open-owner",
+                                        "client_order_id": "mm-owner-1",
+                                        "symbol": "ACS/USDT",
+                                        "side": "sell",
+                                        "type": "limit",
+                                        "status": "open",
+                                        "price": 0.11,
+                                        "amount": 20.0,
+                                        "filled": 0.0,
+                                        "remaining": 20.0,
+                                        "cost": 2.2,
+                                        "fee": None,
+                                        "timestamp": 1_787_199_700_000,
+                                        "datetime": "2026-08-20T04:21:40Z",
+                                    }
+                                ],
+                                "open_order_details_complete": True,
                                 "updated_at": 2.0,
                             },
                         }
@@ -347,6 +415,12 @@ class WebMonitorTest(unittest.TestCase):
 
         self.assertTrue(payload["owner_scoped"])
         self.assertEqual(payload["open_order_count"], 1)
+        self.assertEqual(payload["open_orders"][0]["price"], 0.11)
+        self.assertEqual(payload["open_orders"][0]["side"], "sell")
+        self.assertEqual(
+            payload["open_orders"][0]["timestamp"],
+            1_787_199_700_000,
+        )
         self.assertEqual(payload["recent_trade_count"], 1)
         self.assertEqual(payload["recent_trades"][0]["id"], "fill-user-mm-owner")
 
