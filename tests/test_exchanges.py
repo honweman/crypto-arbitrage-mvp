@@ -594,6 +594,21 @@ class ExchangeProxyConfigTest(unittest.TestCase):
             "crypto-arb-mm-mexc-1",
         )
 
+    def test_mexc_client_order_id_is_exchange_safe_and_bounded(self) -> None:
+        cfg = ExchangeConfig(id="mexc", label="mexc-spot", market_type="spot")
+
+        normalized = normalize_client_order_id_for_exchange(
+            cfg,
+            "arb-umm-6618f6f6632b-user-15a2b1cbbd",
+        )
+
+        self.assertLessEqual(len(normalized), 32)
+        self.assertRegex(normalized, r"^[0-9A-Za-z_-]+$")
+        self.assertEqual(
+            normalized,
+            normalize_client_order_id_for_exchange(cfg, normalized),
+        )
+
     def test_gateio_client_order_id_is_prefixed_and_bounded(self) -> None:
         cfg = ExchangeConfig(id="gateio", label="gateio-swap", market_type="swap")
 

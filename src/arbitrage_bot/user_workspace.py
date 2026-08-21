@@ -56,6 +56,14 @@ EGRESS_MODES = {"default", "source_ip", "proxy"}
 USER_STRATEGY_DEFAULT_TYPES = {"auto_buy_sell"}
 
 
+def _reserved_open_order_capacity(strategy: UserStrategy) -> int:
+    configured_limit = int(strategy.risk.get("max_open_orders") or 0)
+    if strategy.strategy_type != "market_maker":
+        return configured_limit
+    planned_orders = max(0, int(strategy.parameters.get("levels") or 0)) * 2
+    return min(configured_limit, planned_orders)
+
+
 def _clean_ip_address(value: Any, *, label: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -3222,14 +3230,17 @@ class UserWorkspaceStore:
                 raise ValueError(
                     "user max total exposure quote limit would be exceeded"
                 )
-            projected_open_orders = int(updated.risk.get("max_open_orders") or 0) + sum(
-                int(row.risk.get("max_open_orders") or 0) for row in existing_strategies
+            projected_open_orders = _reserved_open_order_capacity(updated) + sum(
+                _reserved_open_order_capacity(row) for row in existing_strategies
             )
             if (
                 profile.max_open_orders > 0
                 and projected_open_orders > profile.max_open_orders
             ):
-                raise ValueError("user max open orders limit would be exceeded")
+                raise ValueError(
+                    "user max open orders limit would be exceeded: "
+                    f"planned {projected_open_orders} > limit {profile.max_open_orders}"
+                )
         with self._connect() as connection:
             connection.execute(
                 """

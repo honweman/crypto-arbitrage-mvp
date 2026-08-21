@@ -227,6 +227,8 @@ def normalize_client_order_id_for_exchange(
         raw = str(value or "").strip()
         without_prefix = raw[2:] if raw.startswith("t-") else raw
         return "t-" + normalize_client_order_id(without_prefix, max_length=26)
+    if cfg.id == "mexc":
+        return normalize_client_order_id(value, max_length=32)
     return normalize_client_order_id(value)
 
 

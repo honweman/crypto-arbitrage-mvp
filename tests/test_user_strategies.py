@@ -15,6 +15,7 @@ from arbitrage_bot.user_strategies import (
 from arbitrage_bot.user_workspace import (
     UserExchangeAccount,
     UserProject,
+    UserRiskProfile,
     UserWorkspaceStore,
 )
 
@@ -176,6 +177,79 @@ class UserStrategyTest(unittest.TestCase):
             "strategy budget exceeds max total quote",
             strategy_parameter_blockers(underfunded_grid),
         )
+
+    def test_user_open_order_limit_reserves_planned_mm_levels_not_risk_ceiling(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_USER_STRATEGY_MASTER_KEY": MASTER_KEY},
+            clear=False,
+        ):
+            store = self._store(Path(tmp) / "workspace.sqlite3")
+            project = store.upsert_project(
+                UserProject.from_dict(
+                    {
+                        "id": "project-acs-usdt",
+                        "owner_email": "trader@example.com",
+                        "name": "ACS USDT Trading",
+                        "asset": "ACS",
+                        "quote_currency": "USDT",
+                        "status": "active",
+                    }
+                )
+            )
+            account = self._account(
+                store,
+                project,
+                account_id="mexc-main",
+                exchange="mexc",
+                symbol="ACS/USDT",
+            )
+            store.upsert_risk_profile(
+                UserRiskProfile.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "max_open_orders": 25,
+                        "max_active_strategies": 5,
+                        "max_total_exposure_quote": 1_000.0,
+                    }
+                )
+            )
+
+            def strategy(name: str) -> UserStrategy:
+                return UserStrategy.from_dict(
+                    {
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "name": name,
+                        "strategy_type": "market_maker",
+                        "account_ids": [account.id],
+                        "enabled": True,
+                        "live_enabled": True,
+                        "parameters": {
+                            "levels": 5,
+                            "quote_per_level": 10.0,
+                        },
+                        "risk": {
+                            "max_order_quote": 20.0,
+                            "max_total_quote": 100.0,
+                            "max_daily_loss_quote": 50.0,
+                            "max_open_orders": 500,
+                        },
+                    }
+                )
+
+            first = store.upsert_strategy(strategy("MEXC MM 1"))
+            second = store.upsert_strategy(strategy("MEXC MM 2"))
+            with self.assertRaisesRegex(
+                ValueError,
+                "planned 30 > limit 25",
+            ):
+                store.upsert_strategy(strategy("MEXC MM 3"))
+
+        self.assertTrue(first.enabled)
+        self.assertTrue(second.enabled)
 
     def test_store_builds_ready_paper_strategy_and_disables_it_on_account_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
