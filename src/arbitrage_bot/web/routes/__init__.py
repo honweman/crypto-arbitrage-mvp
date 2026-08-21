@@ -7,40 +7,11 @@ from .monitor import api_state, api_state_stream
 
 
 def register_routes(app: web.Application) -> None:
+    from ..assets import STATIC_DIR
     from ..observability_routes import api_health, api_metrics, favicon
-    from .. import (
-        STATIC_DIR,
-        api_account,
-        api_admin_users,
-        api_backtest,
-        api_cancel_bulk_orders,
-        api_cancel_order,
-        api_cash_and_carry_pairs,
-        api_cleanup_auto_buy_sell_tasks,
-        api_config_versions_get,
-        api_config_versions_post,
-        api_control,
-        api_control_auto_buy_sell_task,
-        api_create_auto_buy_sell_task,
-        api_cross_exchange_rebalance,
-        api_dca,
-        api_execution_algo,
-        api_market_maker,
-        api_markets,
-        api_profile,
-        api_risk,
-        api_signal_webhook,
-        api_slow_execution,
-        api_spot_grid,
-        api_strategy_center,
-        api_strategy_control,
-        api_strategy_preflight,
-        api_user_backtests_get,
-        api_user_backtests_post,
-        api_user_workspace,
+    from ..security import (
         forgot_password_code_post,
         forgot_password_get,
-        index,
         login_get,
         login_post,
         logout,
@@ -50,6 +21,42 @@ def register_routes(app: web.Application) -> None:
         reset_password_post,
         security_get,
         security_post,
+    )
+    from .control import api_control
+    from .profile import (
+        api_account,
+        api_admin_users,
+        api_profile,
+        index,
+    )
+    from .strategies import (
+        api_backtest,
+        api_cross_exchange_rebalance,
+        api_dca,
+        api_execution_algo,
+        api_slow_execution,
+        api_spot_grid,
+        api_strategy_preflight,
+    )
+    from .strategy_center import api_signal_webhook, api_strategy_center
+    from .trading import (
+        api_cancel_bulk_orders,
+        api_cancel_order,
+        api_cash_and_carry_pairs,
+        api_cleanup_auto_buy_sell_tasks,
+        api_config_versions_get,
+        api_config_versions_post,
+        api_control_auto_buy_sell_task,
+        api_create_auto_buy_sell_task,
+        api_market_maker,
+        api_markets,
+        api_risk,
+        api_strategy_control,
+    )
+    from .workspace import (
+        api_user_backtests_get,
+        api_user_backtests_post,
+        api_user_workspace,
     )
 
     app.router.add_get("/login", login_get)

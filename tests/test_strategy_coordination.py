@@ -196,15 +196,18 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
             timeout = RebalanceMarketDataTimeout("test market data timeout")
             with (
                 patch(
-                    "arbitrage_bot.web.loops.ExchangeManager",
+                    "arbitrage_bot.web.background.rebalance.ExchangeManager",
                     return_value=FakeManager(),
                 ),
                 patch(
-                    "arbitrage_bot.web.loops._fetch_rebalance_books",
+                    "arbitrage_bot.web.background.rebalance._fetch_rebalance_books",
                     side_effect=timeout,
                 ) as fetch_books,
-                patch("arbitrage_bot.web.loops.write_trade_event"),
-                patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+                patch("arbitrage_bot.web.background.rebalance.write_trade_event"),
+                patch(
+                    "arbitrage_bot.web.background.rebalance."
+                    "write_strategy_timeline_from_payload"
+                ),
             ):
                 task = asyncio.create_task(
                     cross_exchange_rebalance_task_loop(cfg, state)  # type: ignore[arg-type]
@@ -270,11 +273,14 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
             state = FakeState()
             with (
                 patch(
-                    "arbitrage_bot.web.loops.ExchangeManager",
+                    "arbitrage_bot.web.background.rebalance.ExchangeManager",
                     return_value=FakeManager(),
                 ),
-                patch("arbitrage_bot.web.loops.write_trade_event"),
-                patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+                patch("arbitrage_bot.web.background.rebalance.write_trade_event"),
+                patch(
+                    "arbitrage_bot.web.background.rebalance."
+                    "write_strategy_timeline_from_payload"
+                ),
             ):
                 task = asyncio.create_task(
                     cross_exchange_rebalance_task_loop(cfg, state)  # type: ignore[arg-type]
@@ -397,9 +403,15 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
 
         manager = FakeManager()
         with (
-            patch("arbitrage_bot.web.loops.ExchangeManager", return_value=manager),
-            patch("arbitrage_bot.web.loops.write_trade_event"),
-            patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+            patch(
+                "arbitrage_bot.web.background.market_maker.ExchangeManager",
+                return_value=manager,
+            ),
+            patch("arbitrage_bot.web.background.market_maker.write_trade_event"),
+            patch(
+                "arbitrage_bot.web.background.market_maker."
+                "write_strategy_timeline_from_payload"
+            ),
         ):
             loop_task = asyncio.create_task(
                 _market_maker_instance_task_loop(cfg, state, maker.id)
@@ -489,9 +501,15 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
 
         manager = FakeManager()
         with (
-            patch("arbitrage_bot.web.loops.ExchangeManager", return_value=manager),
-            patch("arbitrage_bot.web.loops.write_trade_event"),
-            patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+            patch(
+                "arbitrage_bot.web.background.market_maker.ExchangeManager",
+                return_value=manager,
+            ),
+            patch("arbitrage_bot.web.background.market_maker.write_trade_event"),
+            patch(
+                "arbitrage_bot.web.background.market_maker."
+                "write_strategy_timeline_from_payload"
+            ),
         ):
             task = asyncio.create_task(
                 _market_maker_instance_task_loop(cfg, state, maker.id)
@@ -595,11 +613,14 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
             state = FakeState()
             with (
                 patch(
-                    "arbitrage_bot.web.loops.ExchangeManager",
+                    "arbitrage_bot.web.background.rebalance.ExchangeManager",
                     return_value=FakeManager(),
                 ),
-                patch("arbitrage_bot.web.loops.write_trade_event"),
-                patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+                patch("arbitrage_bot.web.background.rebalance.write_trade_event"),
+                patch(
+                    "arbitrage_bot.web.background.rebalance."
+                    "write_strategy_timeline_from_payload"
+                ),
             ):
                 task = asyncio.create_task(
                     cross_exchange_rebalance_task_loop(cfg, state)  # type: ignore[arg-type]
@@ -657,9 +678,15 @@ class CoordinationStateTest(unittest.IsolatedAsyncioTestCase):
 
         manager = FailingCancelManager()
         with (
-            patch("arbitrage_bot.web.loops.ExchangeManager", return_value=manager),
-            patch("arbitrage_bot.web.loops.write_trade_event"),
-            patch("arbitrage_bot.web.loops.write_strategy_timeline_from_payload"),
+            patch(
+                "arbitrage_bot.web.background.market_maker.ExchangeManager",
+                return_value=manager,
+            ),
+            patch("arbitrage_bot.web.background.market_maker.write_trade_event"),
+            patch(
+                "arbitrage_bot.web.background.market_maker."
+                "write_strategy_timeline_from_payload"
+            ),
         ):
             task = asyncio.create_task(
                 _market_maker_instance_task_loop(cfg, state, maker.id)

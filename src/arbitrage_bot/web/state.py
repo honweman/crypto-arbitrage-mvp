@@ -66,8 +66,8 @@ from ..workspace_runtime import (
     WorkspaceRuntimeAccounts,
     merge_workspace_runtime_accounts,
 )
-from . import (
-    STRATEGY_IDS,
+from .constants import STRATEGY_IDS
+from .core import (
     _all_account_exchanges,
     _build_initial_payload,
     _load_runtime_overrides,
