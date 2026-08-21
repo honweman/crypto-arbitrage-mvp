@@ -5,11 +5,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from arbitrage_bot.web import APP_JS, STYLES_CSS
 from arbitrage_bot.web.market_tickers import (
     MarketTickerService,
     MarketWatchlistStore,
     normalize_watchlist,
 )
+
+
+class MarketTickerUiTest(unittest.TestCase):
+    def test_editor_supports_persistent_reordering(self) -> None:
+        self.assertIn("function moveMarketTickerDraftItem(index, offset)", APP_JS)
+        self.assertIn('moveUp.setAttribute("aria-label", uiText("Move up"))', APP_JS)
+        self.assertIn(
+            'moveDown.setAttribute("aria-label", uiText("Move down"))',
+            APP_JS,
+        )
+        self.assertIn('body: JSON.stringify({ items: marketTickerDraft })', APP_JS)
+        self.assertIn(".market-ticker-draft-actions", STYLES_CSS)
 
 
 class MarketWatchlistStoreTest(unittest.TestCase):

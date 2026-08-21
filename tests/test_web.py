@@ -21,14 +21,12 @@ from arbitrage_bot.config import (
     AssetLedgerConfig,
     AssetPosition,
     BacktestConfig,
-    BotConfig,
     CashAndCarryPair,
     CrossExchangeRebalanceConfig,
     DcaConfig,
     ExchangeConfig,
     ExecutionAlgoConfig,
     MarketMakerConfig,
-    OnchainMonitorConfig,
     OptionComboConfig,
     OptionsArbitrageConfig,
     PortfolioConfig,
@@ -166,72 +164,10 @@ from arbitrage_bot.user_workspace import (
     UserWorkspaceStore,
     api_connection_egress_blockers,
 )
+from tests.web_test_support import make_config
 
 
 HTML = f"{INDEX_HTML}\n{APP_JS}"
-
-
-def make_config(
-    *,
-    market_maker: MarketMakerConfig | None = None,
-    market_makers: list[MarketMakerConfig] | None = None,
-    slow_execution: SlowExecutionConfig | None = None,
-    spot_grid: SpotGridConfig | None = None,
-    dca: DcaConfig | None = None,
-    execution_algo: ExecutionAlgoConfig | None = None,
-    backtest: BacktestConfig | None = None,
-    options_arbitrage: OptionsArbitrageConfig | None = None,
-    portfolio: PortfolioConfig | None = None,
-    spot_markets: list[SpotMarketConfig] | None = None,
-    spot_exchanges: list[ExchangeConfig] | None = None,
-    cash_and_carry_pairs: list[CashAndCarryPair] | None = None,
-    derivative_exchanges: list[ExchangeConfig] | None = None,
-    option_combos: list[OptionComboConfig] | None = None,
-    risk: RiskConfig | None = None,
-    trade_log: TradeLogConfig | None = None,
-    strategy_center: StrategyCenterConfig | None = None,
-    strategy_timeline: StrategyTimelineConfig | None = None,
-    alerts: AlertConfig | None = None,
-    web_security: WebSecurityConfig | None = None,
-    quote_rates: dict[str, float] | None = None,
-    cross_exchange_rebalance: CrossExchangeRebalanceConfig | None = None,
-) -> BotConfig:
-    return BotConfig(
-        poll_seconds=1.0,
-        order_book_depth=20,
-        notional_quote=200.0,
-        min_profit_quote=0.1,
-        min_profit_bps=1.0,
-        min_basis_bps=15.0,
-        common_quote_currency="USD",
-        quote_rates=quote_rates or {"USD": 1.0},
-        quote_rate_sources=[],
-        onchain_monitor=OnchainMonitorConfig(),
-        market_maker=market_maker or MarketMakerConfig(),
-        market_makers=market_makers or [],
-        slow_execution=slow_execution or SlowExecutionConfig(),
-        spot_grid=spot_grid or SpotGridConfig(),
-        dca=dca or DcaConfig(),
-        execution_algo=execution_algo or ExecutionAlgoConfig(),
-        backtest=backtest or BacktestConfig(),
-        options_arbitrage=options_arbitrage or OptionsArbitrageConfig(),
-        strategy_center=strategy_center or StrategyCenterConfig(),
-        portfolio=portfolio or PortfolioConfig(),
-        spot_symbols=[],
-        spot_markets=spot_markets or [],
-        cash_and_carry_pairs=cash_and_carry_pairs or [],
-        option_combos=option_combos or [],
-        spot_exchanges=spot_exchanges or [],
-        derivative_exchanges=derivative_exchanges or [],
-        cross_exchange_rebalance=(
-            cross_exchange_rebalance or CrossExchangeRebalanceConfig()
-        ),
-        risk=risk or RiskConfig(),
-        trade_log=trade_log or TradeLogConfig(enabled=False),
-        strategy_timeline=strategy_timeline or StrategyTimelineConfig(enabled=False),
-        alerts=alerts or AlertConfig(),
-        web_security=web_security or WebSecurityConfig(),
-    )
 
 
 class WebMonitorTest(unittest.TestCase):
@@ -964,16 +900,6 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('"Account / Project / Exchange / Pair"', i18n_js)
         self.assertIn('"Continue Setup": "설정 계속"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
-
-    def test_market_watch_editor_supports_persistent_reordering(self) -> None:
-        self.assertIn("function moveMarketTickerDraftItem(index, offset)", APP_JS)
-        self.assertIn('moveUp.setAttribute("aria-label", uiText("Move up"))', APP_JS)
-        self.assertIn(
-            'moveDown.setAttribute("aria-label", uiText("Move down"))',
-            APP_JS,
-        )
-        self.assertIn('body: JSON.stringify({ items: marketTickerDraft })', APP_JS)
-        self.assertIn(".market-ticker-draft-actions", STYLES_CSS)
 
     def test_settings_support_verified_browser_wallets_and_dex_venues(self) -> None:
         for element_id in (
@@ -10420,102 +10346,6 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(save_payload["workspace"]["projects"]), 1)
         self.assertNotIn(b"unified-api-key", database_bytes)
         self.assertNotIn(b"unified-api-secret", database_bytes)
-
-
-class WebPerformanceAndStreamTest(unittest.IsolatedAsyncioTestCase):
-    async def test_api_state_is_gzip_compressed_for_gzip_clients(self) -> None:
-        cfg = make_config()
-        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        try:
-            response = await client.get("/api/state")
-            payload = await response.json()
-
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
-            self.assertIn("status", payload)
-        finally:
-            await client.close()
-
-    async def test_static_assets_get_immutable_cache_control_and_gzip(self) -> None:
-        cfg = make_config()
-        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        try:
-            response = await client.get("/static/app.js")
-
-            self.assertEqual(response.status, 200)
-            self.assertEqual(
-                response.headers.get("Cache-Control"),
-                "public, max-age=31536000, immutable",
-            )
-            self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
-        finally:
-            await client.close()
-
-    async def test_favicon_is_served_even_without_a_session(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
-            cfg = make_config(
-                web_security=WebSecurityConfig(
-                    password_env="TEST_WEB_PASSWORD",
-                    cookie_secret_env=None,
-                    allowed_ips_env=None,
-                    cookie_secure=False,
-                    user_store_path=str(data_dir / "web_users.json"),
-                ),
-            )
-            with patch.dict(os.environ, {"TEST_WEB_PASSWORD": "123456"}, clear=False):
-                app = create_app(cfg, "spot-spread", cfg.poll_seconds)
-                client = TestClient(TestServer(app))
-                await client.start_server()
-                try:
-                    ico = await client.get("/favicon.ico", allow_redirects=False)
-                    svg = await client.get("/static/favicon.svg", allow_redirects=False)
-                    page = await client.get("/", allow_redirects=False)
-
-                    self.assertEqual(ico.status, 200)
-                    self.assertEqual(ico.headers.get("Content-Type"), "image/svg+xml")
-                    self.assertEqual(svg.status, 200)
-                    # The dashboard itself still requires a session.
-                    self.assertEqual(page.status, 302)
-                finally:
-                    await client.close()
-
-    async def test_state_stream_pushes_snapshots_matching_state_payload(self) -> None:
-        cfg = make_config()
-        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        try:
-            state_response = await client.get("/api/state?view=status")
-            state_payload = await state_response.json()
-
-            stream_response = await client.get(
-                "/api/state/stream?view=status&interval=1"
-            )
-            self.assertEqual(stream_response.status, 200)
-            self.assertEqual(
-                stream_response.headers.get("Content-Type"),
-                "text/event-stream",
-            )
-            event = await asyncio.wait_for(
-                stream_response.content.readuntil(b"\n\n"),
-                timeout=10,
-            )
-            stream_response.close()
-
-            self.assertTrue(event.startswith(b"data: "))
-            streamed_payload = json.loads(event[len(b"data: ") :].decode("utf-8"))
-            self.assertEqual(
-                sorted(streamed_payload.keys()),
-                sorted(state_payload.keys()),
-            )
-            self.assertIn("status", streamed_payload)
-        finally:
-            await client.close()
 
 
 if __name__ == "__main__":

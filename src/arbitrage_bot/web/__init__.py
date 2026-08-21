@@ -130,6 +130,12 @@ from .security import (
     write_system_web_audit_event,
     write_web_audit_event,
 )
+from .routes.market_tickers import api_market_tickers
+from .routes.monitor import (
+    STATE_PAYLOAD_BUILDER_KEY,
+    api_state,
+    api_state_stream,
+)
 
 from ..account_check import (
     _auth_env_status,
@@ -5925,87 +5931,6 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     return filtered
 
 
-async def api_state(request: web.Request) -> web.Response:
-    return web.json_response(await _state_payload_for_request(request))
-
-
-async def api_market_tickers(request: web.Request) -> web.Response:
-    user = _request_user(request)
-    owner_email = user.email if user is not None else "legacy@local"
-    service: MarketTickerService = request.app["market_ticker_service"]
-    try:
-        if request.method == "POST":
-            payload = await request.json()
-            if not isinstance(payload, dict):
-                raise ValueError("payload must be an object")
-            items = payload.get("items")
-            if not isinstance(items, list):
-                raise ValueError("items must be a list")
-            service.save(owner_email, items)
-            write_web_audit_event(
-                request.app["config"],
-                request,
-                action="market_watchlist_update",
-                target=owner_email,
-                detail=f"saved {len(items)} market ticker item(s)",
-                payload={"items": items},
-            )
-        result = await service.snapshot(
-            owner_email,
-            force=request.method == "POST",
-        )
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-    return web.json_response(result)
-
-
-STATE_STREAM_MIN_INTERVAL_SECONDS = 1.0
-STATE_STREAM_MAX_INTERVAL_SECONDS = 15.0
-STATE_STREAM_DEFAULT_INTERVAL_SECONDS = 2.0
-
-
-async def api_state_stream(request: web.Request) -> web.StreamResponse:
-    """Server-Sent Events stream of the same payload served by /api/state.
-
-    Pushes a full view-scoped state snapshot on a fixed interval so clients
-    can hold one connection open instead of re-polling. Clients that lack
-    EventSource support (or hit any stream error) keep using /api/state.
-    """
-    try:
-        interval = float(request.query.get("interval", ""))
-    except ValueError:
-        interval = STATE_STREAM_DEFAULT_INTERVAL_SECONDS
-    interval = min(
-        STATE_STREAM_MAX_INTERVAL_SECONDS,
-        max(STATE_STREAM_MIN_INTERVAL_SECONDS, interval),
-    )
-    response = web.StreamResponse(
-        status=200,
-        headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-store",
-            "X-Accel-Buffering": "no",
-        },
-    )
-    _add_security_headers(response)
-    await response.prepare(request)
-    try:
-        while True:
-            payload = await _state_payload_for_request(request)
-            body = json.dumps(payload)
-            await response.write(f"data: {body}\n\n".encode("utf-8"))
-            await asyncio.sleep(interval)
-    except (
-        asyncio.CancelledError,
-        ConnectionResetError,
-        ConnectionError,
-        RuntimeError,
-    ):
-        # Client went away or server is shutting down; end the stream quietly.
-        pass
-    return response
-
-
 async def api_profile(request: web.Request) -> web.Response:
     state: MonitorState = request.app["monitor_state"]
     cfg: BotConfig = request.app["config"]
@@ -11033,6 +10958,7 @@ def create_app(
 
     from .routes import register_routes
 
+    app[STATE_PAYLOAD_BUILDER_KEY] = _state_payload_for_request
     register_routes(app)
     return app
 

@@ -2,50 +2,50 @@ from __future__ import annotations
 
 from aiohttp import web
 
+from .market_tickers import api_market_tickers
+from .monitor import api_state, api_state_stream
+
 
 def register_routes(app: web.Application) -> None:
-    from .observability_routes import api_health, api_metrics, favicon
-    from . import (
+    from ..observability_routes import api_health, api_metrics, favicon
+    from .. import (
         STATIC_DIR,
         api_account,
         api_admin_users,
+        api_backtest,
         api_cancel_bulk_orders,
         api_cancel_order,
         api_cash_and_carry_pairs,
         api_cleanup_auto_buy_sell_tasks,
-        api_control,
         api_config_versions_get,
         api_config_versions_post,
+        api_control,
         api_control_auto_buy_sell_task,
-        api_cross_exchange_rebalance,
         api_create_auto_buy_sell_task,
-        api_backtest,
+        api_cross_exchange_rebalance,
         api_dca,
         api_execution_algo,
         api_market_maker,
-        api_market_tickers,
         api_markets,
         api_profile,
         api_risk,
+        api_signal_webhook,
         api_slow_execution,
         api_spot_grid,
-        api_state,
-        api_state_stream,
-        api_signal_webhook,
         api_strategy_center,
         api_strategy_control,
         api_strategy_preflight,
-        api_user_workspace,
         api_user_backtests_get,
         api_user_backtests_post,
+        api_user_workspace,
         forgot_password_code_post,
         forgot_password_get,
         index,
         login_get,
         login_post,
         logout,
-        register_get,
         register_code_post,
+        register_get,
         register_post,
         reset_password_post,
         security_get,

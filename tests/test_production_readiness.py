@@ -18,7 +18,7 @@ from arbitrage_bot.web.preflight import collect_preflight_issues
 from arbitrage_bot.web.security import ApiWriteRateLimiter
 from arbitrage_bot.web.users import WebUserStore, totp_code
 
-from test_web import make_config
+from tests.web_test_support import make_config
 
 
 class PreflightTest(unittest.TestCase):
