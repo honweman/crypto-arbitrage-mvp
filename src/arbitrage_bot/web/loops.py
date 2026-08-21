@@ -3409,6 +3409,31 @@ def _private_balance_total(balance: dict[str, Any], currency: str) -> float:
     return 0.0
 
 
+def _market_order_reconciliation_is_clear(
+    reliability: dict[str, Any],
+    *,
+    exchange: str,
+    symbol: str,
+) -> bool:
+    if not reliability.get("enabled"):
+        return False
+    try:
+        pending_count = int(reliability.get("pending_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pending_count <= 0:
+        return True
+    resources = reliability.get("quarantined_resources")
+    if not isinstance(resources, list) or not resources:
+        return False
+    return not any(
+        isinstance(row, dict)
+        and str(row.get("exchange") or "") == exchange
+        and str(row.get("symbol") or "") == symbol
+        for row in resources
+    )
+
+
 async def _market_maker_instance_task_loop(
     cfg: BotConfig,
     state: MonitorState,
@@ -3677,6 +3702,21 @@ async def _market_maker_instance_task_loop(
             if not live_allowed:
                 previous_live_allowed = False
                 start_reconciliation_block_reason = None
+            elif start_reconciliation_block_reason and (
+                _market_order_reconciliation_is_clear(
+                    manager.order_reliability_summary(),
+                    exchange=maker_cfg.exchange,
+                    symbol=maker_cfg.symbol,
+                )
+            ):
+                start_reconciliation_block_reason = None
+                if last_start_recovery is not None:
+                    last_start_recovery = {
+                        **last_start_recovery,
+                        "status": "ok",
+                        "unresolved_count": 0,
+                        "auto_cleared_at": time.time(),
+                    }
             coordination_hold = await state.coordination_hold_for(
                 maker_cfg.exchange,
                 maker_cfg.symbol,
