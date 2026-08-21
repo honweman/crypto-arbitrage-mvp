@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
-GATE_SPOT_ORDER_INTERVAL_SECONDS = 1.1
+# This account currently reports Gate's `(012)3/10` UID restriction. A small
+# margin above 10 / 3 seconds keeps rolling-window bursts below that limit.
+GATE_SPOT_ORDER_INTERVAL_SECONDS = 3.5
 GATE_SPOT_RATE_LIMIT_COOLDOWN_SECONDS = 10.5
 
 

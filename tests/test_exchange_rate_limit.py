@@ -19,7 +19,7 @@ class ExchangeRateLimitPolicyTest(unittest.TestCase):
         policy = exchange_request_pacing_policy(cfg, operation="create_order")
 
         assert policy is not None
-        self.assertEqual(policy.interval_seconds, 1.1)
+        self.assertEqual(policy.interval_seconds, 3.5)
         self.assertEqual(policy.cooldown_seconds, 10.5)
 
     def test_policy_does_not_slow_other_gate_operations_or_markets(self) -> None:
