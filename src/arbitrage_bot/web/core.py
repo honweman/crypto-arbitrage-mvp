@@ -106,6 +106,13 @@ from .application import (  # noqa: E402
     create_app as create_app,
     main as main,
 )
+from .routes.market_tickers import (  # noqa: E402
+    api_market_tickers as api_market_tickers,
+)
+from .routes.monitor import (  # noqa: E402
+    api_state as api_state,
+    api_state_stream as api_state_stream,
+)
 from .routes.control import (  # noqa: E402
     _consume_strategy_preflight as _consume_strategy_preflight,
     _preflight_candidate_from_payload as _preflight_candidate_from_payload,
