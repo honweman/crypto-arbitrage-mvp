@@ -35,6 +35,22 @@ class MarketWatchlistStoreTest(unittest.TestCase):
         self.assertGreater(len(bob), 1)
         self.assertNotEqual(alice, bob)
 
+    def test_watchlist_order_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MarketWatchlistStore(Path(tmp) / "watchlists.json")
+            expected = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
+            store.set(
+                "trader@example.com",
+                [
+                    {"exchange": "ticker:binance:spot", "symbol": symbol}
+                    for symbol in expected
+                ],
+            )
+
+            persisted = MarketWatchlistStore(store.path).get("trader@example.com")
+
+        self.assertEqual([row["symbol"] for row in persisted], expected)
+
 
 class MarketTickerServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_batches_symbols_by_market_source(self) -> None:

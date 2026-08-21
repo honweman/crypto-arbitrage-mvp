@@ -357,18 +357,20 @@ main {
 }
 
 .market-ticker-draft {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 6px;
+  max-height: 320px;
   margin-top: 10px;
+  overflow-y: auto;
 }
 
 .market-ticker-draft-item {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  min-height: 30px;
-  padding: 3px 4px 3px 8px;
+  gap: 8px;
+  min-height: 38px;
+  padding: 4px 5px 4px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface);
@@ -376,9 +378,42 @@ main {
   font-weight: 700;
 }
 
+.market-ticker-draft-position {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.market-ticker-draft-label {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.market-ticker-draft-label strong {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+
+.market-ticker-draft-label span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-ticker-draft-actions {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.market-ticker-order-button,
 .market-ticker-remove {
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -387,6 +422,16 @@ main {
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
+}
+
+.market-ticker-order-button:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.market-ticker-order-button:disabled {
+  cursor: default;
+  opacity: 0.3;
 }
 
 .market-ticker-remove:hover {
@@ -2344,6 +2389,19 @@ tbody tr:last-child td {
   .market-ticker-price { font-size: 15px; }
   .market-ticker-add { grid-template-columns: 1fr; }
   .market-ticker-add .control-button { grid-column: auto; }
+  .market-ticker-draft-item {
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    padding-left: 5px;
+  }
+  .market-ticker-draft-label {
+    display: grid;
+    gap: 1px;
+  }
+  .market-ticker-order-button,
+  .market-ticker-remove {
+    width: 34px;
+    height: 34px;
+  }
   .market-ticker-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

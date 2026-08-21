@@ -843,11 +843,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260819-ui3" defer></script>',
+            '<script src="/static/app.js?v=20260821-market-order1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260819-ui3" defer></script>',
+            '<script src="/static/i18n.js?v=20260821-market-order1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -965,6 +965,16 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('"Continue Setup": "설정 계속"', i18n_js)
         self.assertIn('"ko-KR"', i18n_js)
 
+    def test_market_watch_editor_supports_persistent_reordering(self) -> None:
+        self.assertIn("function moveMarketTickerDraftItem(index, offset)", APP_JS)
+        self.assertIn('moveUp.setAttribute("aria-label", uiText("Move up"))', APP_JS)
+        self.assertIn(
+            'moveDown.setAttribute("aria-label", uiText("Move down"))',
+            APP_JS,
+        )
+        self.assertIn('body: JSON.stringify({ items: marketTickerDraft })', APP_JS)
+        self.assertIn(".market-ticker-draft-actions", STYLES_CSS)
+
     def test_settings_support_verified_browser_wallets_and_dex_venues(self) -> None:
         for element_id in (
             "wallet-provider-select",
@@ -1023,12 +1033,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260819-ui3"></script>',
+            '<script src="/static/theme.js?v=20260821-market-order1"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index("/static/theme.js?v=20260819-ui3"),
-            INDEX_HTML.index("/static/styles.css?v=20260819-ui3"),
+            INDEX_HTML.index("/static/theme.js?v=20260821-market-order1"),
+            INDEX_HTML.index("/static/styles.css?v=20260821-market-order1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1136,7 +1146,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260819-ui3">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260821-market-order1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)

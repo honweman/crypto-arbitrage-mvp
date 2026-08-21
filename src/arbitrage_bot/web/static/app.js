@@ -9690,10 +9690,36 @@ function balanceStatusClass(status) {
       draft.innerHTML = "";
       for (const [index, row] of marketTickerDraft.entries()) {
         const account = accounts.find((candidate) => candidate.key === row.exchange);
-        const item = document.createElement("span");
+        const item = document.createElement("div");
         item.className = "market-ticker-draft-item";
+        const position = document.createElement("span");
+        position.className = "market-ticker-draft-position";
+        position.textContent = String(index + 1);
         const label = document.createElement("span");
-        label.textContent = `${row.symbol} · ${account?.label || row.exchange}`;
+        label.className = "market-ticker-draft-label";
+        const symbol = document.createElement("strong");
+        symbol.textContent = row.symbol;
+        const source = document.createElement("span");
+        source.textContent = account?.label || row.exchange;
+        label.append(symbol, source);
+        const actions = document.createElement("span");
+        actions.className = "market-ticker-draft-actions";
+        const moveUp = document.createElement("button");
+        moveUp.type = "button";
+        moveUp.className = "market-ticker-order-button";
+        moveUp.title = uiText("Move up");
+        moveUp.setAttribute("aria-label", uiText("Move up"));
+        moveUp.textContent = "\u2191";
+        moveUp.disabled = index === 0;
+        moveUp.addEventListener("click", () => moveMarketTickerDraftItem(index, -1));
+        const moveDown = document.createElement("button");
+        moveDown.type = "button";
+        moveDown.className = "market-ticker-order-button";
+        moveDown.title = uiText("Move down");
+        moveDown.setAttribute("aria-label", uiText("Move down"));
+        moveDown.textContent = "\u2193";
+        moveDown.disabled = index === marketTickerDraft.length - 1;
+        moveDown.addEventListener("click", () => moveMarketTickerDraftItem(index, 1));
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "market-ticker-remove";
@@ -9704,9 +9730,25 @@ function balanceStatusClass(status) {
           marketTickerDraft.splice(index, 1);
           renderMarketTickerEditor();
         });
-        item.append(label, remove);
+        actions.append(moveUp, moveDown, remove);
+        item.append(position, label, actions);
         draft.appendChild(item);
       }
+    }
+
+    function moveMarketTickerDraftItem(index, offset) {
+      const target = index + offset;
+      if (
+        index < 0
+        || index >= marketTickerDraft.length
+        || target < 0
+        || target >= marketTickerDraft.length
+      ) return;
+      [marketTickerDraft[index], marketTickerDraft[target]] = [
+        marketTickerDraft[target],
+        marketTickerDraft[index],
+      ];
+      renderMarketTickerEditor();
     }
 
     function openMarketTickerEditor() {
