@@ -27,6 +27,11 @@ from .derivatives import (
     STABLE_MARGIN_CURRENCIES,
     stable_linear_contract_currencies,
 )
+from .exchange_rate_limit import (
+    defer_exchange_request,
+    is_exchange_rate_limit_error,
+    pace_exchange_request,
+)
 from .models import OrderBookSnapshot, Side
 from .order_reliability import OrderIntentStore, is_confirmed_order_rejection
 from .order_validation import validate_prepared_limit_order
@@ -1383,8 +1388,35 @@ class ExchangeManager:
                 )
             )
             or isinstance(exc, ValueError)
+            or is_exchange_rate_limit_error(exc)
             or is_confirmed_order_rejection(str(exc))
         )
+
+    @staticmethod
+    async def _submit_limit_order_request(
+        cfg: ExchangeConfig,
+        client: Any,
+        *,
+        symbol: str,
+        side: Side,
+        amount: float,
+        price: float,
+        params: dict[str, Any],
+    ) -> Any:
+        await pace_exchange_request(cfg, operation="create_order")
+        try:
+            return await client.create_order(
+                symbol,
+                "limit",
+                side,
+                amount,
+                price,
+                params,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if is_exchange_rate_limit_error(exc):
+                await defer_exchange_request(cfg, operation="create_order")
+            raise
 
     async def _create_order_idempotently(
         self,
@@ -1454,13 +1486,14 @@ class ExchangeManager:
         if limit_order_features(cfg).client_order_id:
             params["clientOrderId"] = client_order_id
         try:
-            response = await client.create_order(
-                symbol,
-                "limit",
-                side,
-                float(prepared["amount"]),
-                float(prepared["price"]),
-                params,
+            response = await self._submit_limit_order_request(
+                cfg,
+                client,
+                symbol=symbol,
+                side=side,
+                amount=float(prepared["amount"]),
+                price=float(prepared["price"]),
+                params=params,
             )
         except Exception as exc:  # noqa: BLE001
             if self._terminal_create_error(exc):
@@ -1545,13 +1578,14 @@ class ExchangeManager:
             params["postOnly"] = True
         if normalized_client_order_id and limit_order_features(cfg).client_order_id:
             params["clientOrderId"] = normalized_client_order_id
-        return await client.create_order(
-            symbol,
-            "limit",
-            side,
-            float(prepared["amount"]),
-            float(prepared["price"]),
-            params,
+        return await self._submit_limit_order_request(
+            cfg,
+            client,
+            symbol=symbol,
+            side=side,
+            amount=float(prepared["amount"]),
+            price=float(prepared["price"]),
+            params=params,
         )
 
     async def create_prepared_limit_orders(

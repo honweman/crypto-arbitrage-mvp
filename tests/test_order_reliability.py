@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from arbitrage_bot.config import ExchangeConfig
 from arbitrage_bot.exchanges import ExchangeManager, normalize_client_order_id
@@ -156,6 +156,51 @@ class OrderIntentStoreTest(unittest.TestCase):
 
 
 class IdempotentExchangeSubmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_gate_rate_limit_rejection_is_failed_and_starts_cooldown(
+        self,
+    ) -> None:
+        class RateLimitExceeded(Exception):
+            pass
+
+        class FakeClient:
+            async def create_order(self, *args: object) -> dict[str, object]:
+                raise RateLimitExceeded(
+                    'gate {"label":"TOO_MANY_REQUESTS",'
+                    '"message":"Request Rate Limit Exceeded (012)3/10"}'
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = ExchangeConfig(id="gateio", label="gate-main", market_type="spot")
+            journal_path = Path(tmp) / "orders.sqlite3"
+            manager = ExchangeManager(order_journal_path=str(journal_path))
+            manager._clients[cfg.key] = FakeClient()
+
+            with (
+                patch(
+                    "arbitrage_bot.exchanges.pace_exchange_request",
+                    new=AsyncMock(return_value=0.0),
+                ),
+                patch(
+                    "arbitrage_bot.exchanges.defer_exchange_request",
+                    new=AsyncMock(),
+                ) as defer,
+                self.assertRaises(RateLimitExceeded),
+            ):
+                await manager.create_prepared_limit_order(
+                    cfg,
+                    symbol="ACS/USDT",
+                    side="buy",
+                    prepared={"amount": 10.0, "price": 0.1, "errors": []},
+                    post_only=True,
+                    client_order_id="gate-rate-limited",
+                )
+
+            intent = OrderIntentStore(journal_path).get("t-gate-rate-limited")
+            assert intent is not None
+            self.assertEqual(intent["status"], "failed")
+            self.assertEqual(manager.order_reliability_summary()["pending_count"], 0)
+            defer.assert_awaited_once_with(cfg, operation="create_order")
+
     async def test_coinbase_post_only_rejection_is_terminal(self) -> None:
         class ExchangeError(Exception):
             pass
