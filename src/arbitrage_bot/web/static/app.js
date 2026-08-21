@@ -12,6 +12,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    ]);
 	    let currentPage = pageFromLocation();
 	    let lastState = null;
+	    let headerStatusIssue = null;
 	    let refreshQueued = false;
 	    const pageStateCache = {};
 	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, trading: 2000, quant: 4000, settings: 3000, records: 2000 };
@@ -2328,50 +2329,180 @@ function balanceStatusClass(status) {
       );
     }
 
+    function statusIssueRows(data = lastState) {
+      if (!data || typeof data !== "object") return [];
+      const issues = [];
+      const seen = new Set();
+      const add = ({ severity = "warning", title, reason, meta = [], action = "" }) => {
+        const normalizedReason = friendlyAccountMessage(reason).trim();
+        if (!normalizedReason) return;
+        const normalizedTitle = String(title || "Warning").trim();
+        const key = `${normalizedTitle}:${normalizedReason}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        issues.push({
+          severity,
+          title: normalizedTitle,
+          reason: normalizedReason,
+          meta: meta.filter(Boolean),
+          action: String(action || "").trim(),
+        });
+      };
+
+      for (const warning of (data.warnings || [])) {
+        add({ severity: "warning", title: "Warning", reason: warning });
+      }
+      if (data.error) {
+        add({ severity: "error", title: "Error", reason: data.error });
+      }
+
+      for (const row of (data.strategy_lifecycle?.instances || [])) {
+        if (row?.converged && row.convergence_state === "in_sync") continue;
+        const severity = row.convergence_state === "error"
+          ? "error"
+          : row.convergence_state === "blocked"
+            ? "blocked"
+            : "attention";
+        const meta = [
+          row.account ? `${uiText("Account")}: ${displayExchange(row.account)}` : "",
+          row.symbol ? `${uiText("Trading pair")}: ${row.symbol}` : "",
+          row.mode ? `${uiText("Mode")}: ${row.mode}` : "",
+          row.updated_at ? `${uiText("Updated")}: ${formatAge(row.updated_at)}` : "",
+        ];
+        const actions = (row.allowed_actions || [])
+          .map((value) => uiText(String(value || "").replaceAll("_", " ")))
+          .filter(Boolean)
+          .join(" / ");
+        add({
+          severity,
+          title: row.label || row.strategy_id || "Strategy",
+          reason: row.reason || lifecycleDetail(row),
+          meta,
+          action: actions,
+        });
+      }
+
+      const marketMaker = data.market_maker || {};
+      const mmReason = marketMakerStatusReason(marketMaker);
+      if (mmReason) {
+        add({ severity: "error", title: "Market Maker", reason: mmReason });
+      }
+
+      const autoTasks = data.slow_execution?.tasks?.tasks || [];
+      for (const task of autoTasks) {
+        if (!["error", "blocked_by_risk", "recovering"].includes(task?.status || "")) continue;
+        const config = task.config || {};
+        add({
+          severity: task.status === "error" ? "error" : "blocked",
+          title: "Auto Buy/Sell",
+          reason: task.last_error || task.status_reason || autoTaskLastOrderText(task, config),
+          meta: [
+            config.exchange ? `${uiText("Account")}: ${displayExchange(config.exchange)}` : "",
+            config.symbol ? `${uiText("Trading pair")}: ${config.symbol}` : "",
+          ],
+        });
+      }
+
+      const reconciliation = data.order_activity?.reconciliation || {};
+      for (const issue of (reconciliation.issues || [])) {
+        add({
+          severity: "error",
+          title: "Orders",
+          reason: issue.reason || issue.error || issue.detail || JSON.stringify(issue),
+          meta: [
+            issue.exchange ? `${uiText("Account")}: ${displayExchange(issue.exchange)}` : "",
+            issue.symbol ? `${uiText("Trading pair")}: ${issue.symbol}` : "",
+          ],
+        });
+      }
+      if ((reconciliation.issue_count || 0) > 0 && !(reconciliation.issues || []).length) {
+        add({
+          severity: "error",
+          title: "Orders",
+          reason: reconciliation.reason || `${reconciliation.issue_count} ${uiText("order reconciliation issue(s)")}`,
+        });
+      }
+
+      for (const nextAction of (data.readiness?.next_actions || [])) {
+        if (nextAction.level !== "high" && nextAction.status !== "blocked") continue;
+        add({
+          severity: nextAction.status === "blocked" ? "blocked" : "warning",
+          title: nextAction.action || "Risk",
+          reason: nextAction.detail || nextAction.scope || "review required",
+          meta: nextAction.scope ? [`${uiText("Scope")}: ${nextAction.scope}`] : [],
+        });
+      }
+      return issues;
+    }
+
+    function statusIssuesWithConnectionState(data = lastState) {
+      const issues = statusIssueRows(data);
+      if (!headerStatusIssue) return issues;
+      const duplicate = issues.some((issue) => issue.reason === headerStatusIssue.reason);
+      return duplicate ? issues : [headerStatusIssue, ...issues];
+    }
+
+    function statusSeverityLabel(value) {
+      const labels = {
+        error: "Error",
+        blocked: "Blocked",
+        warning: "Warning",
+        attention: "Attention",
+      };
+      return uiText(labels[value] || "Attention");
+    }
+
+    function openStatusDetails(preferredTitle = "") {
+      const dialog = document.getElementById("status-detail-dialog");
+      const summary = document.getElementById("status-detail-summary");
+      const list = document.getElementById("status-detail-list");
+      if (!dialog || !summary || !list) return;
+      const issues = statusIssuesWithConnectionState();
+      if (preferredTitle) {
+        issues.sort((left, right) => (
+          Number(right.title === preferredTitle) - Number(left.title === preferredTitle)
+        ));
+      }
+      summary.textContent = issues.length
+        ? `${issues.length} ${uiText("active issue(s)")}`
+        : uiText("No active risk or error.");
+      list.innerHTML = issues.length
+        ? issues.map((issue) => `
+          <article class="status-detail-item severity-${escapeHtml(issue.severity)}">
+            <div class="status-detail-item-heading">
+              <strong>${escapeHtml(uiText(issue.title))}</strong>
+              <span>${escapeHtml(statusSeverityLabel(issue.severity))}</span>
+            </div>
+            <div class="status-detail-reason">
+              <span>${escapeHtml(uiText("Reason"))}</span>
+              <p>${escapeHtml(issue.reason)}</p>
+            </div>
+            ${issue.meta.length ? `<div class="status-detail-meta">${issue.meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : ""}
+            ${issue.action ? `<div class="status-detail-action"><span>${escapeHtml(uiText("Available action"))}</span><strong>${escapeHtml(issue.action)}</strong></div>` : ""}
+          </article>
+        `).join("")
+        : `<div class="status-detail-empty">${escapeHtml(uiText("No active risk or error."))}</div>`;
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+
     function renderStatusReasons(data) {
       const root = document.getElementById("status-reasons-section");
       if (!root) return;
-      const items = [];
-      for (const warning of (data.warnings || []).slice(0, 3)) {
-        items.push(["Warning", warning]);
-      }
-      const mmReason = marketMakerStatusReason(data.market_maker || {});
-      const mmRuntime = data.market_maker?.runtime || {};
-      if (mmRuntime.problem_instance_count || mmReason) {
-        items.push(["MM", mmReason || `${mmRuntime.problem_instance_count} instance(s) need attention`]);
-      }
-      const autoTasks = data.slow_execution?.tasks?.tasks || [];
-      const autoProblem = autoTasks.find((task) => ["error", "blocked_by_risk"].includes(task.status || ""));
-      if (autoProblem) {
-        items.push(["Auto", `${autoProblem.status || "--"} · ${autoTaskLastOrderText(autoProblem, autoProblem.config || {})}`]);
-      }
-      const reconciliation = data.order_activity?.reconciliation || {};
-      if ((reconciliation.issue_count || 0) > 0) {
-        items.push(["Orders", `${reconciliation.status || "--"} · ${reconciliation.issue_count} issue(s)`]);
-      }
-      const nextAction = (data.readiness?.next_actions || []).find((action) => action.level === "high" || action.status === "blocked");
-      if (nextAction) {
-        items.push(["Risk", nextAction.detail || nextAction.action || nextAction.scope || "review required"]);
-      }
-
-      const unique = [];
-      const seen = new Set();
-      for (const [label, detail] of items) {
-        const normalized = friendlyAccountMessage(detail).trim();
-        if (!normalized || seen.has(`${label}:${normalized}`)) continue;
-        seen.add(`${label}:${normalized}`);
-        unique.push([label, normalized]);
-      }
-      root.classList.toggle("has-items", unique.length > 0);
-      root.innerHTML = unique
+      const issues = statusIssueRows(data);
+      root.classList.toggle("has-items", issues.length > 0);
+      root.innerHTML = issues
         .slice(0, 4)
-        .map(([label, detail]) => `
-          <div class="status-reason">
-            <strong>${escapeHtml(uiText(label))}</strong>
-            <span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
-          </div>
+        .map((issue) => `
+          <button class="status-reason" type="button" data-status-title="${escapeHtml(issue.title)}" aria-haspopup="dialog">
+            <strong>${escapeHtml(uiText(issue.title))}</strong>
+            <span title="${escapeHtml(issue.reason)}">${escapeHtml(issue.reason)}</span>
+          </button>
         `)
         .join("");
+      root.querySelectorAll(".status-reason").forEach((button) => {
+        button.addEventListener("click", () => openStatusDetails(button.dataset.statusTitle || ""));
+      });
     }
 
     function renderStrategySummaries(data) {
@@ -9565,11 +9696,27 @@ function balanceStatusClass(status) {
       return "degraded";
     }
 
-    function setHeaderStatus(statusValue, label) {
+    function setHeaderStatus(statusValue, label, detail = "") {
       const status = document.getElementById("status");
       const normalized = statusValue || "starting";
+      headerStatusIssue = detail
+        ? {
+            severity: normalized === "error" ? "error" : "attention",
+            title: label || statusLabel(normalized),
+            reason: friendlyAccountMessage(detail),
+            meta: [],
+            action: "",
+          }
+        : null;
+      const issueCount = statusIssuesWithConnectionState().length;
+      const clickable = ["degraded", "error", "auto_stopped"].includes(normalized)
+        && issueCount > 0;
       status.textContent = label || statusLabel(normalized);
-      status.className = `pill ${pillClassForStatus(normalized)}`;
+      status.className = `pill ${pillClassForStatus(normalized)} status-trigger${clickable ? " is-clickable" : ""}`;
+      status.setAttribute("aria-disabled", clickable ? "false" : "true");
+      status.title = clickable
+        ? `${uiText("Click to view details")} · ${issueCount}`
+        : "";
     }
 
     async function fetchWithTimeout(url, options = {}, timeoutMs = STATE_FETCH_TIMEOUT_MS) {
@@ -10056,16 +10203,16 @@ function balanceStatusClass(status) {
           ? "state request timed out"
           : (error?.message || String(error || "state request failed"));
         if (!refreshHadSuccess) {
-          setHeaderStatus("degraded", "Retrying");
+          setHeaderStatus("degraded", "Retrying", `Connecting to server: ${message}`);
           text("warnings", `Connecting to server: ${message}`);
         } else if (refreshFailureCount < 2) {
           // A single missed poll on a healthy session is usually a transient
           // blip; retry silently instead of flashing the header pill.
         } else if (refreshFailureCount < 3) {
-          setHeaderStatus("degraded", "Reconnecting");
+          setHeaderStatus("degraded", "Reconnecting", `Connection retry ${refreshFailureCount}/3: ${message}`);
           text("warnings", `Connection retry ${refreshFailureCount}/3: ${message}`);
         } else {
-          setHeaderStatus("degraded", "Stale");
+          setHeaderStatus("degraded", "Stale", `State is stale: ${message}`);
           text("warnings", `State is stale: ${message}`);
         }
       } finally {
@@ -10174,6 +10321,15 @@ function balanceStatusClass(status) {
     for (const provider of window.ethereum?.providers || [window.ethereum]) {
       registerWalletProvider(provider, {});
     }
+
+    const statusTrigger = document.getElementById("status");
+    statusTrigger.addEventListener("click", () => {
+      if (statusTrigger.getAttribute("aria-disabled") !== "true") openStatusDetails();
+    });
+    const statusDetailDialog = document.getElementById("status-detail-dialog");
+    statusDetailDialog.addEventListener("click", (event) => {
+      if (event.target === statusDetailDialog) statusDetailDialog.close();
+    });
 
     refresh({ force: true });
     document.getElementById("program-toggle").addEventListener("change", (event) => {

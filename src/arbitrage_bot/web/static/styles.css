@@ -628,14 +628,32 @@ main {
 
 .status-reason {
   display: grid;
-  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr) 14px;
   gap: 10px;
   align-items: center;
+  width: 100%;
   padding: 9px 11px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.status-reason::after {
+  content: "›";
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.status-reason:hover,
+.status-reason:focus-visible {
+  border-color: var(--amber);
+  outline: none;
 }
 
 .status-reason strong {
@@ -651,6 +669,157 @@ main {
   white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
+}
+
+.status-trigger {
+  appearance: none;
+  color: var(--text);
+  cursor: default;
+}
+
+.status-trigger.is-clickable {
+  cursor: pointer;
+}
+
+.status-trigger.is-clickable:hover,
+.status-trigger.is-clickable:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.status-detail-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 48px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+}
+
+.status-detail-dialog::backdrop {
+  background: rgba(8, 12, 18, 0.58);
+}
+
+.status-detail-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: min(760px, calc(100vh - 48px));
+}
+
+.status-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.status-detail-header h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.status-detail-close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.status-detail-close:hover,
+.status-detail-close:focus-visible {
+  border-color: var(--muted);
+  outline: none;
+}
+
+.status-detail-list {
+  overflow-y: auto;
+}
+
+.status-detail-item {
+  display: grid;
+  gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  border-left: 4px solid var(--amber);
+}
+
+.status-detail-item:last-child {
+  border-bottom: 0;
+}
+
+.status-detail-item.severity-error,
+.status-detail-item.severity-blocked {
+  border-left-color: var(--red);
+}
+
+.status-detail-item-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.status-detail-item-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.status-detail-item-heading span,
+.status-detail-reason > span,
+.status-detail-action > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.status-detail-reason {
+  display: grid;
+  gap: 4px;
+}
+
+.status-detail-reason p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.status-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.status-detail-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.status-detail-empty {
+  padding: 28px 20px;
+  color: var(--muted);
+  text-align: center;
 }
 
 .subtle {
@@ -2380,6 +2549,15 @@ tbody tr:last-child td {
   :root { --layout-gutter: 10px; }
   h1 { font-size: 18px; }
   main { padding: 10px var(--layout-gutter) 20px; }
+  .status-detail-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+  .status-detail-shell { max-height: calc(100vh - 20px); }
+  .status-detail-header { padding: 14px; }
+  .status-detail-item { padding: 14px; }
+  .status-detail-item-heading { align-items: flex-start; }
+  .status-detail-meta { display: grid; gap: 4px; }
   .market-ticker-list { min-height: 68px; }
   .market-ticker-item {
     flex-basis: 138px;

@@ -61,6 +61,28 @@ class WebTransportTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+    async def test_status_details_dialog_and_click_handlers_are_shipped(self) -> None:
+        cfg = make_config()
+        app = create_app(cfg, "spot-spread", cfg.poll_seconds)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            page_response = await client.get("/")
+            script_response = await client.get("/static/app.js")
+            style_response = await client.get("/static/styles.css")
+            page = await page_response.text()
+            script = await script_response.text()
+            style = await style_response.text()
+
+            self.assertIn('id="status-detail-dialog"', page)
+            self.assertIn('aria-haspopup="dialog"', page)
+            self.assertIn("function statusIssueRows", script)
+            self.assertIn("function openStatusDetails", script)
+            self.assertIn(".status-detail-dialog", style)
+            self.assertIn(".status-trigger.is-clickable", style)
+        finally:
+            await client.close()
+
     async def test_favicon_is_served_even_without_a_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

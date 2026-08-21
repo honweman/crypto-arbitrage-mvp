@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <script src="/static/theme.js?v=20260821-market-order1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260821-market-order1">
+  <script src="/static/theme.js?v=20260821-status-detail1"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260821-status-detail1">
 
 </head>
 <body>
@@ -50,7 +50,7 @@
         <input id="program-toggle" type="checkbox" checked>
         <span class="switch-track"></span>
       </label>
-      <span id="status" class="pill starting">Starting</span>
+      <button id="status" class="pill starting status-trigger" type="button" aria-haspopup="dialog" aria-disabled="true">Starting</button>
     </div>
   </header>
 
@@ -2719,8 +2719,23 @@
     </section>
   </main>
 
-  <script src="/static/i18n.js?v=20260821-market-order1" defer></script>
-  <script src="/static/app.js?v=20260821-market-order1" defer></script>
+  <dialog id="status-detail-dialog" class="status-detail-dialog" aria-labelledby="status-detail-title">
+    <div class="status-detail-shell">
+      <div class="status-detail-header">
+        <div>
+          <h2 id="status-detail-title">Status Details</h2>
+          <div id="status-detail-summary" class="subtle" aria-live="polite"></div>
+        </div>
+        <form method="dialog">
+          <button class="status-detail-close" type="submit" title="Close" aria-label="Close">&times;</button>
+        </form>
+      </div>
+      <div id="status-detail-list" class="status-detail-list"></div>
+    </div>
+  </dialog>
+
+  <script src="/static/i18n.js?v=20260821-status-detail1" defer></script>
+  <script src="/static/app.js?v=20260821-status-detail1" defer></script>
 
 </body>
 </html>
