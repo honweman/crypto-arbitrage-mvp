@@ -4748,6 +4748,21 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                     )
                     resume_strategy_payload = await resume_strategy_response.json()
 
+                    paper_strategy_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "upsert_strategy",
+                            "strategy": {
+                                "name": "ACS Coinbase DCA",
+                                "project_id": project["id"],
+                                "strategy_type": "dca",
+                                "account_ids": [account["id"]],
+                                "enabled": True,
+                            },
+                        },
+                    )
+                    paper_strategy_payload = await paper_strategy_response.json()
+
                     exchange_change_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -4863,10 +4878,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             ],
             ["auto_buy_sell", "market_maker"],
         )
-        self.assertFalse(
+        self.assertTrue(
             settings_state["user_workspace"]["strategy_access"]["quant"]["enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             settings_state["user_workspace"]["strategy_access"]["quant"][
                 "live_submit_allowed"
             ]
@@ -4875,7 +4890,21 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
             settings_state["user_workspace"]["strategy_access"]["quant"][
                 "strategy_types"
             ],
-            [],
+            [
+                "market_maker",
+                "auto_buy_sell",
+                "spot_grid",
+                "dca",
+                "spot_spread",
+                "contract_arbitrage",
+                "prediction_arbitrage",
+            ],
+        )
+        self.assertEqual(
+            settings_state["user_workspace"]["strategy_access"]["quant"][
+                "live_strategy_types"
+            ],
+            ["market_maker"],
         )
         self.assertEqual(
             trading_state["user_workspace"]["strategy_access"]["scope"],
@@ -4890,13 +4919,18 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 "platform_manage"
             ]
         )
-        self.assertEqual(
-            trading_state["user_workspace"]["strategies"][0]["owner_email"],
-            member.email,
+        self.assertTrue(
+            all(
+                row["owner_email"] == member.email
+                for row in trading_state["user_workspace"]["strategies"]
+            )
         )
-        self.assertEqual(
-            trading_state["user_workspace"]["strategies"][0]["strategy_type"],
+        self.assertIn(
             "market_maker",
+            {
+                row["strategy_type"]
+                for row in trading_state["user_workspace"]["strategies"]
+            },
         )
         self.assertEqual(untested_enable_response.status, 400, untested_enable_payload)
         self.assertIn("connection test", untested_enable_payload["error"])
@@ -4938,6 +4972,20 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resume_strategy_response.status, 400, resume_strategy_payload)
         self.assertIn("confirm_live", resume_strategy_payload["error"])
+        self.assertEqual(
+            paper_strategy_response.status,
+            200,
+            paper_strategy_payload,
+        )
+        paper_strategy = next(
+            row
+            for row in paper_strategy_payload["workspace"]["strategies"]
+            if row["strategy_type"] == "dca"
+        )
+        self.assertEqual(paper_strategy["mode"], "paper")
+        self.assertTrue(paper_strategy["enabled"])
+        self.assertTrue(paper_strategy["effective_enabled"])
+        self.assertEqual(paper_strategy["paper_runtime"]["mode"], "paper")
         self.assertEqual(exchange_change_response.status, 400, exchange_change_payload)
         self.assertIn("re-enter API key", exchange_change_payload["error"])
         self.assertEqual(scope_change_response.status, 200, scope_change_payload)

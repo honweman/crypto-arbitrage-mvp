@@ -20,7 +20,11 @@ from ...strategy_center import (
 )
 from ...user_paper_store import UserPaperTradingStore
 from ...user_live_strategies import user_market_maker_instance_id
-from ...user_strategies import UserStrategy
+from ...user_strategies import (
+    LIVE_USER_STRATEGY_TYPES,
+    USER_STRATEGY_DEFINITIONS,
+    UserStrategy,
+)
 from ...user_workspace import (
     UserWorkspaceStore,
 )
@@ -53,10 +57,24 @@ def build_user_workspace_payload(
             "requires_live_confirmation": True,
         },
         "quant": {
-            "enabled": False,
-            "mode": "live",
-            "live_submit_allowed": False,
-            "strategy_types": [],
+            "enabled": user is not None,
+            "mode": "mixed",
+            "live_submit_allowed": bool(user is not None),
+            "strategy_types": (
+                list(USER_STRATEGY_DEFINITIONS) if user is not None else []
+            ),
+            "live_strategy_types": (
+                sorted(LIVE_USER_STRATEGY_TYPES) if user is not None else []
+            ),
+            "paper_strategy_types": (
+                [
+                    strategy_type
+                    for strategy_type in USER_STRATEGY_DEFINITIONS
+                    if strategy_type not in LIVE_USER_STRATEGY_TYPES
+                ]
+                if user is not None
+                else []
+            ),
         },
     }
     empty_paper = {
@@ -127,45 +145,44 @@ def build_user_workspace_payload(
             owner_email=user.email,
             is_admin=False,
         )
-        payload["strategy_catalog"] = [
-            row
-            for row in payload.get("strategy_catalog", [])
-            if isinstance(row, dict) and row.get("live_supported")
-        ]
-        payload["strategies"] = [
-            row
-            for row in payload.get("strategies", [])
-            if isinstance(row, dict) and row.get("mode") == "live"
-        ]
-        payload["summary"].update(
-            {
-                "strategy_count": len(payload["strategies"]),
-                "enabled_strategy_count": sum(
-                    bool(row.get("enabled")) for row in payload["strategies"]
-                ),
-                "ready_strategy_count": sum(
-                    bool(row.get("effective_enabled"))
-                    for row in payload["strategies"]
-                ),
-                "blocked_strategy_count": sum(
-                    bool(row.get("enabled"))
-                    and not bool(row.get("effective_enabled"))
-                    for row in payload["strategies"]
-                ),
-            }
-        )
         payload["strategy_access"] = strategy_access
+        paper = (
+            paper_store.public_payload(owner_email=user.email, is_admin=False)
+            if paper_store is not None
+            else empty_paper
+        )
+        paper_states = {
+            str(row.get("strategy_id") or ""): row
+            for row in paper.get("states", [])
+            if isinstance(row, dict) and row.get("strategy_id")
+        }
+        paper_counts = paper.get("counts", {})
         for strategy in payload["strategies"]:
-            strategy["runtime_instance_id"] = user_market_maker_instance_id(
-                UserStrategy.from_dict(strategy)
-            )
-            strategy["live_runtime"] = {
-                "status": "starting" if strategy.get("enabled") else "paused",
-                "mode": "live",
-                "reason": "waiting for the owner strategy runtime",
+            if strategy.get("mode") == "live":
+                strategy["runtime_instance_id"] = user_market_maker_instance_id(
+                    UserStrategy.from_dict(strategy)
+                )
+                strategy["live_runtime"] = {
+                    "status": "starting" if strategy.get("enabled") else "paused",
+                    "mode": "live",
+                    "reason": "waiting for the owner strategy runtime",
+                    "open_order_count": 0,
+                }
+                continue
+            strategy_id = str(strategy.get("id") or "")
+            strategy["paper_counts"] = dict(paper_counts.get(strategy_id) or {})
+            strategy["paper_runtime"] = paper_states.get(strategy_id) or {
+                "strategy_id": strategy_id,
+                "status": "waiting" if strategy.get("enabled") else "paused",
+                "mode": "paper",
+                "reason": (
+                    "waiting for the paper strategy runtime"
+                    if strategy.get("enabled")
+                    else "paper strategy is paused"
+                ),
                 "open_order_count": 0,
             }
-        payload["paper"] = empty_paper
+        payload["paper"] = paper
         payload["platform_projects"] = (
             [
                 project
@@ -175,8 +192,12 @@ def build_user_workspace_payload(
             if user.role == "admin"
             else []
         )
-        payload["summary"]["paper_running_count"] = 0
-        payload["summary"]["paper_fill_count"] = 0
+        payload["summary"]["paper_running_count"] = int(
+            (paper.get("summary") or {}).get("running_count") or 0
+        )
+        payload["summary"]["paper_fill_count"] = int(
+            (paper.get("summary") or {}).get("fill_count") or 0
+        )
         return payload
     except (OSError, sqlite3.Error, ValueError) as exc:
         return {

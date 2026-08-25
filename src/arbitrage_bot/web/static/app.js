@@ -164,7 +164,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         tradingBadge.textContent = uiText(ownerMode ? "My accounts · live confirmation required" : "Risk gated");
       }
       if (quantBadge) {
-        quantBadge.textContent = uiText(ownerMode ? "My strategies · live risk gated" : "Paper by default");
+        quantBadge.textContent = uiText(ownerMode ? "My strategies · live + paper" : "Paper by default");
       }
       mountUserStrategyLab(currentPage);
     }
@@ -5259,8 +5259,8 @@ function balanceStatusClass(status) {
       text(
         "user-quant-access-meta",
         access.enabled === false
-          ? uiText("Use the live strategy modules on the Trading page")
-          : uiText("Owner scoped · live execution")
+          ? uiText("Registered account required")
+          : uiText("Owner scoped · live where supported, paper otherwise")
       );
       const formsDisabled = !currentUserWorkspace
         || currentUserWorkspace.status === "user_account_required"
@@ -5639,8 +5639,8 @@ function balanceStatusClass(status) {
         .filter((definition) => !userStrategyViewFilter || definition.id === userStrategyViewFilter)
         .map((definition) => ({
           value: definition.id,
-          label: uiText(definition.label || definition.id),
-          title: `${definition.min_accounts}-${definition.max_accounts} accounts · paper`,
+          label: `${uiText(definition.label || definition.id)} · ${uiText(definition.live_supported ? "Live" : "Paper")}`,
+          title: `${definition.min_accounts}-${definition.max_accounts} accounts · ${definition.live_supported ? "live" : "paper"}`,
         }));
       const selected = userStrategyViewFilter || selectedType || rows[0]?.value || "market_maker";
       setSelectOptions("user-strategy-type", rows, selected, "Select strategy");
@@ -5981,14 +5981,16 @@ function balanceStatusClass(status) {
 
     function userStrategyPayloadFromForm() {
       const strategyType = document.getElementById("user-strategy-type").value;
+      const definition = workspaceStrategyDefinition(strategyType);
+      const liveSupported = Boolean(definition?.live_supported);
       const strategy = {
         project_id: document.getElementById("user-strategy-project").value,
         name: document.getElementById("user-strategy-name").value.trim(),
         strategy_type: strategyType,
         account_ids: selectedUserStrategyAccountIds(),
         enabled: document.getElementById("user-strategy-enabled").checked,
-        mode: "live",
-        live_enabled: true,
+        mode: liveSupported ? "live" : "paper",
+        live_enabled: liveSupported,
         parameters: userStrategyParametersFromForm(strategyType),
         risk: userStrategyRiskFromForm(),
       };
@@ -6060,8 +6062,7 @@ function balanceStatusClass(status) {
         "user-strategy-meta",
         `${runningCount} ${uiText("running")} · ${readyCount}/${strategies.length} ${uiText("ready")}`
       );
-      const paperActivity = document.getElementById("user-paper-activity");
-      if (paperActivity) paperActivity.hidden = true;
+      renderUserPaperEvents(workspace, strategies.filter((strategy) => strategy.mode === "paper"));
       if (strategies.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="7">${escapeHtml(uiText("No user strategies yet."))}</td>`;
@@ -6075,7 +6076,8 @@ function balanceStatusClass(status) {
         const project = projectMap.get(strategy.project_id);
         const readiness = strategy.readiness || {};
         const blockers = readiness.blockers || [];
-        const runtime = strategy.live_runtime || {};
+        const isLive = strategy.mode === "live";
+        const runtime = (isLive ? strategy.live_runtime : strategy.paper_runtime) || {};
         const runtimeTerminal = Boolean(runtime.terminal);
         const runtimeStatus = !strategy.enabled
           ? "paused"
@@ -6114,7 +6116,7 @@ function balanceStatusClass(status) {
         const runtimeDetail = [runtimeReason, predictionText, activityText].filter(Boolean).join(" · ");
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || strategy.id)}<br><span class="subtle">${escapeHtml(uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type))}</span></td>
+          <td title="${escapeHtml(strategy.id || "")}">${escapeHtml(strategy.name || strategy.id)}<br><span class="subtle">${escapeHtml(uiText(workspaceStrategyDefinition(strategy.strategy_type)?.label || strategy.strategy_type))} · ${escapeHtml(uiText(isLive ? "Live" : "Paper"))}</span></td>
           <td>${escapeHtml(project?.symbol || strategy.project_id || "--")}</td>
           <td>${escapeHtml(accounts || "--")}</td>
           <td class="num">${formatSymbolQuantity(strategy.risk?.max_total_quote || 0, project?.symbol || "", "quote")}${progressText}</td>
@@ -6141,6 +6143,14 @@ function balanceStatusClass(status) {
         toggleButton.textContent = uiText(strategy.enabled ? "Pause" : "Resume");
         toggleButton.addEventListener("click", () => toggleUserStrategy(strategy, toggleButton));
         actions.appendChild(toggleButton);
+        if (!isLive) {
+          const resetButton = document.createElement("button");
+          resetButton.className = "ghost-button";
+          resetButton.type = "button";
+          resetButton.textContent = uiText("Reset");
+          resetButton.addEventListener("click", () => resetUserStrategyPaper(strategy, resetButton));
+          actions.appendChild(resetButton);
+        }
         const deleteButton = document.createElement("button");
         deleteButton.className = "danger-button";
         deleteButton.type = "button";
@@ -6160,16 +6170,21 @@ function balanceStatusClass(status) {
       button.disabled = true;
       try {
         const strategy = userStrategyPayloadFromForm();
-        if (strategy.enabled && !dangerConfirm(
+        const isLive = strategy.mode === "live";
+        if (isLive && strategy.enabled && !dangerConfirm(
           "Start or update this live Market Maker?",
           `${strategy.name} · ${strategy.parameters.levels} levels/side · ${strategy.parameters.quote_per_level} quote/level · maximum ${strategy.risk.max_total_quote} quote`
         )) return;
         await postUserWorkspace({
           action: "upsert_strategy",
           strategy,
-          confirm_live: strategy.enabled ? LIVE_MARKET_MAKER_CONFIRMATION : "",
+          confirm_live: isLive && strategy.enabled ? LIVE_MARKET_MAKER_CONFIRMATION : "",
         });
-        setUserWorkspaceNotice(uiText(strategy.enabled ? "Live strategy saved and starting." : "Live strategy saved in paused mode."));
+        setUserWorkspaceNotice(uiText(
+          strategy.enabled
+            ? `${isLive ? "Live" : "Paper"} strategy saved and starting.`
+            : `${isLive ? "Live" : "Paper"} strategy saved in paused mode.`
+        ));
         closeUserStrategyForm();
       } catch (error) {
         setUserWorkspaceNotice(`strategy update failed: ${error.message || error}`);
@@ -6182,7 +6197,8 @@ function balanceStatusClass(status) {
     async function toggleUserStrategy(strategy, button) {
       button.disabled = true;
       try {
-        if (!strategy.enabled && !dangerConfirm(
+        const isLive = strategy.mode === "live";
+        if (isLive && !strategy.enabled && !dangerConfirm(
           "Resume this live Market Maker?",
           `${strategy.name} · ${strategy.accounts?.map((row) => `${row.label} ${row.symbol}`).join(" · ") || "selected account"}`
         )) return;
@@ -6190,10 +6206,14 @@ function balanceStatusClass(status) {
           action: "set_strategy_enabled",
           strategy_id: strategy.id,
           enabled: !strategy.enabled,
-          confirm_live: strategy.enabled ? "" : LIVE_MARKET_MAKER_CONFIRMATION,
+          confirm_live: isLive && !strategy.enabled ? LIVE_MARKET_MAKER_CONFIRMATION : "",
         });
         setUserWorkspaceNotice(
-          uiText(strategy.enabled ? "Live strategy paused; tracked orders will be canceled." : "Live strategy resumed.")
+          uiText(
+            strategy.enabled
+              ? `${isLive ? "Live" : "Paper"} strategy paused${isLive ? "; tracked orders will be canceled" : ""}.`
+              : `${isLive ? "Live" : "Paper"} strategy resumed.`
+          )
         );
       } catch (error) {
         setUserWorkspaceNotice(`strategy control failed: ${error.message || error}`);
@@ -6209,7 +6229,7 @@ function balanceStatusClass(status) {
           action: "clone_strategy",
           strategy_id: strategy.id,
         });
-        setUserWorkspaceNotice(uiText("Strategy copy created in paused live mode."));
+        setUserWorkspaceNotice(uiText(`Strategy copy created in paused ${strategy.mode || "paper"} mode.`));
       } catch (error) {
         setUserWorkspaceNotice(`strategy copy failed: ${error.message || error}`);
       } finally {
@@ -6236,7 +6256,13 @@ function balanceStatusClass(status) {
     }
 
     async function deleteUserStrategy(strategy, button) {
-      if (!dangerConfirm("Delete this live strategy?", "Any tracked MM orders will be canceled by the strategy runtime.")) return;
+      const isLive = strategy.mode === "live";
+      if (!dangerConfirm(
+        `Delete this ${isLive ? "live" : "paper"} strategy?`,
+        isLive
+          ? "Any tracked MM orders will be canceled by the strategy runtime."
+          : "Its paper state, fills, and events will also be deleted."
+      )) return;
       button.disabled = true;
       try {
         await postUserWorkspace({
@@ -6244,7 +6270,7 @@ function balanceStatusClass(status) {
           strategy_id: strategy.id,
         });
         if (selectedUserStrategyId === strategy.id) closeUserStrategyForm();
-        setUserWorkspaceNotice(uiText("Live strategy deleted."));
+        setUserWorkspaceNotice(uiText(`${isLive ? "Live" : "Paper"} strategy deleted.`));
       } catch (error) {
         setUserWorkspaceNotice(`strategy delete failed: ${error.message || error}`);
       } finally {

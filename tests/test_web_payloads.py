@@ -728,7 +728,7 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260821-status-detail1" defer></script>',
+            '<script src="/static/app.js?v=20260825-owner-access1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -1332,6 +1332,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="execution-section" data-page="quant"', HTML)
         self.assertIn('id="backtest-section" data-page="quant"', HTML)
         self.assertIn('id="user-quant-strategies-section" data-page="quant"', HTML)
+        self.assertNotIn(
+            'id="user-quant-strategies-section" data-page="quant" class="compact-section section-open" data-platform-only',
+            HTML,
+        )
         self.assertIn('id="user-market-maker-section" data-page="trading"', HTML)
         self.assertIn("data-owner-only", HTML)
         self.assertIn('id="user-strategy-lab"', HTML)

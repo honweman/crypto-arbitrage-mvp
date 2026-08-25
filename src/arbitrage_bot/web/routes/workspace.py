@@ -1554,16 +1554,19 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             if owner != project.owner_email:
                 raise ValueError("project and strategy owners must match")
             raw["owner_email"] = owner
-            raw["mode"] = "live"
-            raw["live_enabled"] = True
+            requested_type = str(raw.get("strategy_type") or "").strip().lower()
+            live_supported = requested_type in LIVE_USER_STRATEGY_TYPES
+            raw["mode"] = "live" if live_supported else "paper"
+            raw["live_enabled"] = live_supported
             strategy = UserStrategy.from_dict(raw)
-            if strategy.strategy_type not in LIVE_USER_STRATEGY_TYPES:
-                raise ValueError(
-                    f"live owner execution is not available for {strategy.strategy_type}"
-                )
             if strategy.enabled:
-                require_capability(user, "account.trade")
-                if payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION:
+                if strategy.mode == "live":
+                    require_capability(user, "account.trade")
+                if (
+                    strategy.mode == "live"
+                    and payload.get("confirm_live")
+                    != LIVE_MARKET_MAKER_CONFIRMATION
+                ):
                     raise ValueError(
                         "enabling or changing a live owner Market Maker requires "
                         f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
@@ -1576,7 +1579,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     )
             strategy = store.upsert_strategy(strategy)
             audit_target = strategy.id
-            audit_detail = f"saved live owner strategy {strategy.name}"
+            audit_detail = f"saved {strategy.mode} owner strategy {strategy.name}"
             audit_payload = strategy.to_dict()
         elif action == "set_strategy_enabled":
             strategy_id = str(
@@ -1591,12 +1594,13 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 raise ValueError("enabled must be true or false")
             updated = replace(strategy, enabled=enabled)
             if enabled:
-                require_capability(user, "account.trade")
-                if strategy.mode != "live":
-                    raise ValueError(
-                        "legacy paper strategies must be saved as a live strategy before enabling"
-                    )
-                if payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION:
+                if strategy.mode == "live":
+                    require_capability(user, "account.trade")
+                if (
+                    strategy.mode == "live"
+                    and payload.get("confirm_live")
+                    != LIVE_MARKET_MAKER_CONFIRMATION
+                ):
                     raise ValueError(
                         "enabling a live owner Market Maker requires "
                         f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
@@ -1664,7 +1668,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             _require_workspace_owner(user, strategy.owner_email)
             if strategy.mode != "paper":
                 raise ValueError(
-                    "paper reset is only available for legacy paper strategies"
+                    "paper reset is only available for paper strategies"
                 )
             reset_counts = _user_paper_store(request).reset_strategy(strategy)
             audit_target = strategy.id

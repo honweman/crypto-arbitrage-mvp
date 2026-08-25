@@ -251,6 +251,8 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         for strategy in workspace_payload.get("strategies", []):
             if not isinstance(strategy, dict):
                 continue
+            if strategy.get("mode") != "live":
+                continue
             runtime_id = str(strategy.get("runtime_instance_id") or "")
             runtime = runtime_by_id.get(runtime_id)
             if runtime is not None:

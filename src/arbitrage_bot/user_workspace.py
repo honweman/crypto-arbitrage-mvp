@@ -3444,7 +3444,7 @@ class UserWorkspaceStore:
         blockers = list(strategy_parameter_blockers(strategy))
         warnings: list[str] = []
         if strategy.mode == "paper":
-            warnings.append("legacy paper strategy; live order submission is disabled")
+            warnings.append("paper simulation; live order submission is disabled")
         elif strategy.strategy_type not in LIVE_USER_STRATEGY_TYPES:
             blockers.append(
                 f"live owner execution is unavailable for {strategy.strategy_type}"
