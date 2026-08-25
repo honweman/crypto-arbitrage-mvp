@@ -728,7 +728,7 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260825-owner-access1" defer></script>',
+            '<script src="/static/app.js?v=20260825-owner-mm-edit1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -1346,6 +1346,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertIn("function renderUserQuantStrategies", APP_JS)
         self.assertIn("function renderUserMarketMakerStrategies", APP_JS)
+        self.assertIn("function existingMarketMakerForAccounts", APP_JS)
         self.assertIn(
             'userStrategyViewFilter = ownerMarketMaker ? "market_maker" : ""',
             APP_JS,

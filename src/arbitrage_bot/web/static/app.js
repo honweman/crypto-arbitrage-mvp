@@ -5999,6 +5999,15 @@ function balanceStatusClass(status) {
       return strategy;
     }
 
+    function existingMarketMakerForAccounts(strategy) {
+      if (strategy.id || strategy.strategy_type !== "market_maker") return null;
+      const selectedAccounts = new Set(strategy.account_ids || []);
+      return (currentUserWorkspace?.strategies || []).find(
+        (row) => row.strategy_type === "market_maker"
+          && (row.account_ids || []).some((accountId) => selectedAccounts.has(accountId))
+      ) || null;
+    }
+
     function formatPaperPnl(value, currency) {
       const number = Number(value);
       if (!Number.isFinite(number)) return "--";
@@ -6170,8 +6179,19 @@ function balanceStatusClass(status) {
       button.disabled = true;
       try {
         const strategy = userStrategyPayloadFromForm();
+        const existingMarketMaker = existingMarketMakerForAccounts(strategy);
+        if (existingMarketMaker) {
+          if (!dangerConfirm(
+            "Update the existing Market Maker for this account?",
+            `${existingMarketMaker.name} will be reconfigured instead of creating a duplicate instance. Its current live state will be preserved unless Enable Immediately is selected.`
+          )) return;
+          strategy.id = existingMarketMaker.id;
+          strategy.enabled = Boolean(existingMarketMaker.enabled || strategy.enabled);
+          setFieldValue("user-strategy-id", existingMarketMaker.id);
+          setCheckedValue("user-strategy-enabled", strategy.enabled);
+        }
         const isLive = strategy.mode === "live";
-        if (isLive && strategy.enabled && !dangerConfirm(
+        if (isLive && strategy.enabled && !existingMarketMaker && !dangerConfirm(
           "Start or update this live Market Maker?",
           `${strategy.name} · ${strategy.parameters.levels} levels/side · ${strategy.parameters.quote_per_level} quote/level · maximum ${strategy.risk.max_total_quote} quote`
         )) return;

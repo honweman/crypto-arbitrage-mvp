@@ -3195,6 +3195,26 @@ class UserWorkspaceStore:
             ),
             updated_at=_now(),
         )
+        if updated.strategy_type == "market_maker":
+            selected_accounts = set(updated.account_ids)
+            duplicate = next(
+                (
+                    row
+                    for row in self.list_strategies(
+                        owner_email=updated.owner_email,
+                        is_admin=False,
+                    )
+                    if row.id != updated.id
+                    and row.strategy_type == "market_maker"
+                    and selected_accounts.intersection(row.account_ids)
+                ),
+                None,
+            )
+            if duplicate is not None:
+                raise ValueError(
+                    "a Market Maker already exists for the selected account; "
+                    f"edit the existing strategy {duplicate.name} instead"
+                )
         if updated.enabled:
             readiness = self.strategy_readiness(updated)
             if not readiness["ready"]:
@@ -3228,7 +3248,9 @@ class UserWorkspaceStore:
                 and projected_exposure > profile.max_total_exposure_quote
             ):
                 raise ValueError(
-                    "user max total exposure quote limit would be exceeded"
+                    "user max total exposure quote limit would be exceeded: "
+                    f"planned {projected_exposure:g} > limit "
+                    f"{profile.max_total_exposure_quote:g}"
                 )
             projected_open_orders = _reserved_open_order_capacity(updated) + sum(
                 _reserved_open_order_capacity(row) for row in existing_strategies

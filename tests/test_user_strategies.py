@@ -199,13 +199,16 @@ class UserStrategyTest(unittest.TestCase):
                     }
                 )
             )
-            account = self._account(
-                store,
-                project,
-                account_id="mexc-main",
-                exchange="mexc",
-                symbol="ACS/USDT",
-            )
+            accounts = [
+                self._account(
+                    store,
+                    project,
+                    account_id=f"mexc-{index}",
+                    exchange="mexc",
+                    symbol="ACS/USDT",
+                )
+                for index in range(1, 4)
+            ]
             store.upsert_risk_profile(
                 UserRiskProfile.from_dict(
                     {
@@ -217,7 +220,7 @@ class UserStrategyTest(unittest.TestCase):
                 )
             )
 
-            def strategy(name: str) -> UserStrategy:
+            def strategy(name: str, account: UserExchangeAccount) -> UserStrategy:
                 return UserStrategy.from_dict(
                     {
                         "owner_email": project.owner_email,
@@ -240,16 +243,76 @@ class UserStrategyTest(unittest.TestCase):
                     }
                 )
 
-            first = store.upsert_strategy(strategy("MEXC MM 1"))
-            second = store.upsert_strategy(strategy("MEXC MM 2"))
+            first = store.upsert_strategy(strategy("MEXC MM 1", accounts[0]))
+            second = store.upsert_strategy(strategy("MEXC MM 2", accounts[1]))
             with self.assertRaisesRegex(
                 ValueError,
                 "planned 30 > limit 25",
             ):
-                store.upsert_strategy(strategy("MEXC MM 3"))
+                store.upsert_strategy(strategy("MEXC MM 3", accounts[2]))
 
         self.assertTrue(first.enabled)
         self.assertTrue(second.enabled)
+
+    def test_user_cannot_create_duplicate_market_maker_for_same_account(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"TEST_USER_STRATEGY_MASTER_KEY": MASTER_KEY},
+            clear=False,
+        ):
+            store = self._store(Path(tmp) / "workspace.sqlite3")
+            project = self._project(store)
+            account = self._account(
+                store,
+                project,
+                account_id="coinbase-main",
+                exchange="coinbase",
+                symbol="ACS/USDC",
+            )
+            original = store.upsert_strategy(
+                UserStrategy.from_dict(
+                    {
+                        "id": "mm-original",
+                        "owner_email": project.owner_email,
+                        "project_id": project.id,
+                        "name": "ACS MM",
+                        "strategy_type": "market_maker",
+                        "account_ids": [account.id],
+                        "enabled": True,
+                        "live_enabled": True,
+                    }
+                )
+            )
+
+            updated = store.upsert_strategy(
+                UserStrategy.from_dict(
+                    {
+                        **original.to_dict(),
+                        "parameters": {
+                            **original.parameters,
+                            "quote_per_level": 2.0,
+                        },
+                    }
+                )
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "already exists for the selected account",
+            ):
+                store.upsert_strategy(
+                    UserStrategy.from_dict(
+                        {
+                            **original.to_dict(),
+                            "id": "mm-duplicate",
+                            "name": "Duplicate ACS MM",
+                        }
+                    )
+                )
+
+        self.assertEqual(updated.id, original.id)
+        self.assertEqual(updated.parameters["quote_per_level"], 2.0)
 
     def test_store_builds_ready_paper_strategy_and_disables_it_on_account_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
