@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260821-status-detail1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances3">
 
 </head>
 <body>
@@ -1584,25 +1584,18 @@
         </label>
         <button id="account-balances-refresh" class="ghost-button" type="button">Refresh</button>
       </div>
-      <div id="account-balance-cards" class="account-balance-cards" aria-live="polite"></div>
-      <div class="table-wrap">
-        <table class="balance-table mobile-card-table">
-          <thead>
+      <div class="table-wrap balance-matrix-wrap" aria-live="polite">
+        <table class="balance-table balance-matrix-table">
+          <thead id="account-balances-head">
             <tr>
-              <th>Account</th>
-              <th>Type</th>
               <th>Currency</th>
-              <th class="num">Free</th>
-              <th class="num">In Orders</th>
-              <th class="num">Used</th>
               <th class="num">Total</th>
               <th class="num">Price</th>
               <th class="num">Value</th>
-              <th>Updated</th>
-              <th>Status</th>
             </tr>
           </thead>
           <tbody id="account-balances"></tbody>
+          <tfoot id="account-balances-foot"></tfoot>
         </table>
       </div>
     </section>
@@ -2749,8 +2742,8 @@
     </div>
   </dialog>
 
-  <script src="/static/i18n.js?v=20260826-monitor-balances2" defer></script>
-  <script src="/static/app.js?v=20260826-monitor-balances2" defer></script>
+  <script src="/static/i18n.js?v=20260826-monitor-balances3" defer></script>
+  <script src="/static/app.js?v=20260826-monitor-balances3" defer></script>
 
 </body>
 </html>

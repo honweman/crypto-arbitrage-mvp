@@ -1547,7 +1547,7 @@ table {
 }
 
 .balance-table {
-  min-width: 1180px;
+  min-width: 720px;
 }
 
 .balance-toolbar {
@@ -1574,75 +1574,82 @@ table {
   text-transform: uppercase;
 }
 
-.account-balance-cards {
+.balance-matrix-wrap {
+  position: relative;
+}
+
+.balance-matrix-table {
+  table-layout: fixed;
+}
+
+.balance-matrix-table th,
+.balance-matrix-table td {
+  min-width: 150px;
+  height: 58px;
+  white-space: normal;
+}
+
+.balance-matrix-table th:first-child,
+.balance-matrix-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  min-width: 92px;
+  width: 92px;
+  background: var(--surface);
+}
+
+.balance-matrix-table thead th:first-child,
+.balance-matrix-table tfoot th:first-child {
+  z-index: 3;
+  background: var(--surface-3);
+}
+
+.balance-account-head {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px;
+  gap: 4px;
+  text-align: right;
 }
 
-.compact-section.section-open > .account-balance-cards {
-  display: grid;
-}
-
-.account-balance-card {
-  min-width: 0;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-2);
-}
-
-.account-balance-card-head,
-.account-balance-card-stats {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.account-balance-card-head strong {
-  min-width: 0;
+.balance-account-head strong {
   overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
 }
 
-.account-balance-status {
-  flex: 0 0 auto;
+.balance-account-head small,
+.balance-matrix-cell small,
+.balance-matrix-table tfoot small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
   font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
+  font-weight: 600;
+  line-height: 1.3;
+  text-transform: none;
 }
 
-.account-balance-card-value {
-  margin-top: 10px;
-  font-size: 18px;
-  font-weight: 750;
+.balance-matrix-cell strong,
+.balance-matrix-table tfoot strong {
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
-.account-balance-card-stats {
-  margin-top: 7px;
+.balance-matrix-empty {
   color: var(--muted);
-  font-size: 11px;
 }
 
-.account-balance-card-meta {
-  margin-top: 7px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.balance-currency-cell strong {
+  font-size: 13px;
 }
 
-.account-balance-empty {
-  grid-column: 1 / -1;
-  min-height: 54px;
-  padding: 16px;
-  border: 1px dashed var(--line);
-  border-radius: 8px;
+.balance-matrix-table tfoot th,
+.balance-matrix-table tfoot td {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  background: var(--surface-3);
 }
 
 .orders-table {
@@ -2621,7 +2628,7 @@ tbody tr:last-child td {
   .readiness-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .strategy-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .balance-table { min-width: 1080px; }
+  .balance-table { min-width: 720px; }
   .orders-table { min-width: 960px; }
   .fills-table { min-width: 1080px; }
   .reconciliation-table { min-width: 920px; }
@@ -2697,7 +2704,6 @@ tbody tr:last-child td {
     flex: 1 1 auto;
     min-width: 0;
   }
-  .account-balance-cards { grid-template-columns: 1fr; }
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-row {
     grid-template-columns: 1fr;

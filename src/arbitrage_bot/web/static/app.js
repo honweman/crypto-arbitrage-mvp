@@ -1022,58 +1022,52 @@ function balanceStatusClass(status) {
       return values.reduce((total, value) => total + Number(value || 0), 0);
     }
 
-    function renderAccountBalanceCards(accounts, commonCurrency) {
-      const host = document.getElementById("account-balance-cards");
-      if (!host) return;
-      host.innerHTML = "";
-      if (!accounts.length) {
-        host.innerHTML = `<div class="account-balance-empty subtle">${escapeHtml(uiText("No account balances yet."))}</div>`;
-        return;
+    function aggregateBalanceCurrencies(rows) {
+      const grouped = new Map();
+      for (const row of rows || []) {
+        const currency = String(row?.currency || "").trim().toUpperCase();
+        if (!currency) continue;
+        const target = grouped.get(currency) || {
+          currency,
+          free: 0,
+          used: 0,
+          total: 0,
+          open_order_reserved: 0,
+          value_common: 0,
+          value_common_complete: true,
+          wallets: new Set(),
+        };
+        target.free += Number(row.free || 0);
+        target.used += Number(row.used || 0);
+        target.total += Number(row.total || 0);
+        target.open_order_reserved += Number(row.open_order_reserved || 0);
+        const valueCommon = balanceCommonValue(row);
+        if (valueCommon == null) target.value_common_complete = false;
+        else target.value_common += Number(valueCommon);
+        if (row.wallet) target.wallets.add(String(row.wallet).toLowerCase());
+        grouped.set(currency, target);
       }
-      for (const account of accounts) {
-        const { visible } = visibleBalanceRows(account.balance?.currencies || []);
-        const currency = selectedBalanceCurrency();
-        const rows = currency
-          ? visible.filter((row) => String(row.currency || "").toUpperCase() === currency)
-          : visible;
-        if (currency && !rows.length) continue;
-        const totalValue = accountBalanceValue(rows);
-        const reservedValue = rows.reduce((total, row) => {
-          const rowTotal = Number(row.total || 0);
-          const rowValue = balanceCommonValue(row);
-          const reserved = Number(row.open_order_reserved || 0);
-          if (!rowTotal || rowValue == null) return total;
-          return total + (reserved / rowTotal) * rowValue;
-        }, 0);
-        const status = String(account.status || "unknown");
-        const card = document.createElement("article");
-        card.className = "account-balance-card";
-        const marketType = String(account.market_type || "spot").toUpperCase();
-        const symbols = (account.symbols || []).slice(0, 3).join(", ");
-        const issue = account.balance?.error
-          || (account.errors || [])[0]
-          || (account.warnings || [])[0]
-          || "";
-        card.innerHTML = `
-          <div class="account-balance-card-head">
-            <strong>${escapeHtml(displayExchange(account.exchange, account.label))}</strong>
-            <span class="account-balance-status ${balanceStatusClass(status)}">${escapeHtml(status)}</span>
-          </div>
-          <div class="account-balance-card-value">${totalValue == null ? "--" : `${money.format(totalValue)} ${escapeHtml(commonCurrency)}`}</div>
-          <div class="account-balance-card-stats">
-            <span>${rows.length} ${escapeHtml(uiText("currencies"))}</span>
-            <span>${escapeHtml(marketType)}</span>
-            <span>${reservedValue > 0 ? `${money.format(reservedValue)} ${escapeHtml(commonCurrency)} ${escapeHtml(uiText("in orders"))}` : escapeHtml(uiText("No reserved funds"))}</span>
-          </div>
-          <div class="account-balance-card-meta" title="${escapeHtml(issue || symbols)}">
-            ${escapeHtml(symbols || uiText("All synced balances"))} · ${escapeHtml(formatAge(account.checked_at || accountBalanceDetailPayload?.last_finished))}
-          </div>
-        `;
-        host.appendChild(card);
-      }
-      if (!host.children.length) {
-        host.innerHTML = `<div class="account-balance-empty subtle">${escapeHtml(uiText("No balances match this currency."))}</div>`;
-      }
+      return new Map([...grouped].map(([currency, row]) => {
+        const result = { ...row, wallets: [...row.wallets].sort() };
+        if (!row.value_common_complete) delete result.value_common;
+        delete result.value_common_complete;
+        return [currency, result];
+      }));
+    }
+
+    function balanceAccountHeader(account) {
+      const status = String(account.status || "unknown");
+      const marketType = String(account.market_type || "spot").toUpperCase();
+      const issue = account.balance?.error
+        || (account.errors || [])[0]
+        || (account.warnings || [])[0]
+        || (account.symbols || []).join(", ");
+      return `
+        <span class="balance-account-head" title="${escapeHtml(issue)}">
+          <strong>${escapeHtml(displayExchange(account.exchange, account.label))}</strong>
+          <small class="${balanceStatusClass(status)}">${escapeHtml(marketType)} · ${escapeHtml(status)} · ${escapeHtml(formatAge(account.checked_at || accountBalanceDetailPayload?.last_finished))}</small>
+        </span>
+      `;
     }
 
     function renderAccountBalanceSummary(accountBalances) {
@@ -1156,84 +1150,92 @@ function balanceStatusClass(status) {
       ]);
       if (accountBalanceDetailSignature === signature) return;
       accountBalanceDetailSignature = signature;
-      renderAccountBalanceCards(accounts, commonCurrency);
 
+      const head = document.getElementById("account-balances-head");
       const body = document.getElementById("account-balances");
+      const foot = document.getElementById("account-balances-foot");
+      const table = body.closest("table");
+      const columnCount = accounts.length + 4;
+      table.style.minWidth = `${Math.max(720, 430 + accounts.length * 190)}px`;
+      head.innerHTML = `
+        <tr>
+          <th>${escapeHtml(uiText("Currency"))}</th>
+          ${accounts.map((account) => `<th class="num balance-account-column">${balanceAccountHeader(account)}</th>`).join("")}
+          <th class="num">${escapeHtml(uiText("Total"))}</th>
+          <th class="num">${escapeHtml(uiText("Price"))}</th>
+          <th class="num">${escapeHtml(uiText("Value"))}</th>
+        </tr>
+      `;
       body.innerHTML = "";
+      foot.innerHTML = "";
       if (accounts.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="11">No account balances yet.</td>`;
+        tr.innerHTML = `<td colspan="${columnCount}">${escapeHtml(uiText("No account balances yet."))}</td>`;
         body.appendChild(tr);
         return;
       }
 
-      for (const account of accounts) {
-        const accountBalances = visibleBalanceRows(account.balance?.currencies || []);
-        const rows = sortBalanceCurrencies(accountBalances.visible).filter(
-          (row) => !currencyFilter || String(row.currency || "").toUpperCase() === currencyFilter
-        );
-        const statusText = account.live_enabled
-          ? uiText("Live enabled")
-          : account.status || "--";
-        if (rows.length === 0) {
-          if (currencyFilter) continue;
-          const message = hiddenBalanceText(accountBalances.hiddenCount)
-            || account.balance?.error
-            || account.balance?.skipped_reason
-            || "No non-zero target balances.";
-          const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
-            <td>${escapeHtml(String(account.market_type || "spot").toUpperCase())}</td>
-            <td colspan="8">${escapeHtml(message)}</td>
-            <td class="${balanceStatusClass(account.status)}">${escapeHtml(statusText)}</td>
-          `;
-          body.appendChild(tr);
-          continue;
-        }
+      const accountCurrencyMaps = accounts.map((account) =>
+        aggregateBalanceCurrencies(account.balance?.currencies || [])
+      );
+      const visibleMaps = accountCurrencyMaps.map((currencyMap) => new Map(
+        [...currencyMap].filter(([, row]) => isDisplayableBalance(row))
+      ));
+      const currencyNames = [...new Set(
+        visibleMaps.flatMap((currencyMap) => [...currencyMap.keys()])
+      )];
+      const currencies = sortBalanceCurrencies(
+        currencyNames.map((currency) => ({ currency }))
+      ).map((row) => row.currency).filter(
+        (currency) => !currencyFilter || currency === currencyFilter
+      );
 
-        for (const row of rows) {
-          const tr = document.createElement("tr");
+      for (const currency of currencies) {
+        const accountRows = visibleMaps.map((currencyMap) => currencyMap.get(currency) || null);
+        const combined = aggregateBalanceCurrencies(accountRows.filter(Boolean)).get(currency);
+        const valueCommon = combined ? balanceCommonValue(combined) : null;
+        const total = Number(combined?.total || 0);
+        const priceCommon = valueCommon != null && total ? Number(valueCommon) / total : null;
+        const tr = document.createElement("tr");
+        const accountCells = accountRows.map((row) => {
+          if (!row) return `<td class="num balance-matrix-cell balance-matrix-empty">--</td>`;
           const reserved = Number(row.open_order_reserved || 0);
-          const wallet = String(row.wallet || "trading").toLowerCase();
-          const walletLabel = wallet === "funding"
-            ? uiText("Funding wallet")
-            : wallet === "spot"
-              ? uiText("Spot wallet")
-              : wallet === "swap"
-                ? uiText("Futures wallet")
-                : uiText("Trading wallet");
-          const currencyLabel = `${row.currency} · ${walletLabel}`;
-          const usedTitle = reserved > 0
-            ? `Open-order reserve ${formatBalanceAmount(reserved)} ${row.currency}`
-            : row.tradable === false
-              ? uiText("Funding balance is not directly tradable")
-              : "";
-          const valueCommon = balanceCommonValue(row);
-          const total = Number(row.total || 0);
-          const priceCommon = Number(row.price_common)
-            || (valueCommon != null && total ? Number(valueCommon) / total : null);
-          tr.innerHTML = `
-            <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
-            <td>${escapeHtml(String(account.market_type || "spot").toUpperCase())}</td>
-            <td title="${escapeHtml(usedTitle)}">${escapeHtml(currencyLabel)}</td>
-            <td class="num">${formatBalanceAmount(row.free)}</td>
-            <td class="num">${reserved > 0 ? formatBalanceAmount(reserved) : "--"}</td>
-            <td class="num" title="${escapeHtml(usedTitle)}">${formatBalanceAmount(row.used)}</td>
-            <td class="num">${formatBalanceAmount(row.total)}</td>
-            <td class="num">${priceCommon == null ? "--" : money.format(priceCommon)}</td>
-            <td class="num">${valueCommon == null ? "--" : `${money.format(valueCommon)} ${escapeHtml(commonCurrency)}`}</td>
-            <td>${escapeHtml(formatAge(account.checked_at || filtered?.last_finished))}</td>
-            <td class="${balanceStatusClass(account.status)}">${escapeHtml(statusText)}</td>
+          const wallets = (row.wallets || []).join(", ") || "trading";
+          const title = `${currency} · free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · orders ${formatBalanceAmount(reserved)} · wallets ${wallets}`;
+          return `
+            <td class="num balance-matrix-cell" title="${escapeHtml(title)}">
+              <strong>${formatBalanceAmount(row.total)}</strong>
+              <small>${escapeHtml(uiText("Free"))} ${formatBalanceAmount(row.free)}${reserved > 0 ? ` · ${escapeHtml(uiText("In Orders"))} ${formatBalanceAmount(reserved)}` : ""}</small>
+            </td>
           `;
-          body.appendChild(tr);
-        }
+        }).join("");
+        tr.innerHTML = `
+          <td class="balance-currency-cell"><strong>${escapeHtml(currency)}</strong></td>
+          ${accountCells}
+          <td class="num"><strong>${formatBalanceAmount(total)}</strong></td>
+          <td class="num">${priceCommon == null ? "--" : money.format(priceCommon)}</td>
+          <td class="num">${valueCommon == null ? "--" : `${money.format(valueCommon)} ${escapeHtml(commonCurrency)}`}</td>
+        `;
+        body.appendChild(tr);
       }
       if (!body.children.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="11">${escapeHtml(uiText("No balances match this currency."))}</td>`;
+        tr.innerHTML = `<td colspan="${columnCount}">${escapeHtml(uiText("No balances match this currency."))}</td>`;
         body.appendChild(tr);
+        return;
       }
+
+      const accountValues = visibleMaps.map((currencyMap) => accountBalanceValue([...currencyMap.values()]));
+      const grandValue = accountValues.every((value) => value != null)
+        ? accountValues.reduce((total, value) => total + Number(value || 0), 0)
+        : null;
+      foot.innerHTML = `
+        <tr>
+          <th>${escapeHtml(uiText("Account Value"))}</th>
+          ${accountValues.map((value) => `<td class="num"><strong>${value == null ? "--" : money.format(value)}</strong><small>${escapeHtml(commonCurrency)}</small></td>`).join("")}
+          <td class="num" colspan="3"><strong>${grandValue == null ? "--" : `${money.format(grandValue)} ${escapeHtml(commonCurrency)}`}</strong></td>
+        </tr>
+      `;
     }
 
     async function loadAccountBalanceDetails(options = {}) {

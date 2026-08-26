@@ -728,11 +728,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260826-monitor-balances2" defer></script>',
+            '<script src="/static/app.js?v=20260826-monitor-balances3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260826-monitor-balances2" defer></script>',
+            '<script src="/static/i18n.js?v=20260826-monitor-balances3" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -928,7 +928,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260826-monitor-balances2"),
+            INDEX_HTML.index("/static/styles.css?v=20260826-monitor-balances3"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1036,7 +1036,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances2">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances3">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -1470,10 +1470,14 @@ class WebMonitorTest(unittest.TestCase):
     def test_page_includes_account_balances(self) -> None:
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
-        self.assertIn('id="account-balance-cards"', HTML)
+        self.assertIn('id="account-balances-head"', HTML)
+        self.assertIn('id="account-balances-foot"', HTML)
+        self.assertIn("balance-matrix-table", HTML)
+        self.assertNotIn('id="account-balance-cards"', HTML)
         self.assertIn('id="balance-currency-filter"', HTML)
         self.assertIn('id="account-balances-refresh"', HTML)
-        self.assertIn("In Orders", HTML)
+        self.assertIn("balanceAccountHeader", HTML)
+        self.assertIn("aggregateBalanceCurrencies", HTML)
         self.assertIn("loadAccountBalanceDetails", HTML)
         self.assertIn('view=balances&sections=account-balances', HTML)
         self.assertIn("status: 1000", HTML)
