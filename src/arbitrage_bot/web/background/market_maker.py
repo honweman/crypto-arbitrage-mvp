@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..coordination import (
@@ -49,6 +49,152 @@ from .spot_grid import _raw_client_order_id, _raw_order_id
 
 MARKET_MAKER_FILL_SYNC_SECONDS = 30.0
 MARKET_MAKER_FILL_SYNC_LIMIT = 200
+MARKET_MAKER_AUTO_RECOVERY_SECONDS = 600.0
+MARKET_MAKER_AUTO_RECOVERY_STATUSES = frozenset(
+    {"blocked_by_risk", "execution_error", "error"}
+)
+
+
+@dataclass
+class _MarketMakerAutoRecovery:
+    delay_seconds: float = MARKET_MAKER_AUTO_RECOVERY_SECONDS
+    status: str = "inactive"
+    failure_started_at: float | None = None
+    next_check_at: float | None = None
+    last_check_at: float | None = None
+    recovered_at: float | None = None
+    attempt_count: int = 0
+    trigger_status: str | None = None
+    reason: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+        *,
+        delay_seconds: float = MARKET_MAKER_AUTO_RECOVERY_SECONDS,
+    ) -> _MarketMakerAutoRecovery:
+        recovery = cls(delay_seconds=max(0.0, float(delay_seconds)))
+        if not isinstance(payload, dict):
+            return recovery
+        recovery.status = str(payload.get("status") or "inactive")
+        recovery.failure_started_at = _optional_float(
+            payload.get("failure_started_at")
+        )
+        recovery.next_check_at = _optional_float(payload.get("next_check_at"))
+        recovery.last_check_at = _optional_float(payload.get("last_check_at"))
+        recovery.recovered_at = _optional_float(payload.get("recovered_at"))
+        recovery.attempt_count = max(0, int(payload.get("attempt_count") or 0))
+        recovery.trigger_status = str(payload.get("trigger_status") or "") or None
+        recovery.reason = str(payload.get("reason") or "") or None
+        return recovery
+
+    def schedule(
+        self,
+        trigger_status: str,
+        reason: str,
+        *,
+        now: float | None = None,
+    ) -> None:
+        checked_at = time.time() if now is None else float(now)
+        if self.failure_started_at is None:
+            self.failure_started_at = checked_at
+        self.status = "waiting"
+        self.next_check_at = checked_at + self.delay_seconds
+        self.recovered_at = None
+        self.trigger_status = str(trigger_status or "error")
+        self.reason = str(reason or "market maker requires a recovery check")
+
+    def waiting(self, *, now: float | None = None) -> bool:
+        checked_at = time.time() if now is None else float(now)
+        return bool(
+            self.status == "waiting"
+            and self.next_check_at is not None
+            and checked_at < self.next_check_at
+        )
+
+    def begin_if_due(self, *, now: float | None = None) -> bool:
+        checked_at = time.time() if now is None else float(now)
+        if (
+            self.status != "waiting"
+            or self.next_check_at is None
+            or checked_at < self.next_check_at
+        ):
+            return False
+        self.status = "checking"
+        self.next_check_at = None
+        self.last_check_at = checked_at
+        self.attempt_count += 1
+        return True
+
+    def mark_recovered(self, *, now: float | None = None) -> None:
+        if self.status not in {"waiting", "checking"}:
+            return
+        self.status = "recovered"
+        self.next_check_at = None
+        self.recovered_at = time.time() if now is None else float(now)
+
+    def clear(self) -> None:
+        self.status = "inactive"
+        self.failure_started_at = None
+        self.next_check_at = None
+        self.last_check_at = None
+        self.recovered_at = None
+        self.attempt_count = 0
+        self.trigger_status = None
+        self.reason = None
+
+    def to_dict(self, *, now: float | None = None) -> dict[str, Any]:
+        checked_at = time.time() if now is None else float(now)
+        return {
+            "enabled": True,
+            "delay_seconds": self.delay_seconds,
+            "status": self.status,
+            "failure_started_at": self.failure_started_at,
+            "next_check_at": self.next_check_at,
+            "next_check_in_seconds": (
+                max(0.0, self.next_check_at - checked_at)
+                if self.next_check_at is not None
+                else None
+            ),
+            "last_check_at": self.last_check_at,
+            "recovered_at": self.recovered_at,
+            "attempt_count": self.attempt_count,
+            "trigger_status": self.trigger_status,
+            "reason": self.reason,
+        }
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_maker_recovery_reason(payload: dict[str, Any]) -> str:
+    risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
+    execution = (
+        payload.get("execution")
+        if isinstance(payload.get("execution"), dict)
+        else {}
+    )
+    for items in (
+        risk.get("reasons"),
+        execution.get("errors"),
+        execution.get("create_errors"),
+        execution.get("cancel_errors"),
+    ):
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                text = str(item.get("error") or item.get("reason") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                return text
+    return str(payload.get("reason") or payload.get("status") or "MM recovery required")
 
 
 def _market_maker_fill_rows(
@@ -425,15 +571,24 @@ async def _market_maker_instance_task_loop(
     instance_id: str,
     user_workspace_store: UserWorkspaceStore | None = None,
     user_strategy_id: str = "",
+    *,
+    auto_recovery_seconds: float = MARKET_MAKER_AUTO_RECOVERY_SECONDS,
+    initial_auto_recovery: dict[str, Any] | None = None,
+    initial_runtime: dict[str, Any] | None = None,
 ) -> None:
+    initial_runtime = initial_runtime if isinstance(initial_runtime, dict) else {}
     manager = ExchangeManager()
     orderbook_cache = OrderBookCache(manager)
-    open_order_ids: list[str] = []
-    open_order_exchange = ""
-    open_order_symbol = ""
-    placed_count = 0
-    canceled_count = 0
-    cycle_count = 0
+    open_order_ids = [
+        str(order_id)
+        for order_id in initial_runtime.get("open_order_ids", [])
+        if order_id
+    ]
+    open_order_exchange = str(initial_runtime.get("open_order_exchange") or "")
+    open_order_symbol = str(initial_runtime.get("open_order_symbol") or "")
+    placed_count = int(initial_runtime.get("placed_count") or 0)
+    canceled_count = int(initial_runtime.get("canceled_count") or 0)
+    cycle_count = int(initial_runtime.get("cycle_count") or 0)
     last_cancel_at: float | None = None
     previous_mid_price: float | None = None
     previous_plan: dict[str, Any] | None = None
@@ -453,6 +608,10 @@ async def _market_maker_instance_task_loop(
         "last_finished": None,
         "error": None,
     }
+    auto_recovery = _MarketMakerAutoRecovery.from_payload(
+        initial_auto_recovery,
+        delay_seconds=auto_recovery_seconds,
+    )
 
     async def publish_runtime(payload: dict[str, Any]) -> None:
         await state.set_market_maker_instance_runtime(
@@ -460,6 +619,7 @@ async def _market_maker_instance_task_loop(
             {
                 **payload,
                 "fill_sync": dict(fill_sync),
+                "auto_recovery": auto_recovery.to_dict(),
             },
         )
 
@@ -523,22 +683,24 @@ async def _market_maker_instance_task_loop(
                 "error": f"{exc.__class__.__name__}: {exc}",
             }
     runtime: dict[str, Any] = {
+        **initial_runtime,
         "id": instance_id,
         "status": "starting",
         "mode": "dry_run",
-        "open_order_ids": [],
-        "open_order_exchange": "",
-        "open_order_symbol": "",
-        "open_order_count": 0,
-        "open_orders": [],
+        "open_order_ids": open_order_ids,
+        "open_order_exchange": open_order_exchange,
+        "open_order_symbol": open_order_symbol,
+        "open_order_count": len(open_order_ids),
+        "open_orders": list(initial_runtime.get("open_orders") or []),
         "open_order_details_complete": False,
-        "placed_count": 0,
-        "canceled_count": 0,
-        "cycle_count": 0,
+        "placed_count": placed_count,
+        "canceled_count": canceled_count,
+        "cycle_count": cycle_count,
         "last_error": None,
         "market_data": None,
         "open_order_sync": None,
         "coordination_hold": None,
+        "auto_recovery": auto_recovery.to_dict(),
         "updated_at": time.time(),
     }
     try:
@@ -684,9 +846,11 @@ async def _market_maker_instance_task_loop(
                 strategy_paused=strategy_pauses.get("market_maker", False),
                 program_running=program_running,
             )
+            gate_live_allowed = live_allowed
             if not live_allowed:
                 previous_live_allowed = False
                 start_reconciliation_block_reason = None
+                auto_recovery.clear()
             elif start_reconciliation_block_reason and (
                 _market_order_reconciliation_is_clear(
                     manager.order_reliability_summary(),
@@ -719,6 +883,23 @@ async def _market_maker_instance_task_loop(
                     coordination_hold.get("reason")
                     or "temporarily paused for another strategy"
                 )
+            recovery_now = time.time()
+            scheduled_recovery_check = False
+            if gate_live_allowed and coordination_hold is None:
+                if auto_recovery.begin_if_due(now=recovery_now):
+                    scheduled_recovery_check = True
+                    status = "recovering"
+                    reason = "running the scheduled MM recovery preflight"
+                elif auto_recovery.waiting(now=recovery_now):
+                    live_allowed = False
+                    status = auto_recovery.trigger_status or "blocked_by_risk"
+                    remaining = auto_recovery.to_dict(now=recovery_now).get(
+                        "next_check_in_seconds"
+                    )
+                    reason = (
+                        f"{auto_recovery.reason}; automatic recovery check in "
+                        f"{max(0, int(float(remaining or 0)))} seconds"
+                    )
             starting_live_run = live_allowed and not previous_live_allowed
             previous_live_allowed = live_allowed
             try:
@@ -726,9 +907,10 @@ async def _market_maker_instance_task_loop(
                     previous_plan = None
                     previous_mid_price = None
                     active_maker_cfg = None
-                    placed_count = 0
-                    canceled_count = 0
-                    cycle_count = 0
+                    if not scheduled_recovery_check:
+                        placed_count = 0
+                        canceled_count = 0
+                        cycle_count = 0
                     last_cancel_at = None
                     exchange_cfg = _find_exchange_by_key(
                         runtime_cfg,
@@ -1095,6 +1277,17 @@ async def _market_maker_instance_task_loop(
                     payload["market_data"] = market_data
                     payload["runtime_strategy"] = "market_maker"
                     payload["strategy_instance_id"] = instance_id
+                    payload_status = str(payload.get("status") or "unknown")
+                    recovery_reason: str | None = None
+                    if payload_status in MARKET_MAKER_AUTO_RECOVERY_STATUSES:
+                        recovery_reason = _market_maker_recovery_reason(payload)
+                        auto_recovery.schedule(
+                            payload_status,
+                            recovery_reason,
+                        )
+                    elif payload_status in {"placed", "unchanged"}:
+                        auto_recovery.mark_recovered()
+                    payload["auto_recovery"] = auto_recovery.to_dict()
                     write_trade_event(runtime_cfg.trade_log, payload)
                     write_strategy_timeline_from_payload(
                         runtime_cfg.strategy_timeline,
@@ -1175,9 +1368,9 @@ async def _market_maker_instance_task_loop(
                         open_order_ids,
                     )
                     runtime = {
-                        "status": payload.get("status", "unknown"),
+                        "status": payload_status,
                         "mode": "live",
-                        "reason": None,
+                        "reason": recovery_reason,
                         "config": market_maker_config_to_dict(maker_cfg),
                         "open_order_ids": open_order_ids,
                         "open_order_exchange": open_order_exchange,
@@ -1201,7 +1394,11 @@ async def _market_maker_instance_task_loop(
                         "last_plan": payload.get("plan"),
                         "last_risk": payload.get("risk"),
                         "last_execution": execution,
-                        "last_error": None,
+                        "last_error": (
+                            recovery_reason
+                            if payload_status in {"execution_error", "error"}
+                            else None
+                        ),
                         "start_recovery": last_start_recovery,
                         "market_data": payload.get("market_data"),
                         "coordination_hold": None,
@@ -1211,11 +1408,31 @@ async def _market_maker_instance_task_loop(
                     if shutdown_requested:
                         raise asyncio.CancelledError
             except Exception as exc:  # noqa: BLE001
+                error_text = f"{exc.__class__.__name__}: {exc}"
+                auto_recovery.schedule("error", error_text)
+                previous_live_allowed = False
+                recovery_event = {
+                    "type": "market_maker_auto_recovery",
+                    "strategy": "market_maker",
+                    "runtime_strategy": "market_maker",
+                    "strategy_instance_id": instance_id,
+                    "mode": "live" if live_allowed else "dry_run",
+                    "status": "recovery_scheduled",
+                    "reason": error_text,
+                    "auto_recovery": auto_recovery.to_dict(),
+                }
+                write_trade_event(runtime_cfg.trade_log, recovery_event)
+                write_strategy_timeline_from_payload(
+                    runtime_cfg.strategy_timeline,
+                    recovery_event,
+                    source="market_maker_task",
+                )
                 runtime = {
                     **runtime,
                     "status": "error",
                     "mode": "live" if live_allowed else "dry_run",
-                    "last_error": f"{exc.__class__.__name__}: {exc}",
+                    "reason": error_text,
+                    "last_error": error_text,
                     "updated_at": time.time(),
                 }
                 await publish_runtime(runtime)
@@ -1232,8 +1449,12 @@ async def market_maker_task_loop(
     cfg: BotConfig,
     state: MonitorState,
     user_workspace_store: UserWorkspaceStore | None = None,
+    *,
+    auto_recovery_seconds: float = MARKET_MAKER_AUTO_RECOVERY_SECONDS,
 ) -> None:
     tasks: dict[str, asyncio.Task[None]] = {}
+    restart_recoveries: dict[str, _MarketMakerAutoRecovery] = {}
+    restart_runtimes: dict[str, dict[str, Any]] = {}
     await state.set_market_maker_runtime(
         {
             "status": "starting",
@@ -1271,28 +1492,63 @@ async def market_maker_task_loop(
             for instance_id, task in list(tasks.items()):
                 if not task.done():
                     continue
+                unexpected_error: str | None = None
                 try:
                     task.result()
                 except asyncio.CancelledError:
-                    raise
+                    if instance_id in configured_ids:
+                        unexpected_error = "MM instance task was unexpectedly canceled"
                 except Exception as exc:  # noqa: BLE001
+                    if instance_id in configured_ids:
+                        unexpected_error = f"{exc.__class__.__name__}: {exc}"
+                else:
+                    if instance_id in configured_ids:
+                        unexpected_error = "MM instance task terminated unexpectedly"
+                if unexpected_error is not None:
+                    recovery = restart_recoveries.setdefault(
+                        instance_id,
+                        _MarketMakerAutoRecovery(
+                            delay_seconds=max(0.0, float(auto_recovery_seconds))
+                        ),
+                    )
+                    recovery.schedule("error", unexpected_error)
+                    runtime_snapshot = await state.market_maker_runtime()
+                    previous_runtime = next(
+                        (
+                            item
+                            for item in runtime_snapshot.get("instances", [])
+                            if isinstance(item, dict)
+                            and str(item.get("id") or "") == instance_id
+                        ),
+                        {},
+                    )
+                    restart_runtimes[instance_id] = previous_runtime
                     await state.set_market_maker_instance_runtime(
                         instance_id,
                         {
-                            "id": instance_id,
+                            **previous_runtime,
                             "status": "error",
                             "mode": "dry_run",
-                            "last_error": f"{exc.__class__.__name__}: {exc}",
-                            "open_order_ids": [],
-                            "open_order_count": 0,
+                            "reason": unexpected_error,
+                            "last_error": unexpected_error,
+                            "auto_recovery": recovery.to_dict(),
                             "updated_at": time.time(),
                         },
                     )
+                else:
+                    restart_recoveries.pop(instance_id, None)
+                    restart_runtimes.pop(instance_id, None)
                 del tasks[instance_id]
 
             for maker_cfg in maker_configs:
                 if maker_cfg.id in tasks:
                     continue
+                initial_auto_recovery: dict[str, Any] | None = None
+                initial_runtime = restart_runtimes.pop(maker_cfg.id, None)
+                restart_recovery = restart_recoveries.get(maker_cfg.id)
+                if restart_recovery is not None:
+                    initial_auto_recovery = restart_recovery.to_dict()
+                    del restart_recoveries[maker_cfg.id]
                 tasks[maker_cfg.id] = asyncio.create_task(
                     _market_maker_instance_task_loop(
                         cfg,
@@ -1300,6 +1556,9 @@ async def market_maker_task_loop(
                         maker_cfg.id,
                         user_workspace_store,
                         user_strategy_ids.get(maker_cfg.id, ""),
+                        auto_recovery_seconds=auto_recovery_seconds,
+                        initial_auto_recovery=initial_auto_recovery,
+                        initial_runtime=initial_runtime,
                     )
                 )
 

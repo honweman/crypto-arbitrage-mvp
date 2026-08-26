@@ -7924,9 +7924,20 @@ function balanceStatusClass(status) {
       for (const instance of instances) {
         const status = instance?.runtime?.status || instance?.status || "disabled";
         const runtime = instance?.runtime || {};
+        const autoRecovery = runtime.auto_recovery || {};
+        const nextRecoveryIn = autoRecovery.next_check_at == null
+          ? null
+          : Math.max(0, Number(autoRecovery.next_check_at) - Date.now() / 1000);
+        const recoveryDetail = autoRecovery.status === "waiting"
+          ? ` · ${uiText("Automatic recheck pending")} ${formatDurationSeconds(nextRecoveryIn)}`
+          : autoRecovery.status === "checking"
+            ? ` · ${uiText("recovering")}`
+            : autoRecovery.status === "recovered"
+              ? ` · ${uiText("Recovered")}`
+              : "";
         const row = document.createElement("div");
         row.className = "instance-status-row";
-        const detail = `${instance?.mode || runtime.mode || "dry_run"} · open ${runtime.open_order_count ?? 0} · placed ${runtime.placed_count ?? 0} · canceled ${runtime.canceled_count ?? 0}`;
+        const detail = `${instance?.mode || runtime.mode || "dry_run"} · open ${runtime.open_order_count ?? 0} · placed ${runtime.placed_count ?? 0} · canceled ${runtime.canceled_count ?? 0}${recoveryDetail}`;
         const reason = friendlyAccountMessage(marketMakerStatusReason(instance)) || "--";
         row.innerHTML = `
           <div class="instance-status-name" title="${escapeHtml(marketMakerInstanceName(instance))}">${escapeHtml(marketMakerInstanceName(instance))}</div>

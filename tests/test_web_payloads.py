@@ -728,11 +728,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260826-monitor-balances4" defer></script>',
+            '<script src="/static/app.js?v=20260826-mm-recovery1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260826-monitor-balances4" defer></script>',
+            '<script src="/static/i18n.js?v=20260826-mm-recovery1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -740,6 +740,11 @@ class WebMonitorTest(unittest.TestCase):
             INDEX_HTML,
         )
         self.assertIn('id="user-setup-readiness"', INDEX_HTML)
+
+    def test_market_maker_status_shows_scheduled_recovery_countdown(self) -> None:
+        self.assertIn("runtime.auto_recovery || {}", APP_JS)
+        self.assertIn('autoRecovery.status === "waiting"', APP_JS)
+        self.assertIn('uiText("Automatic recheck pending")', APP_JS)
 
     def test_page_exposes_explicit_perpetual_auto_buy_sell_actions(self) -> None:
         self.assertIn('<select id="slow-instrument-type">', INDEX_HTML)
@@ -928,7 +933,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260826-monitor-balances4"),
+            INDEX_HTML.index("/static/styles.css?v=20260826-mm-recovery1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1036,7 +1041,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances4">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260826-mm-recovery1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
