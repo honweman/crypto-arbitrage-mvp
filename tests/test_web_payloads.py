@@ -728,11 +728,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260826-monitor-balances3" defer></script>',
+            '<script src="/static/app.js?v=20260826-monitor-balances4" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260826-monitor-balances3" defer></script>',
+            '<script src="/static/i18n.js?v=20260826-monitor-balances4" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -928,7 +928,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260826-monitor-balances3"),
+            INDEX_HTML.index("/static/styles.css?v=20260826-monitor-balances4"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1036,7 +1036,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances3">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances4">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -1478,6 +1478,10 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="account-balances-refresh"', HTML)
         self.assertIn("balanceAccountHeader", HTML)
         self.assertIn("aggregateBalanceCurrencies", HTML)
+        matrix_head = HTML.split('head.innerHTML = `', 1)[1].split('`;', 1)[0]
+        self.assertLess(matrix_head.index('uiText("Total")'), matrix_head.index("accounts.map"))
+        self.assertLess(matrix_head.index('uiText("Price")'), matrix_head.index("accounts.map"))
+        self.assertLess(matrix_head.index('uiText("Value")'), matrix_head.index("accounts.map"))
         self.assertIn("loadAccountBalanceDetails", HTML)
         self.assertIn('view=balances&sections=account-balances', HTML)
         self.assertIn("status: 1000", HTML)

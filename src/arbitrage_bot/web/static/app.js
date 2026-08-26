@@ -1160,10 +1160,10 @@ function balanceStatusClass(status) {
       head.innerHTML = `
         <tr>
           <th>${escapeHtml(uiText("Currency"))}</th>
-          ${accounts.map((account) => `<th class="num balance-account-column">${balanceAccountHeader(account)}</th>`).join("")}
           <th class="num">${escapeHtml(uiText("Total"))}</th>
           <th class="num">${escapeHtml(uiText("Price"))}</th>
           <th class="num">${escapeHtml(uiText("Value"))}</th>
+          ${accounts.map((account) => `<th class="num balance-account-column">${balanceAccountHeader(account)}</th>`).join("")}
         </tr>
       `;
       body.innerHTML = "";
@@ -1211,10 +1211,10 @@ function balanceStatusClass(status) {
         }).join("");
         tr.innerHTML = `
           <td class="balance-currency-cell"><strong>${escapeHtml(currency)}</strong></td>
-          ${accountCells}
           <td class="num"><strong>${formatBalanceAmount(total)}</strong></td>
           <td class="num">${priceCommon == null ? "--" : money.format(priceCommon)}</td>
           <td class="num">${valueCommon == null ? "--" : `${money.format(valueCommon)} ${escapeHtml(commonCurrency)}`}</td>
+          ${accountCells}
         `;
         body.appendChild(tr);
       }
@@ -1232,8 +1232,10 @@ function balanceStatusClass(status) {
       foot.innerHTML = `
         <tr>
           <th>${escapeHtml(uiText("Account Value"))}</th>
+          <td></td>
+          <td></td>
+          <td class="num"><strong>${grandValue == null ? "--" : `${money.format(grandValue)} ${escapeHtml(commonCurrency)}`}</strong></td>
           ${accountValues.map((value) => `<td class="num"><strong>${value == null ? "--" : money.format(value)}</strong><small>${escapeHtml(commonCurrency)}</small></td>`).join("")}
-          <td class="num" colspan="3"><strong>${grandValue == null ? "--" : `${money.format(grandValue)} ${escapeHtml(commonCurrency)}`}</strong></td>
         </tr>
       `;
     }
