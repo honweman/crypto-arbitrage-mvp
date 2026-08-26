@@ -1636,6 +1636,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["closed_order_count"], 1)
         self.assertEqual(payload["recent_trade_count"], 1)
         self.assertEqual(payload["open_orders"][0]["id"], "order-open-1")
+        self.assertAlmostEqual(payload["open_orders"][0]["open_notional"], 0.126)
         self.assertEqual(payload["recent_trades"][0]["order_id"], "order-closed-1")
         self.assertEqual(payload["recent_trades"][0]["fee"]["currency"], "USDC")
 

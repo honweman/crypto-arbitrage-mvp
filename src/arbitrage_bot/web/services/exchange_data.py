@@ -669,8 +669,12 @@ def _normalize_order(
     filled = _number_or_none(raw.get("filled"))
     remaining = _number_or_none(raw.get("remaining"))
     cost = _number_or_none(raw.get("cost"))
-    if cost is None and price is not None and amount is not None:
-        cost = price * amount
+    open_amount = remaining if remaining is not None else amount
+    open_notional = (
+        price * open_amount
+        if price is not None and open_amount is not None
+        else None
+    )
     return {
         "exchange": exchange.key,
         "label": exchange.label or exchange.key,
@@ -688,6 +692,7 @@ def _normalize_order(
         "filled": filled,
         "remaining": remaining,
         "cost": cost,
+        "open_notional": open_notional,
         "fee": _order_fee_payload(raw),
         "timestamp": _number_or_none(raw.get("timestamp")),
         "datetime": raw.get("datetime"),

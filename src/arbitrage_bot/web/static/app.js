@@ -856,6 +856,27 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       return Math.abs(value) >= 1_000_000 ? shortNumber.format(value) : fmt.format(value);
     }
 
+    function finiteOrderNumber(value) {
+      if (value == null || typeof value === "function" || typeof value === "object") return null;
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    function formatOrderNumber(value, currency = "") {
+      const numeric = finiteOrderNumber(value);
+      if (numeric == null) return "--";
+      const formatted = fmt.format(numeric);
+      return currency ? `${formatted} ${currency}` : formatted;
+    }
+
+    function orderOpenNotional(order) {
+      const explicit = finiteOrderNumber(order?.open_notional);
+      if (explicit != null) return explicit;
+      const price = finiteOrderNumber(order?.price);
+      const remaining = finiteOrderNumber(order?.remaining ?? order?.amount);
+      return price == null || remaining == null ? null : price * remaining;
+    }
+
     function formatBps(value) {
       if (value == null) return "--";
       const numeric = Number(value);
@@ -1808,16 +1829,18 @@ function balanceStatusClass(status) {
       for (const order of orders) {
         const tr = document.createElement("tr");
         const actionCell = showActions ? `<td class="order-action"></td>` : "";
+        const base = baseCurrency(order.symbol);
+        const quote = quoteCurrency(order.symbol);
         tr.innerHTML = `
           <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(order.exchange, order.label))}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(order.symbol || "--")}</td>
           <td data-label="${uiText("Side")}" class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Status")}">${escapeHtml(order.status || "--")}</td>
-          <td data-label="${uiText("Price")}" class="num">${order.price == null ? "--" : fmt.format(order.price)}</td>
-          <td data-label="${uiText("Amount")}" class="num">${formatBalanceAmount(order.amount)}</td>
-          <td data-label="${uiText("Filled")}" class="num">${formatBalanceAmount(order.filled)}</td>
-          <td data-label="${uiText("Remaining")}" class="num">${formatBalanceAmount(order.remaining)}</td>
-          <td data-label="${uiText("Cost")}" class="num">${formatBalanceAmount(order.cost)}</td>
+          <td data-label="${uiText("Price")}" class="num">${formatOrderNumber(order.price, quote)}</td>
+          <td data-label="${uiText("Order Qty")}" class="num">${formatOrderNumber(order.amount, base)}</td>
+          <td data-label="${uiText("Filled")}" class="num">${formatOrderNumber(order.filled, base)}</td>
+          <td data-label="${uiText("Remaining")}" class="num">${formatOrderNumber(order.remaining, base)}</td>
+          <td data-label="${uiText("Open Value")}" class="num">${formatOrderNumber(orderOpenNotional(order), quote)}</td>
           <td data-label="${uiText("Updated")}">${formatTimestamp(order.timestamp)}</td>
           ${actionCell}
         `;
@@ -1850,14 +1873,16 @@ function balanceStatusClass(status) {
 
       for (const fill of fills) {
         const tr = document.createElement("tr");
+        const base = baseCurrency(fill.symbol);
+        const quote = quoteCurrency(fill.symbol);
         tr.innerHTML = `
           <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(fill.exchange, fill.label))}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(fill.symbol || "--")}</td>
           <td data-label="${uiText("Side")}" class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Source")}">${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
-          <td data-label="${uiText("Price")}" class="num">${fill.price == null ? "--" : fmt.format(fill.price)}</td>
-          <td data-label="${uiText("Amount")}" class="num">${formatBalanceAmount(fill.amount)}</td>
-          <td data-label="${uiText("Cost")}" class="num">${formatBalanceAmount(fill.cost)}</td>
+          <td data-label="${uiText("Price")}" class="num">${formatOrderNumber(fill.price, quote)}</td>
+          <td data-label="${uiText("Amount")}" class="num">${formatOrderNumber(fill.amount, base)}</td>
+          <td data-label="${uiText("Cost")}" class="num">${formatOrderNumber(fill.cost, quote)}</td>
           <td data-label="${uiText("P/L")}" class="num ${pnlClass(fill.realized_pnl_common)}">${formatPnlValue(fill.realized_pnl_common)}</td>
           <td data-label="${uiText("Fee")}">${escapeHtml(formatFee(fill.fee))}</td>
           <td data-label="${uiText("Order")}" title="${escapeHtml(fill.order_id || "")}">${escapeHtml(shortId(fill.order_id))}</td>
