@@ -12,12 +12,17 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    ]);
 	    let currentPage = pageFromLocation();
 	    let lastState = null;
+	    let accountBalanceDetailPayload = null;
+	    let accountBalanceDetailLoadedAt = 0;
+	    let accountBalanceDetailLoading = false;
+	    let accountBalanceDetailSignature = "";
 	    let headerStatusIssue = null;
 	    let refreshQueued = false;
 	    const pageStateCache = {};
-	    const PAGE_RENDER_INTERVAL_MS = { status: 1500, trading: 2000, quant: 4000, settings: 3000, records: 2000 };
-	    const PAGE_REFRESH_INTERVAL_MS = { status: 2000, trading: 3000, quant: 6000, settings: 5000, records: 3500 };
+	    const PAGE_RENDER_INTERVAL_MS = { status: 750, trading: 2000, quant: 4000, settings: 3000, records: 2000 };
+	    const PAGE_REFRESH_INTERVAL_MS = { status: 1000, trading: 3000, quant: 6000, settings: 5000, records: 3500 };
 	    const REFRESH_INTERVAL_MS = PAGE_REFRESH_INTERVAL_MS.status;
+	    const BALANCE_DETAIL_REFRESH_INTERVAL_MS = 3000;
 	    const REFRESH_FAILURE_BACKOFF_MS = 15000;
 	    const REFRESH_JITTER_MS = 300;
 	    const LIVE_AUTO_BUY_SELL_CONFIRMATION = "ENABLE LIVE AUTO BUY SELL";
@@ -41,7 +46,6 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        "overview",
 	        "readiness-actions",
 	        "markets",
-	        "account-balances",
 	        "rates",
 	        "opportunities",
 	        "holders",
@@ -202,6 +206,8 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        const overview = document.getElementById("overview");
 	        const onchain = document.getElementById("onchain-monitor-section");
 	        if (overview && onchain) overview.insertAdjacentElement("afterend", onchain);
+	        const balances = document.getElementById("account-balances-section");
+	        if (overview && balances) overview.insertAdjacentElement("afterend", balances);
 	      }
       for (const id of PAGE_DOM_ORDER[page] || []) {
         const section = document.getElementById(id);
@@ -236,6 +242,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	        renderCommonState(lastState);
 	      }
 	      if (options.refresh !== false) refresh({ force: true });
+	      if (activePage === "status") loadAccountBalanceDetails({ force: true });
 	      ensureStateStream();
 	    }
 
@@ -977,6 +984,98 @@ function balanceStatusClass(status) {
       return exchange ? `platform:${exchange}` : "";
     }
 
+    function selectedBalanceCurrency() {
+      return String(document.getElementById("balance-currency-filter")?.value || "")
+        .trim()
+        .toUpperCase();
+    }
+
+    function syncBalanceCurrencyFilter(accountBalances) {
+      const select = document.getElementById("balance-currency-filter");
+      if (!select) return;
+      const previous = String(select.value || "").toUpperCase();
+      const currencies = [...new Set(
+        (accountBalances?.accounts || []).flatMap((account) =>
+          (account.balance?.currencies || [])
+            .filter(isDisplayableBalance)
+            .map((row) => String(row.currency || "").toUpperCase())
+            .filter(Boolean)
+        )
+      )].sort();
+      const signature = currencies.join("|");
+      if (select.dataset.signature === signature) return;
+      select.dataset.signature = signature;
+      select.innerHTML = `<option value="">${escapeHtml(uiText("All currencies"))}</option>`;
+      for (const currency of currencies) {
+        const option = document.createElement("option");
+        option.value = currency;
+        option.textContent = currency;
+        select.appendChild(option);
+      }
+      select.value = currencies.includes(previous) ? previous : "";
+    }
+
+    function accountBalanceValue(rows) {
+      if (!(rows || []).length) return null;
+      const values = (rows || []).map(balanceCommonValue);
+      if (values.some((value) => value == null)) return null;
+      return values.reduce((total, value) => total + Number(value || 0), 0);
+    }
+
+    function renderAccountBalanceCards(accounts, commonCurrency) {
+      const host = document.getElementById("account-balance-cards");
+      if (!host) return;
+      host.innerHTML = "";
+      if (!accounts.length) {
+        host.innerHTML = `<div class="account-balance-empty subtle">${escapeHtml(uiText("No account balances yet."))}</div>`;
+        return;
+      }
+      for (const account of accounts) {
+        const { visible } = visibleBalanceRows(account.balance?.currencies || []);
+        const currency = selectedBalanceCurrency();
+        const rows = currency
+          ? visible.filter((row) => String(row.currency || "").toUpperCase() === currency)
+          : visible;
+        if (currency && !rows.length) continue;
+        const totalValue = accountBalanceValue(rows);
+        const reservedValue = rows.reduce((total, row) => {
+          const rowTotal = Number(row.total || 0);
+          const rowValue = balanceCommonValue(row);
+          const reserved = Number(row.open_order_reserved || 0);
+          if (!rowTotal || rowValue == null) return total;
+          return total + (reserved / rowTotal) * rowValue;
+        }, 0);
+        const status = String(account.status || "unknown");
+        const card = document.createElement("article");
+        card.className = "account-balance-card";
+        const marketType = String(account.market_type || "spot").toUpperCase();
+        const symbols = (account.symbols || []).slice(0, 3).join(", ");
+        const issue = account.balance?.error
+          || (account.errors || [])[0]
+          || (account.warnings || [])[0]
+          || "";
+        card.innerHTML = `
+          <div class="account-balance-card-head">
+            <strong>${escapeHtml(displayExchange(account.exchange, account.label))}</strong>
+            <span class="account-balance-status ${balanceStatusClass(status)}">${escapeHtml(status)}</span>
+          </div>
+          <div class="account-balance-card-value">${totalValue == null ? "--" : `${money.format(totalValue)} ${escapeHtml(commonCurrency)}`}</div>
+          <div class="account-balance-card-stats">
+            <span>${rows.length} ${escapeHtml(uiText("currencies"))}</span>
+            <span>${escapeHtml(marketType)}</span>
+            <span>${reservedValue > 0 ? `${money.format(reservedValue)} ${escapeHtml(commonCurrency)} ${escapeHtml(uiText("in orders"))}` : escapeHtml(uiText("No reserved funds"))}</span>
+          </div>
+          <div class="account-balance-card-meta" title="${escapeHtml(issue || symbols)}">
+            ${escapeHtml(symbols || uiText("All synced balances"))} · ${escapeHtml(formatAge(account.checked_at || accountBalanceDetailPayload?.last_finished))}
+          </div>
+        `;
+        host.appendChild(card);
+      }
+      if (!host.children.length) {
+        host.innerHTML = `<div class="account-balance-empty subtle">${escapeHtml(uiText("No balances match this currency."))}</div>`;
+      }
+    }
+
     function renderAccountBalanceSummary(accountBalances) {
       const { visible: visibleTotals, hiddenCount } = visibleBalanceRows(accountBalances?.totals || []);
       const totals = sortBalanceCurrencies(visibleTotals);
@@ -1019,6 +1118,8 @@ function balanceStatusClass(status) {
 
     function renderAccountBalances(accountBalances) {
       const filtered = accountBalancesForProfile(accountBalances);
+      syncBalanceCurrencyFilter(filtered);
+      const currencyFilter = selectedBalanceCurrency();
       const filteredRows = (filtered?.accounts || []).flatMap(
         (account) => account.balance?.currencies || []
       );
@@ -1033,23 +1134,49 @@ function balanceStatusClass(status) {
           : ""
       );
 
+      const accounts = filtered?.accounts || [];
+      const commonCurrency = String(lastState?.config?.common_quote_currency || "USD").toUpperCase();
+      const signature = JSON.stringify([
+        filtered?.last_finished || 0,
+        currencyFilter,
+        document.getElementById("profile-account")?.value || "",
+        accounts.map((account) => [
+          accountBalanceFilterKey(account),
+          account.status,
+          account.checked_at,
+          (account.balance?.currencies || []).map((row) => [
+            row.currency,
+            row.free,
+            row.used,
+            row.total,
+            row.open_order_reserved,
+            row.value_common,
+          ]),
+        ]),
+      ]);
+      if (accountBalanceDetailSignature === signature) return;
+      accountBalanceDetailSignature = signature;
+      renderAccountBalanceCards(accounts, commonCurrency);
+
       const body = document.getElementById("account-balances");
       body.innerHTML = "";
-      const accounts = filtered?.accounts || [];
       if (accounts.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="6">No account balances yet.</td>`;
+        tr.innerHTML = `<td colspan="11">No account balances yet.</td>`;
         body.appendChild(tr);
         return;
       }
 
       for (const account of accounts) {
         const accountBalances = visibleBalanceRows(account.balance?.currencies || []);
-        const rows = sortBalanceCurrencies(accountBalances.visible);
+        const rows = sortBalanceCurrencies(accountBalances.visible).filter(
+          (row) => !currencyFilter || String(row.currency || "").toUpperCase() === currencyFilter
+        );
         const statusText = account.live_enabled
           ? uiText("Live enabled")
           : account.status || "--";
         if (rows.length === 0) {
+          if (currencyFilter) continue;
           const message = hiddenBalanceText(accountBalances.hiddenCount)
             || account.balance?.error
             || account.balance?.skipped_reason
@@ -1057,7 +1184,8 @@ function balanceStatusClass(status) {
           const tr = document.createElement("tr");
           tr.innerHTML = `
             <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
-            <td colspan="4">${escapeHtml(message)}</td>
+            <td>${escapeHtml(String(account.market_type || "spot").toUpperCase())}</td>
+            <td colspan="8">${escapeHtml(message)}</td>
             <td class="${balanceStatusClass(account.status)}">${escapeHtml(statusText)}</td>
           `;
           body.appendChild(tr);
@@ -1081,16 +1209,69 @@ function balanceStatusClass(status) {
             : row.tradable === false
               ? uiText("Funding balance is not directly tradable")
               : "";
+          const valueCommon = balanceCommonValue(row);
+          const total = Number(row.total || 0);
+          const priceCommon = Number(row.price_common)
+            || (valueCommon != null && total ? Number(valueCommon) / total : null);
           tr.innerHTML = `
             <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
+            <td>${escapeHtml(String(account.market_type || "spot").toUpperCase())}</td>
             <td title="${escapeHtml(usedTitle)}">${escapeHtml(currencyLabel)}</td>
             <td class="num">${formatBalanceAmount(row.free)}</td>
+            <td class="num">${reserved > 0 ? formatBalanceAmount(reserved) : "--"}</td>
             <td class="num" title="${escapeHtml(usedTitle)}">${formatBalanceAmount(row.used)}</td>
             <td class="num">${formatBalanceAmount(row.total)}</td>
+            <td class="num">${priceCommon == null ? "--" : money.format(priceCommon)}</td>
+            <td class="num">${valueCommon == null ? "--" : `${money.format(valueCommon)} ${escapeHtml(commonCurrency)}`}</td>
+            <td>${escapeHtml(formatAge(account.checked_at || filtered?.last_finished))}</td>
             <td class="${balanceStatusClass(account.status)}">${escapeHtml(statusText)}</td>
           `;
           body.appendChild(tr);
         }
+      }
+      if (!body.children.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="11">${escapeHtml(uiText("No balances match this currency."))}</td>`;
+        body.appendChild(tr);
+      }
+    }
+
+    async function loadAccountBalanceDetails(options = {}) {
+      if (currentPage !== "status" || accountBalanceDetailLoading) return;
+      const force = Boolean(options.force);
+      if (!force && accountBalanceDetailPayload
+        && Date.now() - accountBalanceDetailLoadedAt < BALANCE_DETAIL_REFRESH_INTERVAL_MS) {
+        return;
+      }
+      accountBalanceDetailLoading = true;
+      const button = document.getElementById("account-balances-refresh");
+      if (button) button.disabled = true;
+      try {
+        const response = await fetchWithTimeout(
+          "/api/state?view=balances&sections=account-balances",
+          { cache: "no-store" },
+        );
+        if (response.status === 401) {
+          window.location.assign("/login");
+          return;
+        }
+        if (!response.ok) throw new Error(`balance request failed (${response.status})`);
+        const payload = await response.json();
+        accountBalanceDetailPayload = payload.account_balances || null;
+        accountBalanceDetailLoadedAt = Date.now();
+        accountBalanceDetailSignature = "";
+        if (payload.quote_rates && lastState) lastState.quote_rates = payload.quote_rates;
+        renderProfileAccounts(accountBalanceDetailPayload);
+        renderAccountBalanceSummary(accountBalancesForProfile(accountBalanceDetailPayload));
+        renderAccountBalances(accountBalanceDetailPayload);
+        applyMobileTableLabels();
+      } catch (error) {
+        if (!accountBalanceDetailPayload) {
+          text("account-balances-meta", `${uiText("Data unavailable")} · ${error.message || error}`);
+        }
+      } finally {
+        accountBalanceDetailLoading = false;
+        if (button) button.disabled = false;
       }
     }
 
@@ -10041,7 +10222,9 @@ function balanceStatusClass(status) {
     function renderCommonState(data) {
       setHeaderStatus(data.status || "starting");
       renderAuthProfile(data.auth);
-      renderProfileAccounts(data.account_balances);
+      if (Array.isArray(data.account_balances?.accounts)) {
+        renderProfileAccounts(data.account_balances);
+      }
       document.getElementById("program-toggle").checked = data.program?.running !== false;
 
       text("scan-count", data.scan?.count ?? 0);
@@ -10054,7 +10237,9 @@ function balanceStatusClass(status) {
       text("common-quote", data.config?.common_quote_currency || "USD");
       text("warnings", (data.warnings || []).join(" · "));
       text("onchain-meta", data.onchain?.mint ? `${data.onchain.label || "Token"} · ${shortAddress(data.onchain.mint)} · ${formatAge(data.onchain.last_finished)}` : "");
-      renderAccountBalanceSummary(data.account_balances);
+      renderAccountBalanceSummary(accountBalancesForProfile(
+        accountBalanceDetailPayload || data.account_balances
+      ));
 
       const mmSelected = selectedMarketMakerInstance(data.market_maker) || data.market_maker;
       const mmInstances = marketMakerInstances(data.market_maker);
@@ -10200,9 +10385,12 @@ function balanceStatusClass(status) {
         return;
       }
       loadMarketTickers();
+      loadAccountBalanceDetails();
       renderOpenSection("readiness-actions", () => renderReadiness(data.readiness, data.runtime_store));
       renderOpenSection("markets", () => renderMarkets(data.markets));
-      renderOpenSection("account-balances", () => renderAccountBalances(data.account_balances));
+      renderOpenSection("account-balances", () => renderAccountBalances(
+        accountBalanceDetailPayload || data.account_balances
+      ));
       renderOpenSection("rates", () => renderRates(data.quote_rates));
       renderOpenSection("opportunities", () => renderOpportunities(data.opportunities));
       renderOpenSection("holders", () => renderHolders(data.onchain));
@@ -10383,7 +10571,19 @@ function balanceStatusClass(status) {
     });
     document.getElementById("profile-asset").addEventListener("change", updateProfileAsset);
     document.getElementById("profile-account").addEventListener("change", (event) => {
-      renderAccountBalances(lastState?.account_balances);
+      accountBalanceDetailSignature = "";
+      renderAccountBalanceSummary(accountBalancesForProfile(
+        accountBalanceDetailPayload || lastState?.account_balances
+      ));
+      renderAccountBalances(accountBalanceDetailPayload || lastState?.account_balances);
+    });
+    document.getElementById("balance-currency-filter").addEventListener("change", () => {
+      accountBalanceDetailSignature = "";
+      renderAccountBalances(accountBalanceDetailPayload || lastState?.account_balances);
+      applyMobileTableLabels();
+    });
+    document.getElementById("account-balances-refresh").addEventListener("click", () => {
+      loadAccountBalanceDetails({ force: true });
     });
 	    document.getElementById("risk-form").addEventListener("input", markRiskFormDirty);
 	    document.getElementById("user-risk-profile-form").addEventListener("input", () => {

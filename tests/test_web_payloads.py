@@ -728,11 +728,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260825-owner-mm-edit1" defer></script>',
+            '<script src="/static/app.js?v=20260826-monitor-balances2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260821-status-detail1" defer></script>',
+            '<script src="/static/i18n.js?v=20260826-monitor-balances2" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -928,7 +928,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260821-status-detail1"),
+            INDEX_HTML.index("/static/styles.css?v=20260826-monitor-balances2"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1036,7 +1036,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260821-status-detail1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances2">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
@@ -1198,6 +1198,11 @@ class WebMonitorTest(unittest.TestCase):
             },
         }
         status_overview = state_payload_for_view(payload, "status", sections="overview")
+        balance_detail = state_payload_for_view(
+            payload,
+            "balances",
+            sections="account-balances",
+        )
         quant_overview = state_payload_for_view(
             payload, "quant", sections="backtest-points"
         )
@@ -1231,6 +1236,14 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(status_overview["readiness"], {})
         self.assertIn("totals", status_overview["account_balances"])
         self.assertNotIn("accounts", status_overview["account_balances"])
+        self.assertEqual(balance_detail["status"], "running")
+        self.assertEqual(
+            balance_detail["account_balances"]["accounts"],
+            [{"id": "coinbase"}],
+        )
+        self.assertEqual(balance_detail["quote_rates"], {"USD": 1.0})
+        self.assertNotIn("market_maker", balance_detail)
+        self.assertNotIn("operations", balance_detail)
         self.assertNotIn("derivatives", status_overview)
         self.assertNotIn(
             "orders",
@@ -1457,6 +1470,13 @@ class WebMonitorTest(unittest.TestCase):
     def test_page_includes_account_balances(self) -> None:
         self.assertIn("Account Balances", HTML)
         self.assertIn('id="account-balances"', HTML)
+        self.assertIn('id="account-balance-cards"', HTML)
+        self.assertIn('id="balance-currency-filter"', HTML)
+        self.assertIn('id="account-balances-refresh"', HTML)
+        self.assertIn("In Orders", HTML)
+        self.assertIn("loadAccountBalanceDetails", HTML)
+        self.assertIn('view=balances&sections=account-balances', HTML)
+        self.assertIn("status: 1000", HTML)
 
     def test_page_includes_derivatives_risk_panel(self) -> None:
         self.assertIn("Derivatives Risk", HTML)

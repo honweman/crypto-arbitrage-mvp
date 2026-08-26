@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 
-STATE_VIEW_IDS = {"status", "trading", "quant", "settings", "records"}
+STATE_VIEW_IDS = {"status", "trading", "quant", "settings", "records", "balances"}
 
 
 def _section_set(sections: Iterable[str] | str | None) -> set[str] | None:
@@ -593,6 +593,18 @@ def state_payload_for_view(
 ) -> dict[str, Any]:
     if view not in STATE_VIEW_IDS:
         return payload
+
+    if view == "balances":
+        return {
+            "status": payload.get("status"),
+            "config": _compact_config_payload(payload.get("config", {})),
+            "portfolio": payload.get("portfolio", {}),
+            "quote_rates": payload.get("quote_rates", {}),
+            "account_balances": _compact_account_balances_payload(
+                payload.get("account_balances", {}),
+                full=True,
+            ),
+        }
 
     is_status = view == "status"
     is_trading = view == "trading"

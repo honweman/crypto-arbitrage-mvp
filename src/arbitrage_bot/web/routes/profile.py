@@ -318,6 +318,8 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
             filtered.get("account_balances"),
             quote_rates=runtime_cfg.quote_rates,
         )
+        if view == "status" and "account-balances" not in requested_sections:
+            filtered["account_balances"].pop("accounts", None)
     return filtered
 
 

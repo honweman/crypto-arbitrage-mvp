@@ -7,7 +7,7 @@
   <title>Crypto Trading Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/theme.js?v=20260821-status-detail1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=20260821-status-detail1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260826-monitor-balances2">
 
 </head>
 <body>
@@ -1570,20 +1570,35 @@
       </div>
     </section>
 
-    <section data-page="status" class="compact-section">
+    <section id="account-balances-section" data-page="status" class="compact-section section-open">
       <div class="section-title">
         <h2>Account Balances</h2>
         <span id="account-balances-meta" class="subtle"></span>
       </div>
+      <div class="balance-toolbar">
+        <label>
+          <span>Currency</span>
+          <select id="balance-currency-filter" aria-label="Balance currency filter">
+            <option value="">All currencies</option>
+          </select>
+        </label>
+        <button id="account-balances-refresh" class="ghost-button" type="button">Refresh</button>
+      </div>
+      <div id="account-balance-cards" class="account-balance-cards" aria-live="polite"></div>
       <div class="table-wrap">
         <table class="balance-table mobile-card-table">
           <thead>
             <tr>
               <th>Account</th>
+              <th>Type</th>
               <th>Currency</th>
               <th class="num">Free</th>
+              <th class="num">In Orders</th>
               <th class="num">Used</th>
               <th class="num">Total</th>
+              <th class="num">Price</th>
+              <th class="num">Value</th>
+              <th>Updated</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -2734,8 +2749,8 @@
     </div>
   </dialog>
 
-  <script src="/static/i18n.js?v=20260821-status-detail1" defer></script>
-  <script src="/static/app.js?v=20260825-owner-mm-edit1" defer></script>
+  <script src="/static/i18n.js?v=20260826-monitor-balances2" defer></script>
+  <script src="/static/app.js?v=20260826-monitor-balances2" defer></script>
 
 </body>
 </html>
