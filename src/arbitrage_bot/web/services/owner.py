@@ -248,7 +248,6 @@ def _owner_live_trading_console(
     terminal_statuses = {
         "complete",
         "stopped",
-        "stopped_by_price",
         "below_min_order_quote",
     }
     task_snapshot = auto_buy_sell_payload.get("tasks")

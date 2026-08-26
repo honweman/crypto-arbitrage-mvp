@@ -266,7 +266,7 @@ def build_trading_console_payload(
         task
         for task in (auto_buy_sell_tasks or {}).get("tasks", [])
         if task.get("status")
-        not in {"complete", "stopped_by_price", "below_min_order_quote"}
+        not in {"complete", "stopped", "below_min_order_quote"}
     ]
     first_auto_task = auto_tasks[0] if auto_tasks else {}
     first_auto_config = (

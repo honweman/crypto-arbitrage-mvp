@@ -2710,7 +2710,7 @@ function balanceStatusClass(status) {
 
       const auto = data.slow_execution || {};
       const autoTasks = auto.tasks?.tasks || [];
-      const activeTasks = autoTasks.filter((task) => !["complete", "stopped_by_price", "below_min_order_quote"].includes(task.status));
+      const activeTasks = autoTasks.filter((task) => !["complete", "stopped", "below_min_order_quote"].includes(task.status));
       const autoStatus = auto.tasks
         ? `${activeTasks.length}/${autoTasks.length} active`
         : (auto.status || "disabled");
@@ -6489,7 +6489,7 @@ function balanceStatusClass(status) {
       return seconds <= 0 ? "due" : `${seconds.toFixed(0)}s`;
     }
 
-    const AUTO_TERMINAL_STATUSES = new Set(["complete", "stopped", "stopped_by_price", "below_min_order_quote"]);
+    const AUTO_TERMINAL_STATUSES = new Set(["complete", "stopped", "below_min_order_quote"]);
     const AUTO_CONFIG_COMPARE_FIELDS = [
       ["exchange", "Account", "string"],
       ["symbol", "Symbol", "string"],
@@ -6684,7 +6684,9 @@ function balanceStatusClass(status) {
 
     function autoTaskStartGateStatus(task, config) {
       const plan = task.last_plan || {};
-      if (plan.status !== "waiting_for_start_price") return "";
+      const waiting = plan.status === "waiting_for_start_price"
+        || (task.status === "waiting_for_start_price" && !task.start_price_triggered);
+      if (!waiting) return "";
       const trigger = Number(plan.trigger_price);
       const start = Number(config.start_price ?? plan.start_price);
       if (!(trigger > 0) || !(start > 0)) return uiText("Waiting for start price");
@@ -6708,6 +6710,7 @@ function balanceStatusClass(status) {
         `placed: ${task.placed_count || 0}`,
         `canceled: ${task.canceled_count || 0}`,
         `start: ${task.start_price_triggered ? "triggered" : "waiting"}`,
+        `stop rearms: ${task.stop_price_rearm_count || 0}`,
         autoStartGateText(config),
         autoStopGateText(config),
       ];

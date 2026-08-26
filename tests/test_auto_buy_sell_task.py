@@ -607,7 +607,7 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed_task["consecutive_error_count"], 0)
         self.assertEqual(manager.created, 1)
 
-    async def test_stop_price_cancels_open_orders_before_waiting_for_fill(self) -> None:
+    async def test_stop_price_cancels_open_orders_then_rearms_start_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
             slow_cfg = self._slow_cfg(
@@ -627,8 +627,12 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             second = await service.run_due_tasks(cfg, manager)
             second_task = second["tasks"][0]
 
-        self.assertEqual(second_task["status"], "stopped_by_price")
-        self.assertEqual(second_task["last_status"], "stopped_by_price")
+        self.assertEqual(second_task["status"], "waiting_for_start_price")
+        self.assertEqual(second_task["last_status"], "waiting_for_start_price")
+        self.assertFalse(second_task["start_price_triggered"])
+        self.assertIsNone(second_task["finished_at"])
+        self.assertGreater(second_task["next_run_at"], 0.0)
+        self.assertEqual(second_task["stop_price_rearm_count"], 1)
         self.assertEqual(second_task["open_order_ids"], [])
         self.assertEqual(second_task["open_order_count"], 0)
         self.assertEqual(second_task["last_execution"]["reason"], "stop_price_reached")
@@ -655,14 +659,156 @@ class AutoBuySellTaskTest(unittest.IsolatedAsyncioTestCase):
             manager.cancel_keeps_open = False
             service._tasks[0].next_run_at = 0.0
             retried = await service.run_due_tasks(cfg, manager)
-            stopped = retried["tasks"][0]
+            rearmed = retried["tasks"][0]
 
         self.assertEqual(pending["tasks"][0]["status"], "stop_cancel_pending")
-        self.assertEqual(stopped["status"], "stopped_by_price")
-        self.assertEqual(stopped["open_order_ids"], [])
-        self.assertEqual(stopped["last_execution"]["reason"], "stop_price_reached")
+        self.assertEqual(
+            pending["tasks"][0]["last_execution"]["target_status"],
+            "waiting_for_start_price",
+        )
+        self.assertEqual(rearmed["status"], "waiting_for_start_price")
+        self.assertFalse(rearmed["start_price_triggered"])
+        self.assertEqual(rearmed["stop_price_rearm_count"], 1)
+        self.assertEqual(rearmed["open_order_ids"], [])
+        self.assertEqual(rearmed["last_execution"]["reason"], "stop_price_reached")
         self.assertEqual(manager.canceled, 2)
         self.assertEqual(manager.created, 1)
+
+    async def test_finite_task_resumes_at_start_price_until_target_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            slow_cfg = self._slow_cfg(
+                total_base=10.0,
+                start_price=0.00016,
+                stop_price=0.00017,
+                order_ttl_seconds=30.0,
+            )
+            await service.create_task(slow_cfg)
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp, slow_execution=slow_cfg)
+
+            await service.run_due_tasks(cfg, manager)
+            manager.open_order_ids = []
+            manager.trades = [
+                {
+                    "id": "trade-1",
+                    "order": "order-1",
+                    "amount": 5.0,
+                    "cost": 0.0008,
+                    "timestamp": 1_000_000,
+                }
+            ]
+            manager.ask_price = 0.00018
+            service._tasks[0].next_run_at = 0.0
+            stopped = await service.run_due_tasks(cfg, manager)
+
+            manager.ask_price = 0.000165
+            service._tasks[0].order_created_at["order-1"] = time.time() - 2.0
+            service._tasks[0].next_run_at = 0.0
+            waiting = await service.run_due_tasks(cfg, manager)
+
+            manager.ask_price = 0.00015
+            service._tasks[0].next_run_at = 0.0
+            resumed = await service.run_due_tasks(cfg, manager)
+
+            manager.open_order_ids = []
+            manager.trades.append(
+                {
+                    "id": "trade-2",
+                    "order": "order-2",
+                    "amount": 5.0,
+                    "cost": 0.00075,
+                    "timestamp": 2_000_000,
+                }
+            )
+            service._tasks[0].next_run_at = 0.0
+            completed = await service.run_due_tasks(cfg, manager)
+
+        self.assertEqual(stopped["tasks"][0]["status"], "waiting_for_start_price")
+        self.assertAlmostEqual(stopped["tasks"][0]["filled_base"], 5.0)
+        self.assertEqual(waiting["tasks"][0]["status"], "waiting_for_start_price")
+        self.assertEqual(manager.created, 2)
+        self.assertEqual(resumed["tasks"][0]["open_order_ids"], ["order-2"])
+        self.assertTrue(resumed["tasks"][0]["start_price_triggered"])
+        self.assertEqual(completed["tasks"][0]["status"], "complete")
+        self.assertAlmostEqual(completed["tasks"][0]["filled_base"], 10.0)
+        self.assertAlmostEqual(completed["tasks"][0]["progress_pct"], 100.0)
+
+    async def test_unlimited_task_rearms_and_resumes_indefinitely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            slow_cfg = replace(
+                self._slow_cfg(
+                    total_base=0.0,
+                    start_price=0.00016,
+                    stop_price=0.00017,
+                    order_ttl_seconds=30.0,
+                ),
+                unlimited_total=True,
+            )
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(slow_cfg)
+            manager = FakeTaskManager()
+            cfg = self._cfg(tmp, slow_execution=slow_cfg)
+
+            await service.run_due_tasks(cfg, manager)
+            manager.ask_price = 0.00018
+            service._tasks[0].next_run_at = 0.0
+            rearmed = await service.run_due_tasks(cfg, manager)
+
+            manager.ask_price = 0.00015
+            service._tasks[0].order_created_at["order-1"] = time.time() - 2.0
+            service._tasks[0].next_run_at = 0.0
+            resumed = await service.run_due_tasks(cfg, manager)
+
+        self.assertEqual(rearmed["tasks"][0]["status"], "waiting_for_start_price")
+        self.assertEqual(rearmed["tasks"][0]["progress_mode"], "unlimited")
+        self.assertEqual(resumed["tasks"][0]["status"], "waiting_for_fill")
+        self.assertEqual(resumed["tasks"][0]["open_order_ids"], ["order-2"])
+        self.assertEqual(manager.created, 2)
+
+    async def test_store_migrates_incomplete_stopped_by_price_task_to_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tasks.json"
+            service = AutoBuySellTaskService(path)
+            await service.create_task(
+                self._slow_cfg(start_price=0.00016, stop_price=0.00017)
+            )
+            service._tasks[0].status = "stopped_by_price"
+            service._tasks[0].last_status = "stopped_by_price"
+            service._tasks[0].finished_at = time.time()
+            service._tasks[0].filled_base = 5.0
+            service.store.save(service._tasks)
+
+            loaded = AutoBuySellTaskStore(path).load()[0]
+
+        self.assertEqual(loaded.status, "waiting_for_start_price")
+        self.assertEqual(loaded.last_status, "waiting_for_start_price")
+        self.assertFalse(loaded.start_price_triggered)
+        self.assertIsNone(loaded.finished_at)
+        self.assertEqual(loaded.next_run_at, 0.0)
+        self.assertIsNotNone(loaded.last_stop_price_at)
+        self.assertEqual(loaded.stop_price_rearm_count, 1)
+
+    async def test_task_above_stop_before_first_start_waits_without_rearm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            slow_cfg = self._slow_cfg(
+                start_price=0.00016,
+                stop_price=0.00017,
+            )
+            service = AutoBuySellTaskService(Path(tmp) / "tasks.json")
+            await service.create_task(slow_cfg)
+            manager = FakeTaskManager()
+            manager.ask_price = 0.00018
+            cfg = self._cfg(tmp, slow_execution=slow_cfg)
+
+            waiting = await service.run_due_tasks(cfg, manager)
+
+        task = waiting["tasks"][0]
+        self.assertEqual(task["status"], "waiting_for_start_price")
+        self.assertFalse(task["start_price_triggered"])
+        self.assertIsNone(task["last_stop_price_at"])
+        self.assertEqual(task["stop_price_rearm_count"], 0)
+        self.assertEqual(manager.created, 0)
 
     async def test_filled_order_respects_next_interval_before_replacing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

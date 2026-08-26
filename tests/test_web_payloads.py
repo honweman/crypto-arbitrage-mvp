@@ -728,11 +728,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260826-mm-recovery1" defer></script>',
+            '<script src="/static/app.js?v=20260826-auto-rearm1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260826-mm-recovery1" defer></script>',
+            '<script src="/static/i18n.js?v=20260826-auto-rearm1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -933,7 +933,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260826-mm-recovery1"),
+            INDEX_HTML.index("/static/styles.css?v=20260826-auto-rearm1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1041,7 +1041,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260826-mm-recovery1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260826-auto-rearm1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)

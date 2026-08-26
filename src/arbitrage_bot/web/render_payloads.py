@@ -265,6 +265,8 @@ def _compact_slow_execution_payload(
                 "placed_count",
                 "canceled_count",
                 "start_price_triggered",
+                "last_stop_price_at",
+                "stop_price_rearm_count",
                 "last_cycle_at",
                 "next_run_at",
                 "last_fill_at",

@@ -35,7 +35,6 @@ RUNNING_TASK_STATUSES = {
 TERMINAL_TASK_STATUSES = {
     "complete",
     "stopped",
-    "stopped_by_price",
     "below_min_order_quote",
 }
 TERMINAL_TASK_DETAIL_RETENTION_SECONDS = 3 * 24 * 60 * 60
@@ -305,6 +304,8 @@ class AutoBuySellTask:
     filled_base: float = 0.0
     filled_quote: float = 0.0
     start_price_triggered: bool = False
+    last_stop_price_at: float | None = None
+    stop_price_rearm_count: int = 0
     canceled_count: int = 0
     placed_count: int = 0
     cycle_count: int = 0
@@ -361,6 +362,20 @@ class AutoBuySellTask:
         }
 
 
+def _rearm_task_after_stop_price(
+    task: AutoBuySellTask,
+    *,
+    now: float,
+) -> None:
+    task.status = "waiting_for_start_price"
+    task.last_status = "waiting_for_start_price"
+    task.start_price_triggered = False
+    task.last_error = None
+    task.finished_at = None
+    task.updated_at = now
+    task.next_run_at = now + max(1.0, task.exec_cfg.interval_seconds)
+
+
 def _cleanup_task_summary(task: AutoBuySellTask) -> dict[str, Any]:
     row = task.to_dict()
     config = row.get("config") if isinstance(row.get("config"), dict) else {}
@@ -412,6 +427,20 @@ class AutoBuySellTaskStore:
                 continue
             if task.status == "placing":
                 task.status = "running"
+            if task.status == "stopped_by_price":
+                if _task_is_complete(task, task.exec_cfg):
+                    task.status = "complete"
+                    task.last_status = "complete"
+                else:
+                    migrated_at = time.time()
+                    if task.last_stop_price_at is None:
+                        task.last_stop_price_at = task.updated_at or migrated_at
+                    task.stop_price_rearm_count = max(
+                        1,
+                        task.stop_price_rearm_count,
+                    )
+                    _rearm_task_after_stop_price(task, now=migrated_at)
+                    task.next_run_at = 0.0
             tasks.append(task)
         return tasks
 
@@ -1077,7 +1106,7 @@ class AutoBuySellTaskService:
     ) -> None:
         previous_execution = task.last_execution or {}
         target_status = str(previous_execution.get("target_status") or "stopped")
-        if target_status not in {"stopped", "stopped_by_price"}:
+        if target_status not in {"stopped", "waiting_for_start_price"}:
             target_status = "stopped"
         reason = str(previous_execution.get("reason") or "manual_stop")
         requested_ids = list(task.open_order_ids)
@@ -1125,11 +1154,14 @@ class AutoBuySellTaskService:
                 min(5.0, task.exec_cfg.interval_seconds),
             )
         else:
-            task.status = target_status
-            task.last_status = target_status
-            task.last_error = None
-            task.finished_at = now
-            task.next_run_at = 0.0
+            if target_status == "waiting_for_start_price":
+                _rearm_task_after_stop_price(task, now=now)
+            else:
+                task.status = target_status
+                task.last_status = target_status
+                task.last_error = None
+                task.finished_at = now
+                task.next_run_at = 0.0
         payload["task_id"] = task.id
         payload["status"] = task.status
         payload["reason"] = reason
@@ -1162,15 +1194,54 @@ class AutoBuySellTaskService:
         if plan.status != "stopped_by_price":
             return False
 
+        if not task.start_price_triggered and (
+            task_cfg.start_price > 0 or task.last_stop_price_at is not None
+        ):
+            task.status = "waiting_for_start_price"
+            task.last_status = "waiting_for_start_price"
+            task.last_error = None
+            task.finished_at = None
+            task.updated_at = time.time()
+            task.next_run_at = task.updated_at + max(
+                1.0,
+                task_cfg.interval_seconds,
+            )
+            return True
+
         open_order_ids = list(task.open_order_ids)
         now = time.time()
+        task.last_stop_price_at = now
+        task.stop_price_rearm_count += 1
         if not open_order_ids:
-            task.status = "stopped_by_price"
-            task.last_status = "stopped_by_price"
-            task.last_error = None
-            task.finished_at = now
-            task.updated_at = now
-            task.next_run_at = 0.0
+            task.last_execution = {
+                "canceled_count": 0,
+                "cancel_requested_order_ids": [],
+                "remaining_open_order_ids": [],
+                "errors": [],
+                "confirmation_errors": [],
+                "cancel_confirmed": True,
+                "reason": "stop_price_reached",
+                "target_status": "waiting_for_start_price",
+            }
+            _rearm_task_after_stop_price(task, now=now)
+            payload = {
+                "type": "slow_execution_stop_price_rearm",
+                "task_id": task.id,
+                "status": task.status,
+                "reason": "stop_price_reached",
+                "target_status": "waiting_for_start_price",
+                "trigger_price": plan.trigger_price,
+                "stop_price": task_cfg.stop_price,
+                "filled_base": task.filled_base,
+                "filled_quote": task.filled_quote,
+                "stop_price_rearm_count": task.stop_price_rearm_count,
+            }
+            write_trade_event(cfg.trade_log, payload)
+            write_strategy_timeline_from_payload(
+                cfg.strategy_timeline,
+                payload,
+                source="auto_buy_sell_task",
+            )
             return True
 
         cancel_payload = await _cancel_and_confirm_order_ids(
@@ -1193,12 +1264,20 @@ class AutoBuySellTaskService:
             "confirmation_errors": cancel_payload.get("confirmation_errors", []),
             "cancel_confirmed": bool(cancel_payload.get("cancel_confirmed")),
             "reason": "stop_price_reached",
-            "target_status": "stopped_by_price",
+            "target_status": "waiting_for_start_price",
         }
-        task.updated_at = time.time()
+        task.updated_at = now
         cancel_payload["status"] = (
-            "stop_cancel_pending" if task.open_order_ids else "stopped_by_price"
+            "stop_cancel_pending"
+            if task.open_order_ids
+            else "waiting_for_start_price"
         )
+        cancel_payload["target_status"] = "waiting_for_start_price"
+        cancel_payload["trigger_price"] = plan.trigger_price
+        cancel_payload["stop_price"] = task_cfg.stop_price
+        cancel_payload["filled_base"] = task.filled_base
+        cancel_payload["filled_quote"] = task.filled_quote
+        cancel_payload["stop_price_rearm_count"] = task.stop_price_rearm_count
         write_trade_event(cfg.trade_log, cancel_payload)
         write_strategy_timeline_from_payload(
             cfg.strategy_timeline,
@@ -1219,11 +1298,7 @@ class AutoBuySellTaskService:
             )
             return True
 
-        task.status = "stopped_by_price"
-        task.last_status = "stopped_by_price"
-        task.last_error = None
-        task.finished_at = time.time()
-        task.next_run_at = 0.0
+        _rearm_task_after_stop_price(task, now=time.time())
         return True
 
     async def _handle_open_orders(

@@ -385,7 +385,7 @@ def _filter_state_payload_for_user(
                 1
                 for task in tasks["tasks"]
                 if task.get("status")
-                not in {"complete", "stopped_by_price", "below_min_order_quote"}
+                not in {"complete", "stopped", "below_min_order_quote"}
             )
 
     def filter_strategy_rows(rows: Any) -> list[dict[str, Any]]:
