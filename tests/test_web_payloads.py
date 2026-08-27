@@ -456,6 +456,71 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(private["order_activity"]["status"], "private")
         self.assertEqual(private["trading_console"]["status"], "private")
 
+    def test_non_admin_does_not_receive_platform_strategy_risk_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebUserStore(Path(tmp) / "users.json")
+            store.create_user(
+                email="admin@example.com",
+                password="Strong-pass-1!",
+            )
+            user = store.create_user(
+                email="owner@example.com",
+                password="Strong-pass-1!",
+                allowed_assets=["ACS"],
+            )
+
+        filtered = _filter_state_payload_for_user(
+            {
+                "status": "degraded",
+                "warnings": [
+                    "Market maker Coinbase ACS: blocked_by_risk (max exposure)",
+                    "Account balances: administrator account unavailable",
+                ],
+                "program": {
+                    "running": True,
+                    "stop_reason": "Coinbase MM risk limit",
+                },
+                "config": {"risk": {"allow_live_trading": True}},
+                "market_maker": {
+                    "status": "blocked_by_risk",
+                    "error": "Coinbase MM risk limit",
+                    "instances": [
+                        {
+                            "config": {"symbol": "ACS/USDC"},
+                            "status_reason": "max exposure",
+                        }
+                    ],
+                },
+                "strategy_lifecycle": {
+                    "instances": [
+                        {
+                            "strategy_id": "market_maker",
+                            "symbol": "ACS/USDC",
+                            "converged": False,
+                            "convergence_state": "blocked",
+                            "reason": "administrator max exposure",
+                        }
+                    ]
+                },
+            },
+            cfg=make_config(),
+            user=user,
+        )
+
+        self.assertEqual(filtered["status"], "running")
+        self.assertEqual(filtered["warnings"], [])
+        self.assertEqual(filtered["program"]["stop_reason"], "")
+        self.assertEqual(filtered["market_maker"]["status"], "platform_managed")
+        self.assertEqual(filtered["strategy_lifecycle"]["status"], "private")
+        self.assertNotIn("Coinbase", json.dumps(filtered))
+
+    def test_page_builds_non_admin_risk_status_from_owner_workspace(self) -> None:
+        self.assertIn('data.auth?.role !== "admin"', APP_JS)
+        self.assertIn("data.user_workspace?.strategies || []", APP_JS)
+        self.assertIn('strategy?.strategy_type !== "market_maker"', APP_JS)
+        self.assertIn('runtime.status_reason || runtime.last_error', APP_JS)
+        self.assertIn('stateStatus === "running" && statusIssueRows(data).length', APP_JS)
+
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(
             {
@@ -728,11 +793,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260827-order-display1" defer></script>',
+            '<script src="/static/app.js?v=20260828-owner-risk1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260827-order-display1" defer></script>',
+            '<script src="/static/i18n.js?v=20260828-owner-risk1" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -933,7 +998,7 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertLess(
             INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260827-order-display1"),
+            INDEX_HTML.index("/static/styles.css?v=20260828-owner-risk1"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1041,7 +1106,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260827-order-display1">',
+            '<link rel="stylesheet" href="/static/styles.css?v=20260828-owner-risk1">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)

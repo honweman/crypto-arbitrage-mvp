@@ -625,6 +625,21 @@ def _filter_state_payload_for_user(
         # Platform live accounts belong to the platform operator. User-owned
         # payloads carry an explicit owner_scoped marker after they have been
         # built from the request user's isolated runtime configuration.
+        # Global warnings are also produced from platform strategy runtimes.
+        # Do not leak an administrator's account names or risk reasons to an
+        # owner whose strategy happens to use the same asset.
+        payload["warnings"] = []
+        if payload.get("status") == "degraded":
+            payload["status"] = "running"
+        if payload.get("error"):
+            payload["error"] = "monitor state unavailable"
+        program = payload.get("program")
+        if isinstance(program, dict) and program.get("stop_reason"):
+            program["stop_reason"] = (
+                "Global trading is paused"
+                if program.get("running") is False
+                else ""
+            )
         payload["portfolio"] = {
             "status": "private",
             "positions": [],

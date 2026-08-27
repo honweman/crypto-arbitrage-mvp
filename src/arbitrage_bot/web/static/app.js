@@ -2598,6 +2598,42 @@ function balanceStatusClass(status) {
         add({ severity: "error", title: "Market Maker", reason: mmReason });
       }
 
+      if (data.auth?.role !== "admin") {
+        for (const strategy of (data.user_workspace?.strategies || [])) {
+          if (strategy?.strategy_type !== "market_maker" || strategy?.mode !== "live") continue;
+          const runtime = strategy.live_runtime || {};
+          const readiness = strategy.readiness || {};
+          const blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
+          const status = String(runtime.status || "").toLowerCase();
+          const hasProblem = [
+            "blocked",
+            "blocked_by_risk",
+            "cancel_retry",
+            "coordination_cancel_retry",
+            "error",
+            "execution_error",
+            "open_order_sync_error",
+            "reconciliation_required",
+          ].includes(status) || (strategy.enabled && blockers.length > 0);
+          if (!hasProblem) continue;
+          const runtimeConfig = runtime.config || {};
+          const account = (strategy.accounts || [])[0] || {};
+          add({
+            severity: status.includes("error") ? "error" : "blocked",
+            title: strategy.name || "Market Maker",
+            reason: runtime.status_reason || runtime.last_error || runtime.reason || blockers[0] || status || "risk check blocked",
+            meta: [
+              runtimeConfig.exchange || account.exchange
+                ? `${uiText("Account")}: ${displayExchange(runtimeConfig.exchange || account.exchange, account.label)}`
+                : "",
+              runtimeConfig.symbol || account.symbol
+                ? `${uiText("Trading pair")}: ${runtimeConfig.symbol || account.symbol}`
+                : "",
+            ],
+          });
+        }
+      }
+
       const autoTasks = data.slow_execution?.tasks?.tasks || [];
       for (const task of autoTasks) {
         if (!["error", "blocked_by_risk", "recovering"].includes(task?.status || "")) continue;
@@ -10263,7 +10299,11 @@ function balanceStatusClass(status) {
     }
 
     function renderCommonState(data) {
-      setHeaderStatus(data.status || "starting");
+      const stateStatus = data.status || "starting";
+      const visibleStatus = stateStatus === "running" && statusIssueRows(data).length
+        ? "degraded"
+        : stateStatus;
+      setHeaderStatus(visibleStatus);
       renderAuthProfile(data.auth);
       if (Array.isArray(data.account_balances?.accounts)) {
         renderProfileAccounts(data.account_balances);
