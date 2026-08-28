@@ -941,15 +941,16 @@ class AssetLedgerStore:
                 else "ok"
             )
             portfolio_payload = portfolio if isinstance(portfolio, dict) else {}
+            performance_account_values = account_values_from_balances(
+                account_balances,
+                portfolio_payload,
+            )
             performance = update_portfolio_performance(
                 conn,
                 portfolio=portfolio_payload,
                 scope_key="platform",
-                account_keys=account_keys,
-                account_values=account_values_from_balances(
-                    account_balances,
-                    portfolio_payload,
-                ),
+                account_keys=performance_account_values,
+                account_values=performance_account_values,
                 observed_at=observed_at,
                 observation_key=checkpoint_id,
             )
@@ -1191,7 +1192,8 @@ class AssetLedgerStore:
         if not self.enabled or not isinstance(portfolio, dict):
             return portfolio
         observed_at = float(observed_at or time.time())
-        account_keys = sorted(_account_map(account_balances))
+        account_values = account_values_from_balances(account_balances, portfolio)
+        account_keys = sorted(account_values)
         observation_key = _stable_key(
             "performance", scope_key, observed_at, portfolio.get("total_asset_value")
         )
@@ -1202,10 +1204,7 @@ class AssetLedgerStore:
                 portfolio=portfolio,
                 scope_key=scope_key,
                 account_keys=account_keys,
-                account_values=account_values_from_balances(
-                    account_balances,
-                    portfolio,
-                ),
+                account_values=account_values,
                 observed_at=observed_at,
                 observation_key=observation_key,
             )

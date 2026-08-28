@@ -290,6 +290,7 @@ def create_app(
                 leader_check=lambda: (
                     supervisor.role == "leader" and supervisor.leader_ready
                 ),
+                asset_ledger_cfg=cfg.asset_ledger,
             ),
             name="workspace-account-health",
         )

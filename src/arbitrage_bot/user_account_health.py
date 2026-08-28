@@ -7,7 +7,13 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from .user_account_check import WorkspaceAccountCheckService
+from .asset_ledger import AssetLedgerStore
+from .config import AssetLedgerConfig
+from .exchanges import ExchangeManager
+from .user_account_check import (
+    WorkspaceAccountCheckService,
+    workspace_exchange_config,
+)
 from .user_workspace import UserApiConnection, UserExchangeAccount, UserWorkspaceStore
 
 
@@ -19,6 +25,82 @@ API_CONNECTION_ERROR_RETRY_SECONDS = 60.0
 DEFAULT_LOOP_SECONDS = 30.0
 DEFAULT_MAX_CONNECTION_CONCURRENCY = 2
 DEFAULT_MAX_BATCH = 20
+_NEXT_CASH_FLOW_SYNC_AT: dict[str, float] = {}
+
+
+async def _sync_workspace_cash_flows(
+    api_connection: UserApiConnection,
+    credentials: dict[str, str],
+    asset_ledger_cfg: AssetLedgerConfig,
+) -> None:
+    if not asset_ledger_cfg.enabled:
+        return
+    now = time.time()
+    if now < _NEXT_CASH_FLOW_SYNC_AT.get(api_connection.id, 0.0):
+        return
+    _NEXT_CASH_FLOW_SYNC_AT[api_connection.id] = (
+        now + asset_ledger_cfg.cash_flow_interval_seconds
+    )
+    exchange = workspace_exchange_config(
+        exchange=api_connection.exchange,
+        market_type="spot",
+        api_variant=api_connection.api_variant,
+        runtime_key=api_connection.id,
+        egress_mode=api_connection.egress_mode,
+        source_ip=(
+            api_connection.egress_source_ip
+            if api_connection.egress_mode == "source_ip"
+            else ""
+        ),
+    )
+    manager = ExchangeManager(credentials_by_key={exchange.key: credentials})
+    ledger = AssetLedgerStore(asset_ledger_cfg)
+    canonical_key = api_connection.id
+    for market_type in ("spot", "swap", "future"):
+        ledger.set_cash_flow_account_alias(
+            account_key=f"workspace:{api_connection.id}:{market_type}",
+            canonical_account_key=canonical_key,
+            observed_at=now,
+        )
+    supported: list[str] = []
+    try:
+        supported = manager.cash_flow_capabilities(exchange)
+        cursor = ledger.cash_flow_sync_cursor(
+            account_key=canonical_key,
+            supported_types=supported,
+            observed_at=now,
+        )
+        if cursor is None:
+            return
+        payload = await asyncio.wait_for(
+            manager.fetch_cash_flows(
+                exchange,
+                since_ms=cursor,
+                limit=100,
+            ),
+            timeout=max(3.0, asset_ledger_cfg.worker_timeout_seconds),
+        )
+        ledger.record_cash_flows(
+            account_key=canonical_key,
+            transactions=payload.get("transactions", []),
+            supported_types=payload.get("supported_types", supported),
+            errors=payload.get("errors", []),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ledger.record_cash_flow_error(
+            account_key=canonical_key,
+            supported_types=supported,
+            error=_redacted_error(exc, credentials),
+        )
+        LOGGER.warning(
+            "workspace cash-flow sync failed account=%s error=%s",
+            canonical_key,
+            _redacted_error(exc, credentials),
+        )
+    finally:
+        await manager.close()
 
 
 def workspace_account_check_due(
@@ -55,6 +137,7 @@ async def refresh_workspace_api_connection(
     store: UserWorkspaceStore,
     checker: WorkspaceAccountCheckService,
     api_connection: UserApiConnection,
+    asset_ledger_cfg: AssetLedgerConfig | None = None,
 ) -> UserApiConnection | None:
     credentials = store.decrypt_credentials(
         account_id=api_connection.id,
@@ -74,6 +157,12 @@ async def refresh_workspace_api_connection(
                 "error": _redacted_error(exc, credentials),
                 "latency_ms": 0.0,
             }
+        if asset_ledger_cfg is not None:
+            await _sync_workspace_cash_flows(
+                api_connection,
+                credentials,
+                asset_ledger_cfg,
+            )
     finally:
         credentials.clear()
     current = store.get_api_connection(api_connection.id)
@@ -94,6 +183,7 @@ async def refresh_workspace_api_connections(
     force: bool = False,
     now: float | None = None,
     max_batch: int = DEFAULT_MAX_BATCH,
+    asset_ledger_cfg: AssetLedgerConfig | None = None,
 ) -> dict[str, Any]:
     candidates = store.list_api_connections(owner_email="", is_admin=True)
     credential_statuses = store.credential_statuses(
@@ -116,7 +206,12 @@ async def refresh_workspace_api_connections(
         item
         for item in await asyncio.gather(
             *(
-                refresh_workspace_api_connection(store, checker, api_connection)
+                refresh_workspace_api_connection(
+                    store,
+                    checker,
+                    api_connection,
+                    asset_ledger_cfg,
+                )
                 for api_connection in due
             )
         )
@@ -265,6 +360,7 @@ async def workspace_account_health_loop(
     checker: WorkspaceAccountCheckService,
     *,
     leader_check: Callable[[], bool],
+    asset_ledger_cfg: AssetLedgerConfig | None = None,
     loop_seconds: float = DEFAULT_LOOP_SECONDS,
 ) -> None:
     while True:
@@ -273,6 +369,7 @@ async def workspace_account_health_loop(
                 connection_result = await refresh_workspace_api_connections(
                     store,
                     checker,
+                    asset_ledger_cfg=asset_ledger_cfg,
                 )
                 account_result = await refresh_workspace_accounts(store, checker)
                 if connection_result["error_count"] or account_result["error_count"]:

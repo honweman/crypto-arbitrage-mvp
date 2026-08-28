@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import base64
+import sqlite3
 import tempfile
 import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from arbitrage_bot.config import AssetLedgerConfig
 
 from arbitrage_bot.user_account_health import (
     API_CONNECTION_ERROR_RETRY_SECONDS,
     API_CONNECTION_HEALTHY_REFRESH_SECONDS,
     ERROR_RETRY_SECONDS,
     HEALTHY_REFRESH_SECONDS,
+    _NEXT_CASH_FLOW_SYNC_AT,
+    _sync_workspace_cash_flows,
     refresh_workspace_accounts,
     workspace_account_check_due,
     workspace_api_connection_check_due,
@@ -202,3 +207,79 @@ class WorkspaceAccountHealthTest(unittest.IsolatedAsyncioTestCase):
                 now=now + API_CONNECTION_ERROR_RETRY_SECONDS,
             )
         )
+
+    async def test_workspace_cash_flows_share_one_spot_swap_ledger_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = str(Path(tmp) / "asset-ledger.sqlite3")
+            ledger_cfg = AssetLedgerConfig(
+                enabled=True,
+                path=ledger_path,
+                cash_flow_interval_seconds=0.0,
+            )
+            connection = UserApiConnection.from_dict(
+                {
+                    "id": "connection-test",
+                    "owner_email": "trader@example.com",
+                    "exchange": "bybit",
+                    "market_type": "spot",
+                    "api_variant": "default",
+                }
+            )
+            manager = MagicMock()
+            manager.cash_flow_capabilities.return_value = [
+                "deposit",
+                "withdrawal",
+            ]
+            manager.fetch_cash_flows = AsyncMock(
+                return_value={
+                    "supported_types": ["deposit", "withdrawal"],
+                    "transactions": [
+                        {
+                            "id": "deposit-1",
+                            "type": "deposit",
+                            "currency": "USDT",
+                            "amount": 100.0,
+                            "timestamp": time.time() * 1000.0,
+                            "status": "ok",
+                        }
+                    ],
+                    "errors": [],
+                }
+            )
+            manager.close = AsyncMock()
+            _NEXT_CASH_FLOW_SYNC_AT.pop(connection.id, None)
+            with patch(
+                "arbitrage_bot.user_account_health.ExchangeManager",
+                return_value=manager,
+            ):
+                await _sync_workspace_cash_flows(
+                    connection,
+                    {"api_key": "key", "secret": "secret"},
+                    ledger_cfg,
+                )
+                await _sync_workspace_cash_flows(
+                    connection,
+                    {"api_key": "key", "secret": "secret"},
+                    ledger_cfg,
+                )
+
+            with sqlite3.connect(ledger_path) as db:
+                self.assertEqual(
+                    db.execute("select count(*) from cash_flows").fetchone()[0],
+                    1,
+                )
+                aliases = dict(
+                    db.execute(
+                        """
+                        select account_key, canonical_account_key
+                        from cash_flow_account_aliases
+                        """
+                    ).fetchall()
+                )
+            self.assertEqual(
+                aliases["workspace:connection-test:swap"],
+                "connection-test",
+            )
+            self.assertEqual(manager.fetch_cash_flows.await_count, 1)
