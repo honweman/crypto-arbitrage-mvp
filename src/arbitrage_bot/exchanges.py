@@ -2144,6 +2144,7 @@ class ExchangeManager:
         *,
         since_ms: float | None = None,
         limit: int = 100,
+        currencies: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         client = self.client(cfg)
         supported = self.cash_flow_capabilities(cfg)
@@ -2153,6 +2154,9 @@ class ExchangeManager:
             "deposit": getattr(client, "fetch_deposits", None),
             "withdrawal": getattr(client, "fetch_withdrawals", None),
         }
+        currency_codes = sorted(
+            {str(currency).upper() for currency in currencies or [] if currency}
+        )
         for flow_type in supported:
             try:
                 rows = await fetchers[flow_type](
@@ -2161,8 +2165,29 @@ class ExchangeManager:
                     max(1, int(limit)),
                 )
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"{flow_type}: {exc.__class__.__name__}: {exc}")
-                continue
+                rows = []
+                currency_errors: list[str] = []
+                for currency in currency_codes:
+                    try:
+                        currency_rows = await fetchers[flow_type](
+                            currency,
+                            int(since_ms) if since_ms is not None else None,
+                            max(1, int(limit)),
+                        )
+                        rows.extend(currency_rows or [])
+                    except Exception as currency_exc:  # noqa: BLE001
+                        currency_errors.append(
+                            f"{currency}: {currency_exc.__class__.__name__}: "
+                            f"{currency_exc}"
+                        )
+                if not currency_codes or len(currency_errors) == len(currency_codes):
+                    detail = "; ".join(currency_errors) or (
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                    errors.append(f"{flow_type}: {detail}")
+                    continue
+                if currency_errors:
+                    errors.append(f"{flow_type}: " + "; ".join(currency_errors))
             for row in rows or []:
                 if not isinstance(row, dict):
                     continue

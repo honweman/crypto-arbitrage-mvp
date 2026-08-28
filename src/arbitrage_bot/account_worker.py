@@ -372,7 +372,10 @@ class AccountWorker:
             fetch_consistent_snapshot(), timeout=self.timeout_seconds
         )
 
-    async def _sync_cash_flows(self) -> dict[str, Any]:
+    async def _sync_cash_flows(
+        self,
+        balances: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         now = time.time()
         if now < self._next_cash_flow_sync_at:
             return {"status": "not_due"}
@@ -404,6 +407,15 @@ class AccountWorker:
                     self.exchange,
                     since_ms=cursor,
                     limit=100,
+                    currencies=[
+                        str(row.get("currency") or "").upper()
+                        for row in (
+                            ((balances or {}).get("balance") or {}).get(
+                                "currencies", []
+                            )
+                        )
+                        if isinstance(row, dict) and row.get("currency")
+                    ],
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -458,7 +470,7 @@ class AccountWorker:
                 order_account=activity,
                 source=self.snapshot_source,
             )
-            cash_flow_sync = await self._sync_cash_flows()
+            cash_flow_sync = await self._sync_cash_flows(balances)
             finished_at = time.time()
             next_due_at = finished_at + self.interval_seconds
             status = "ok" if result.get("status") == "ok" else str(result.get("status"))

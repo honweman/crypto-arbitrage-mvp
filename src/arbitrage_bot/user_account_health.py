@@ -32,6 +32,9 @@ async def _sync_workspace_cash_flows(
     api_connection: UserApiConnection,
     credentials: dict[str, str],
     asset_ledger_cfg: AssetLedgerConfig,
+    *,
+    alias_account_keys: Sequence[str] = (),
+    currencies: Sequence[str] = (),
 ) -> None:
     if not asset_ledger_cfg.enabled:
         return
@@ -56,12 +59,19 @@ async def _sync_workspace_cash_flows(
     manager = ExchangeManager(credentials_by_key={exchange.key: credentials})
     ledger = AssetLedgerStore(asset_ledger_cfg)
     canonical_key = api_connection.id
-    for market_type in ("spot", "swap", "future"):
-        ledger.set_cash_flow_account_alias(
-            account_key=f"workspace:{api_connection.id}:{market_type}",
-            canonical_account_key=canonical_key,
-            observed_at=now,
-        )
+    for alias_key in {api_connection.id, *alias_account_keys}:
+        if alias_key != canonical_key:
+            ledger.set_cash_flow_account_alias(
+                account_key=alias_key,
+                canonical_account_key=canonical_key,
+                observed_at=now,
+            )
+        for market_type in ("spot", "swap", "future"):
+            ledger.set_cash_flow_account_alias(
+                account_key=f"workspace:{alias_key}:{market_type}",
+                canonical_account_key=canonical_key,
+                observed_at=now,
+            )
     supported: list[str] = []
     try:
         supported = manager.cash_flow_capabilities(exchange)
@@ -77,6 +87,7 @@ async def _sync_workspace_cash_flows(
                 exchange,
                 since_ms=cursor,
                 limit=100,
+                currencies=currencies,
             ),
             timeout=max(3.0, asset_ledger_cfg.worker_timeout_seconds),
         )
@@ -158,10 +169,21 @@ async def refresh_workspace_api_connection(
                 "latency_ms": 0.0,
             }
         if asset_ledger_cfg is not None:
+            linked_account_keys = [
+                account.id
+                for account in store.list_accounts(owner_email="", is_admin=True)
+                if account.connection_id == api_connection.id
+            ]
             await _sync_workspace_cash_flows(
                 api_connection,
                 credentials,
                 asset_ledger_cfg,
+                alias_account_keys=linked_account_keys,
+                currencies=[
+                    str(row.get("currency") or "").upper()
+                    for row in check.get("balances", []) or []
+                    if isinstance(row, dict) and row.get("currency")
+                ],
             )
     finally:
         credentials.clear()

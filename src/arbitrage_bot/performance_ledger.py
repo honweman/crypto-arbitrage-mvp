@@ -381,6 +381,7 @@ def account_values_from_balances(
             continue
         value = 0.0
         complete = True
+        has_value = False
         for row in balance.get("currencies", []) or []:
             if not isinstance(row, dict):
                 continue
@@ -388,12 +389,13 @@ def account_values_from_balances(
             currency = str(row.get("currency") or "").upper()
             if amount in {None, 0.0} or not currency:
                 continue
+            has_value = True
             rate = rates.get(currency)
             if rate is None:
                 complete = False
                 break
             value += float(amount) * rate
-        if complete:
+        if complete and has_value:
             result[account_key] = value
     return result
 
