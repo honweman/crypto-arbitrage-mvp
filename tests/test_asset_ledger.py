@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from arbitrage_bot.asset_ledger import (
@@ -142,6 +143,306 @@ class AssetLedgerStoreTest(unittest.TestCase):
         store.record_monitor_checkpoint(_balances(), _activity(), observed_at=1000)
         store.record_monitor_checkpoint(_balances(), _activity(), observed_at=1010)
         self.assertEqual(store.summary(now=1011)["counts"]["ledger_fills"], 1)
+
+    def test_performance_excludes_deposits_and_withdrawals(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+
+        def portfolio(equity: float) -> dict:
+            return {
+                "status": "ok",
+                "quote_currency": "USD",
+                "total_asset_currency": "USD",
+                "total_asset_value": equity,
+                "cash_balances": {"USDC": equity - 20.0},
+                "cash_balances_common": {"USDC": equity - 20.0},
+                "cash_value": equity - 20.0,
+                "position_value": 20.0,
+                "positions": [
+                    {
+                        "asset": "ACS",
+                        "position_base": 100.0,
+                        "mark_price": 0.2,
+                        "position_value": 20.0,
+                    }
+                ],
+                "position_missing_marks": [],
+                "cash_missing_rates": [],
+                "total_asset_missing_rates": [],
+                "total_pnl": 99.0,
+            }
+
+        first = store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            portfolio=portfolio(120.0),
+            observed_at=1000.0,
+        )
+        self.assertEqual(first["performance"]["since_inception"]["pnl"], 0.0)
+
+        deposit = {
+            "id": "deposit-1",
+            "type": "deposit",
+            "currency": "USDC",
+            "amount": 50.0,
+            "timestamp": 1010_000,
+            "status": "ok",
+        }
+        inserted = store.record_cash_flows(
+            account_key="coinbase-spot",
+            transactions=[deposit],
+            supported_types=["deposit", "withdrawal"],
+            observed_at=1010.0,
+        )
+        duplicate = store.record_cash_flows(
+            account_key="coinbase-spot",
+            transactions=[deposit],
+            supported_types=["deposit", "withdrawal"],
+            observed_at=1011.0,
+        )
+        self.assertEqual(inserted["inserted_count"], 1)
+        self.assertEqual(duplicate["inserted_count"], 0)
+
+        after_deposit = store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            portfolio=portfolio(170.0),
+            observed_at=1020.0,
+        )["performance"]
+        self.assertEqual(after_deposit["since_inception"]["pnl"], 0.0)
+        self.assertEqual(
+            after_deposit["since_inception"]["net_external_flow"],
+            50.0,
+        )
+
+        market_gain = store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            portfolio=portfolio(180.0),
+            observed_at=1060.0,
+        )["performance"]
+        self.assertEqual(market_gain["since_inception"]["pnl"], 10.0)
+
+        store.record_cash_flows(
+            account_key="coinbase-spot",
+            transactions=[
+                {
+                    "id": "withdrawal-1",
+                    "type": "withdrawal",
+                    "currency": "USDC",
+                    "amount": 20.0,
+                    "timestamp": 1070_000,
+                    "status": "ok",
+                }
+            ],
+            supported_types=["deposit", "withdrawal"],
+            observed_at=1070.0,
+        )
+        after_withdrawal = store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            portfolio=portfolio(160.0),
+            observed_at=1080.0,
+        )["performance"]
+        self.assertEqual(after_withdrawal["since_inception"]["pnl"], 10.0)
+        self.assertEqual(
+            after_withdrawal["since_inception"]["net_external_flow"],
+            30.0,
+        )
+
+    def test_daily_performance_rolls_over_without_resetting_inception(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        first_at = datetime(2026, 8, 27, 23, 59, 0).astimezone().timestamp()
+        second_at = datetime(2026, 8, 28, 0, 1, 0).astimezone().timestamp()
+
+        def portfolio(equity: float) -> dict:
+            return {
+                "status": "ok",
+                "quote_currency": "USD",
+                "total_asset_currency": "USD",
+                "total_asset_value": equity,
+                "cash_balances": {"USDC": equity},
+                "cash_balances_common": {"USDC": equity},
+                "cash_value": equity,
+                "position_value": 0.0,
+                "positions": [],
+                "position_missing_marks": [],
+                "cash_missing_rates": [],
+                "total_asset_missing_rates": [],
+                "total_pnl": 0.0,
+            }
+
+        balances = _balances()
+        balances["accounts"][0]["balance"]["currencies"] = [
+            {"currency": "USDC", "free": 100, "used": 0, "total": 100}
+        ]
+
+        store.record_monitor_checkpoint(
+            balances,
+            _activity(),
+            portfolio=portfolio(100.0),
+            observed_at=first_at,
+        )
+        result = store.record_monitor_checkpoint(
+            balances,
+            _activity(),
+            portfolio=portfolio(103.0),
+            observed_at=second_at,
+        )["performance"]
+        self.assertEqual(result["since_inception"]["pnl"], 3.0)
+        self.assertEqual(result["daily"]["pnl"], 3.0)
+        self.assertNotEqual(
+            result["since_inception"]["started_at"],
+            result["daily"]["started_at"],
+        )
+
+    def test_performance_keeps_last_reliable_value_when_valuation_is_missing(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        complete = {
+            "status": "ok",
+            "quote_currency": "USD",
+            "total_asset_currency": "USD",
+            "total_asset_value": 120.0,
+            "cash_balances": {"USDC": 100.0},
+            "cash_balances_common": {"USDC": 100.0},
+            "cash_value": 100.0,
+            "position_value": 20.0,
+            "positions": [
+                {
+                    "asset": "ACS",
+                    "position_base": 100.0,
+                    "mark_price": 0.2,
+                    "position_value": 20.0,
+                }
+            ],
+            "position_missing_marks": [],
+            "cash_missing_rates": [],
+            "total_asset_missing_rates": [],
+            "total_pnl": 0.0,
+        }
+        store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            portfolio=complete,
+            observed_at=1000.0,
+        )
+        incomplete = {**complete, "total_asset_value": None}
+        result = store.record_monitor_checkpoint(
+            _balances(),
+            _activity(),
+            portfolio=incomplete,
+            observed_at=1060.0,
+        )["performance"]
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(result["since_inception"]["pnl"], 0.0)
+        self.assertEqual(result["last_reliable_at"], 1000.0)
+
+    def test_shared_spot_and_swap_account_applies_cash_flow_once(self) -> None:
+        store = AssetLedgerStore(self.cfg)
+        store.record_cash_flows(
+            account_key="workspace:account-1:spot",
+            transactions=[],
+            supported_types=["deposit", "withdrawal"],
+            observed_at=990.0,
+        )
+        store.set_cash_flow_account_alias(
+            account_key="workspace:account-1:swap",
+            canonical_account_key="workspace:account-1:spot",
+            observed_at=990.0,
+        )
+
+        def balances(spot_total: float) -> dict:
+            return {
+                "status": "ok",
+                "accounts": [
+                    {
+                        "exchange": "workspace:account-1:spot",
+                        "status": "ok",
+                        "errors": [],
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {
+                                    "currency": "USDC",
+                                    "free": spot_total,
+                                    "used": 0.0,
+                                    "total": spot_total,
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "exchange": "workspace:account-1:swap",
+                        "status": "ok",
+                        "errors": [],
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {
+                                    "currency": "USDC",
+                                    "free": 100.0,
+                                    "used": 0.0,
+                                    "total": 100.0,
+                                }
+                            ],
+                        },
+                    },
+                ],
+                "totals": [],
+                "checked_account_count": 2,
+                "total_account_count": 2,
+                "errors": [],
+            }
+
+        def portfolio(equity: float) -> dict:
+            return {
+                "status": "ok",
+                "quote_currency": "USD",
+                "total_asset_currency": "USD",
+                "total_asset_value": equity,
+                "cash_balances": {"USDC": equity},
+                "cash_balances_common": {"USDC": equity},
+                "cash_value": equity,
+                "position_value": 0.0,
+                "positions": [],
+                "position_missing_marks": [],
+                "cash_missing_rates": [],
+                "total_asset_missing_rates": [],
+                "total_pnl": 0.0,
+            }
+
+        store.record_monitor_checkpoint(
+            balances(100.0),
+            {"accounts": [], "daily_pnl": {}},
+            portfolio=portfolio(200.0),
+            observed_at=1000.0,
+        )
+        store.record_cash_flows(
+            account_key="workspace:account-1:spot",
+            transactions=[
+                {
+                    "id": "shared-deposit",
+                    "type": "deposit",
+                    "currency": "USDC",
+                    "amount": 50.0,
+                    "timestamp": 1010_000,
+                    "status": "ok",
+                }
+            ],
+            supported_types=["deposit", "withdrawal"],
+            observed_at=1010.0,
+        )
+        result = store.record_monitor_checkpoint(
+            balances(150.0),
+            {"accounts": [], "daily_pnl": {}},
+            portfolio=portfolio(250.0),
+            observed_at=1020.0,
+        )["performance"]
+        self.assertEqual(result["since_inception"]["net_external_flow"], 50.0)
+        self.assertEqual(result["since_inception"]["pnl"], 0.0)
+        self.assertEqual(
+            result["cash_flow_coverage"]["covered_account_count"],
+            2,
+        )
 
     def test_strategy_fill_source_is_idempotent_and_queryable(self) -> None:
         store = AssetLedgerStore(self.cfg)

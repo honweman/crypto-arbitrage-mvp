@@ -31,6 +31,17 @@ class PortfolioPnl:
     observed_at: float
 
     def to_dict(self) -> dict[str, Any]:
+        missing_rates = sorted(
+            set([*self.position_missing_marks, *self.cash_missing_rates])
+        )
+        position_value = self.position_value
+        if position_value is None and not self.positions:
+            position_value = 0.0
+        total_asset_value = (
+            self.cash_value + position_value
+            if not missing_rates and position_value is not None
+            else None
+        )
         return {
             "status": self.status,
             "asset": self.asset,
@@ -46,6 +57,9 @@ class PortfolioPnl:
             "mark_price": self.mark_price,
             "mark_source_count": self.mark_source_count,
             "position_value": self.position_value,
+            "total_asset_value": total_asset_value,
+            "total_asset_currency": self.quote_currency,
+            "total_asset_missing_rates": missing_rates,
             "total_pnl": self.total_pnl,
             "sources": {
                 "market_maker": self.market_maker_pnl,

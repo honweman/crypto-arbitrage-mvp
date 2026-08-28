@@ -6933,6 +6933,47 @@ function balanceStatusClass(status) {
         .join(" | ");
     }
 
+    function formatPerformanceStart(timestamp) {
+      if (!timestamp) return "--";
+      return new Date(Number(timestamp) * 1000).toLocaleString([], {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    }
+
+    function formatNetFlow(value, currency = "USD") {
+      const numeric = Number(value || 0);
+      const sign = numeric > 0 ? "+" : "";
+      return `${currency} ${sign}${money.format(numeric)}`;
+    }
+
+    function performanceDetail(performance, windowName) {
+      const window = performance?.[windowName];
+      if (!window || window.pnl == null) {
+        return uiText(performance?.reason || "Establishing P/L baseline");
+      }
+      const currency = performance.currency || "USD";
+      const pieces = [];
+      if (performance.status === "stale" && performance.reason) {
+        pieces.push(`${uiText("Last reliable value")} · ${uiText(performance.reason)}`);
+      }
+      if (windowName === "since_inception") {
+        pieces.push(`${uiText("From")} ${formatPerformanceStart(window.started_at)}`);
+      }
+      pieces.push(
+        `${uiText("Net deposits/withdrawals excluded")} ${formatNetFlow(window.net_external_flow, currency)}`
+      );
+      const coverage = performance.cash_flow_coverage || {};
+      if (coverage.status === "partial") {
+        pieces.push(
+          `${uiText("Cash-flow coverage")} ${coverage.covered_account_count || 0}/${coverage.account_count || 0}`
+        );
+      }
+      return pieces.join(" · ");
+    }
+
     function displayablePortfolioPositions(portfolio) {
       return (portfolio?.positions || []).filter((position) =>
         meetsBalanceDisplayThreshold(
@@ -7065,12 +7106,16 @@ function balanceStatusClass(status) {
         text("portfolio-mark", "--");
         text("portfolio-value", "--");
         setPnl("portfolio-total-pnl", null);
+        setPnl("portfolio-daily-pnl", null);
         setPnl("portfolio-mm-pnl", null);
         setPnl("portfolio-arb-pnl", null);
         setPnl("portfolio-auto-pnl", null);
         setPnl("portfolio-other-pnl", null);
         setPnl("portfolio-price-pnl", null);
         document.getElementById("portfolio-total-pnl").title = "";
+        text("portfolio-total-pnl-detail", "--");
+        text("portfolio-daily-pnl-detail", "--");
+        document.getElementById("portfolio-daily-pnl").title = "";
         return;
       }
 
@@ -7122,7 +7167,15 @@ function balanceStatusClass(status) {
         ? positionValues.reduce((sum, value) => sum + value, 0)
         : null;
       text("portfolio-value", positionValue == null ? "--" : `$${money.format(positionValue)}`);
-      setPnl("portfolio-total-pnl", portfolio.total_pnl);
+      const performance = portfolio.performance || {};
+      const sincePnl = performance.since_inception?.pnl ?? portfolio.total_pnl;
+      const dailyPnl = performance.daily?.pnl ?? portfolio.daily_total_pnl;
+      setPnl("portfolio-total-pnl", sincePnl);
+      setPnl("portfolio-daily-pnl", dailyPnl);
+      const sinceDetail = performanceDetail(performance, "since_inception");
+      const dailyDetail = performanceDetail(performance, "daily");
+      text("portfolio-total-pnl-detail", sinceDetail);
+      text("portfolio-daily-pnl-detail", dailyDetail);
       setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);
       setPnl("portfolio-arb-pnl", portfolio.sources?.arbitrage);
       setPnl("portfolio-auto-pnl", portfolio.sources?.auto_buy_sell);
@@ -7131,7 +7184,11 @@ function balanceStatusClass(status) {
         (portfolio.sources?.manual || 0) + (portfolio.sources?.unattributed || 0)
       );
       setPnl("portfolio-price-pnl", portfolio.sources?.price_move);
-      document.getElementById("portfolio-total-pnl").title = formatPnlSourceDetail(portfolio);
+      document.getElementById("portfolio-total-pnl").title = sinceDetail;
+      document.getElementById("portfolio-daily-pnl").title = [
+        dailyDetail,
+        formatPnlSourceDetail(portfolio),
+      ].filter(Boolean).join(" | ");
     }
 
     function shortAddress(address) {

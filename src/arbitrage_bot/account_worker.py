@@ -28,6 +28,19 @@ def _all_exchanges(cfg: BotConfig) -> list[ExchangeConfig]:
     return [*cfg.spot_exchanges, *cfg.derivative_exchanges]
 
 
+def _cash_flow_credential_identity(exchange: ExchangeConfig) -> tuple[str, ...]:
+    connection_id = str(exchange.credential_connection_id or "").strip()
+    if connection_id:
+        return ("workspace", connection_id)
+    return (
+        "environment",
+        exchange.id,
+        str(exchange.api_key_env or ""),
+        str(exchange.secret_env or ""),
+        str(exchange.password_env or ""),
+    )
+
+
 def _isolated_config(cfg: BotConfig, account_key: str) -> BotConfig:
     matches = [exchange for exchange in _all_exchanges(cfg) if exchange.key == account_key]
     if not matches:
@@ -305,6 +318,18 @@ class AccountWorker:
     ) -> None:
         if not cfg.asset_ledger.enabled:
             raise ValueError("asset_ledger.enabled must be true for account workers")
+        all_exchanges = _all_exchanges(cfg)
+        selected_exchange = next(row for row in all_exchanges if row.key == account_key)
+        credential_identity = _cash_flow_credential_identity(selected_exchange)
+        credential_peers = [
+            row
+            for row in all_exchanges
+            if _cash_flow_credential_identity(row) == credential_identity
+        ]
+        cash_flow_primary = min(
+            credential_peers,
+            key=lambda row: (row.market_type != "spot", row.key),
+        )
         self.cfg = _isolated_config(cfg, account_key)
         self.account_key = account_key
         self.interval_seconds = max(
@@ -320,6 +345,14 @@ class AccountWorker:
         self.snapshot_source = f"{self.worker_id}:reserve-adjusted-v1"
         self.ledger = AssetLedgerStore(cfg.asset_ledger)
         self.manager = ExchangeManager()
+        self.exchange = selected_exchange
+        self.cash_flow_primary_account_key = cash_flow_primary.key
+        self.cash_flow_sync_primary = cash_flow_primary.key == account_key
+        self.cash_flow_interval_seconds = max(
+            60.0,
+            float(cfg.asset_ledger.cash_flow_interval_seconds),
+        )
+        self._next_cash_flow_sync_at = 0.0
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -338,6 +371,70 @@ class AccountWorker:
         return await asyncio.wait_for(
             fetch_consistent_snapshot(), timeout=self.timeout_seconds
         )
+
+    async def _sync_cash_flows(self) -> dict[str, Any]:
+        now = time.time()
+        if now < self._next_cash_flow_sync_at:
+            return {"status": "not_due"}
+        self._next_cash_flow_sync_at = now + self.cash_flow_interval_seconds
+        if not self.cash_flow_sync_primary:
+            self.ledger.set_cash_flow_account_alias(
+                account_key=self.account_key,
+                canonical_account_key=self.cash_flow_primary_account_key,
+                observed_at=now,
+            )
+            return {
+                "status": "shared_account",
+                "primary_account_key": self.cash_flow_primary_account_key,
+            }
+        supported = self.manager.cash_flow_capabilities(self.exchange)
+        cursor = self.ledger.cash_flow_sync_cursor(
+            account_key=self.account_key,
+            supported_types=supported,
+            observed_at=now,
+        )
+        if cursor is None:
+            return {
+                "status": "initialized" if supported else "unsupported",
+                "supported_types": supported,
+            }
+        try:
+            payload = await asyncio.wait_for(
+                self.manager.fetch_cash_flows(
+                    self.exchange,
+                    since_ms=cursor,
+                    limit=100,
+                ),
+                timeout=self.timeout_seconds,
+            )
+            result = self.ledger.record_cash_flows(
+                account_key=self.account_key,
+                transactions=payload.get("transactions", []),
+                supported_types=payload.get("supported_types", supported),
+                errors=payload.get("errors", []),
+            )
+            return {
+                "status": "partial" if payload.get("errors") else "ok",
+                "supported_types": payload.get("supported_types", supported),
+                **result,
+            }
+        except Exception as exc:  # noqa: BLE001
+            message = f"{exc.__class__.__name__}: {exc}"
+            self.ledger.record_cash_flow_error(
+                account_key=self.account_key,
+                supported_types=supported,
+                error=message,
+            )
+            LOGGER.warning(
+                "cash-flow sync failed account=%s error=%s",
+                self.account_key,
+                message,
+            )
+            return {
+                "status": "error",
+                "supported_types": supported,
+                "error": message,
+            }
 
     async def run_cycle(self) -> dict[str, Any]:
         started_at = time.time()
@@ -361,6 +458,7 @@ class AccountWorker:
                 order_account=activity,
                 source=self.snapshot_source,
             )
+            cash_flow_sync = await self._sync_cash_flows()
             finished_at = time.time()
             next_due_at = finished_at + self.interval_seconds
             status = "ok" if result.get("status") == "ok" else str(result.get("status"))
@@ -386,8 +484,10 @@ class AccountWorker:
                     "timeout_seconds": self.timeout_seconds,
                     "read_only": True,
                     "duration_seconds": finished_at - started_at,
+                    "cash_flow_sync": cash_flow_sync,
                 },
             )
+            result["cash_flow_sync"] = cash_flow_sync
             return result
         except Exception as exc:
             failed_at = time.time()

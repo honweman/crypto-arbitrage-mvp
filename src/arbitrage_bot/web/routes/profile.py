@@ -47,6 +47,7 @@ from ...auto_buy_sell_task import (
     validate_task_config,
     validate_task_exchange_config,
 )
+from ...asset_ledger import AssetLedgerStore
 from ...config import (
     BotConfig,
     SlowExecutionConfig,
@@ -318,6 +319,19 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
             filtered.get("account_balances"),
             quote_rates=runtime_cfg.quote_rates,
         )
+        if runtime_cfg.asset_ledger.enabled:
+            scope_key = (
+                "platform"
+                if requesting_user.role == "admin"
+                else f"user:{normalize_email(requesting_user.email)}"
+            )
+            filtered["portfolio"] = AssetLedgerStore(
+                runtime_cfg.asset_ledger
+            ).apply_portfolio_performance(
+                filtered["portfolio"],
+                filtered["account_balances"],
+                scope_key=scope_key,
+            )
         if view == "status" and "account-balances" not in requested_sections:
             filtered["account_balances"].pop("accounts", None)
     return filtered

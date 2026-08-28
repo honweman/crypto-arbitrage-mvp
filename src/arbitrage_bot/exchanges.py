@@ -613,6 +613,8 @@ class BithumbV2Client:
                 "fetchOpenOrders": True,
                 "fetchClosedOrders": True,
                 "fetchMyTrades": False,
+                "fetchDeposits": True,
+                "fetchWithdrawals": True,
                 "createOrder": True,
                 "cancelOrder": True,
             }
@@ -790,6 +792,125 @@ class BithumbV2Client:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         return []
+
+    @staticmethod
+    def _normalize_cash_flow(
+        raw: dict[str, Any],
+        flow_type: str,
+    ) -> dict[str, Any]:
+        timestamp = None
+        date_text = str(
+            raw.get("done_at")
+            or raw.get("created_at")
+            or raw.get("requested_at")
+            or ""
+        )
+        if date_text:
+            try:
+                timestamp = datetime.fromisoformat(
+                    date_text.replace("Z", "+00:00")
+                ).timestamp() * 1000.0
+            except ValueError:
+                timestamp = None
+        fee_cost = _number_or_none(
+            raw.get("fee")
+            or raw.get("transaction_fee")
+            or raw.get("paid_fee")
+        )
+        currency = str(raw.get("currency") or "").upper()
+        return {
+            "id": str(raw.get("uuid") or raw.get("id") or ""),
+            "txid": str(raw.get("txid") or ""),
+            "type": flow_type,
+            "currency": currency,
+            "amount": _number_or_none(raw.get("amount")) or 0.0,
+            "timestamp": timestamp,
+            "datetime": date_text or None,
+            "status": str(raw.get("state") or raw.get("status") or ""),
+            "fee": {"cost": fee_cost, "currency": currency}
+            if fee_cost is not None
+            else None,
+            "address": raw.get("address"),
+            "tag": raw.get("secondary_address"),
+            "info": raw,
+        }
+
+    async def _fetch_cash_flow_rows(
+        self,
+        *,
+        path: str,
+        krw_path: str,
+        flow_type: str,
+        code: str | None,
+        since: float | None,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
+        target_limit = min(100, max(1, int(limit or 100)))
+        params: dict[str, Any] = {
+            "limit": target_limit,
+            "page": 1,
+            "order_by": "desc",
+        }
+        if code and str(code).upper() != "KRW":
+            params["currency"] = str(code).upper()
+        paths = [krw_path] if str(code or "").upper() == "KRW" else [path]
+        if code is None:
+            paths.append(krw_path)
+        result: list[dict[str, Any]] = []
+        for target_path in paths:
+            try:
+                payload = await self._request("GET", target_path, params=params)
+            except Exception:
+                if target_path == path:
+                    raise
+                continue
+            for row in payload if isinstance(payload, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                normalized = self._normalize_cash_flow(row, flow_type)
+                timestamp = _number_or_none(normalized.get("timestamp"))
+                if since is not None and timestamp is not None and timestamp < since:
+                    continue
+                result.append(normalized)
+        return sorted(
+            result,
+            key=lambda row: float(row.get("timestamp") or 0.0),
+            reverse=True,
+        )[:target_limit]
+
+    async def fetch_deposits(
+        self,
+        code: str | None = None,
+        since: float | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        del params
+        return await self._fetch_cash_flow_rows(
+            path="/v1/deposits",
+            krw_path="/v1/deposits/krw",
+            flow_type="deposit",
+            code=code,
+            since=since,
+            limit=limit,
+        )
+
+    async def fetch_withdrawals(
+        self,
+        code: str | None = None,
+        since: float | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        del params
+        return await self._fetch_cash_flow_rows(
+            path="/v1/withdraws",
+            krw_path="/v1/withdraws/krw",
+            flow_type="withdrawal",
+            code=code,
+            since=since,
+            limit=limit,
+        )
 
     async def create_order(
         self,
@@ -2002,6 +2123,61 @@ class ExchangeManager:
         if fetcher is None:
             return []
         return await fetcher(symbol, None, limit)
+
+    def cash_flow_capabilities(self, cfg: ExchangeConfig) -> list[str]:
+        client = self.client(cfg)
+        capabilities = getattr(client, "has", None) or {}
+        supported: list[str] = []
+        if capabilities.get("fetchDeposits") not in {False, None} and getattr(
+            client, "fetch_deposits", None
+        ) is not None:
+            supported.append("deposit")
+        if capabilities.get("fetchWithdrawals") not in {False, None} and getattr(
+            client, "fetch_withdrawals", None
+        ) is not None:
+            supported.append("withdrawal")
+        return supported
+
+    async def fetch_cash_flows(
+        self,
+        cfg: ExchangeConfig,
+        *,
+        since_ms: float | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        client = self.client(cfg)
+        supported = self.cash_flow_capabilities(cfg)
+        transactions: list[dict[str, Any]] = []
+        errors: list[str] = []
+        fetchers = {
+            "deposit": getattr(client, "fetch_deposits", None),
+            "withdrawal": getattr(client, "fetch_withdrawals", None),
+        }
+        for flow_type in supported:
+            try:
+                rows = await fetchers[flow_type](
+                    None,
+                    int(since_ms) if since_ms is not None else None,
+                    max(1, int(limit)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{flow_type}: {exc.__class__.__name__}: {exc}")
+                continue
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                transactions.append(
+                    {
+                        **row,
+                        "type": flow_type,
+                        "source": f"account-worker:{cfg.key}",
+                    }
+                )
+        return {
+            "supported_types": supported,
+            "transactions": transactions,
+            "errors": errors,
+        }
 
     async def fetch_positions(
         self,

@@ -442,6 +442,7 @@ class AssetLedgerConfig:
     worker_interval_seconds: float = 30.0
     worker_timeout_seconds: float = 20.0
     worker_stale_seconds: float = 90.0
+    cash_flow_interval_seconds: float = 300.0
     balance_abs_tolerance: float = 1e-8
     balance_rel_tolerance: float = 1e-9
 
@@ -1365,6 +1366,10 @@ def load_config(path: str | Path) -> BotConfig:
             ),
             worker_stale_seconds=float(
                 asset_ledger_raw.get("worker_stale_seconds", 90.0)
+            ),
+            cash_flow_interval_seconds=max(
+                60.0,
+                float(asset_ledger_raw.get("cash_flow_interval_seconds", 300.0)),
             ),
             balance_abs_tolerance=float(
                 asset_ledger_raw.get("balance_abs_tolerance", 1e-8)

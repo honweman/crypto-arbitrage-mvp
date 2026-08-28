@@ -3,15 +3,27 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
 
 from .config import AssetLedgerConfig
+from .performance_ledger import (
+    account_values_from_balances,
+    cash_flow_sync_cursor,
+    init_performance_schema,
+    record_cash_flow_batch,
+    record_cash_flow_alias,
+    record_cash_flow_sync_error,
+    update_portfolio_performance,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+_INITIALIZED_PATHS: set[str] = set()
+_INITIALIZE_LOCK = threading.Lock()
 
 
 def _json(value: Any) -> str:
@@ -269,6 +281,7 @@ def init_asset_ledger(path: str) -> None:
                 on worker_heartbeats(account_key, updated_at desc);
             """
         )
+        init_performance_schema(conn)
         conn.execute(
             """
             insert into ledger_meta(key, value, updated_at) values('schema_version', ?, ?)
@@ -315,10 +328,12 @@ def _row_discrepancy(row: dict[str, Any]) -> float | None:
 class AssetLedgerStore:
     def __init__(self, cfg: AssetLedgerConfig) -> None:
         self.cfg = cfg
-        if cfg.enabled and (
-            not Path(cfg.path).is_file() or Path(cfg.path).stat().st_size == 0
-        ):
-            init_asset_ledger(cfg.path)
+        resolved_path = str(Path(cfg.path).expanduser().resolve())
+        if cfg.enabled and resolved_path not in _INITIALIZED_PATHS:
+            with _INITIALIZE_LOCK:
+                if resolved_path not in _INITIALIZED_PATHS:
+                    init_asset_ledger(cfg.path)
+                    _INITIALIZED_PATHS.add(resolved_path)
 
     @property
     def enabled(self) -> bool:
@@ -925,7 +940,29 @@ class AssetLedgerStore:
                 if any(row["status"] == "warning" for row in run_summaries)
                 else "ok"
             )
-            portfolio_payload = portfolio or {}
+            portfolio_payload = portfolio if isinstance(portfolio, dict) else {}
+            performance = update_portfolio_performance(
+                conn,
+                portfolio=portfolio_payload,
+                scope_key="platform",
+                account_keys=account_keys,
+                account_values=account_values_from_balances(
+                    account_balances,
+                    portfolio_payload,
+                ),
+                observed_at=observed_at,
+                observation_key=checkpoint_id,
+            )
+            portfolio_payload["performance"] = performance
+            portfolio_payload["attribution_total_pnl"] = portfolio_payload.get(
+                "total_pnl"
+            )
+            portfolio_payload["total_pnl"] = performance.get(
+                "since_inception", {}
+            ).get("pnl")
+            portfolio_payload["daily_total_pnl"] = performance.get("daily", {}).get(
+                "pnl"
+            )
             position_snapshot_id = _stable_key(
                 "positions", observed_at, portfolio_payload
             )
@@ -1034,7 +1071,7 @@ class AssetLedgerStore:
                     source,
                     _json(account_balances),
                     _json(order_activity),
-                    _json(portfolio or {}),
+                    _json(portfolio_payload),
                 ),
             )
             conn.commit()
@@ -1045,7 +1082,139 @@ class AssetLedgerStore:
             "observed_at": observed_at,
             "accounts": run_summaries,
             "path": self.cfg.path,
+            "performance": performance,
         }
+
+    def cash_flow_sync_cursor(
+        self,
+        *,
+        account_key: str,
+        supported_types: Iterable[str],
+        observed_at: float | None = None,
+    ) -> float | None:
+        if not self.enabled:
+            return None
+        observed_at = float(observed_at or time.time())
+        with closing(_connect(self.cfg.path)) as conn:
+            conn.execute("begin immediate")
+            cursor = cash_flow_sync_cursor(
+                conn,
+                account_key=account_key,
+                supported_types=supported_types,
+                observed_at=observed_at,
+            )
+            conn.commit()
+        return cursor
+
+    def set_cash_flow_account_alias(
+        self,
+        *,
+        account_key: str,
+        canonical_account_key: str,
+        observed_at: float | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        observed_at = float(observed_at or time.time())
+        with closing(_connect(self.cfg.path)) as conn:
+            conn.execute("begin immediate")
+            record_cash_flow_alias(
+                conn,
+                account_key=account_key,
+                canonical_account_key=canonical_account_key,
+                observed_at=observed_at,
+            )
+            conn.commit()
+
+    def record_cash_flows(
+        self,
+        *,
+        account_key: str,
+        transactions: Iterable[dict[str, Any]],
+        supported_types: Iterable[str],
+        errors: Iterable[str] = (),
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.enabled:
+            return {"enabled": False}
+        observed_at = float(observed_at or time.time())
+        rows = [row for row in transactions if isinstance(row, dict)]
+        with closing(_connect(self.cfg.path)) as conn:
+            conn.execute("begin immediate")
+            inserted = record_cash_flow_batch(
+                conn,
+                account_key=account_key,
+                transactions=rows,
+                supported_types=supported_types,
+                observed_at=observed_at,
+                errors=errors,
+            )
+            conn.commit()
+        return {
+            "enabled": True,
+            "account_key": account_key,
+            "observed_count": len(rows),
+            "inserted_count": inserted,
+            "observed_at": observed_at,
+        }
+
+    def record_cash_flow_error(
+        self,
+        *,
+        account_key: str,
+        supported_types: Iterable[str],
+        error: str,
+        observed_at: float | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        observed_at = float(observed_at or time.time())
+        with closing(_connect(self.cfg.path)) as conn:
+            conn.execute("begin immediate")
+            record_cash_flow_sync_error(
+                conn,
+                account_key=account_key,
+                supported_types=supported_types,
+                observed_at=observed_at,
+                error=error,
+            )
+            conn.commit()
+
+    def apply_portfolio_performance(
+        self,
+        portfolio: dict[str, Any],
+        account_balances: dict[str, Any],
+        *,
+        scope_key: str,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.enabled or not isinstance(portfolio, dict):
+            return portfolio
+        observed_at = float(observed_at or time.time())
+        account_keys = sorted(_account_map(account_balances))
+        observation_key = _stable_key(
+            "performance", scope_key, observed_at, portfolio.get("total_asset_value")
+        )
+        with closing(_connect(self.cfg.path)) as conn:
+            conn.execute("begin immediate")
+            performance = update_portfolio_performance(
+                conn,
+                portfolio=portfolio,
+                scope_key=scope_key,
+                account_keys=account_keys,
+                account_values=account_values_from_balances(
+                    account_balances,
+                    portfolio,
+                ),
+                observed_at=observed_at,
+                observation_key=observation_key,
+            )
+            conn.commit()
+        portfolio["performance"] = performance
+        portfolio["attribution_total_pnl"] = portfolio.get("total_pnl")
+        portfolio["total_pnl"] = performance.get("since_inception", {}).get("pnl")
+        portfolio["daily_total_pnl"] = performance.get("daily", {}).get("pnl")
+        return portfolio
 
     def record_account_snapshot(
         self,
@@ -1420,6 +1589,7 @@ def prune_asset_ledger(
         "order_snapshots",
         "position_snapshots",
         "pnl_snapshots",
+        "portfolio_performance_observations",
         "ledger_fills",
     ),
 ) -> dict[str, int]:
@@ -1433,6 +1603,7 @@ def prune_asset_ledger(
         "order_snapshots",
         "position_snapshots",
         "pnl_snapshots",
+        "portfolio_performance_observations",
         "ledger_fills",
     }
     selected = set(tables) & allowed
@@ -1500,6 +1671,15 @@ def prune_asset_ledger(
                   order by latest.observed_at desc limit 1
               )
         """,
+        "portfolio_performance_observations": """
+            delete from portfolio_performance_observations
+            where observed_at < ?
+              and observation_key not in (
+                  select observation_key from portfolio_performance_observations latest
+                  where latest.scope_key = portfolio_performance_observations.scope_key
+                  order by latest.observed_at desc limit 1
+              )
+        """,
         "ledger_fills": "delete from ledger_fills where last_observed_at < ?",
     }
     delete_order = (
@@ -1508,6 +1688,7 @@ def prune_asset_ledger(
         "order_snapshots",
         "position_snapshots",
         "pnl_snapshots",
+        "portfolio_performance_observations",
         "monitor_checkpoints",
         "ledger_events",
         "ledger_fills",
