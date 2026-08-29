@@ -108,6 +108,10 @@ from arbitrage_bot.web.loops import (
 )
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
 from arbitrage_bot.web.users import WebUserStore
+from arbitrage_bot.web.background.monitor import (
+    _ASSET_CHECKPOINT_WRITTEN_AT,
+    _checkpoint_asset_state,
+)
 from arbitrage_bot.web_config import (
     cross_exchange_rebalance_config_from_payload,
     market_maker_config_from_payload,
@@ -122,6 +126,79 @@ HTML = f"{INDEX_HTML}\n{APP_JS}"
 
 
 class WebMonitorTest(unittest.TestCase):
+    def test_portfolio_performance_is_attached_between_ledger_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_cfg = AssetLedgerConfig(
+                enabled=True,
+                path=str(Path(temp_dir) / "asset-ledger.sqlite3"),
+                checkpoint_interval_seconds=3600.0,
+            )
+            cfg = replace(make_config(), asset_ledger=ledger_cfg)
+            balances = {
+                "status": "ok",
+                "accounts": [
+                    {
+                        "exchange": "coinbase-spot",
+                        "status": "ok",
+                        "errors": [],
+                        "balance": {
+                            "checked": True,
+                            "currencies": [
+                                {"currency": "ACS", "total": 100.0},
+                                {"currency": "USDC", "total": 100.0},
+                            ],
+                        },
+                    }
+                ],
+                "totals": [],
+                "errors": [],
+            }
+            activity = {
+                "status": "ok",
+                "accounts": [],
+                "open_orders": [],
+                "recent_trades": [],
+                "errors": [],
+            }
+
+            def portfolio(mark_price: float) -> dict:
+                position_value = 100.0 * mark_price
+                return {
+                    "status": "ok",
+                    "quote_currency": "USD",
+                    "total_asset_currency": "USD",
+                    "total_asset_value": 100.0 + position_value,
+                    "positions": [
+                        {
+                            "asset": "ACS",
+                            "position_base": 100.0,
+                            "mark_price": mark_price,
+                            "position_value": position_value,
+                        }
+                    ],
+                    "position_value": position_value,
+                    "cash_balances": {"USDC": 100.0},
+                    "cash_balances_common": {"USDC": 100.0},
+                    "cash_value": 100.0,
+                    "position_missing_marks": [],
+                    "cash_missing_rates": [],
+                    "total_asset_missing_rates": [],
+                }
+
+            ledger_key = str(Path(ledger_cfg.path).resolve())
+            _ASSET_CHECKPOINT_WRITTEN_AT.pop(ledger_key, None)
+            initial = portfolio(0.2)
+            _checkpoint_asset_state(cfg, balances, activity, initial)
+            self.assertEqual(initial["performance"]["since_inception"]["pnl"], 0.0)
+
+            refreshed = portfolio(0.25)
+            _checkpoint_asset_state(cfg, balances, activity, refreshed)
+            self.assertAlmostEqual(
+                refreshed["performance"]["since_inception"]["pnl"],
+                5.0,
+            )
+            self.assertAlmostEqual(refreshed["daily_total_pnl"], 5.0)
+
     def test_market_maker_runtime_orders_keep_real_public_order_details(self) -> None:
         exchange = ExchangeConfig(
             id="bybit",

@@ -12,6 +12,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 	    ]);
 	    let currentPage = pageFromLocation();
 	    let lastState = null;
+	    let lastReliablePortfolioPerformance = null;
 	    let accountBalanceDetailPayload = null;
 	    let accountBalanceDetailLoadedAt = 0;
 	    let accountBalanceDetailLoading = false;
@@ -6974,6 +6975,33 @@ function balanceStatusClass(status) {
       return pieces.join(" · ");
     }
 
+    function resolvedPortfolioPerformance(portfolio) {
+      const performance = portfolio?.performance || {};
+      const sincePnl = performance.since_inception?.pnl ?? portfolio?.total_pnl;
+      const dailyPnl = performance.daily?.pnl ?? portfolio?.daily_total_pnl;
+      if (sincePnl != null || dailyPnl != null) {
+        const reliable = {
+          ...performance,
+          since_inception: {
+            ...(performance.since_inception || {}),
+            pnl: sincePnl,
+          },
+          daily: {
+            ...(performance.daily || {}),
+            pnl: dailyPnl,
+          },
+        };
+        lastReliablePortfolioPerformance = reliable;
+        return reliable;
+      }
+      if (!lastReliablePortfolioPerformance) return performance;
+      return {
+        ...lastReliablePortfolioPerformance,
+        status: "stale",
+        reason: performance.reason || "P/L refresh temporarily unavailable",
+      };
+    }
+
     function displayablePortfolioPositions(portfolio) {
       return (portfolio?.positions || []).filter((position) =>
         meetsBalanceDisplayThreshold(
@@ -7098,6 +7126,7 @@ function balanceStatusClass(status) {
     }
 
     function renderPortfolio(portfolio) {
+      const performance = resolvedPortfolioPerformance(portfolio);
       if (!portfolio || portfolio.status === "disabled") {
         text("portfolio-total-assets", "--");
         text("portfolio-total-assets-detail", "--");
@@ -7105,17 +7134,21 @@ function balanceStatusClass(status) {
         text("portfolio-cash-detail", "--");
         text("portfolio-mark", "--");
         text("portfolio-value", "--");
-        setPnl("portfolio-total-pnl", null);
-        setPnl("portfolio-daily-pnl", null);
+        const sincePnl = performance.since_inception?.pnl;
+        const dailyPnl = performance.daily?.pnl;
+        setPnl("portfolio-total-pnl", sincePnl);
+        setPnl("portfolio-daily-pnl", dailyPnl);
         setPnl("portfolio-mm-pnl", null);
         setPnl("portfolio-arb-pnl", null);
         setPnl("portfolio-auto-pnl", null);
         setPnl("portfolio-other-pnl", null);
         setPnl("portfolio-price-pnl", null);
-        document.getElementById("portfolio-total-pnl").title = "";
-        text("portfolio-total-pnl-detail", "--");
-        text("portfolio-daily-pnl-detail", "--");
-        document.getElementById("portfolio-daily-pnl").title = "";
+        const sinceDetail = performanceDetail(performance, "since_inception");
+        const dailyDetail = performanceDetail(performance, "daily");
+        document.getElementById("portfolio-total-pnl").title = sinceDetail;
+        text("portfolio-total-pnl-detail", sinceDetail);
+        text("portfolio-daily-pnl-detail", dailyDetail);
+        document.getElementById("portfolio-daily-pnl").title = dailyDetail;
         return;
       }
 
@@ -7167,7 +7200,6 @@ function balanceStatusClass(status) {
         ? positionValues.reduce((sum, value) => sum + value, 0)
         : null;
       text("portfolio-value", positionValue == null ? "--" : `$${money.format(positionValue)}`);
-      const performance = portfolio.performance || {};
       const sincePnl = performance.since_inception?.pnl ?? portfolio.total_pnl;
       const dailyPnl = performance.daily?.pnl ?? portfolio.daily_total_pnl;
       setPnl("portfolio-total-pnl", sincePnl);

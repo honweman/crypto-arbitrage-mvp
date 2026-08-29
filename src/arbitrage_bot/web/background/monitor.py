@@ -9,7 +9,7 @@ from ..market_maker_alerts import market_maker_problem_warnings
 from ..state import MonitorState
 
 from ...alerts import AlertService
-from ...asset_ledger import attach_ledger_checkpoint
+from ...asset_ledger import AssetLedgerStore, attach_ledger_checkpoint
 from ...config import BotConfig
 from ...exchanges import ExchangeManager
 from ...main import (
@@ -97,6 +97,19 @@ def _checkpoint_asset_state(
     ledger_key = str(Path(cfg.asset_ledger.path).expanduser().resolve())
     last_written = _ASSET_CHECKPOINT_WRITTEN_AT.get(ledger_key, 0.0)
     if now - last_written < cfg.asset_ledger.checkpoint_interval_seconds:
+        if portfolio is not None and cfg.asset_ledger.enabled:
+            try:
+                AssetLedgerStore(cfg.asset_ledger).apply_portfolio_performance(
+                    portfolio,
+                    account_balances,
+                    scope_key="platform",
+                    observed_at=now,
+                )
+            except Exception:  # noqa: BLE001
+                # A ledger refresh must not interrupt the monitor loop. The next
+                # cycle or checkpoint will retry while the browser retains the
+                # last reliable value.
+                pass
         return account_balances, order_activity
     try:
         balances, activity, _ = attach_ledger_checkpoint(
@@ -108,6 +121,16 @@ def _checkpoint_asset_state(
         _ASSET_CHECKPOINT_WRITTEN_AT[ledger_key] = now
         return balances, activity
     except Exception as exc:  # noqa: BLE001
+        if portfolio is not None and cfg.asset_ledger.enabled:
+            try:
+                AssetLedgerStore(cfg.asset_ledger).apply_portfolio_performance(
+                    portfolio,
+                    account_balances,
+                    scope_key="platform",
+                    observed_at=now,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         ledger_error = {
             "enabled": cfg.asset_ledger.enabled,
             "status": "error",
