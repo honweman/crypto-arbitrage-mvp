@@ -964,6 +964,9 @@ class AssetLedgerStore:
             portfolio_payload["daily_total_pnl"] = performance.get("daily", {}).get(
                 "pnl"
             )
+            portfolio_payload["rolling_24h_pnl"] = performance.get(
+                "rolling_24h", {}
+            ).get("pnl")
             position_snapshot_id = _stable_key(
                 "positions", observed_at, portfolio_payload
             )
@@ -1213,6 +1216,9 @@ class AssetLedgerStore:
         portfolio["attribution_total_pnl"] = portfolio.get("total_pnl")
         portfolio["total_pnl"] = performance.get("since_inception", {}).get("pnl")
         portfolio["daily_total_pnl"] = performance.get("daily", {}).get("pnl")
+        portfolio["rolling_24h_pnl"] = performance.get("rolling_24h", {}).get(
+            "pnl"
+        )
         return portfolio
 
     def record_account_snapshot(

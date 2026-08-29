@@ -295,6 +295,82 @@ class AssetLedgerStoreTest(unittest.TestCase):
             result["daily"]["started_at"],
         )
 
+    def test_rolling_24h_performance_uses_trailing_equity_and_excludes_flows(
+        self,
+    ) -> None:
+        store = AssetLedgerStore(self.cfg)
+        first_at = 1_800_000_000.0
+
+        def portfolio(equity: float) -> dict:
+            return {
+                "status": "ok",
+                "quote_currency": "USD",
+                "total_asset_currency": "USD",
+                "total_asset_value": equity,
+                "cash_balances": {"USDC": equity},
+                "cash_balances_common": {"USDC": equity},
+                "cash_value": equity,
+                "position_value": 0.0,
+                "positions": [],
+                "position_missing_marks": [],
+                "cash_missing_rates": [],
+                "total_asset_missing_rates": [],
+            }
+
+        balances = _balances()
+        balances["accounts"][0]["balance"]["currencies"] = [
+            {"currency": "USDC", "free": 100, "used": 0, "total": 100}
+        ]
+        first = store.record_monitor_checkpoint(
+            balances,
+            _activity(),
+            portfolio=portfolio(100.0),
+            observed_at=first_at,
+        )["performance"]
+        self.assertEqual(first["rolling_24h"]["pnl"], 0.0)
+        self.assertFalse(first["rolling_24h"]["complete_window"])
+
+        one_hour_at = first_at + 3600.0
+        store.record_monitor_checkpoint(
+            balances,
+            _activity(),
+            portfolio=portfolio(101.0),
+            observed_at=one_hour_at,
+        )
+        deposit_at = first_at + 13.0 * 3600.0
+        store.record_cash_flows(
+            account_key="coinbase-spot",
+            transactions=[
+                {
+                    "id": "rolling-deposit",
+                    "type": "deposit",
+                    "currency": "USDC",
+                    "amount": 50.0,
+                    "timestamp": int(deposit_at * 1000),
+                    "status": "ok",
+                }
+            ],
+            supported_types=["deposit", "withdrawal"],
+            observed_at=deposit_at,
+        )
+        store.record_monitor_checkpoint(
+            balances,
+            _activity(),
+            portfolio=portfolio(163.0),
+            observed_at=deposit_at + 60.0,
+        )
+
+        result = store.record_monitor_checkpoint(
+            balances,
+            _activity(),
+            portfolio=portfolio(166.0),
+            observed_at=first_at + 25.0 * 3600.0,
+        )["performance"]["rolling_24h"]
+        self.assertTrue(result["complete_window"])
+        self.assertEqual(result["started_at"], one_hour_at)
+        self.assertEqual(result["net_external_flow"], 50.0)
+        self.assertEqual(result["pnl"], 15.0)
+
     def test_performance_keeps_last_reliable_value_when_valuation_is_missing(self) -> None:
         store = AssetLedgerStore(self.cfg)
         complete = {

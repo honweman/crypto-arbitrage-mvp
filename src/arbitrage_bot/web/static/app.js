@@ -6963,6 +6963,12 @@ function balanceStatusClass(status) {
       if (windowName === "since_inception") {
         pieces.push(`${uiText("From")} ${formatPerformanceStart(window.started_at)}`);
       }
+      if (windowName === "rolling_24h") {
+        pieces.push(`${uiText("From")} ${formatPerformanceStart(window.started_at)}`);
+        if (window.complete_window === false) {
+          pieces.push(uiText("Building 24h P/L window"));
+        }
+      }
       pieces.push(
         `${uiText("Net deposits/withdrawals excluded")} ${formatNetFlow(window.net_external_flow, currency)}`
       );
@@ -6978,17 +6984,20 @@ function balanceStatusClass(status) {
     function resolvedPortfolioPerformance(portfolio) {
       const performance = portfolio?.performance || {};
       const sincePnl = performance.since_inception?.pnl ?? portfolio?.total_pnl;
-      const dailyPnl = performance.daily?.pnl ?? portfolio?.daily_total_pnl;
-      if (sincePnl != null || dailyPnl != null) {
+      const rollingPnl = performance.rolling_24h?.pnl
+        ?? portfolio?.rolling_24h_pnl
+        ?? performance.daily?.pnl
+        ?? portfolio?.daily_total_pnl;
+      if (sincePnl != null || rollingPnl != null) {
         const reliable = {
           ...performance,
           since_inception: {
             ...(performance.since_inception || {}),
             pnl: sincePnl,
           },
-          daily: {
-            ...(performance.daily || {}),
-            pnl: dailyPnl,
+          rolling_24h: {
+            ...(performance.rolling_24h || performance.daily || {}),
+            pnl: rollingPnl,
           },
         };
         lastReliablePortfolioPerformance = reliable;
@@ -7135,7 +7144,7 @@ function balanceStatusClass(status) {
         text("portfolio-mark", "--");
         text("portfolio-value", "--");
         const sincePnl = performance.since_inception?.pnl;
-        const dailyPnl = performance.daily?.pnl;
+        const dailyPnl = performance.rolling_24h?.pnl;
         setPnl("portfolio-total-pnl", sincePnl);
         setPnl("portfolio-daily-pnl", dailyPnl);
         setPnl("portfolio-mm-pnl", null);
@@ -7144,7 +7153,7 @@ function balanceStatusClass(status) {
         setPnl("portfolio-other-pnl", null);
         setPnl("portfolio-price-pnl", null);
         const sinceDetail = performanceDetail(performance, "since_inception");
-        const dailyDetail = performanceDetail(performance, "daily");
+        const dailyDetail = performanceDetail(performance, "rolling_24h");
         document.getElementById("portfolio-total-pnl").title = sinceDetail;
         text("portfolio-total-pnl-detail", sinceDetail);
         text("portfolio-daily-pnl-detail", dailyDetail);
@@ -7201,11 +7210,14 @@ function balanceStatusClass(status) {
         : null;
       text("portfolio-value", positionValue == null ? "--" : `$${money.format(positionValue)}`);
       const sincePnl = performance.since_inception?.pnl ?? portfolio.total_pnl;
-      const dailyPnl = performance.daily?.pnl ?? portfolio.daily_total_pnl;
+      const dailyPnl = performance.rolling_24h?.pnl
+        ?? portfolio.rolling_24h_pnl
+        ?? performance.daily?.pnl
+        ?? portfolio.daily_total_pnl;
       setPnl("portfolio-total-pnl", sincePnl);
       setPnl("portfolio-daily-pnl", dailyPnl);
       const sinceDetail = performanceDetail(performance, "since_inception");
-      const dailyDetail = performanceDetail(performance, "daily");
+      const dailyDetail = performanceDetail(performance, "rolling_24h");
       text("portfolio-total-pnl-detail", sinceDetail);
       text("portfolio-daily-pnl-detail", dailyDetail);
       setPnl("portfolio-mm-pnl", portfolio.sources?.market_maker);

@@ -477,8 +477,86 @@ def _empty_performance(
         "currency": currency,
         "current_equity": _number(portfolio.get("total_asset_value")),
         "since_inception": {"pnl": None},
+        "rolling_24h": {"pnl": None},
         "daily": {"pnl": None, "day": _local_day(datetime.now().timestamp())},
         "cash_flow_coverage": coverage,
+    }
+
+
+def _rolling_24h_performance(
+    conn: Any,
+    *,
+    scope_key: str,
+    observed_at: float,
+    current_equity: float,
+    inception_at: float,
+    opening_equity: float,
+    cumulative_flow: float,
+    current_external_flow: float,
+) -> dict[str, Any]:
+    target_at = observed_at - 24.0 * 60.0 * 60.0
+    if inception_at > target_at:
+        return {
+            "pnl": current_equity - opening_equity - cumulative_flow,
+            "started_at": inception_at,
+            "opening_equity": opening_equity,
+            "net_external_flow": cumulative_flow,
+            "window_seconds": max(0.0, observed_at - inception_at),
+            "complete_window": False,
+        }
+
+    reference = conn.execute(
+        """
+        select observed_at, equity
+        from portfolio_performance_observations
+        where scope_key = ? and observed_at <= ?
+        order by observed_at desc
+        limit 1
+        """,
+        (scope_key, target_at),
+    ).fetchone()
+    if reference is None:
+        reference = conn.execute(
+            """
+            select observed_at, equity
+            from portfolio_performance_observations
+            where scope_key = ?
+            order by observed_at asc
+            limit 1
+            """,
+            (scope_key,),
+        ).fetchone()
+    if reference is None:
+        return {
+            "pnl": current_equity - opening_equity - cumulative_flow,
+            "started_at": inception_at,
+            "opening_equity": opening_equity,
+            "net_external_flow": cumulative_flow,
+            "window_seconds": max(0.0, observed_at - inception_at),
+            "complete_window": False,
+        }
+
+    started_at = float(reference["observed_at"])
+    window_flow = float(
+        conn.execute(
+            """
+            select coalesce(sum(external_flow), 0)
+            from portfolio_performance_observations
+            where scope_key = ? and observed_at > ? and observed_at <= ?
+            """,
+            (scope_key, started_at, observed_at),
+        ).fetchone()[0]
+        or 0.0
+    )
+    window_flow += current_external_flow
+    reference_equity = float(reference["equity"])
+    return {
+        "pnl": current_equity - reference_equity - window_flow,
+        "started_at": started_at,
+        "opening_equity": reference_equity,
+        "net_external_flow": window_flow,
+        "window_seconds": max(0.0, observed_at - started_at),
+        "complete_window": started_at <= target_at,
     }
 
 
@@ -566,6 +644,14 @@ def update_portfolio_performance(
                 "started_at": observed_at,
                 "opening_equity": equity,
                 "net_external_flow": 0.0,
+            },
+            "rolling_24h": {
+                "pnl": 0.0,
+                "started_at": observed_at,
+                "opening_equity": equity,
+                "net_external_flow": 0.0,
+                "window_seconds": 0.0,
+                "complete_window": False,
             },
             "daily": {
                 "pnl": 0.0,
@@ -672,6 +758,16 @@ def update_portfolio_performance(
     daily_flow += membership_flow + applied_flow
     since_pnl = equity - opening_equity - cumulative_flow
     today_pnl = equity - daily_opening - daily_flow
+    rolling_24h = _rolling_24h_performance(
+        conn,
+        scope_key=scope_key,
+        observed_at=observed_at,
+        current_equity=equity,
+        inception_at=inception_at,
+        opening_equity=opening_equity,
+        cumulative_flow=cumulative_flow,
+        current_external_flow=membership_flow + applied_flow,
+    )
     status = "ok"
     reasons: list[str] = []
     if coverage["status"] != "complete":
@@ -682,6 +778,7 @@ def update_portfolio_performance(
         reasons.append("cash flows are waiting for prices")
         since_pnl = None
         today_pnl = None
+        rolling_24h["pnl"] = None
     payload = {
         "status": status,
         "reason": "; ".join(reasons),
@@ -693,6 +790,7 @@ def update_portfolio_performance(
             "opening_equity": opening_equity,
             "net_external_flow": cumulative_flow,
         },
+        "rolling_24h": rolling_24h,
         "daily": {
             "pnl": today_pnl,
             "day": daily_day,

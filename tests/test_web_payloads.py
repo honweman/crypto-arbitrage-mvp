@@ -197,6 +197,11 @@ class WebMonitorTest(unittest.TestCase):
                 refreshed["performance"]["since_inception"]["pnl"],
                 5.0,
             )
+            self.assertAlmostEqual(
+                refreshed["performance"]["rolling_24h"]["pnl"],
+                5.0,
+            )
+            self.assertAlmostEqual(refreshed["rolling_24h_pnl"], 5.0)
             self.assertAlmostEqual(refreshed["daily_total_pnl"], 5.0)
 
     def test_market_maker_runtime_orders_keep_real_public_order_details(self) -> None:
