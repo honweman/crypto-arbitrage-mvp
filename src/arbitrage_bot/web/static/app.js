@@ -1,7 +1,6 @@
 const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     const money = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
-    const compact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-	    const shortNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+    const wholeQuantity = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 	    const PAGE_IDS = new Set(["status", "trading", "quant", "settings", "records"]);
 	    const CORE_CONTROL_SECTION_IDS = new Set([
 	      "user-market-maker-section",
@@ -775,7 +774,8 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 
     function formatSymbolQuantity(value, symbol, mode) {
       const currency = mode === "quote" ? quoteCurrency(symbol) : baseCurrency(symbol);
-      return `${currency} ${formatBalanceAmount(value || 0)}`;
+      const formatter = mode === "quote" ? money : wholeQuantity;
+      return `${currency} ${formatter.format(Number(value || 0))}`;
     }
 
     function marketLimitKey(exchange, symbol) {
@@ -802,7 +802,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function formatLimitValue(value, currency = "") {
       if (value == null) return "--";
       const prefix = currency ? `${currency} ` : "";
-      return `${prefix}${formatBalanceAmount(value)}`;
+      return `${prefix}${fmt.format(value)}`;
     }
 
     function marketLimitSummary(row, symbol) {
@@ -835,8 +835,8 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
           <td class="num">${row.ask == null ? "--" : fmt.format(row.ask)}</td>
           <td class="num">${row.bid_common == null ? "--" : fmt.format(row.bid_common)}</td>
           <td class="num">${row.ask_common == null ? "--" : fmt.format(row.ask_common)}</td>
-          <td class="num">${row.bid_size == null ? "--" : compact.format(row.bid_size)}</td>
-          <td class="num">${row.ask_size == null ? "--" : compact.format(row.ask_size)}</td>
+          <td class="num">${row.bid_size == null ? "--" : wholeQuantity.format(row.bid_size)}</td>
+          <td class="num">${row.ask_size == null ? "--" : wholeQuantity.format(row.ask_size)}</td>
         `;
         body.appendChild(tr);
       }
@@ -854,7 +854,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
 
     function formatBalanceAmount(value) {
       if (value == null) return "--";
-      return Math.abs(value) >= 1_000_000 ? shortNumber.format(value) : fmt.format(value);
+      return wholeQuantity.format(Number(value));
     }
 
     function finiteOrderNumber(value) {
@@ -867,6 +867,13 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       const numeric = finiteOrderNumber(value);
       if (numeric == null) return "--";
       const formatted = fmt.format(numeric);
+      return currency ? `${formatted} ${currency}` : formatted;
+    }
+
+    function formatOrderQuantity(value, currency = "") {
+      const numeric = finiteOrderNumber(value);
+      if (numeric == null) return "--";
+      const formatted = wholeQuantity.format(numeric);
       return currency ? `${formatted} ${currency}` : formatted;
     }
 
@@ -1339,7 +1346,7 @@ function balanceStatusClass(status) {
           <td>${escapeHtml(displayExchange(account.exchange, account.label))}</td>
             <td>${escapeHtml(position.symbol || "--")}</td>
             <td class="${position.side === "long" ? "side-buy" : position.side === "short" ? "side-sell" : ""}">${escapeHtml(String(position.side || "--").toUpperCase())}</td>
-            <td class="num">${formatBalanceAmount(position.notional_quote)}</td>
+            <td class="num">${position.notional_quote == null ? "--" : money.format(position.notional_quote)}</td>
             <td class="num">${position.leverage == null ? "--" : fmt.format(position.leverage)}</td>
             <td class="num">${position.mark_price == null ? "--" : fmt.format(position.mark_price)}</td>
             <td class="num">${position.liquidation_price == null ? "--" : fmt.format(position.liquidation_price)}</td>
@@ -1627,7 +1634,7 @@ function balanceStatusClass(status) {
 
     function formatFee(fee) {
       if (!fee) return "--";
-      const cost = fee.cost == null ? "--" : formatBalanceAmount(fee.cost);
+      const cost = fee.cost == null ? "--" : money.format(fee.cost);
       return fee.currency ? `${cost} ${fee.currency}` : cost;
     }
 
@@ -1838,9 +1845,9 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Side")}" class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Status")}">${escapeHtml(order.status || "--")}</td>
           <td data-label="${uiText("Price")}" class="num">${formatOrderNumber(order.price, quote)}</td>
-          <td data-label="${uiText("Order Qty")}" class="num">${formatOrderNumber(order.amount, base)}</td>
-          <td data-label="${uiText("Filled")}" class="num">${formatOrderNumber(order.filled, base)}</td>
-          <td data-label="${uiText("Remaining")}" class="num">${formatOrderNumber(order.remaining, base)}</td>
+          <td data-label="${uiText("Order Qty")}" class="num">${formatOrderQuantity(order.amount, base)}</td>
+          <td data-label="${uiText("Filled")}" class="num">${formatOrderQuantity(order.filled, base)}</td>
+          <td data-label="${uiText("Remaining")}" class="num">${formatOrderQuantity(order.remaining, base)}</td>
           <td data-label="${uiText("Open Value")}" class="num">${formatOrderNumber(orderOpenNotional(order), quote)}</td>
           <td data-label="${uiText("Updated")}">${formatTimestamp(order.timestamp)}</td>
           ${actionCell}
@@ -1882,7 +1889,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Side")}" class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Source")}">${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
           <td data-label="${uiText("Price")}" class="num">${formatOrderNumber(fill.price, quote)}</td>
-          <td data-label="${uiText("Amount")}" class="num">${formatOrderNumber(fill.amount, base)}</td>
+          <td data-label="${uiText("Amount")}" class="num">${formatOrderQuantity(fill.amount, base)}</td>
           <td data-label="${uiText("Cost")}" class="num">${formatOrderNumber(fill.cost, quote)}</td>
           <td data-label="${uiText("P/L")}" class="num ${pnlClass(fill.realized_pnl_common)}">${formatPnlValue(fill.realized_pnl_common)}</td>
           <td data-label="${uiText("Fee")}">${escapeHtml(formatFee(fill.fee))}</td>
@@ -3187,13 +3194,13 @@ function balanceStatusClass(status) {
       const usingDaily = quality.window === "daily_pnl";
       text(
         "mm-quality-inventory",
-        base == null ? "--" : compact.format(base)
+        base == null ? "--" : wholeQuantity.format(base)
       );
       text(
         "mm-quality-inventory-detail",
         base == null
           ? "--"
-          : `target ${compact.format(target || 0)} · dev ${compact.format(deviation || 0)} · buy ${buyMult == null ? "--" : Number(buyMult).toFixed(2)}x / sell ${sellMult == null ? "--" : Number(sellMult).toFixed(2)}x`
+          : `target ${wholeQuantity.format(target || 0)} · dev ${wholeQuantity.format(deviation || 0)} · buy ${buyMult == null ? "--" : Number(buyMult).toFixed(2)}x / sell ${sellMult == null ? "--" : Number(sellMult).toFixed(2)}x`
       );
 
       const buy = quality.buy || {};
@@ -3239,7 +3246,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Side")}" class="${order.side === "buy" ? "side-buy" : "side-sell"}">${order.side.toUpperCase()}</td>
           <td data-label="${uiText("Level")}" class="num">${order.level}</td>
           <td data-label="${uiText("Price")}" class="num">${fmt.format(order.price)}</td>
-          <td data-label="${uiText("Amount")}" class="num">${compact.format(order.amount)}</td>
+          <td data-label="${uiText("Amount")}" class="num">${wholeQuantity.format(order.amount)}</td>
           <td data-label="${uiText("Quote")}" class="num" title="${commonQuote}">${formatSymbolQuantity(order.quote_notional, marketMaker.plan.symbol, "quote")}</td>
           <td data-label="${uiText("Distance")}" class="num">${order.distance_bps.toFixed(2)} bps</td>
         `;
@@ -3277,7 +3284,7 @@ function balanceStatusClass(status) {
         <td data-label="${uiText("Exchange")}">${escapeHtml(displayExchange(plan.exchange, plan.exchange_label))}</td>
         <td data-label="${uiText("Symbol")}">${plan.symbol}</td>
         <td data-label="${uiText("Order Price")}" class="num">${fmt.format(order.price)}</td>
-        <td data-label="${uiText("Slice Amount")}" class="num">${compact.format(order.amount)}</td>
+        <td data-label="${uiText("Slice Amount")}" class="num">${wholeQuantity.format(order.amount)}</td>
         <td data-label="${uiText("Quote")}" class="num">${money.format(order.quote_notional)}</td>
         <td data-label="${uiText("Submitted")}" class="num">${submittedText}</td>
         <td data-label="${uiText("Remaining")}" class="num">${remainingText}</td>
@@ -3307,7 +3314,7 @@ function balanceStatusClass(status) {
           <td class="${order.side === "buy" ? "side-buy" : "side-sell"}">${String(order.side || "").toUpperCase()}</td>
           <td class="num">${order.level}</td>
           <td class="num">${fmt.format(order.price)}</td>
-          <td class="num">${compact.format(order.amount)}</td>
+          <td class="num">${wholeQuantity.format(order.amount)}</td>
           <td class="num">${formatSymbolQuantity(order.quote_notional, spotGrid.plan.symbol, "quote")}</td>
           <td class="num">${Number(order.distance_bps || 0).toFixed(2)} bps</td>
         `;
@@ -3337,7 +3344,7 @@ function balanceStatusClass(status) {
           <td class="num">${row.order_index}</td>
           <td class="${plan.side === "buy" ? "side-buy" : "side-sell"}">${String(plan.side || "").toUpperCase()}</td>
           <td class="num">${fmt.format(displayPrice)}</td>
-          <td class="num">${compact.format(row.amount_at_current_price || 0)}</td>
+          <td class="num">${wholeQuantity.format(row.amount_at_current_price || 0)}</td>
           <td class="num">${formatSymbolQuantity(row.quote_notional, plan.symbol, "quote")}</td>
           <td>${isNext ? "Next" : escapeHtml(plan.status || "--")}</td>
         `;
@@ -3365,7 +3372,7 @@ function balanceStatusClass(status) {
           <td class="${item.side === "buy" ? "side-buy" : "side-sell"}">${String(item.side || "").toUpperCase()}</td>
           <td class="num">${Number(item.scheduled_at_seconds || 0).toFixed(0)}s</td>
           <td class="num">${fmt.format(item.price)}</td>
-          <td class="num">${compact.format(item.amount)}</td>
+          <td class="num">${wholeQuantity.format(item.amount)}</td>
           <td class="num">${formatSymbolQuantity(item.quote_notional, plan.symbol, "quote")}</td>
           <td>${item.status === "next" ? "Next" : escapeHtml(item.status || "--")}</td>
         `;
@@ -3562,7 +3569,7 @@ function balanceStatusClass(status) {
           <td class="num">${fmt.format(point.price)}</td>
           <td class="num">${money.format(point.equity)}</td>
           <td class="num">${backtestPercent(point.drawdown_pct)}</td>
-          <td class="num">${compact.format(point.base)}</td>
+          <td class="num">${wholeQuantity.format(point.base)}</td>
           <td class="num">${money.format(point.cash)}</td>
         `;
         body.appendChild(tr);
@@ -6620,7 +6627,7 @@ function balanceStatusClass(status) {
       const total = Number(config.total_quote || 0) > 0
         ? `${quoteCurrency(config.symbol)} ${fmt.format(config.total_quote)}`
         : Number(config.total_base || 0) > 0
-        ? `${baseCurrency(config.symbol)} ${fmt.format(config.total_base)}`
+        ? `${baseCurrency(config.symbol)} ${wholeQuantity.format(config.total_base)}`
         : (config.unlimited_total ? "Unlimited" : "No target");
       const slice = config.slice_mode === "top_level"
         ? "Top level size"
@@ -6628,7 +6635,7 @@ function balanceStatusClass(status) {
         ? `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base_min || 0)}-${fmt.format(config.slice_base_max || 0)}`
         : Number(config.slice_quote || 0) > 0
         ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
-        : `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base || 0)}`;
+        : `${baseCurrency(config.symbol)} ${wholeQuantity.format(config.slice_base || 0)}`;
       const guard = config.block_conflicting_market_maker === false ? "MM guard off" : "MM guard on";
       const coordination = config.coordinate_market_maker ? "MM auto-coordinate" : "MM coordination off";
       return `${displayExchange(config.exchange, config.exchange_label) || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard} · ${coordination}`;
@@ -7045,7 +7052,7 @@ function balanceStatusClass(status) {
             ? left.currency.localeCompare(right.currency)
             : leftRank - rightRank;
         })
-        .map((row) => `${row.currency} ${compact.format(row.amount)}`);
+        .map((row) => `${row.currency} ${wholeQuantity.format(row.amount)}`);
       const visibleCurrencies = new Set(visibleCash.map((row) => row.currency));
       const missing = (portfolio?.cash_missing_rates || []).filter((currency) =>
         visibleCurrencies.has(currency)
@@ -7076,7 +7083,7 @@ function balanceStatusClass(status) {
               .filter(Boolean)
           ).size;
           return [
-            `${position.asset} ${compact.format(position.position_base || 0)}`,
+            `${position.asset} ${wholeQuantity.format(position.position_base || 0)}`,
             formatPositionPrice(position, portfolio),
             formatPositionValue(position, portfolio),
             accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
@@ -7091,7 +7098,7 @@ function balanceStatusClass(status) {
           const wallet = String(row.wallet || "trading").toLowerCase() === "funding"
             ? uiText("Funding wallet")
             : uiText("Trading wallet");
-          return `${position.asset} · ${row.account || displayExchange(row.exchange, row.exchange_label)} · ${wallet} ${compact.format(row.amount || 0)}`;
+          return `${position.asset} · ${row.account || displayExchange(row.exchange, row.exchange_label)} · ${wallet} ${wholeQuantity.format(row.amount || 0)}`;
         }))
         .join(" | ");
     }
@@ -7267,7 +7274,7 @@ function balanceStatusClass(status) {
 
     function formatTokenDelta(value) {
       if (value == null) return "--";
-      return `${value >= 0 ? "+" : ""}${compact.format(value)}`;
+      return `${value >= 0 ? "+" : ""}${wholeQuantity.format(value)}`;
     }
 
     function deltaClass(value) {
@@ -7298,9 +7305,9 @@ function balanceStatusClass(status) {
             <td>${holder.rank}</td>
             <td><span class="holder-label ${labelClass}" title="${escapeHtml(label)}">${escapeHtml(label)}</span></td>
             <td title="${holder.owner}">${shortAddress(holder.owner)}</td>
-            <td class="num">${compact.format(holder.amount)}</td>
+            <td class="num">${wholeQuantity.format(holder.amount)}</td>
             <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(4) + "%"}</td>
-            <td class="num ${deltaClass(cumulativeDelta)}" title="Baseline ${holder.baseline_amount == null ? "--" : compact.format(holder.baseline_amount)}">${formatTokenDelta(cumulativeDelta)}</td>
+            <td class="num ${deltaClass(cumulativeDelta)}" title="Baseline ${holder.baseline_amount == null ? "--" : wholeQuantity.format(holder.baseline_amount)}">${formatTokenDelta(cumulativeDelta)}</td>
             <td class="num ${deltaClass(lastDelta)}" title="${holder.last_change_at ? formatAge(holder.last_change_at) : "No change"}">${formatTokenDelta(lastDelta)}</td>
             <td class="num">${holder.change_count || 0}</td>
             <td class="num">${holder.token_account_count}</td>
@@ -7337,7 +7344,7 @@ function balanceStatusClass(status) {
           <td title="${event.owner}">${shortAddress(event.owner)}</td>
           <td class="num">${event.previous_rank && event.previous_rank !== event.rank ? `${event.previous_rank}→${event.rank || "--"}` : event.rank || "--"}</td>
           <td class="num ${deltaClass(event.delta_amount)}">${formatTokenDelta(event.delta_amount)}</td>
-          <td class="num">${event.amount == null ? "--" : compact.format(event.amount)}</td>
+          <td class="num">${event.amount == null ? "--" : wholeQuantity.format(event.amount)}</td>
           <td class="num ${deltaClass(event.cumulative_delta_amount)}">${formatTokenDelta(event.cumulative_delta_amount)}</td>
         `;
         changesBody.appendChild(tr);
@@ -8911,7 +8918,7 @@ function balanceStatusClass(status) {
       if (!payload.unlimited_total) {
         total = payload.total_quote > 0
           ? `${quote} ${money.format(payload.total_quote)}`
-          : `${base} ${fmt.format(payload.total_base)}`;
+          : `${base} ${wholeQuantity.format(payload.total_base)}`;
       }
       const size = payload.slice_mode === "top_level"
         ? uiText("Match top-of-book size")
@@ -9495,7 +9502,7 @@ function balanceStatusClass(status) {
       }
       if (!dangerConfirm(
         "Acknowledge residual exposure?",
-        `${fmt.format(quantity)} ${asset}\nNo order will be placed. MM may resume, but rebalance remains blocked until reset and a new live confirmation.`,
+        `${wholeQuantity.format(quantity)} ${asset}\nNo order will be placed. MM may resume, but rebalance remains blocked until reset and a new live confirmation.`,
       )) return;
       const button = document.getElementById("rebalance-acknowledge-exposure");
       rebalanceFormBusy = true;
@@ -9532,7 +9539,7 @@ function balanceStatusClass(status) {
       );
       if (!dangerConfirm(
         "Stop rebalance and release MM?",
-        `${fmt.format(quantity)} ${asset}\nNo hedge order will be placed. The residual remains in the audit log.`,
+        `${wholeQuantity.format(quantity)} ${asset}\nNo hedge order will be placed. The residual remains in the audit log.`,
       )) return;
       const button = document.getElementById("rebalance-stop-release");
       rebalanceFormBusy = true;
@@ -9588,8 +9595,8 @@ function balanceStatusClass(status) {
         <span class="config-chip ${runtime.halted ? "config-diff" : "config-match"}">${escapeHtml(status)}</span>
         <span>${uiText("Source spent")} ${escapeHtml(common)} ${money.format(completed)} / ${money.format(target)} · ${uiText("remaining")} ${money.format(remaining)}</span>
         <span>${uiText("Destination received")} ${escapeHtml(common)} ${money.format(destinationReceived)}</span>
-        <span>${escapeHtml(baseCurrency(plan?.buy_symbol || data?.config?.buy_symbol || ""))} ${fmt.format(runtime.completed_base || 0)}</span>
-        ${Number(residual.quantity_base || 0) > 0 ? `<span>${acknowledgedResidual ? "Acknowledged" : "Residual"}: ${escapeHtml(fmt.format(residual.quantity_base))} ${escapeHtml(residual.asset || "")}</span>` : ""}
+        <span>${escapeHtml(baseCurrency(plan?.buy_symbol || data?.config?.buy_symbol || ""))} ${wholeQuantity.format(runtime.completed_base || 0)}</span>
+        ${Number(residual.quantity_base || 0) > 0 ? `<span>${acknowledgedResidual ? "Acknowledged" : "Residual"}: ${escapeHtml(wholeQuantity.format(residual.quantity_base))} ${escapeHtml(residual.asset || "")}</span>` : ""}
         ${coordinationStatus ? `<span>${escapeHtml(uiText("MM coordination"))}: ${escapeHtml(coordinationStatus)}</span>` : ""}
       `;
 
@@ -9631,7 +9638,7 @@ function balanceStatusClass(status) {
           <td>${escapeHtml(row.symbol || "--")}</td>
           <td class="${row.side === "buy" ? "side-buy" : "side-sell"}">${row.side.toUpperCase()}</td>
           <td class="num">${fmt.format(row.price || 0)}</td>
-          <td class="num">${fmt.format(row.base || 0)}</td>
+          <td class="num">${wholeQuantity.format(row.base || 0)}</td>
           <td class="num">${escapeHtml(row.local)}</td>
           <td class="num">${escapeHtml(row.common)}</td>
         `;
