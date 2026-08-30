@@ -1,6 +1,14 @@
-const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
-    const money = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
-    const wholeQuantity = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
+    const wholeNumberFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+    const wholeNumber = {
+      format(value) {
+        const numeric = Number(value);
+        return wholeNumberFormatter.format(Math.round(numeric) === 0 ? 0 : numeric);
+      },
+    };
+    const fmt = priceNumber;
+    const money = wholeNumber;
+    const wholeQuantity = wholeNumber;
 	    const PAGE_IDS = new Set(["status", "trading", "quant", "settings", "records"]);
 	    const CORE_CONTROL_SECTION_IDS = new Set([
 	      "user-market-maker-section",
@@ -349,14 +357,14 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function formatAge(ts) {
       if (!ts) return "--";
       const age = Math.max(0, Date.now() / 1000 - ts);
-      return age < 60 ? `${age.toFixed(0)}s ago` : `${(age / 60).toFixed(1)}m ago`;
+      return age < 60 ? `${age.toFixed(0)}s ago` : `${(age / 60).toFixed(0)}m ago`;
     }
 
     function formatDurationSeconds(value) {
       const seconds = Math.max(0, Number(value || 0));
       if (seconds < 60) return `${Math.ceil(seconds)}s`;
       if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
-      return `${(seconds / 3600).toFixed(seconds < 36000 ? 1 : 0)}h`;
+      return `${(seconds / 3600).toFixed(0)}h`;
     }
 
     function baseCurrency(symbol) {
@@ -712,20 +720,20 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
         return {
           ready: false,
           limit,
-          detail: `${uiText("Perpetual opening is disabled. Set Risk Controls > Max Leverage to at least")} ${fmt.format(requested || 1)}x`,
+          detail: `${uiText("Perpetual opening is disabled. Set Risk Controls > Max Leverage to at least")} ${wholeNumber.format(requested || 1)}x`,
         };
       }
       if (!(requested > 0) || requested > limit + 1e-9) {
         return {
           ready: false,
           limit,
-          detail: `${uiText("Requested leverage exceeds the global risk maximum")}: ${fmt.format(requested)}x > ${fmt.format(limit)}x`,
+          detail: `${uiText("Requested leverage exceeds the global risk maximum")}: ${wholeNumber.format(requested)}x > ${wholeNumber.format(limit)}x`,
         };
       }
       return {
         ready: true,
         limit,
-        detail: `${uiText("Global risk maximum leverage")}: ${fmt.format(limit)}x`,
+        detail: `${uiText("Global risk maximum leverage")}: ${wholeNumber.format(limit)}x`,
       };
     }
 
@@ -802,7 +810,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function formatLimitValue(value, currency = "") {
       if (value == null) return "--";
       const prefix = currency ? `${currency} ` : "";
-      return `${prefix}${fmt.format(value)}`;
+      return `${prefix}${wholeNumber.format(value)}`;
     }
 
     function marketLimitSummary(row, symbol) {
@@ -866,7 +874,14 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     function formatOrderNumber(value, currency = "") {
       const numeric = finiteOrderNumber(value);
       if (numeric == null) return "--";
-      const formatted = fmt.format(numeric);
+      const formatted = wholeNumber.format(numeric);
+      return currency ? `${formatted} ${currency}` : formatted;
+    }
+
+    function formatOrderPrice(value, currency = "") {
+      const numeric = finiteOrderNumber(value);
+      if (numeric == null) return "--";
+      const formatted = priceNumber.format(numeric);
       return currency ? `${formatted} ${currency}` : formatted;
     }
 
@@ -889,7 +904,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
       if (value == null) return "--";
       const numeric = Number(value);
       if (!Number.isFinite(numeric)) return "--";
-      return `${numeric.toFixed(2)} bps`;
+      return `${numeric.toFixed(0)} bps`;
     }
 
 function balanceStatusClass(status) {
@@ -1241,7 +1256,7 @@ function balanceStatusClass(status) {
         tr.innerHTML = `
           <td class="balance-currency-cell"><strong>${escapeHtml(currency)}</strong></td>
           <td class="num"><strong>${formatBalanceAmount(total)}</strong></td>
-          <td class="num">${priceCommon == null ? "--" : money.format(priceCommon)}</td>
+          <td class="num">${priceCommon == null ? "--" : priceNumber.format(priceCommon)}</td>
           <td class="num">${valueCommon == null ? "--" : `${money.format(valueCommon)} ${escapeHtml(commonCurrency)}`}</td>
           ${accountCells}
         `;
@@ -1338,8 +1353,8 @@ function balanceStatusClass(status) {
           continue;
         }
         for (const position of positions) {
-          const funding = position.funding_rate == null ? "--" : `${(Number(position.funding_rate) * 100).toFixed(4)}%`;
-          const buffer = position.liquidation_buffer_pct == null ? "--" : `${Number(position.liquidation_buffer_pct).toFixed(2)}%`;
+          const funding = position.funding_rate == null ? "--" : `${(Number(position.funding_rate) * 100).toFixed(0)}%`;
+          const buffer = position.liquidation_buffer_pct == null ? "--" : `${Number(position.liquidation_buffer_pct).toFixed(0)}%`;
           const reasons = (position.risk_reasons || []).join(" · ");
           const tr = document.createElement("tr");
           tr.innerHTML = `
@@ -1347,7 +1362,7 @@ function balanceStatusClass(status) {
             <td>${escapeHtml(position.symbol || "--")}</td>
             <td class="${position.side === "long" ? "side-buy" : position.side === "short" ? "side-sell" : ""}">${escapeHtml(String(position.side || "--").toUpperCase())}</td>
             <td class="num">${position.notional_quote == null ? "--" : money.format(position.notional_quote)}</td>
-            <td class="num">${position.leverage == null ? "--" : fmt.format(position.leverage)}</td>
+            <td class="num">${position.leverage == null ? "--" : wholeNumber.format(position.leverage)}</td>
             <td class="num">${position.mark_price == null ? "--" : fmt.format(position.mark_price)}</td>
             <td class="num">${position.liquidation_price == null ? "--" : fmt.format(position.liquidation_price)}</td>
             <td class="num">${buffer}</td>
@@ -1399,7 +1414,7 @@ function balanceStatusClass(status) {
           <td class="num">${row.spot_mid == null ? "--" : fmt.format(row.spot_mid)}</td>
           <td class="num">${row.derivative_mid == null ? "--" : fmt.format(row.derivative_mid)}</td>
           <td class="num">${formatBps(row.basis_bps)}</td>
-          <td class="num" title="${row.estimated_apr_pct == null ? "" : `APR ${Number(row.estimated_apr_pct).toFixed(2)}%`}">${formatBps(row.funding_rate_bps)}</td>
+          <td class="num" title="${row.estimated_apr_pct == null ? "" : `APR ${Number(row.estimated_apr_pct).toFixed(0)}%`}">${formatBps(row.funding_rate_bps)}</td>
           <td>${escapeHtml(paper.state || "--")}<br><span class="subtle" title="${escapeHtml(protectionTitle)}">${escapeHtml((legs || paper.reason || "--") + protectionText)}</span></td>
           <td class="${balanceStatusClass(row.status)}" title="${escapeHtml(reason)}">${escapeHtml(row.status || "--")}</td>
         `;
@@ -1427,7 +1442,7 @@ function balanceStatusClass(status) {
       }
       if (primary === "grid") {
         return [
-          `Mid ${formatMaybeNumber(signal.mid_price)}`,
+          `Mid ${formatMaybeNumber(signal.mid_price, priceNumber)}`,
           signal.detail || "",
         ];
       }
@@ -1513,7 +1528,7 @@ function balanceStatusClass(status) {
       }
     }
 
-    function formatMaybeNumber(value, formatter = fmt) {
+    function formatMaybeNumber(value, formatter = wholeNumber) {
       return value == null || !Number.isFinite(Number(value)) ? "--" : formatter.format(Number(value));
     }
 
@@ -1561,10 +1576,10 @@ function balanceStatusClass(status) {
         ].join(" / ");
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${escapeHtml(row.expiry || "--")}<br><span class="subtle">${row.days_to_expiry == null ? "--" : `${Number(row.days_to_expiry).toFixed(1)}d`} · K ${formatMaybeNumber(row.strike)}</span></td>
+          <td>${escapeHtml(row.expiry || "--")}<br><span class="subtle">${row.days_to_expiry == null ? "--" : `${Number(row.days_to_expiry).toFixed(0)}d`} · K ${formatMaybeNumber(row.strike, priceNumber)}</span></td>
           <td>${escapeHtml(row.option_type || "--")}<br><span class="subtle">${escapeHtml(row.symbol || "--")}</span></td>
-          <td class="num">${formatMaybeNumber(row.bid)} / ${formatMaybeNumber(row.ask)}</td>
-          <td class="num">${formatMaybeNumber(row.mark_price)}<br><span class="subtle">${row.iv == null ? "IV --" : `IV ${formatMaybeNumber(row.iv)}`}</span></td>
+          <td class="num">${formatMaybeNumber(row.bid, priceNumber)} / ${formatMaybeNumber(row.ask, priceNumber)}</td>
+          <td class="num">${formatMaybeNumber(row.mark_price, priceNumber)}<br><span class="subtle">${row.iv == null ? "IV --" : `IV ${formatMaybeNumber(row.iv)}`}</span></td>
           <td class="num">${formatMaybeNumber(row.min_depth_quote, money)}<br><span class="subtle">${formatBps(row.spread_bps)}</span></td>
           <td class="num">${formatMaybeNumber(row.volume)} / ${formatMaybeNumber(row.open_interest)}</td>
           <td class="num" title="${escapeHtml(greeks)}">${escapeHtml(greeks)}</td>
@@ -1844,7 +1859,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Symbol")}">${escapeHtml(order.symbol || "--")}</td>
           <td data-label="${uiText("Side")}" class="${orderSideClass(order.side)}">${escapeHtml(order.side ? order.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Status")}">${escapeHtml(order.status || "--")}</td>
-          <td data-label="${uiText("Price")}" class="num">${formatOrderNumber(order.price, quote)}</td>
+          <td data-label="${uiText("Price")}" class="num">${formatOrderPrice(order.price, quote)}</td>
           <td data-label="${uiText("Order Qty")}" class="num">${formatOrderQuantity(order.amount, base)}</td>
           <td data-label="${uiText("Filled")}" class="num">${formatOrderQuantity(order.filled, base)}</td>
           <td data-label="${uiText("Remaining")}" class="num">${formatOrderQuantity(order.remaining, base)}</td>
@@ -1888,7 +1903,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Symbol")}">${escapeHtml(fill.symbol || "--")}</td>
           <td data-label="${uiText("Side")}" class="${orderSideClass(fill.side)}">${escapeHtml(fill.side ? fill.side.toUpperCase() : "--")}</td>
           <td data-label="${uiText("Source")}">${escapeHtml(fill.source_label || displaySource(fill.source))}</td>
-          <td data-label="${uiText("Price")}" class="num">${formatOrderNumber(fill.price, quote)}</td>
+          <td data-label="${uiText("Price")}" class="num">${formatOrderPrice(fill.price, quote)}</td>
           <td data-label="${uiText("Amount")}" class="num">${formatOrderQuantity(fill.amount, base)}</td>
           <td data-label="${uiText("Cost")}" class="num">${formatOrderNumber(fill.cost, quote)}</td>
           <td data-label="${uiText("P/L")}" class="num ${pnlClass(fill.realized_pnl_common)}">${formatPnlValue(fill.realized_pnl_common)}</td>
@@ -1951,7 +1966,7 @@ function balanceStatusClass(status) {
         const mmDetail = row.strategy === "market_maker"
           ? `spread ${formatPnlValue(row.spread_capture_estimate || 0)} · inventory ${formatPnlValue(row.inventory_pnl_residual || 0)}`
           : row.strategy === "slow_execution" && row.progress_pct != null
-            ? `progress ${Number(row.progress_pct).toFixed(1)}%`
+            ? `progress ${Number(row.progress_pct).toFixed(0)}%`
             : "";
         const avgFill = row.task_average_fill_price ?? row.average_fill_price;
         const tr = document.createElement("tr");
@@ -1960,11 +1975,11 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Instance")}" title="${escapeHtml(row.instance_id || "")}">${escapeHtml(shortId(row.instance_id || "default"))}</td>
           <td data-label="${uiText("Account / Symbol")}">${escapeHtml(row.account || "--")}<br><span class="subtle">${escapeHtml(row.symbol || "--")}</span></td>
           <td data-label="${uiText("Fills / Submitted")}" class="num">${Number(row.filled_order_count || 0)} / ${Number(row.submitted_order_count || 0)}</td>
-          <td data-label="${uiText("Fill Rate")}" class="num">${row.fill_rate_pct == null ? "--" : `${Number(row.fill_rate_pct).toFixed(1)}%`}</td>
+          <td data-label="${uiText("Fill Rate")}" class="num">${row.fill_rate_pct == null ? "--" : `${Number(row.fill_rate_pct).toFixed(0)}%`}</td>
           <td data-label="${uiText("Average Fill")}" class="num">${avgFill == null ? "--" : fmt.format(avgFill)}</td>
           <td data-label="${uiText("Fees")}" class="num">${formatPnlValue(row.fees_common || 0)}</td>
           <td data-label="${uiText("P/L")}" class="num ${pnlClass(row.realized_pnl)}">${formatPnlValue(row.realized_pnl || 0)}${mmDetail ? `<br><span class="subtle">${escapeHtml(mmDetail)}</span>` : ""}</td>
-          <td data-label="${uiText("Slippage")}" class="num">${row.average_slippage_bps == null ? "--" : `${Number(row.average_slippage_bps).toFixed(2)} bps`}</td>
+          <td data-label="${uiText("Slippage")}" class="num">${row.average_slippage_bps == null ? "--" : `${Number(row.average_slippage_bps).toFixed(0)} bps`}</td>
           <td data-label="${uiText("Latency")}" class="num">${row.average_submit_latency_ms == null ? "--" : `${Number(row.average_submit_latency_ms).toFixed(0)} ms`}</td>
           <td data-label="${uiText("Paper vs Live")}" class="num ${pnlClass(row.paper_vs_live_delta)}">${formatPnlValue(row.paper_vs_live_delta)}</td>
         `;
@@ -2785,7 +2800,7 @@ function balanceStatusClass(status) {
         : (auto.status || "disabled");
       const firstTask = activeTasks[0] || autoTasks[0];
       const autoDetail = firstTask
-        ? `${String(firstTask.config?.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${firstTask.status || "--"}`
+        ? `${String(firstTask.config?.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(0) + "%"} · ${firstTask.status || "--"}`
         : (auto.plan ? `${displayExchange(auto.plan.exchange, auto.plan.exchange_label)} ${auto.plan.symbol} · ${String(auto.plan.side || "").toUpperCase()}` : "--");
       text("monitor-auto-summary", autoStatus);
       text("monitor-auto-detail", autoDetail);
@@ -2911,7 +2926,7 @@ function balanceStatusClass(status) {
           status: autoLifecycle.worst?.actual_state || (activeTasks.length ? "running" : (auto.status || "disabled")),
           summary: activeTasks.length ? `${activeTasks.length}/${tasks.length} active task(s)` : (auto.status || "disabled"),
           detail: lifecycleCardDetail(autoLifecycle, firstTask
-            ? `${displayExchange(firstTaskConfig.exchange, firstTaskConfig.exchange_label) || "--"} ${firstTaskConfig.symbol || "--"} · ${String(firstTaskConfig.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(1) + "%"} · ${autoProgressText}`
+            ? `${displayExchange(firstTaskConfig.exchange, firstTaskConfig.exchange_label) || "--"} ${firstTaskConfig.symbol || "--"} · ${String(firstTaskConfig.side || "--").toUpperCase()} · ${firstTask.progress_pct == null ? "--" : firstTask.progress_pct.toFixed(0) + "%"} · ${autoProgressText}`
             : "Open to create or edit a task"),
           target: "slow-section",
         },
@@ -2922,7 +2937,7 @@ function balanceStatusClass(status) {
             ? `${displayExchange(rebalancePlan.buy_exchange, rebalancePlan.buy_exchange_label)} -> ${displayExchange(rebalancePlan.sell_exchange, rebalancePlan.sell_exchange_label)}`
             : (rebalance.status || "disabled"),
           detail: lifecycleCardDetail(rebalanceLifecycle, rebalancePlan
-            ? `${rebalancePlan.base_asset} · ${Number(rebalanceRuntime.progress_pct || 0).toFixed(1)}% · cost ${Number(rebalancePlan.expected_cost_bps || 0).toFixed(2)} bps`
+            ? `${rebalancePlan.base_asset} · ${Number(rebalanceRuntime.progress_pct || 0).toFixed(0)}% · cost ${Number(rebalancePlan.expected_cost_bps || 0).toFixed(0)} bps`
             : "No plan"),
           target: "rebalance-section",
         },
@@ -2968,7 +2983,7 @@ function balanceStatusClass(status) {
         `).join("");
         el.innerHTML = `
           <div><strong>$${money.format(item.profit_quote)}</strong><div class="subtle">profit</div></div>
-          <div><strong>${item.profit_bps.toFixed(2)} bps</strong><div class="subtle">edge</div></div>
+          <div><strong>${item.profit_bps.toFixed(0)} bps</strong><div class="subtle">edge</div></div>
           <div class="legs">${legs}</div>
         `;
         root.appendChild(el);
@@ -2986,7 +3001,7 @@ function balanceStatusClass(status) {
       const riskState = risk.enabled === false ? "off" : risk.trading_enabled === false ? "trading off" : risk.allow_live_trading ? "live allowed" : "dry-run guarded";
       text(
         "risk-meta",
-        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · max/day $${money.format(risk.max_daily_loss_quote || 0)} · day P/L ${formatPnlValue(dailyPnl.total_realized_pnl || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${risk.max_slippage_bps || 0} bps · timeline ${timelineSummary.event_count || 0} · blocked ${timelineSummary.blocked_count || summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
+        `${riskState} · max/order $${money.format(risk.max_order_quote || 0)} · max/cycle $${money.format(risk.max_cycle_quote || 0)} · max/day $${money.format(risk.max_daily_loss_quote || 0)} · day P/L ${formatPnlValue(dailyPnl.total_realized_pnl || 0)} · open ${risk.max_open_orders || 0} · depth $${money.format(risk.min_order_book_depth_quote || 0)} · slip ${wholeNumber.format(risk.max_slippage_bps || 0)} bps · timeline ${timelineSummary.event_count || 0} · blocked ${timelineSummary.blocked_count || summary.blocked_event_count || 0} · alerts ${alerts.enabled ? "on" : "off"}`
       );
 
       const timelineBody = document.getElementById("strategy-timeline");
@@ -3016,7 +3031,7 @@ function balanceStatusClass(status) {
             <td>${escapeHtml((event.accounts || []).map((account) => displayExchange(account)).join(", ") || "--")}</td>
             <td>${escapeHtml((event.symbols || []).join(", ") || "--")}</td>
             <td class="num">${latency == null ? "--" : `${Number(latency).toFixed(0)} ms`}</td>
-            <td class="num">${slippage == null ? "--" : `${Number(slippage).toFixed(1)} bps`}</td>
+            <td class="num">${slippage == null ? "--" : `${Number(slippage).toFixed(0)} bps`}</td>
             <td title="${escapeHtml(reason)}">${escapeHtml(reason)}</td>
           `;
           timelineBody.appendChild(tr);
@@ -3172,12 +3187,12 @@ function balanceStatusClass(status) {
           : null;
       setValueState(
         "mm-safety-market",
-        market.existing_spread_bps == null ? "--" : `${Number(market.existing_spread_bps).toFixed(1)} bps`,
+        market.existing_spread_bps == null ? "--" : `${Number(market.existing_spread_bps).toFixed(0)} bps`,
         ""
       );
       text(
         "mm-safety-market-detail",
-        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${Number.isFinite(maxLevelGapBps) ? maxLevelGapBps.toFixed(1) : "--"}/${limits.max_order_book_gap_bps || "--"} bps · age ${age == null ? "--" : age.toFixed(1) + "s"}`
+        `depth ${money.format(market.bid_depth_quote || 0)}/${money.format(market.ask_depth_quote || 0)} · gap ${Number.isFinite(maxLevelGapBps) ? maxLevelGapBps.toFixed(0) : "--"}/${limits.max_order_book_gap_bps == null ? "--" : wholeNumber.format(limits.max_order_book_gap_bps)} bps · age ${age == null ? "--" : age.toFixed(0) + "s"}`
       );
       renderMarketMakerQuality(marketMaker);
     }
@@ -3200,7 +3215,7 @@ function balanceStatusClass(status) {
         "mm-quality-inventory-detail",
         base == null
           ? "--"
-          : `target ${wholeQuantity.format(target || 0)} · dev ${wholeQuantity.format(deviation || 0)} · buy ${buyMult == null ? "--" : Number(buyMult).toFixed(2)}x / sell ${sellMult == null ? "--" : Number(sellMult).toFixed(2)}x`
+          : `target ${wholeQuantity.format(target || 0)} · dev ${wholeQuantity.format(deviation || 0)} · buy ${buyMult == null ? "--" : Number(buyMult).toFixed(0)}x / sell ${sellMult == null ? "--" : Number(sellMult).toFixed(0)}x`
       );
 
       const buy = quality.buy || {};
@@ -3217,7 +3232,7 @@ function balanceStatusClass(status) {
       );
       setValueState(
         "mm-quality-spread",
-        quality.realized_spread_bps == null ? "--" : `${Number(quality.realized_spread_bps).toFixed(1)} bps`,
+        quality.realized_spread_bps == null ? "--" : `${Number(quality.realized_spread_bps).toFixed(0)} bps`,
         quality.realized_spread_bps == null ? "" : quality.realized_spread_bps >= 0 ? "risk-ok" : "risk-blocked"
       );
       text(
@@ -3248,7 +3263,7 @@ function balanceStatusClass(status) {
           <td data-label="${uiText("Price")}" class="num">${fmt.format(order.price)}</td>
           <td data-label="${uiText("Amount")}" class="num">${wholeQuantity.format(order.amount)}</td>
           <td data-label="${uiText("Quote")}" class="num" title="${commonQuote}">${formatSymbolQuantity(order.quote_notional, marketMaker.plan.symbol, "quote")}</td>
-          <td data-label="${uiText("Distance")}" class="num">${order.distance_bps.toFixed(2)} bps</td>
+          <td data-label="${uiText("Distance")}" class="num">${order.distance_bps.toFixed(0)} bps</td>
         `;
         body.appendChild(tr);
       }
@@ -3316,7 +3331,7 @@ function balanceStatusClass(status) {
           <td class="num">${fmt.format(order.price)}</td>
           <td class="num">${wholeQuantity.format(order.amount)}</td>
           <td class="num">${formatSymbolQuantity(order.quote_notional, spotGrid.plan.symbol, "quote")}</td>
-          <td class="num">${Number(order.distance_bps || 0).toFixed(2)} bps</td>
+          <td class="num">${Number(order.distance_bps || 0).toFixed(0)} bps</td>
         `;
         body.appendChild(tr);
       }
@@ -3389,9 +3404,9 @@ function balanceStatusClass(status) {
       return USER_BACKTEST_ACTIVE_STATUSES.has(status) ? "ok" : "risk-off";
     }
 
-    function backtestPercent(value, digits = 2) {
+    function backtestPercent(value) {
       const number = Number(value);
-      return Number.isFinite(number) ? `${number.toFixed(digits)}%` : "--";
+      return Number.isFinite(number) ? `${number.toFixed(0)}%` : "--";
     }
 
     function backtestEpoch(value) {
@@ -3639,7 +3654,7 @@ function balanceStatusClass(status) {
       text("backtest-benchmark", result ? backtestPercent(result.benchmark_return_pct) : "--");
       text("backtest-excess", result ? backtestPercent(result.excess_return_pct) : "--");
       text("backtest-drawdown", result ? backtestPercent(result.max_drawdown_pct) : "--");
-      text("backtest-sharpe", result?.sharpe_ratio == null ? "--" : Number(result.sharpe_ratio).toFixed(2));
+      text("backtest-sharpe", result?.sharpe_ratio == null ? "--" : Number(result.sharpe_ratio).toFixed(0));
       text("backtest-fees", result ? money.format(result.fee_quote || 0) : "--");
       text("backtest-turnover", result ? backtestPercent(result.turnover_pct, 1) : "--");
       text("backtest-trades", result ? String(result.trade_count || 0) : "--");
@@ -5025,7 +5040,7 @@ function balanceStatusClass(status) {
         option.dataset.base = market.base || market.asset || "";
         option.dataset.quote = market.quote || market.quote_currency || "";
         const minimum = Number(market.cost_min || 0);
-        option.textContent = `${String(option.dataset.marketType).toUpperCase()} · ${market.symbol}${minimum > 0 ? ` · min ${fmt.format(minimum)} ${option.dataset.quote}` : ""}`;
+        option.textContent = `${String(option.dataset.marketType).toUpperCase()} · ${market.symbol}${minimum > 0 ? ` · min ${wholeNumber.format(minimum)} ${option.dataset.quote}` : ""}`;
         option.selected = selectedKeys.has(key);
         select.appendChild(option);
       }
@@ -5612,7 +5627,7 @@ function balanceStatusClass(status) {
           throw new Error(check.error || "connection test failed");
         }
         const balances = (check.balances || [])
-          .map((row) => `${row.currency} ${fmt.format(row.total ?? row.free ?? 0)}`)
+          .map((row) => `${row.currency} ${wholeNumber.format(row.total ?? row.free ?? 0)}`)
           .join(" · ");
         setUserWorkspaceNotice(
           `${uiText("Connection healthy")} · ${displayExchange(account.exchange, account.exchange_label)} ${account.symbol} · ${Number(check.latency_ms || 0).toFixed(0)}ms · ${check.open_order_count || 0} ${uiText("open orders")}${balances ? ` · ${balances}` : ""}`
@@ -6361,7 +6376,7 @@ function balanceStatusClass(status) {
         const statusClass = paperRuntimeStatusClass(runtimeStatus);
         const progress = Number(runtime.progress_pct);
         const progressText = Number.isFinite(progress)
-          ? `<br><span class="subtle">${escapeHtml(`${progress.toFixed(1)}%`)}</span>`
+          ? `<br><span class="subtle">${escapeHtml(`${progress.toFixed(0)}%`)}</span>`
           : "";
         const activityText = `${Number(runtime.placed_count || 0)} ${uiText("placed")} · ${Number(runtime.open_order_count || 0)} ${uiText("open")}`;
         const predictionScan = runtime.prediction_scan || {};
@@ -6372,7 +6387,7 @@ function balanceStatusClass(status) {
         const predictionText = strategy.strategy_type === "prediction_arbitrage"
           ? [
               predictionBest.mechanism || "Polymarket",
-              Number.isFinite(predictionEdge) ? `${fmt.format(predictionEdge)} bps` : "",
+              Number.isFinite(predictionEdge) ? `${wholeNumber.format(predictionEdge)} bps` : "",
               `${Number(predictionScan.candidate_count || 0)} ${uiText("candidates")}`,
             ].filter(Boolean).join(" · ")
           : "";
@@ -6597,9 +6612,12 @@ function balanceStatusClass(status) {
       return String(value ?? "").trim();
     }
 
-    function autoConfigValueText(value, type) {
+    function autoConfigValueText(value, type, key = "") {
       if (type === "boolean") return Boolean(value) ? "on" : "off";
-      if (type === "number") return fmt.format(Number(value || 0));
+      if (type === "number") {
+        const formatter = ["start_price", "stop_price"].includes(key) ? priceNumber : wholeNumber;
+        return formatter.format(Number(value || 0));
+      }
       return String(value ?? "--") || "--";
     }
 
@@ -6625,20 +6643,20 @@ function balanceStatusClass(status) {
       if (!config) return "No default config";
       const side = String(config.side || "--").toUpperCase();
       const total = Number(config.total_quote || 0) > 0
-        ? `${quoteCurrency(config.symbol)} ${fmt.format(config.total_quote)}`
+        ? `${quoteCurrency(config.symbol)} ${wholeNumber.format(config.total_quote)}`
         : Number(config.total_base || 0) > 0
         ? `${baseCurrency(config.symbol)} ${wholeQuantity.format(config.total_base)}`
         : (config.unlimited_total ? "Unlimited" : "No target");
       const slice = config.slice_mode === "top_level"
         ? "Top level size"
         : Number(config.slice_base_min || 0) || Number(config.slice_base_max || 0)
-        ? `${baseCurrency(config.symbol)} ${fmt.format(config.slice_base_min || 0)}-${fmt.format(config.slice_base_max || 0)}`
+        ? `${baseCurrency(config.symbol)} ${wholeNumber.format(config.slice_base_min || 0)}-${wholeNumber.format(config.slice_base_max || 0)}`
         : Number(config.slice_quote || 0) > 0
-        ? `${quoteCurrency(config.symbol)} ${fmt.format(config.slice_quote)}`
+        ? `${quoteCurrency(config.symbol)} ${wholeNumber.format(config.slice_quote)}`
         : `${baseCurrency(config.symbol)} ${wholeQuantity.format(config.slice_base || 0)}`;
       const guard = config.block_conflicting_market_maker === false ? "MM guard off" : "MM guard on";
       const coordination = config.coordinate_market_maker ? "MM auto-coordinate" : "MM coordination off";
-      return `${displayExchange(config.exchange, config.exchange_label) || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${fmt.format(config.interval_seconds || 0)}s · ${guard} · ${coordination}`;
+      return `${displayExchange(config.exchange, config.exchange_label) || "--"} ${config.symbol || "--"} · ${side} · ${config.price_mode || "--"} · target ${total} · size ${slice} · ${autoStartGateText(config)} · ${autoStopGateText(config)} · every ${wholeNumber.format(config.interval_seconds || 0)}s · ${guard} · ${coordination}`;
     }
 
     function compareAutoTaskConfig(taskConfig, defaultConfig) {
@@ -6651,8 +6669,8 @@ function balanceStatusClass(status) {
           return {
             key,
             label,
-            task: autoConfigValueText(taskConfig[key], type),
-            default: autoConfigValueText(defaultConfig[key], type),
+            task: autoConfigValueText(taskConfig[key], type, key),
+            default: autoConfigValueText(defaultConfig[key], type, key),
           };
         })
         .filter(Boolean);
@@ -6765,7 +6783,7 @@ function balanceStatusClass(status) {
       const gap = Math.abs(start - trigger);
       const gapBps = gap / start * 10_000;
       const quote = quoteCurrency(config.symbol);
-      return `${uiText("Waiting for start price")}: ${priceLabel} ${fmt.format(trigger)} ${comparison} ${uiText("Start price")} ${fmt.format(start)} · ${uiText("Gap")} ${fmt.format(gap)} ${quote} (${gapBps.toFixed(2)} bps)`;
+      return `${uiText("Waiting for start price")}: ${priceLabel} ${fmt.format(trigger)} ${comparison} ${uiText("Start price")} ${fmt.format(start)} · ${uiText("Gap")} ${fmt.format(gap)} ${quote} (${gapBps.toFixed(0)} bps)`;
     }
 
     function autoTaskDetailTitle(task) {
@@ -6832,7 +6850,7 @@ function balanceStatusClass(status) {
           ? `${progressLabel} ${formatSymbolQuantity(task.filled_base, config.symbol, "base")} · ${formatSymbolQuantity(task.filled_quote, config.symbol, "quote")} / Unlimited`
           : `${progressLabel} ${formatSymbolQuantity(filledValue, config.symbol, progressMode)} / ${formatSymbolQuantity(totalValue, config.symbol, progressMode)}`;
         const remainingText = unlimited ? "Unlimited" : formatSymbolQuantity(remainingValue, config.symbol, progressMode);
-        const progressPct = unlimited ? "--" : `${(task.progress_pct || 0).toFixed(2)}%`;
+        const progressPct = unlimited ? "--" : `${(task.progress_pct || 0).toFixed(0)}%`;
         const configCell = autoTaskConfigCell(task, defaultConfig);
         const detailTitle = autoTaskDetailTitle(task);
         const lastText = autoTaskLastOrderText(task, config);
@@ -6953,8 +6971,9 @@ function balanceStatusClass(status) {
 
     function formatNetFlow(value, currency = "USD") {
       const numeric = Number(value || 0);
-      const sign = numeric > 0 ? "+" : "";
-      return `${currency} ${sign}${money.format(numeric)}`;
+      const rounded = Math.round(numeric);
+      const sign = rounded > 0 ? "+" : "";
+      return `${currency} ${sign}${money.format(rounded)}`;
     }
 
     function performanceDetail(performance, windowName) {
@@ -7274,7 +7293,8 @@ function balanceStatusClass(status) {
 
     function formatTokenDelta(value) {
       if (value == null) return "--";
-      return `${value >= 0 ? "+" : ""}${wholeQuantity.format(value)}`;
+      const rounded = Math.round(Number(value));
+      return `${rounded > 0 ? "+" : ""}${wholeQuantity.format(rounded)}`;
     }
 
     function deltaClass(value) {
@@ -7306,7 +7326,7 @@ function balanceStatusClass(status) {
             <td><span class="holder-label ${labelClass}" title="${escapeHtml(label)}">${escapeHtml(label)}</span></td>
             <td title="${holder.owner}">${shortAddress(holder.owner)}</td>
             <td class="num">${wholeQuantity.format(holder.amount)}</td>
-            <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(4) + "%"}</td>
+            <td class="num">${holder.share_pct == null ? "--" : holder.share_pct.toFixed(0) + "%"}</td>
             <td class="num ${deltaClass(cumulativeDelta)}" title="Baseline ${holder.baseline_amount == null ? "--" : wholeQuantity.format(holder.baseline_amount)}">${formatTokenDelta(cumulativeDelta)}</td>
             <td class="num ${deltaClass(lastDelta)}" title="${holder.last_change_at ? formatAge(holder.last_change_at) : "No change"}">${formatTokenDelta(lastDelta)}</td>
             <td class="num">${holder.change_count || 0}</td>
@@ -8212,8 +8232,8 @@ function balanceStatusClass(status) {
         `${uiText("Orders")}: ${plannedOrders} (${payload.levels} ${uiText("levels per side")})`,
         `${uiText("Quote/Level")}: ${quote} ${money.format(payload.quote_per_level)}`,
         `${uiText("Planned total")}: ${quote} ${money.format(plannedQuote)}`,
-        `${uiText("Band %")}: ${fmt.format(payload.price_band_pct)}`,
-        `${uiText("Refresh Sec")}: ${fmt.format(payload.poll_seconds)}`,
+        `${uiText("Band %")}: ${wholeNumber.format(payload.price_band_pct)}`,
+        `${uiText("Refresh Sec")}: ${wholeNumber.format(payload.poll_seconds)}`,
         `${uiText("Post Only")}: ${payload.post_only ? uiText("Yes") : uiText("No")}`,
       ].join("\n");
     }
@@ -8922,7 +8942,7 @@ function balanceStatusClass(status) {
       }
       const size = payload.slice_mode === "top_level"
         ? uiText("Match top-of-book size")
-        : `${base} ${fmt.format(payload.slice_base_min)} - ${fmt.format(payload.slice_base_max)}`;
+        : `${base} ${wholeNumber.format(payload.slice_base_min)} - ${wholeNumber.format(payload.slice_base_max)}`;
       const side = String(payload.side || "").toLowerCase();
       const gatePrice = side === "buy" ? "Ask" : "Bid";
       const startOperator = side === "buy" ? "<=" : ">=";
@@ -8935,7 +8955,7 @@ function balanceStatusClass(status) {
         `${uiText("Total target")}: ${total}`,
         `${uiText("Each order")}: ${size}`,
         `${uiText("Price Mode")}: ${payload.price_mode}`,
-        `${uiText("Place Sec")}: ${fmt.format(payload.interval_seconds)}`,
+        `${uiText("Place Sec")}: ${wholeNumber.format(payload.interval_seconds)}`,
         `${uiText("Start Gate")}: ${payload.start_price > 0 ? `${gatePrice} ${startOperator} ${fmt.format(payload.start_price)} ${quote}` : uiText("Immediate")}`,
         `${uiText("Stop Gate")}: ${payload.stop_price > 0 ? `${gatePrice} ${stopOperator} ${fmt.format(payload.stop_price)} ${quote}` : uiText("None")}`,
         `${uiText("MM Coordination")}: ${payload.coordinate_market_maker ? uiText("On") : uiText("Off")}`,
@@ -8947,8 +8967,8 @@ function balanceStatusClass(status) {
           0,
           `${uiText("Contract Action")}: ${perpetualActionLabel(contractAction)}`,
           `${uiText("Margin Mode")}: ${payload.margin_mode}`,
-          `${uiText("Leverage")}: ${fmt.format(payload.leverage)}x`,
-          `${uiText("Max Position")}: ${quote} ${fmt.format(payload.max_position_quote)}`,
+          `${uiText("Leverage")}: ${wholeNumber.format(payload.leverage)}x`,
+          `${uiText("Max Position")}: ${quote} ${wholeNumber.format(payload.max_position_quote)}`,
         );
       }
       return details.join("\n");
@@ -9224,8 +9244,8 @@ function balanceStatusClass(status) {
         `${uiText("Cash Destination")}: ${payload.sell_exchange} · ${payload.sell_symbol}`,
         `${uiText("Source Spend USD").replace("USD", common)}: ${money.format(payload.total_quote_common)}`,
         `${uiText("Per Cycle Source USD").replace("USD", common)}: ${money.format(payload.quote_per_cycle_common)}`,
-        `${uiText("Max Cost bps")}: ${fmt.format(payload.max_cost_bps)}`,
-        `${uiText("Max Slippage bps")}: ${fmt.format(payload.max_slippage_bps)}`,
+        `${uiText("Max Cost bps")}: ${wholeNumber.format(payload.max_cost_bps)}`,
+        `${uiText("Max Slippage bps")}: ${wholeNumber.format(payload.max_slippage_bps)}`,
       ].join("\n");
     }
 
@@ -9586,7 +9606,7 @@ function balanceStatusClass(status) {
         || "");
       text(
         "rebalance-meta",
-        `${mode} · ${status} · ${progressPct.toFixed(1)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(2)} bps` : ""}${coordinationStatus ? ` · MM ${coordinationStatus}` : ""}${reason ? ` · ${reason}` : ""}`,
+        `${mode} · ${status} · ${progressPct.toFixed(0)}%${plan ? ` · cost ${Number(plan.expected_cost_bps || 0).toFixed(0)} bps` : ""}${coordinationStatus ? ` · MM ${coordinationStatus}` : ""}${reason ? ` · ${reason}` : ""}`,
       );
       const progress = document.getElementById("rebalance-progress");
       const residual = runtime.residual_exposure || {};
@@ -9616,7 +9636,7 @@ function balanceStatusClass(status) {
           side: "buy",
           price: plan.buy_average_price,
           base: plan.quantity_base,
-          local: `${plan.buy_quote_currency} ${fmt.format(plan.buy_cost_local)}`,
+          local: `${plan.buy_quote_currency} ${wholeNumber.format(plan.buy_cost_local)}`,
           common: `${common} ${money.format(plan.buy_cost_common)}`,
         },
         {
@@ -9626,7 +9646,7 @@ function balanceStatusClass(status) {
           side: "sell",
           price: plan.sell_average_price,
           base: plan.quantity_base,
-          local: `${plan.sell_quote_currency} ${fmt.format(plan.sell_proceeds_local)}`,
+          local: `${plan.sell_quote_currency} ${wholeNumber.format(plan.sell_proceeds_local)}`,
           common: `${common} ${money.format(plan.sell_proceeds_common)}`,
         },
       ];
@@ -10213,7 +10233,7 @@ function balanceStatusClass(status) {
               : ""
           : "";
         const changeText = hasChange
-          ? `${percentage > 0 ? "+" : ""}${percentage.toFixed(2)}%`
+          ? `${percentage > 0 ? "+" : ""}${percentage.toFixed(0)}%`
           : "--";
         item.innerHTML = `
           <div class="market-ticker-symbol-row">
@@ -10422,7 +10442,7 @@ function balanceStatusClass(status) {
       text("latency", data.scan?.elapsed_ms == null ? "--" : `${data.scan.elapsed_ms} ms`);
       text("opp-count", data.opportunities?.length ?? 0);
       text("notional", data.config ? `$${money.format(data.config.notional_quote)}` : "--");
-      text("threshold", data.config ? `$${data.config.min_profit_quote} / ${data.config.min_profit_bps} bps` : "--");
+      text("threshold", data.config ? `$${wholeNumber.format(data.config.min_profit_quote || 0)} / ${wholeNumber.format(data.config.min_profit_bps || 0)} bps` : "--");
       text("updated", formatAge(data.scan?.last_finished));
       text("onchain-status", data.onchain?.status || "off");
       text("common-quote", data.config?.common_quote_currency || "USD");
@@ -10440,7 +10460,7 @@ function balanceStatusClass(status) {
       const mmMarketData = mmRuntime.market_data || mmSelected?.market_data || data.market_maker?.market_data || {};
       const mmWsText = mmMarketData.cache?.websocket_supported === false ? " · WS unsupported" : "";
       const mmMarketDataText = mmMarketData.source
-        ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(2)}s`}${mmWsText}`
+        ? ` · ${String(mmMarketData.source).toUpperCase()}${mmMarketData.age_seconds == null ? "" : ` ${Number(mmMarketData.age_seconds).toFixed(0)}s`}${mmWsText}`
         : mmWsText;
       const mmQuote = mmSelected?.quote_conversion || data.market_maker?.quote_conversion;
       const mmQuoteText = mmQuote?.quote_currency ? ` · quote ${mmQuote.quote_currency}${mmQuote.quote_to_common_rate == null ? "" : `→${mmQuote.common_quote_currency} ${mmQuote.quote_to_common_rate}`}` : "";
@@ -10448,7 +10468,7 @@ function balanceStatusClass(status) {
       const mmFeatureText = Object.keys(mmFeatures).length ? ` · post-only ${mmFeatures.post_only ? "yes" : "no"}` : "";
       const mmSpreadText = mmPlan?.existing_spread_bps == null
         ? "--"
-        : Number(mmPlan.existing_spread_bps).toFixed(2);
+        : Number(mmPlan.existing_spread_bps).toFixed(0);
       const mmInstanceText = mmInstances.length > 1 ? `${mmInstances.length} instances · ` : "";
       const mmReason = friendlyAccountMessage(
         marketMakerStatusReason(mmSelected) || marketMakerStatusReason(data.market_maker),
@@ -10465,7 +10485,7 @@ function balanceStatusClass(status) {
       text(
         "grid-meta",
         gridPlan
-          ? `${data.spot_grid.mode || "dry_run"} · ${displayExchange(gridPlan.exchange, gridPlan.exchange_label)} ${gridPlan.symbol} · mid ${fmt.format(gridPlan.mid_price)} · step ${Number(gridPlan.grid_step_bps || 0).toFixed(2)} bps · orders ${(gridPlan.orders || []).length}${gridReason ? ` · ${gridReason}` : ""}`
+          ? `${data.spot_grid.mode || "dry_run"} · ${displayExchange(gridPlan.exchange, gridPlan.exchange_label)} ${gridPlan.symbol} · mid ${fmt.format(gridPlan.mid_price)} · step ${Number(gridPlan.grid_step_bps || 0).toFixed(0)} bps · orders ${(gridPlan.orders || []).length}${gridReason ? ` · ${gridReason}` : ""}`
           : `${data.spot_grid?.status || "disabled"}${gridReason ? ` · ${gridReason}` : ""}`
       );
 
