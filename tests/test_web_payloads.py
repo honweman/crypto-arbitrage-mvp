@@ -44,10 +44,14 @@ from arbitrage_bot.trade_log import (
 )
 from arbitrage_bot.web import (
     APP_JS,
+    APP_JS_VERSION,
     HTML as INDEX_HTML,
+    I18N_JS_VERSION,
     MonitorState,
     SECURITY_HEADERS,
     STYLES_CSS,
+    STYLES_CSS_VERSION,
+    THEME_JS_VERSION,
     _add_security_headers,
     _filter_state_payload_for_user,
     _market_maker_force_replace_reason,
@@ -875,11 +879,11 @@ class WebMonitorTest(unittest.TestCase):
 
     def test_page_uses_auto_buy_sell_label(self) -> None:
         self.assertIn(
-            '<script src="/static/app.js?v=20260828-owner-risk1" defer></script>',
+            f'<script src="/static/app.js?v={APP_JS_VERSION}" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
-            '<script src="/static/i18n.js?v=20260828-owner-risk1" defer></script>',
+            f'<script src="/static/i18n.js?v={I18N_JS_VERSION}" defer></script>',
             INDEX_HTML,
         )
         self.assertIn(
@@ -1075,12 +1079,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', INDEX_HTML)
         self.assertIn('title="Dark mode"', INDEX_HTML)
         self.assertIn(
-            '<script src="/static/theme.js?v=20260821-status-detail1"></script>',
+            f'<script src="/static/theme.js?v={THEME_JS_VERSION}"></script>',
             INDEX_HTML,
         )
         self.assertLess(
-            INDEX_HTML.index("/static/theme.js?v=20260821-status-detail1"),
-            INDEX_HTML.index("/static/styles.css?v=20260828-owner-risk1"),
+            INDEX_HTML.index(f"/static/theme.js?v={THEME_JS_VERSION}"),
+            INDEX_HTML.index(f"/static/styles.css?v={STYLES_CSS_VERSION}"),
         )
         self.assertIn('const STORAGE_KEY = "cryptoArbTheme"', theme_js)
         self.assertIn("root.dataset.theme = theme", theme_js)
@@ -1188,7 +1192,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertEqual(payload["matched_open_count"], 2)
         self.assertEqual(payload["issue_count"], 0)
         self.assertIn(
-            '<link rel="stylesheet" href="/static/styles.css?v=20260828-owner-risk1">',
+            f'<link rel="stylesheet" href="/static/styles.css?v={STYLES_CSS_VERSION}">',
             INDEX_HTML,
         )
         self.assertIn("Auto Buy/Sell", HTML)
