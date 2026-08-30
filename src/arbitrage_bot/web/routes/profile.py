@@ -76,7 +76,14 @@ from ..core import (
 
 
 async def index(_: web.Request) -> web.Response:
-    return web.Response(text=HTML, content_type="text/html")
+    return web.Response(
+        text=HTML,
+        content_type="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 def _user_auto_buy_sell_runtime_config(

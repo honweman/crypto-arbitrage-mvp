@@ -74,6 +74,8 @@ class WebTransportTest(unittest.IsolatedAsyncioTestCase):
             script = await script_response.text()
             style = await style_response.text()
 
+            self.assertEqual(page_response.headers.get("Cache-Control"), "no-store")
+            self.assertEqual(page_response.headers.get("Pragma"), "no-cache")
             self.assertIn('id="status-detail-dialog"', page)
             self.assertIn('aria-haspopup="dialog"', page)
             self.assertIn("function statusIssueRows", script)
