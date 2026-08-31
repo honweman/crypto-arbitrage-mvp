@@ -58,6 +58,7 @@ from .services.exchange_data import (
 from .services.workspace import (
     _merge_workspace_account_balances as _merge_workspace_account_balances,
     _sync_portfolio_with_account_balances as _sync_portfolio_with_account_balances,
+    build_owner_market_maker_payload as build_owner_market_maker_payload,
     build_strategy_center_payload as build_strategy_center_payload,
     build_user_workspace_payload as build_user_workspace_payload,
 )

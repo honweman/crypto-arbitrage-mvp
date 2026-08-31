@@ -4410,6 +4410,45 @@ class UserWorkspaceStore:
                 if account is not None
             ]
             strategy_rows.append(row)
+        enabled_live_strategies = [
+            strategy
+            for strategy in strategies
+            if strategy.enabled and strategy.mode == "live"
+        ]
+        reserved_exposure_quote = sum(
+            float(strategy.risk.get("max_total_quote") or 0.0)
+            for strategy in enabled_live_strategies
+        )
+        reserved_open_orders = sum(
+            _reserved_open_order_capacity(strategy)
+            for strategy in enabled_live_strategies
+        )
+
+        def remaining_capacity(limit: float | int, used: float | int) -> float | int | None:
+            if limit <= 0:
+                return None
+            return max(0, limit - used)
+
+        risk_capacity = {
+            "active_strategies": len(enabled_live_strategies),
+            "max_active_strategies": risk_profile.max_active_strategies,
+            "remaining_active_strategies": remaining_capacity(
+                risk_profile.max_active_strategies,
+                len(enabled_live_strategies),
+            ),
+            "reserved_exposure_quote": reserved_exposure_quote,
+            "max_total_exposure_quote": risk_profile.max_total_exposure_quote,
+            "remaining_exposure_quote": remaining_capacity(
+                risk_profile.max_total_exposure_quote,
+                reserved_exposure_quote,
+            ),
+            "reserved_open_orders": reserved_open_orders,
+            "max_open_orders": risk_profile.max_open_orders,
+            "remaining_open_orders": remaining_capacity(
+                risk_profile.max_open_orders,
+                reserved_open_orders,
+            ),
+        }
         completed_setup_steps = sum(
             int(row["readiness"]["completed_steps"]) for row in project_rows
         )
@@ -4424,6 +4463,7 @@ class UserWorkspaceStore:
         return {
             "status": "ok",
             "risk_profile": risk_profile.to_dict(),
+            "risk_capacity": risk_capacity,
             "projects": project_rows,
             "accounts": account_rows,
             "connections": connection_rows,

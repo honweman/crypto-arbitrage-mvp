@@ -34,6 +34,7 @@ from ..security import (
 
 from ...auto_buy_sell_task import (
     AutoBuySellTaskService,
+    TERMINAL_TASK_STATUSES,
     validate_task_config,
     validate_task_exchange_config,
 )
@@ -496,9 +497,23 @@ async def api_create_auto_buy_sell_task(request: web.Request) -> web.Response:
                     int(owner_tasks.get("active_count") or 0)
                     >= profile.max_active_strategies
                 ):
+                    active_rows = [
+                        row
+                        for row in owner_tasks.get("tasks", [])
+                        if isinstance(row, dict)
+                        and row.get("status") not in TERMINAL_TASK_STATUSES
+                    ]
+                    active_summary = ", ".join(
+                        f"{str(row.get('id') or '')[:8]} "
+                        f"{(row.get('config') or {}).get('symbol') or '--'} "
+                        f"({row.get('status') or 'unknown'})"
+                        for row in active_rows[:4]
+                    )
                     raise ValueError(
-                        "active Auto Buy/Sell task limit reached: "
-                        f"{profile.max_active_strategies}"
+                        "your active Auto Buy/Sell task limit is "
+                        f"{profile.max_active_strategies}; your unfinished tasks: "
+                        f"{active_summary or 'unavailable'}. Stop or finish one "
+                        "before starting another"
                     )
         _consume_strategy_preflight(
             request,

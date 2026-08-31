@@ -56,6 +56,7 @@ from ...workspace_runtime import (
     build_workspace_runtime_accounts,
     isolated_workspace_runtime_config,
 )
+from ...user_live_strategies import user_market_maker_instance_id
 from ...web_config import (
     _auto_buy_sell_symbols_by_exchange,
     auto_buy_sell_exchanges,
@@ -70,6 +71,7 @@ from ..core import (
     _owner_live_market_maker_order_activity,
     _owner_live_trading_console,
     _sync_portfolio_with_account_balances,
+    build_owner_market_maker_payload,
     build_strategy_center_payload,
     build_user_workspace_payload,
 )
@@ -179,12 +181,37 @@ async def _user_auto_buy_sell_payload(
     return {
         "status": "ready" if accounts else "account_required",
         "mode": "owner_live",
+        "owner_scoped": True,
         "config": config_payload,
         "accounts": accounts,
         "tasks": task_snapshot,
         "plan": None,
         "runtime": {},
         "error": None if accounts else "add and test a trading API account",
+    }
+
+
+def _owner_market_maker_workspace(
+    request: web.Request,
+    user: WebUser,
+    workspace_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if isinstance(workspace_payload, dict) and "strategies" in workspace_payload:
+        return workspace_payload
+    store = _user_workspace_store(request)
+    strategies = []
+    for strategy in store.list_strategies(owner_email=user.email, is_admin=False):
+        if strategy.strategy_type != "market_maker":
+            continue
+        row = strategy.to_dict()
+        row["runtime_instance_id"] = user_market_maker_instance_id(strategy)
+        strategies.append(row)
+    return {
+        "accounts": [
+            row.to_dict()
+            for row in store.list_accounts(owner_email=user.email, is_admin=False)
+        ],
+        "strategies": strategies,
     }
 
 
@@ -198,6 +225,7 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     requesting_user = _request_user(request)
     owner_runtime_cfg: BotConfig | None = None
     owner_auto_buy_sell_payload: dict[str, Any] | None = None
+    owner_market_maker_payload: dict[str, Any] | None = None
     if requesting_user is not None and requesting_user.role != "admin":
         owner_runtime_cfg = _user_auto_buy_sell_runtime_config(
             request,
@@ -275,6 +303,14 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
                     "open_order_count": 0,
                 }
         if requesting_user is not None and requesting_user.role != "admin":
+            owner_market_maker_payload = build_owner_market_maker_payload(
+                _owner_market_maker_workspace(
+                    request,
+                    requesting_user,
+                    workspace_payload,
+                ),
+                market_maker_runtime,
+            )
             owner_order_activity = _owner_live_market_maker_order_activity(
                 owner_runtime_cfg or runtime_cfg,
                 workspace_payload,
@@ -310,6 +346,14 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
         filtered["auth"]["permission_model"] = permission_scope["model"]
         filtered["auth"]["permissions"] = permission_scope
     if requesting_user is not None and requesting_user.role != "admin":
+        filtered["market_maker"] = owner_market_maker_payload or {
+            "status": "disabled",
+            "mode": "live",
+            "owner_scoped": True,
+            "instances": [],
+            "runtime": {"status": "disabled", "mode": "live", "instances": []},
+            "plan": None,
+        }
         filtered["slow_execution"] = owner_auto_buy_sell_payload or {}
         config_payload = filtered.get("config")
         if isinstance(config_payload, dict):

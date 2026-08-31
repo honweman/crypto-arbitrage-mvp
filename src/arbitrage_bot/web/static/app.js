@@ -2875,6 +2875,7 @@ function balanceStatusClass(status) {
       body.innerHTML = "";
       const risk = data.operations?.risk || data.config?.risk || {};
       const mm = data.market_maker || {};
+      const ownerMode = data.auth?.mode === "user" && data.auth?.role !== "admin";
       const mmRuntime = mm.runtime || {};
       const mmPlan = mm.plan || mmRuntime.last_plan || null;
       const mmStatus = mmRuntime.mode === "live" || mm.mode === "live"
@@ -2919,7 +2920,7 @@ function balanceStatusClass(status) {
           detail: lifecycleCardDetail(mmLifecycle, mmPlan
             ? `mid ${fmt.format(mmPlan.mid_price)} · ${mmQuote} · open ${mmRuntime.open_order_count || 0}`
             : friendlyAccountMessage(marketMakerStatusReason(mm)) || "Open to edit ladder and risk"),
-          target: "mm-section",
+          target: ownerMode ? "user-market-maker-section" : "mm-section",
         },
         {
           title: "Auto Buy/Sell",
@@ -5543,11 +5544,20 @@ function balanceStatusClass(status) {
     function renderUserMarketMakerStrategies(workspace) {
       currentUserWorkspace = workspace || currentUserWorkspace;
       const access = currentUserWorkspace?.strategy_access?.core_trading || {};
+      const capacity = currentUserWorkspace?.risk_capacity || {};
+      const exposureLimit = Number(capacity.max_total_exposure_quote || 0);
+      const strategyLimit = Number(capacity.max_active_strategies || 0);
+      const capacityText = exposureLimit > 0
+        ? ` · exposure ${money.format(capacity.reserved_exposure_quote || 0)}/${money.format(exposureLimit)}`
+        : "";
+      const strategyCapacityText = strategyLimit > 0
+        ? ` · MM ${Number(capacity.active_strategies || 0)}/${strategyLimit}`
+        : "";
       text(
         "user-mm-access-meta",
         access.enabled === false
           ? uiText("Registered account required")
-          : uiText("My accounts · live risk gated")
+          : `${uiText("My accounts · live risk gated")}${capacityText}${strategyCapacityText}`
       );
       mountUserStrategyLab("trading");
       const formsDisabled = !currentUserWorkspace
@@ -6277,6 +6287,47 @@ function balanceStatusClass(status) {
       ) || null;
     }
 
+    function userStrategyCapacityBlockers(strategy) {
+      if (!strategy?.enabled || strategy.mode !== "live") return [];
+      const workspace = currentUserWorkspace || {};
+      const profile = workspace.risk_profile || {};
+      const otherEnabled = (workspace.strategies || []).filter(
+        (row) => row.id !== strategy.id && row.enabled && row.mode === "live"
+      );
+      const projectedCount = otherEnabled.length + 1;
+      const projectedExposure = Number(strategy.risk?.max_total_quote || 0)
+        + otherEnabled.reduce((sum, row) => sum + Number(row.risk?.max_total_quote || 0), 0);
+      const plannedOpenOrders = strategy.strategy_type === "market_maker"
+        ? Math.min(
+            Number(strategy.risk?.max_open_orders || 0),
+            Number(strategy.parameters?.levels || 0) * 2,
+          )
+        : Number(strategy.risk?.max_open_orders || 0);
+      const projectedOpenOrders = plannedOpenOrders + otherEnabled.reduce((sum, row) => {
+        if (row.strategy_type === "market_maker") {
+          return sum + Math.min(
+            Number(row.risk?.max_open_orders || 0),
+            Number(row.parameters?.levels || 0) * 2,
+          );
+        }
+        return sum + Number(row.risk?.max_open_orders || 0);
+      }, 0);
+      const blockers = [];
+      const maxStrategies = Number(profile.max_active_strategies || 0);
+      const maxExposure = Number(profile.max_total_exposure_quote || 0);
+      const maxOpenOrders = Number(profile.max_open_orders || 0);
+      if (maxStrategies > 0 && projectedCount > maxStrategies) {
+        blockers.push(`active strategies ${projectedCount} exceed your account limit ${maxStrategies}`);
+      }
+      if (maxExposure > 0 && projectedExposure > maxExposure) {
+        blockers.push(`planned exposure ${money.format(projectedExposure)} exceeds your account limit ${money.format(maxExposure)}`);
+      }
+      if (maxOpenOrders > 0 && projectedOpenOrders > maxOpenOrders) {
+        blockers.push(`planned open orders ${projectedOpenOrders} exceed your account limit ${maxOpenOrders}`);
+      }
+      return blockers;
+    }
+
     function formatPaperPnl(value, currency) {
       const number = Number(value);
       if (!Number.isFinite(number)) return "--";
@@ -6458,6 +6509,10 @@ function balanceStatusClass(status) {
           strategy.enabled = Boolean(existingMarketMaker.enabled || strategy.enabled);
           setFieldValue("user-strategy-id", existingMarketMaker.id);
           setCheckedValue("user-strategy-enabled", strategy.enabled);
+        }
+        const capacityBlockers = userStrategyCapacityBlockers(strategy);
+        if (capacityBlockers.length) {
+          throw new Error(`Your account risk capacity blocks this MM: ${capacityBlockers.join("; ")}. Pause another MM, reduce this MM budget, or raise your own risk limit.`);
         }
         const isLive = strategy.mode === "live";
         if (isLive && strategy.enabled && !existingMarketMaker && !dangerConfirm(

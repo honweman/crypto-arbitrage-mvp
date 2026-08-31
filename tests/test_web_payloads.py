@@ -111,6 +111,7 @@ from arbitrage_bot.web.loops import (
     _market_maker_runtime_open_orders,
 )
 from arbitrage_bot.web.state import MonitorState as SplitMonitorState
+from arbitrage_bot.web.services.workspace import build_owner_market_maker_payload
 from arbitrage_bot.web.users import WebUserStore
 from arbitrage_bot.web.background.monitor import (
     _ASSET_CHECKPOINT_WRITTEN_AT,
@@ -130,6 +131,62 @@ HTML = f"{INDEX_HTML}\n{APP_JS}"
 
 
 class WebMonitorTest(unittest.TestCase):
+    def test_owner_market_maker_payload_excludes_foreign_runtime_instances(
+        self,
+    ) -> None:
+        payload = build_owner_market_maker_payload(
+            {
+                "accounts": [
+                    {
+                        "id": "account-owner",
+                        "label": "Owner Bybit",
+                        "exchange": "bybit",
+                        "symbol": "ACS/USDT",
+                    }
+                ],
+                "strategies": [
+                    {
+                        "id": "strategy-owner",
+                        "runtime_instance_id": "user-mm-owner",
+                        "name": "Owner MM",
+                        "strategy_type": "market_maker",
+                        "account_ids": ["account-owner"],
+                        "enabled": True,
+                        "parameters": {
+                            "levels": 2,
+                            "quote_per_level": 10,
+                        },
+                        "risk": {
+                            "max_order_quote": 10,
+                            "max_total_quote": 40,
+                            "max_open_orders": 4,
+                        },
+                    }
+                ],
+            },
+            {
+                "instances": [
+                    {
+                        "id": "user-mm-owner",
+                        "status": "running",
+                        "open_order_count": 4,
+                    },
+                    {
+                        "id": "user-mm-foreign",
+                        "status": "blocked_by_risk",
+                        "status_reason": "foreign account risk",
+                        "open_order_count": 99,
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(payload["owner_scoped"])
+        self.assertEqual(payload["instance_count"], 1)
+        self.assertEqual(payload["runtime"]["open_order_count"], 4)
+        self.assertEqual(payload["instances"][0]["owner_strategy_id"], "strategy-owner")
+        self.assertNotIn("foreign", json.dumps(payload))
+
     def test_portfolio_performance_is_attached_between_ledger_checkpoints(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_cfg = AssetLedgerConfig(
@@ -606,6 +663,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('strategy?.strategy_type !== "market_maker"', APP_JS)
         self.assertIn('runtime.status_reason || runtime.last_error', APP_JS)
         self.assertIn('stateStatus === "running" && statusIssueRows(data).length', APP_JS)
+        self.assertIn('ownerMode ? "user-market-maker-section" : "mm-section"', APP_JS)
+        self.assertIn("function userStrategyCapacityBlockers(strategy)", APP_JS)
 
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(

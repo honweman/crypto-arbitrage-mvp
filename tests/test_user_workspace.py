@@ -858,6 +858,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                         "name": "ACS Coinbase MM",
                         "strategy_type": "market_maker",
                         "account_ids": [account.id],
+                        "live_enabled": True,
                     }
                 )
             )
@@ -888,6 +889,9 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertEqual(payload["summary"]["ready_project_count"], 1)
         self.assertEqual(payload["summary"]["ready_account_count"], 1)
         self.assertEqual(payload["summary"]["setup_progress_pct"], 100.0)
+        self.assertEqual(payload["risk_capacity"]["active_strategies"], 1)
+        self.assertEqual(payload["risk_capacity"]["reserved_exposure_quote"], 50.0)
+        self.assertEqual(payload["risk_capacity"]["reserved_open_orders"], 4)
 
     def test_account_boolean_fields_are_strict(self) -> None:
         base = {

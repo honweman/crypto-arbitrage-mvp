@@ -37,6 +37,197 @@ from .exchange_data import (
 )
 from ..paths import default_strategy_center_path
 
+
+_OWNER_MM_PROBLEM_STATUSES = {
+    "blocked",
+    "blocked_by_risk",
+    "cancel_retry",
+    "error",
+    "execution_error",
+    "open_order_sync_error",
+    "reconciliation_required",
+    "sync_error",
+}
+
+
+def build_owner_market_maker_payload(
+    workspace: dict[str, Any],
+    market_maker_runtime: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a request-owner-only MM summary from owner strategies and runtimes."""
+    accounts_by_id = {
+        str(row.get("id") or ""): row
+        for row in workspace.get("accounts", [])
+        if isinstance(row, dict) and row.get("id")
+    }
+    runtime_by_id = {
+        str(row.get("id") or ""): row
+        for row in market_maker_runtime.get("instances", [])
+        if isinstance(row, dict) and row.get("id")
+    }
+    instances: list[dict[str, Any]] = []
+    for strategy in workspace.get("strategies", []):
+        if (
+            not isinstance(strategy, dict)
+            or strategy.get("strategy_type") != "market_maker"
+        ):
+            continue
+        runtime_id = str(strategy.get("runtime_instance_id") or "")
+        account = next(
+            (
+                accounts_by_id.get(str(account_id or ""))
+                for account_id in strategy.get("account_ids", [])
+                if accounts_by_id.get(str(account_id or "")) is not None
+            ),
+            {},
+        )
+        runtime = {
+            **dict(
+                runtime_by_id.get(runtime_id)
+                or strategy.get("live_runtime")
+                or {}
+            ),
+            "id": runtime_id,
+        }
+        if not strategy.get("enabled"):
+            runtime = {
+                **runtime,
+                "status": "paused",
+                "mode": "live",
+                "reason": runtime.get("reason") or "strategy is paused",
+                "open_order_count": int(runtime.get("open_order_count") or 0),
+            }
+        elif not runtime.get("status"):
+            runtime = {
+                **runtime,
+                "status": "starting",
+                "mode": "live",
+                "reason": "runtime is starting",
+                "open_order_count": 0,
+            }
+        parameters = strategy.get("parameters") or {}
+        risk = strategy.get("risk") or {}
+        config = {
+            "id": runtime_id,
+            "enabled": bool(strategy.get("enabled")),
+            "live_enabled": bool(strategy.get("enabled")),
+            "exchange": str(account.get("exchange") or ""),
+            "exchange_label": str(account.get("label") or ""),
+            "symbol": str(account.get("symbol") or ""),
+            **{
+                key: parameters[key]
+                for key in (
+                    "levels",
+                    "price_band_pct",
+                    "quote_per_level",
+                    "refresh_seconds",
+                    "post_only",
+                    "depth_shape",
+                )
+                if key in parameters
+            },
+            "max_order_quote": risk.get("max_order_quote"),
+            "max_cycle_quote": risk.get("max_total_quote"),
+            "max_open_orders": risk.get("max_open_orders"),
+        }
+        plan = (
+            runtime.get("last_plan")
+            if isinstance(runtime.get("last_plan"), dict)
+            else None
+        )
+        instances.append(
+            {
+                "id": runtime_id,
+                "owner_strategy_id": strategy.get("id"),
+                "display_name": strategy.get("name"),
+                "status": runtime.get("status") or "paused",
+                "mode": "live",
+                "config": config,
+                "runtime": runtime,
+                "plan": plan,
+                "status_reason": runtime.get("status_reason")
+                or runtime.get("reason"),
+                "error": runtime.get("last_error"),
+            }
+        )
+
+    priority = {
+        "error": 0,
+        "execution_error": 0,
+        "sync_error": 0,
+        "open_order_sync_error": 0,
+        "reconciliation_required": 1,
+        "blocked_by_risk": 2,
+        "blocked": 2,
+        "cancel_retry": 3,
+        "starting": 4,
+        "running": 5,
+        "waiting": 6,
+        "paused": 7,
+        "disabled": 8,
+    }
+    selected = min(
+        instances,
+        key=lambda row: priority.get(str(row.get("status") or ""), 9),
+        default={},
+    )
+    runtimes = [row["runtime"] for row in instances]
+    problem_instances = [
+        {
+            "id": row.get("id"),
+            "display_name": row.get("display_name"),
+            "status": row.get("status"),
+            "reason": row.get("status_reason") or row.get("error"),
+        }
+        for row in instances
+        if row.get("status") in _OWNER_MM_PROBLEM_STATUSES
+    ]
+    selected_runtime = (
+        selected.get("runtime")
+        if isinstance(selected.get("runtime"), dict)
+        else {}
+    )
+    aggregate_runtime = {
+        "status": selected.get("status") or "disabled",
+        "mode": "live",
+        "instances": runtimes,
+        "instance_count": len(instances),
+        "active_instance_count": sum(
+            row.get("status") not in {"paused", "disabled"} for row in instances
+        ),
+        "problem_instance_count": len(problem_instances),
+        "problem_instances": problem_instances,
+        "open_order_count": sum(
+            int(row.get("open_order_count") or 0) for row in runtimes
+        ),
+        "placed_count": sum(int(row.get("placed_count") or 0) for row in runtimes),
+        "canceled_count": sum(int(row.get("canceled_count") or 0) for row in runtimes),
+        "status_reason": selected.get("status_reason"),
+        "last_error": selected.get("error"),
+        "last_plan": selected_runtime.get("last_plan"),
+    }
+    return {
+        "status": selected.get("status") or "disabled",
+        "mode": "live",
+        "owner_scoped": True,
+        "instances": instances,
+        "instance_count": len(instances),
+        "problem_instance_count": len(problem_instances),
+        "runtime": aggregate_runtime,
+        "plan": selected.get("plan"),
+        "accounts": [
+            {
+                "id": row.get("id"),
+                "label": row.get("label"),
+                "exchange": row.get("exchange"),
+                "symbol": row.get("symbol"),
+            }
+            for row in accounts_by_id.values()
+        ],
+        "error": selected.get("error"),
+        "status_reason": selected.get("status_reason"),
+    }
+
 def build_user_workspace_payload(
     store: UserWorkspaceStore,
     *,
