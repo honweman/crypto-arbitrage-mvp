@@ -175,6 +175,34 @@ def _workspace_connection_accounts(
     return rows
 
 
+def _require_owned_connection_id(
+    store: UserWorkspaceStore,
+    *,
+    user: WebUser,
+    connection_id: Any,
+) -> None:
+    """Reject a connection id that belongs to a different owner.
+
+    Connection identity is derived from the owner's accounts, so an id
+    supplied by the caller is only meaningful within their own scope. Without
+    this check a caller could point their account at someone else's
+    connection id, which the runtime later resolves to that owner's
+    encrypted credentials.
+    """
+    key = str(connection_id or "").strip()
+    if not key:
+        return
+    if any(
+        account.connection_id == key or account.id == key
+        for account in store.list_accounts(owner_email=user.email, is_admin=False)
+    ):
+        return
+    foreign = store.get_account(key)
+    if foreign is not None or store.get_api_connection(key) is not None:
+        raise PermissionError("the selected API connection belongs to another user")
+    raise ValueError(f"API connection not found: {key}")
+
+
 async def _sync_workspace_connection(
     request: web.Request,
     *,
@@ -202,6 +230,11 @@ async def _sync_workspace_connection(
     )
     if connection_id and existing_connection is None and not existing_rows:
         raise ValueError(f"API connection not found: {connection_id}")
+    if existing_connection is not None:
+        # get_api_connection is not owner scoped. Without this check a caller
+        # could pass someone else's connection id and have it adopted for their
+        # own record, leaving two owners sharing one identifier.
+        _require_workspace_owner(user, existing_connection.owner_email)
     if not connection_id and label:
         connection_candidates = [
             item
@@ -1275,6 +1308,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             )
             if owner != project.owner_email:
                 raise ValueError("project and exchange account owners must match")
+            _require_owned_connection_id(store, user=user, connection_id=raw.get("connection_id"))
             raw["owner_email"] = owner
             raw["symbol"] = str(raw.get("symbol") or project.symbol).strip().upper()
             raw["connection_status"] = (
