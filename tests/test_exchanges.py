@@ -1196,6 +1196,34 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([len(batch) for batch in client.batches], [10, 10, 1])
         self.assertEqual(len(result), len(order_ids))
 
+    async def test_bybit_open_orders_enable_cursor_pagination(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.call: tuple[object, ...] | None = None
+
+            async def fetch_open_orders(
+                self,
+                symbol: str,
+                since: object,
+                limit: object,
+                params: dict[str, object],
+            ) -> list[dict[str, str]]:
+                self.call = (symbol, since, limit, params)
+                return [{"id": f"order-{index}"} for index in range(40)]
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot", market_type="spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+
+        result = await manager.fetch_open_orders(cfg, symbol="ACS/USDT")
+
+        self.assertEqual(
+            client.call,
+            ("ACS/USDT", None, None, {"paginate": True}),
+        )
+        self.assertEqual(len(result), 40)
+
     async def test_optional_history_fetches_respect_ccxt_capabilities(self) -> None:
         class FakeClient:
             has = {

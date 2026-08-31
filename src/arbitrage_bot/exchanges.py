@@ -1480,8 +1480,17 @@ class ExchangeManager:
                     }
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"direct: {exc.__class__.__name__}: {exc}"[:500])
+        open_order_args = (
+            (symbol, None, None, {"paginate": True})
+            if cfg.id == "bybit"
+            else (symbol,)
+        )
         fetchers = (
-            ("open_orders", getattr(client, "fetch_open_orders", None), (symbol,)),
+            (
+                "open_orders",
+                getattr(client, "fetch_open_orders", None),
+                open_order_args,
+            ),
             (
                 "closed_orders",
                 getattr(client, "fetch_closed_orders", None),
@@ -2059,7 +2068,11 @@ class ExchangeManager:
         symbol: str,
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
-        open_orders = await client.fetch_open_orders(symbol)
+        open_orders = await self._fetch_open_orders_from_client(
+            cfg,
+            client,
+            symbol=symbol,
+        )
         cancel_all = getattr(client, "cancel_all_orders", None)
         if cancel_all is not None:
             try:
@@ -2067,7 +2080,11 @@ class ExchangeManager:
                 canceled = result if isinstance(result, list) else [result]
             except Exception:  # noqa: BLE001
                 canceled = []
-            remaining = await client.fetch_open_orders(symbol)
+            remaining = await self._fetch_open_orders_from_client(
+                cfg,
+                client,
+                symbol=symbol,
+            )
             remaining_ids = {
                 str(row.get("id") or row.get("order") or "")
                 for row in remaining or []
@@ -2103,6 +2120,26 @@ class ExchangeManager:
         symbol: str,
     ) -> list[dict[str, Any]]:
         client = self.client(cfg)
+        return await self._fetch_open_orders_from_client(
+            cfg,
+            client,
+            symbol=symbol,
+        )
+
+    async def _fetch_open_orders_from_client(
+        self,
+        cfg: ExchangeConfig,
+        client: Any,
+        *,
+        symbol: str,
+    ) -> list[dict[str, Any]]:
+        if cfg.id == "bybit":
+            return await client.fetch_open_orders(
+                symbol,
+                None,
+                None,
+                {"paginate": True},
+            )
         return await client.fetch_open_orders(symbol)
 
     async def fetch_order(
@@ -2334,7 +2371,11 @@ class ExchangeManager:
                 response = await client.cancel_order(order_id, symbol)
                 if not isinstance(response, dict):
                     response = {"id": order_id, "status": "canceled", "info": response}
-                open_orders = await client.fetch_open_orders(symbol)
+                open_orders = await self._fetch_open_orders_from_client(
+                    cfg,
+                    client,
+                    symbol=symbol,
+                )
                 still_open = any(
                     str(row.get("id") or row.get("order") or "") == order_id
                     for row in open_orders or []
@@ -2348,7 +2389,11 @@ class ExchangeManager:
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 try:
-                    open_orders = await client.fetch_open_orders(symbol)
+                    open_orders = await self._fetch_open_orders_from_client(
+                        cfg,
+                        client,
+                        symbol=symbol,
+                    )
                     still_open = any(
                         str(row.get("id") or row.get("order") or "") == order_id
                         for row in open_orders or []
