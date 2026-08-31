@@ -45,6 +45,25 @@ CLIENT_ORDER_ID_MAX_LENGTH = 36
 EXPLICIT_ABSENCE_MIN_AGE_SECONDS = 30.0
 
 
+def limit_order_batch_request_size(cfg: ExchangeConfig) -> int | None:
+    """Return the exchange request limit for batch create/cancel operations."""
+    if cfg.id != "bybit":
+        return None
+    if cfg.market_type == "spot":
+        return 10
+    if cfg.market_type == "option":
+        return 5
+    return 20
+
+
+def _request_batches(items: list[Any], size: int | None) -> list[list[Any]]:
+    if not items:
+        return []
+    if size is None or size >= len(items):
+        return [items]
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
 def _workspace_credential_revision(cfg: ExchangeConfig) -> float | None:
     connection_id = str(cfg.credential_connection_id or "").strip()
     store_path = str(cfg.credential_store_path or "").strip()
@@ -1786,8 +1805,17 @@ class ExchangeManager:
                 }
             )
 
-        result = await create_many(order_requests)
-        return result if isinstance(result, list) else [result]
+        results: list[dict[str, Any]] = []
+        for request_batch in _request_batches(
+            order_requests,
+            limit_order_batch_request_size(cfg),
+        ):
+            result = await create_many(request_batch)
+            if isinstance(result, list):
+                results.extend(result)
+            else:
+                results.append(result)
+        return results
 
     async def prepare_limit_order(
         self,
@@ -2641,5 +2669,14 @@ class ExchangeManager:
         cancel_many = getattr(client, "cancel_orders", None)
         if cancel_many is None or client.has.get("cancelOrders") is not True:
             raise NotImplementedError(f"{cfg.key} batch order cancel is not supported")
-        result = await cancel_many(order_ids, symbol)
-        return result if isinstance(result, list) else [result]
+        results: list[dict[str, Any]] = []
+        for order_id_batch in _request_batches(
+            order_ids,
+            limit_order_batch_request_size(cfg),
+        ):
+            result = await cancel_many(order_id_batch, symbol)
+            if isinstance(result, list):
+                results.extend(result)
+            else:
+                results.append(result)
+        return results

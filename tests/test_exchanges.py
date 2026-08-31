@@ -1091,6 +1091,47 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.orders[0]["params"]["postOnly"], True)
         self.assertEqual(client.orders[0]["params"]["clientOrderId"], "cid-1")
 
+    async def test_bybit_spot_batch_create_is_split_into_ten_order_requests(
+        self,
+    ) -> None:
+        class FakeClient:
+            has = {"createOrders": True}
+
+            def __init__(self) -> None:
+                self.batches: list[list[dict[str, object]]] = []
+
+            async def create_orders(
+                self,
+                orders: list[dict[str, object]],
+            ) -> list[dict[str, str]]:
+                self.batches.append(orders)
+                start = sum(len(batch) for batch in self.batches[:-1])
+                return [
+                    {"id": f"order-{start + index}"}
+                    for index, _ in enumerate(orders, 1)
+                ]
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot", market_type="spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+        count = 25
+
+        result = await manager.create_prepared_limit_orders(
+            cfg,
+            symbol="ACS/USDT",
+            sides=["buy"] * count,
+            prepared_orders=[
+                {"amount": 10.0, "price": 0.00014, "errors": []}
+                for _ in range(count)
+            ],
+            post_only=True,
+            client_order_ids=[f"cid-{index}" for index in range(count)],
+        )
+
+        self.assertEqual([len(batch) for batch in client.batches], [10, 10, 5])
+        self.assertEqual(len(result), count)
+
     async def test_cancel_orders_uses_batch_client(self) -> None:
         class FakeClient:
             has = {"cancelOrders": True}
@@ -1122,6 +1163,38 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.ids, ["a", "b"])
         self.assertEqual(client.symbol, "ACS/USDT")
         self.assertEqual(len(result), 2)
+
+    async def test_bybit_spot_batch_cancel_is_split_into_ten_order_requests(
+        self,
+    ) -> None:
+        class FakeClient:
+            has = {"cancelOrders": True}
+
+            def __init__(self) -> None:
+                self.batches: list[list[str]] = []
+
+            async def cancel_orders(
+                self,
+                ids: list[str],
+                _: str,
+            ) -> list[dict[str, str]]:
+                self.batches.append(ids)
+                return [{"id": order_id, "status": "canceled"} for order_id in ids]
+
+        cfg = ExchangeConfig(id="bybit", label="bybit-spot", market_type="spot")
+        client = FakeClient()
+        manager = ExchangeManager()
+        manager._clients[cfg.key] = client  # noqa: SLF001
+        order_ids = [f"order-{index}" for index in range(21)]
+
+        result = await manager.cancel_orders(
+            cfg,
+            symbol="ACS/USDT",
+            order_ids=order_ids,
+        )
+
+        self.assertEqual([len(batch) for batch in client.batches], [10, 10, 1])
+        self.assertEqual(len(result), len(order_ids))
 
     async def test_optional_history_fetches_respect_ccxt_capabilities(self) -> None:
         class FakeClient:
