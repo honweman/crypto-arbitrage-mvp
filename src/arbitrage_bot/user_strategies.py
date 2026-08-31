@@ -127,6 +127,7 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
 # Only strategies with an owner-isolated production executor belong here. Paper
 # strategies remain readable for migration, but are never promoted implicitly.
 LIVE_USER_STRATEGY_TYPES = frozenset({"market_maker"})
+USER_STRATEGY_RUN_STATES = frozenset({"running", "paused", "stopped"})
 
 DEFAULT_USER_STRATEGY_RISK: dict[str, Any] = {
     "max_order_quote": 5.0,
@@ -651,6 +652,7 @@ class UserStrategy:
     strategy_type: str
     account_ids: list[str] = field(default_factory=list)
     enabled: bool = False
+    run_state: str = "paused"
     mode: str = "paper"
     parameters: dict[str, Any] = field(default_factory=dict)
     risk: dict[str, Any] = field(default_factory=dict)
@@ -685,6 +687,13 @@ class UserStrategy:
             raise ValueError(
                 f"{strategy_type} supports at most {definition['max_accounts']} accounts"
             )
+        enabled = _strict_bool(raw.get("enabled"), label="enabled", default=False)
+        requested_run_state = str(raw.get("run_state") or "").strip().lower()
+        if requested_run_state and requested_run_state not in USER_STRATEGY_RUN_STATES:
+            raise ValueError(f"unsupported strategy run state: {requested_run_state}")
+        run_state = "running" if enabled else requested_run_state or "paused"
+        if run_state == "running" and not enabled:
+            run_state = "paused"
         now = _now()
         return cls(
             id=_clean_id(raw.get("id"), label="strategy id", default=_new_id()),
@@ -693,7 +702,8 @@ class UserStrategy:
             name=_clean_text(raw.get("name") or definition["label"]),
             strategy_type=strategy_type,
             account_ids=account_ids,
-            enabled=_strict_bool(raw.get("enabled"), label="enabled", default=False),
+            enabled=enabled,
+            run_state=run_state,
             mode=mode,
             parameters=_clean_parameters(strategy_type, raw.get("parameters")),
             risk=_clean_risk(raw.get("risk")),
@@ -710,6 +720,7 @@ class UserStrategy:
             "strategy_type": self.strategy_type,
             "account_ids": list(self.account_ids),
             "enabled": self.enabled,
+            "run_state": self.run_state,
             "mode": self.mode,
             "live_enabled": self.mode == "live",
             "parameters": dict(self.parameters),

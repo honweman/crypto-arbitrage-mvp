@@ -89,12 +89,22 @@ def build_owner_market_maker_payload(
             ),
             "id": runtime_id,
         }
+        desired_state = str(strategy.get("run_state") or "paused")
         if not strategy.get("enabled"):
+            cancellation_pending = bool(
+                runtime.get("open_order_count")
+                or runtime.get("open_order_sync_error")
+                or runtime.get("status")
+                in {"cancel_retry", "remove_cancel_retry"}
+            )
             runtime = {
                 **runtime,
-                "status": "paused",
+                "status": (
+                    runtime.get("status") if cancellation_pending else desired_state
+                ),
                 "mode": "live",
-                "reason": runtime.get("reason") or "strategy is paused",
+                "reason": runtime.get("reason")
+                or f"strategy is {desired_state}",
                 "open_order_count": int(runtime.get("open_order_count") or 0),
             }
         elif not runtime.get("status"):
@@ -139,6 +149,7 @@ def build_owner_market_maker_payload(
             {
                 "id": runtime_id,
                 "owner_strategy_id": strategy.get("id"),
+                "run_state": desired_state,
                 "display_name": strategy.get("name"),
                 "status": runtime.get("status") or "paused",
                 "mode": "live",
@@ -164,6 +175,7 @@ def build_owner_market_maker_payload(
         "running": 5,
         "waiting": 6,
         "paused": 7,
+        "stopped": 8,
         "disabled": 8,
     }
     selected = min(
@@ -354,7 +366,11 @@ def build_user_workspace_payload(
                     UserStrategy.from_dict(strategy)
                 )
                 strategy["live_runtime"] = {
-                    "status": "starting" if strategy.get("enabled") else "paused",
+                    "status": (
+                        "starting"
+                        if strategy.get("enabled")
+                        else strategy.get("run_state") or "paused"
+                    ),
                     "mode": "live",
                     "reason": "waiting for the owner strategy runtime",
                     "open_order_count": 0,

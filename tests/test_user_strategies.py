@@ -92,6 +92,23 @@ class UserStrategyTest(unittest.TestCase):
         self.assertEqual(live.mode, "live")
         self.assertTrue(live.to_dict()["live_enabled"])
         self.assertEqual(live.parameters["reprice_hysteresis_bps"], 3.0)
+        stopped = UserStrategy.from_dict(
+            {**base, "live_enabled": True, "run_state": "stopped"}
+        )
+        self.assertFalse(stopped.enabled)
+        self.assertEqual(stopped.run_state, "stopped")
+        self.assertEqual(stopped.to_dict()["run_state"], "stopped")
+        running = UserStrategy.from_dict(
+            {
+                **base,
+                "live_enabled": True,
+                "enabled": True,
+                "run_state": "stopped",
+            }
+        )
+        self.assertEqual(running.run_state, "running")
+        with self.assertRaisesRegex(ValueError, "unsupported strategy run state"):
+            UserStrategy.from_dict({**base, "run_state": "sleeping"})
         with self.assertRaisesRegex(ValueError, "live owner execution"):
             UserStrategy.from_dict(
                 {

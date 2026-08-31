@@ -4739,6 +4739,15 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     pause_strategy_payload = await pause_strategy_response.json()
+                    stop_strategy_response = await client.post(
+                        "/api/user-workspace",
+                        json={
+                            "action": "set_strategy_state",
+                            "strategy_id": strategy["id"],
+                            "run_state": "stopped",
+                        },
+                    )
+                    stop_strategy_payload = await stop_strategy_response.json()
                     resume_strategy_response = await client.post(
                         "/api/user-workspace",
                         json={
@@ -4971,6 +4980,15 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             pause_strategy_payload["workspace"]["strategies"][0]["enabled"]
         )
+        self.assertEqual(stop_strategy_response.status, 200, stop_strategy_payload)
+        stopped_strategy = next(
+            row
+            for row in stop_strategy_payload["workspace"]["strategies"]
+            if row["id"] == strategy["id"]
+        )
+        self.assertFalse(stopped_strategy["enabled"])
+        self.assertEqual(stopped_strategy["run_state"], "stopped")
+        self.assertEqual(stopped_strategy["status"], "stopped")
         self.assertEqual(resume_strategy_response.status, 400, resume_strategy_payload)
         self.assertIn("confirm_live", resume_strategy_payload["error"])
         self.assertEqual(

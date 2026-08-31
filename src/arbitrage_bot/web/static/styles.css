@@ -527,7 +527,7 @@ main {
 
 .instance-status-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.1fr) minmax(92px, auto) minmax(130px, auto) minmax(0, 2fr);
+  grid-template-columns: minmax(150px, 1.1fr) minmax(92px, auto) minmax(130px, auto) minmax(0, 2fr) auto;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -535,6 +535,17 @@ main {
   border-radius: 8px;
   background: var(--surface-3);
   font-size: 12px;
+}
+
+.instance-status-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.instance-status-actions button {
+  min-height: 32px;
+  padding: 6px 9px;
 }
 
 .instance-status-name {
@@ -2639,6 +2650,7 @@ tbody tr:last-child td {
   .instance-status-row { grid-template-columns: minmax(0, 1fr) auto; }
   .instance-status-detail,
   .instance-status-reason { grid-column: 1 / -1; }
+  .instance-status-actions { grid-column: 2; grid-row: 1 / span 2; }
   .console-actions { grid-template-columns: 1fr; }
   .account-field { grid-column: 1 / -1; }
   .account-selector { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2871,6 +2883,12 @@ tbody tr:last-child td {
   .instance-status-name,
   .instance-status-detail,
   .instance-status-reason { white-space: normal; }
+  .instance-status-actions {
+    grid-column: 1;
+    grid-row: auto;
+    justify-content: stretch;
+  }
+  .instance-status-actions button { flex: 1; }
   .table-wrap {
     margin-right: -14px;
     margin-left: -14px;

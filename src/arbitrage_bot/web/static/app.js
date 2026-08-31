@@ -2124,7 +2124,7 @@ function balanceStatusClass(status) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td data-label="${uiText("Strategy")}">${escapeHtml(strategy.label || strategy.id)}</td>
-          <td data-label="${uiText("Status")}" class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled")}</td>
+          <td data-label="${uiText("Status")}" class="${strategy.paused ? "risk-off" : strategy.configured ? "risk-ok" : "risk-off"}">${escapeHtml(strategy.control_state || strategy.run_state || (strategy.paused ? "paused" : strategy.configured ? "enabled" : "disabled"))}</td>
           <td data-label="${uiText("Live")}" class="${strategy.live ? "ok" : "missing"}">${strategy.live ? "YES" : "NO"}</td>
           <td data-label="${uiText("Account")}">${escapeHtml(displayExchange(strategy.exchange, strategy.exchange_label) || "--")}</td>
           <td data-label="${uiText("Symbol")}">${escapeHtml(strategy.symbol || "--")}</td>
@@ -2133,7 +2133,7 @@ function balanceStatusClass(status) {
         `;
         const action = tr.querySelector(".strategy-action");
         const button = document.createElement("button");
-        button.className = strategy.paused ? "control-button" : "danger-button";
+        button.className = strategy.paused ? "control-button" : "ghost-button";
         button.type = "button";
         button.textContent = strategy.paused ? "Resume" : "Pause";
         if (strategy.owner_strategy_id) {
@@ -2154,6 +2154,24 @@ function balanceStatusClass(status) {
           button.addEventListener("click", () => setStrategyPaused(strategy.id, !strategy.paused, button));
         }
         action.appendChild(button);
+        if (strategy.owner_strategy_id && strategy.run_state !== "stopped") {
+          const ownerStrategy = (currentUserWorkspace?.strategies || []).find(
+            (row) => row.id === strategy.owner_strategy_id
+          );
+          const stopButton = document.createElement("button");
+          stopButton.className = "danger-button";
+          stopButton.type = "button";
+          stopButton.textContent = uiText("Stop");
+          stopButton.disabled = !ownerStrategy;
+          if (ownerStrategy) {
+            stopButton.addEventListener("click", () => setUserStrategyRunState(
+              ownerStrategy,
+              "stopped",
+              stopButton,
+            ));
+          }
+          action.appendChild(stopButton);
+        }
         body.appendChild(tr);
       }
     }
@@ -6408,8 +6426,16 @@ function balanceStatusClass(status) {
         const isLive = strategy.mode === "live";
         const runtime = (isLive ? strategy.live_runtime : strategy.paper_runtime) || {};
         const runtimeTerminal = Boolean(runtime.terminal);
+        const desiredRunState = strategy.run_state || "paused";
+        const cancellationPending = !strategy.enabled && Boolean(
+          Number(runtime.open_order_count || 0) > 0
+          || runtime.open_order_sync_error
+          || ["cancel_retry", "remove_cancel_retry"].includes(runtime.status)
+        );
         const runtimeStatus = !strategy.enabled
-          ? "paused"
+          ? cancellationPending
+            ? desiredRunState === "stopped" ? "stopping" : "pausing"
+            : desiredRunState
           : runtimeTerminal && runtime.status
             ? runtime.status
             : strategy.status === "blocked"
@@ -6472,6 +6498,18 @@ function balanceStatusClass(status) {
         toggleButton.textContent = uiText(strategy.enabled ? "Pause" : "Resume");
         toggleButton.addEventListener("click", () => toggleUserStrategy(strategy, toggleButton));
         actions.appendChild(toggleButton);
+        if (isLive && strategy.run_state !== "stopped") {
+          const stopButton = document.createElement("button");
+          stopButton.className = "danger-button";
+          stopButton.type = "button";
+          stopButton.textContent = uiText("Stop");
+          stopButton.addEventListener("click", () => setUserStrategyRunState(
+            strategy,
+            "stopped",
+            stopButton,
+          ));
+          actions.appendChild(stopButton);
+        }
         if (!isLive) {
           const resetButton = document.createElement("button");
           resetButton.className = "ghost-button";
@@ -6538,25 +6576,46 @@ function balanceStatusClass(status) {
       }
     }
 
-    async function toggleUserStrategy(strategy, button) {
+    async function setUserStrategyRunState(strategy, runState, button) {
       button.disabled = true;
       try {
         const isLive = strategy.mode === "live";
-        if (isLive && !strategy.enabled && !dangerConfirm(
-          "Resume this live Market Maker?",
-          `${strategy.name} · ${strategy.accounts?.map((row) => `${row.label} ${row.symbol}`).join(" · ") || "selected account"}`
+        const instanceStateSupported = isLive
+          && strategy.strategy_type === "market_maker";
+        const accountDetail = strategy.accounts
+          ?.map((row) => `${row.label} ${row.symbol}`)
+          .join(" · ") || "selected account";
+        if (runState === "running" && isLive && !dangerConfirm(
+          strategy.run_state === "stopped"
+            ? "Start this live Market Maker?"
+            : "Resume this live Market Maker?",
+          `${strategy.name} · ${accountDetail}`
         )) return;
-        await postUserWorkspace({
-          action: "set_strategy_enabled",
-          strategy_id: strategy.id,
-          enabled: !strategy.enabled,
-          confirm_live: isLive && !strategy.enabled ? LIVE_MARKET_MAKER_CONFIRMATION : "",
-        });
+        if (runState === "stopped" && !dangerConfirm(
+          "Stop this Market Maker and cancel its managed orders?",
+          `${strategy.name} · ${accountDetail}`
+        )) return;
+        await postUserWorkspace(
+          instanceStateSupported
+            ? {
+                action: "set_strategy_state",
+                strategy_id: strategy.id,
+                run_state: runState,
+                confirm_live: runState === "running" ? LIVE_MARKET_MAKER_CONFIRMATION : "",
+              }
+            : {
+                action: "set_strategy_enabled",
+                strategy_id: strategy.id,
+                enabled: runState === "running",
+              }
+        );
         setUserWorkspaceNotice(
           uiText(
-            strategy.enabled
-              ? `${isLive ? "Live" : "Paper"} strategy paused${isLive ? "; tracked orders will be canceled" : ""}.`
-              : `${isLive ? "Live" : "Paper"} strategy resumed.`
+            runState === "running"
+              ? `${isLive ? "Live" : "Paper"} strategy ${strategy.run_state === "stopped" ? "started" : "resumed"}.`
+              : runState === "stopped"
+                ? `${isLive ? "Live" : "Paper"} strategy stopped; tracked orders are being canceled.`
+                : `${isLive ? "Live" : "Paper"} strategy paused${isLive ? "; tracked orders are being canceled" : ""}.`
           )
         );
       } catch (error) {
@@ -6564,6 +6623,14 @@ function balanceStatusClass(status) {
       } finally {
         button.disabled = false;
       }
+    }
+
+    async function toggleUserStrategy(strategy, button) {
+      return setUserStrategyRunState(
+        strategy,
+        strategy.enabled ? "paused" : "running",
+        button,
+      );
     }
 
     async function copyUserStrategy(strategy, button) {
@@ -8080,8 +8147,19 @@ function balanceStatusClass(status) {
 
     function marketMakerInstanceLabel(instance) {
       const config = instance?.config || {};
-      const status = instance?.runtime?.status || instance?.status || "disabled";
-      return `${accountLabelForKey(config.exchange) || "account"} ${config.symbol || "symbol"} · ${status}`;
+      const status = marketMakerInstanceControlState(instance);
+      return `${accountLabelForKey(config.exchange) || "account"} ${config.symbol || "symbol"} · ${uiText(status)}`;
+    }
+
+    function marketMakerInstanceControlState(instance) {
+      const config = instance?.config || {};
+      const runtime = instance?.runtime || {};
+      const pendingCancellation = Number(runtime.open_order_count || 0) > 0
+        && !(config.enabled && config.live_enabled);
+      if (pendingCancellation) return config.enabled ? "pausing" : "stopping";
+      if (!config.enabled) return "stopped";
+      if (!config.live_enabled) return "paused";
+      return runtime.status || instance?.status || "starting";
     }
 
     function firstListText(items) {
@@ -8113,8 +8191,8 @@ function balanceStatusClass(status) {
     }
 
     function marketMakerStatusClass(status) {
-      if (["placed", "unchanged", "planned"].includes(status)) return "risk-ok";
-      if (["disabled", "paused", "starting"].includes(status)) return "risk-off";
+      if (["live", "placed", "planned", "running", "unchanged"].includes(status)) return "risk-ok";
+      if (["disabled", "paused", "pausing", "starting", "stopped", "stopping"].includes(status)) return "risk-off";
       return "risk-blocked";
     }
 
@@ -8169,7 +8247,7 @@ function balanceStatusClass(status) {
         return;
       }
       for (const instance of instances) {
-        const status = instance?.runtime?.status || instance?.status || "disabled";
+        const status = marketMakerInstanceControlState(instance);
         const runtime = instance?.runtime || {};
         const autoRecovery = runtime.auto_recovery || {};
         const nextRecoveryIn = autoRecovery.next_check_at == null
@@ -8188,11 +8266,101 @@ function balanceStatusClass(status) {
         const reason = friendlyAccountMessage(marketMakerStatusReason(instance)) || "--";
         row.innerHTML = `
           <div class="instance-status-name" title="${escapeHtml(marketMakerInstanceName(instance))}">${escapeHtml(marketMakerInstanceName(instance))}</div>
-          <div class="instance-status-pill ${marketMakerStatusClass(status)}">${escapeHtml(status)}</div>
+          <div class="instance-status-pill ${marketMakerStatusClass(status)}">${escapeHtml(uiText(status))}</div>
           <div class="instance-status-detail">${escapeHtml(detail)}</div>
           <div class="instance-status-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</div>
+          <div class="instance-status-actions"></div>
         `;
+        const actions = row.querySelector(".instance-status-actions");
+        const addAction = (label, action, className) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = className;
+          button.textContent = uiText(label);
+          button.addEventListener("click", () => controlMarketMakerInstance(
+            instance,
+            action,
+            button,
+          ));
+          actions.appendChild(button);
+        };
+        if (status === "paused") {
+          addAction("Resume", "running", "control-button");
+          addAction("Stop", "stopped", "danger-button");
+        } else if (status === "stopped") {
+          addAction("Start", "running", "control-button");
+        } else if (!["pausing", "stopping"].includes(status)) {
+          addAction("Pause", "paused", "ghost-button");
+          addAction("Stop", "stopped", "danger-button");
+        }
         body.appendChild(row);
+      }
+    }
+
+    async function controlMarketMakerInstance(instance, runState, button) {
+      if (mmFormBusy) return;
+      const config = { ...(instance?.config || {}) };
+      if (!config.id) return;
+      const payload = {
+        ...config,
+        enabled: runState !== "stopped",
+        live_enabled: runState === "running",
+        cleanup_recoverable_state: true,
+      };
+      const label = marketMakerInstanceName(instance);
+      if (runState === "paused" && !dangerConfirm(
+        "Pause this Market Maker and cancel its managed orders?",
+        label,
+      )) return;
+      if (runState === "stopped" && !dangerConfirm(
+        "Stop this Market Maker and cancel its managed orders?",
+        label,
+      )) return;
+      if (runState === "running") {
+        const parameters = marketMakerFormReadiness(payload);
+        const risk = coreLiveRiskReadiness("market_maker", [payload.exchange]);
+        if (!parameters.ready || !risk.ready) {
+          setStrategyFeedback(
+            "mm-feedback",
+            parameters.ready ? risk.detail : parameters.detail,
+            "error",
+          );
+          return;
+        }
+        let preflight;
+        try {
+          preflight = await runStrategyPreflight("market_maker", payload);
+        } catch (error) {
+          setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+          return;
+        }
+        if (!dangerConfirm(
+          "Start this live Market Maker instance?",
+          `${marketMakerConfirmationDetail(payload)}\n${uiText("Preflight")}: ${preflight.checks?.length || 0} ${uiText("checks passed")}`,
+        )) return;
+        payload.confirm_live = LIVE_MARKET_MAKER_CONFIRMATION;
+        payload.preflight_token = preflight.token;
+      }
+      mmFormBusy = true;
+      button.disabled = true;
+      selectedMarketMakerInstanceId = config.id;
+      try {
+        const result = await postMarketMakerConfig(payload);
+        applyMarketMakerMutationResult(result);
+        setStrategyFeedback(
+          "mm-feedback",
+          runState === "running"
+            ? "Market Maker instance started."
+            : `Market Maker instance ${runState}; order cleanup is running.`,
+          "ok",
+        );
+        scheduleMutationRefresh();
+      } catch (error) {
+        setStrategyFeedback("mm-feedback", error.message || String(error), "error");
+      } finally {
+        mmFormBusy = false;
+        button.disabled = false;
+        updateCoreFormStates();
       }
     }
 
@@ -8335,17 +8503,19 @@ function balanceStatusClass(status) {
       const instances = configs.map((config) => {
         const previous = previousById.get(config.id) || {};
         const starting = Boolean(config.enabled && config.live_enabled);
+        const paused = Boolean(config.enabled && !config.live_enabled);
+        const targetStatus = starting ? "starting" : paused ? "paused" : "stopped";
         return {
           ...previous,
           config,
-          status: starting ? "starting" : "disabled",
-          mode: starting ? "live" : "paused",
+          status: targetStatus,
+          mode: starting ? "live" : targetStatus,
           status_reason: "",
           error: null,
           runtime: {
             ...(previous.runtime || {}),
-            status: starting ? "starting" : "disabled",
-            mode: starting ? "live" : "paused",
+            status: targetStatus,
+            mode: starting ? "live" : targetStatus,
             reason: null,
             last_error: null,
             last_risk: null,

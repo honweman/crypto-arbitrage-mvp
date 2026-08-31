@@ -665,6 +665,8 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn('stateStatus === "running" && statusIssueRows(data).length', APP_JS)
         self.assertIn('ownerMode ? "user-market-maker-section" : "mm-section"', APP_JS)
         self.assertIn("function userStrategyCapacityBlockers(strategy)", APP_JS)
+        self.assertIn("function controlMarketMakerInstance(instance, runState, button)", APP_JS)
+        self.assertIn('action: "set_strategy_state"', APP_JS)
 
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(

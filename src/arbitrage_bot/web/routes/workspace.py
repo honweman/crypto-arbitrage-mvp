@@ -611,6 +611,7 @@ async def api_user_workspace(request: web.Request) -> web.Response:
         elif action in {
             "upsert_strategy",
             "set_strategy_enabled",
+            "set_strategy_state",
             "clone_strategy",
             "delete_strategy",
             "reset_strategy_paper",
@@ -1592,7 +1593,11 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             enabled = payload.get("enabled")
             if not isinstance(enabled, bool):
                 raise ValueError("enabled must be true or false")
-            updated = replace(strategy, enabled=enabled)
+            updated = replace(
+                strategy,
+                enabled=enabled,
+                run_state="running" if enabled else "paused",
+            )
             if enabled:
                 if strategy.mode == "live":
                     require_capability(user, "account.trade")
@@ -1619,6 +1624,48 @@ async def api_user_workspace(request: web.Request) -> web.Response:
             audit_payload = {
                 "strategy_id": strategy.id,
                 "enabled": strategy.enabled,
+                "run_state": strategy.run_state,
+                "mode": strategy.mode,
+            }
+        elif action == "set_strategy_state":
+            strategy_id = str(
+                payload.get("strategy_id") or payload.get("id") or ""
+            ).strip()
+            strategy = store.get_strategy(strategy_id)
+            if strategy is None:
+                raise ValueError(f"strategy not found: {strategy_id}")
+            _require_workspace_owner(user, strategy.owner_email)
+            if strategy.strategy_type != "market_maker" or strategy.mode != "live":
+                raise ValueError("instance run-state control is only available for live Market Maker")
+            run_state = str(payload.get("run_state") or "").strip().lower()
+            if run_state not in {"running", "paused", "stopped"}:
+                raise ValueError("run_state must be running, paused, or stopped")
+            enabled = run_state == "running"
+            updated = replace(
+                strategy,
+                enabled=enabled,
+                run_state=run_state,
+            )
+            if enabled:
+                require_capability(user, "account.trade")
+                if payload.get("confirm_live") != LIVE_MARKET_MAKER_CONFIRMATION:
+                    raise ValueError(
+                        "starting or resuming a live owner Market Maker requires "
+                        f"confirm_live={LIVE_MARKET_MAKER_CONFIRMATION}"
+                    )
+                readiness = store.strategy_readiness(updated)
+                if not readiness["ready"]:
+                    raise ValueError(
+                        "strategy cannot be enabled: "
+                        + "; ".join(readiness["blockers"])
+                    )
+            strategy = store.upsert_strategy(updated)
+            audit_target = strategy.id
+            audit_detail = f"set owner strategy {strategy.name} to {run_state}"
+            audit_payload = {
+                "strategy_id": strategy.id,
+                "enabled": strategy.enabled,
+                "run_state": strategy.run_state,
                 "mode": strategy.mode,
             }
         elif action == "clone_strategy":

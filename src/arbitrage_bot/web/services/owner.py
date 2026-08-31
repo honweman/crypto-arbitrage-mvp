@@ -219,10 +219,22 @@ def _owner_live_trading_console(
             runtime_config.get("symbol") or first_account.get("symbol") or ""
         )
         enabled = bool(strategy.get("enabled"))
+        run_state = str(strategy.get("run_state") or "paused")
         runtime_mode = str(runtime.get("mode") or "live")
         runtime_status = str(
-            runtime.get("status") or ("starting" if enabled else "paused")
+            runtime.get("status") or ("starting" if enabled else run_state)
         )
+        cancellation_pending = bool(
+            not enabled
+            and (
+                runtime.get("open_order_count")
+                or runtime.get("open_order_sync_error")
+                or runtime_status in {"cancel_retry", "remove_cancel_retry"}
+            )
+        )
+        control_state = (
+            "stopping" if run_state == "stopped" else "pausing"
+        ) if cancellation_pending else ("running" if enabled else run_state)
         strategies.append(
             {
                 "id": f"owner_market_maker:{strategy.get('id') or ''}",
@@ -236,8 +248,10 @@ def _owner_live_trading_console(
                 ),
                 "symbol": symbol,
                 "paused": not enabled,
+                "run_state": "running" if enabled else run_state,
+                "control_state": control_state,
                 "live": enabled and runtime_mode == "live",
-                "mode": "paused" if not enabled else runtime_mode,
+                "mode": run_state if not enabled else runtime_mode,
                 "status": runtime_status,
                 "strategy_allowed": bool(strategy.get("effective_enabled")),
                 "account_enabled": _risk_account_enabled(cfg, exchange_key),

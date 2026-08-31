@@ -2841,7 +2841,12 @@ class UserWorkspaceStore:
             strategy = UserStrategy.from_dict(json.loads(row["payload"]))
             if not strategy.enabled:
                 continue
-            updated = replace(strategy, enabled=False, updated_at=_now())
+            updated = replace(
+                strategy,
+                enabled=False,
+                run_state="paused",
+                updated_at=_now(),
+            )
             connection.execute(
                 """
                 UPDATE user_strategies
@@ -2864,7 +2869,12 @@ class UserWorkspaceStore:
             strategy = UserStrategy.from_dict(json.loads(row["payload"]))
             if not strategy.enabled or account_id not in strategy.account_ids:
                 continue
-            updated = replace(strategy, enabled=False, updated_at=_now())
+            updated = replace(
+                strategy,
+                enabled=False,
+                run_state="paused",
+                updated_at=_now(),
+            )
             connection.execute(
                 """
                 UPDATE user_strategies
@@ -4396,7 +4406,7 @@ class UserWorkspaceStore:
                 if row["effective_enabled"]
                 else "blocked"
                 if strategy.enabled
-                else "paused"
+                else strategy.run_state
             )
             row["accounts"] = [
                 {
