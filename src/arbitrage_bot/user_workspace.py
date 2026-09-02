@@ -164,9 +164,9 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "label": "Upbit",
         "market_types": ["spot"],
         "required_credentials": ["api_key", "secret"],
-        "default_variant": "global",
+        "default_variant": "korea",
         "variants": [
-            {"id": "global", "label": "Global"},
+            {"id": "korea", "label": "Korea (upbit.com)"},
             {"id": "indonesia", "label": "Indonesia (id.Upbit)"},
         ],
     },
@@ -250,6 +250,16 @@ EXCHANGE_CATALOG: tuple[dict[str, Any], ...] = (
         "variants": [{"id": "v3", "label": "API v3"}],
     },
 )
+
+
+def _normalize_api_variant(exchange: str, api_variant: Any) -> str:
+    variant = str(api_variant or "").strip().lower()
+    # Earlier releases called the Korean api.upbit.com endpoint "global".
+    if exchange == "upbit" and variant == "global":
+        return "korea"
+    return variant
+
+
 EXCHANGES_BY_ID = {row["id"]: row for row in EXCHANGE_CATALOG}
 
 DEX_VENUE_CATALOG: tuple[dict[str, Any], ...] = (
@@ -661,14 +671,13 @@ class UserApiConnection:
             for item in exchange_row.get("variants", [])
             if isinstance(item, dict)
         }
-        api_variant = (
+        api_variant = _normalize_api_variant(
+            exchange,
             str(
                 raw.get("api_variant")
                 or exchange_row.get("default_variant")
                 or "default"
-            )
-            .strip()
-            .lower()
+            ),
         )
         if api_variant not in variants:
             raise ValueError(f"{exchange} does not support API variant {api_variant}")
@@ -917,14 +926,13 @@ class UserExchangeAccount:
             for item in exchange_row.get("variants", [])
             if isinstance(item, dict)
         }
-        api_variant = (
+        api_variant = _normalize_api_variant(
+            exchange,
             str(
                 raw.get("api_variant")
                 or exchange_row.get("default_variant")
                 or "default"
-            )
-            .strip()
-            .lower()
+            ),
         )
         if api_variant not in variants:
             raise ValueError(f"{exchange} does not support API variant {api_variant}")

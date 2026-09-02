@@ -1098,6 +1098,26 @@ class UserWorkspaceStoreTest(unittest.TestCase):
             self.assertIsNone(store.get_project(project.id))
             self.assertIsNone(store.get_account(account.id))
 
+    def test_upbit_korea_is_default_and_legacy_global_is_normalized(self) -> None:
+        current = UserExchangeAccount.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "project_id": "project-upbit",
+                "exchange": "upbit",
+            }
+        )
+        legacy = UserExchangeAccount.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "project_id": "project-upbit",
+                "exchange": "upbit",
+                "api_variant": "global",
+            }
+        )
+
+        self.assertEqual(current.api_variant, "korea")
+        self.assertEqual(legacy.api_variant, "korea")
+
     def test_disabling_project_disables_child_accounts_without_deleting_credentials(
         self,
     ) -> None:

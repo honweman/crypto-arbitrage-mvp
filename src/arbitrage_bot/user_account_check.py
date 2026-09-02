@@ -45,8 +45,10 @@ def workspace_exchange_config(
 
     if exchange_id == "bithumb":
         options["private_api"] = "v2.0"
-    elif exchange_id == "upbit" and variant == "indonesia":
-        options["hostname"] = "id-api.upbit.com"
+    elif exchange_id == "upbit":
+        options["hostname"] = (
+            "id-api.upbit.com" if variant == "indonesia" else "api.upbit.com"
+        )
     elif exchange_id == "hyperliquid" and variant == "testnet":
         options["hostname"] = "hyperliquid-testnet.xyz"
 

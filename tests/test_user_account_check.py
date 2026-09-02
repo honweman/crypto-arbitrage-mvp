@@ -197,6 +197,12 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             api_variant="indonesia",
             runtime_key="account-1",
         )
+        upbit_korea = workspace_exchange_config(
+            exchange="upbit",
+            market_type="spot",
+            api_variant="korea",
+            runtime_key="account-korea",
+        )
         bithumb = workspace_exchange_config(
             exchange="bithumb",
             market_type="spot",
@@ -235,6 +241,7 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(upbit.options["hostname"], "id-api.upbit.com")
+        self.assertEqual(upbit_korea.options["hostname"], "api.upbit.com")
         self.assertEqual(bithumb.options["private_api"], "v2.0")
         self.assertEqual(binance.id, "binanceusdm")
         self.assertEqual(binance.options["defaultType"], "swap")

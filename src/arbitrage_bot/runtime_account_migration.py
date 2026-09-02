@@ -31,7 +31,7 @@ def _api_variant(exchange: ExchangeConfig) -> str:
         return "v2"
     if exchange.id == "upbit":
         hostname = str(exchange.options.get("hostname") or "").lower()
-        return "indonesia" if hostname.startswith("id-") else "global"
+        return "indonesia" if hostname.startswith("id-") else "korea"
     return "default"
 
 
