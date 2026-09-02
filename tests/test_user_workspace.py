@@ -144,6 +144,38 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertIn("expected public IP is required", blockers)
         self.assertIn("egress public IP has not been verified", blockers)
 
+    def test_upbit_regions_may_share_the_server_default_egress(self) -> None:
+        now = time.time()
+        korea = UserApiConnection.from_dict(
+            {
+                "owner_email": "one@example.com",
+                "label": "Upbit Korea",
+                "exchange": "upbit",
+                "api_variant": "korea",
+                "connection_status": "healthy",
+                "connection_checked_at": now,
+            }
+        )
+        indonesia = UserApiConnection.from_dict(
+            {
+                "owner_email": "one@example.com",
+                "label": "Upbit Indonesia",
+                "exchange": "upbit",
+                "api_variant": "indonesia",
+                "connection_status": "healthy",
+                "connection_checked_at": now,
+            }
+        )
+
+        self.assertEqual(
+            api_connection_egress_blockers(korea, [korea, indonesia], now=now),
+            [],
+        )
+        self.assertEqual(
+            api_connection_egress_blockers(indonesia, [korea, indonesia], now=now),
+            [],
+        )
+
     def test_staged_second_account_does_not_interrupt_existing_account(self) -> None:
         now = time.time()
         existing = UserApiConnection.from_dict(

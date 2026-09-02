@@ -820,6 +820,7 @@ def api_connection_egress_blockers(
         row
         for row in peers
         if row.exchange == connection.exchange
+        and row.api_variant == connection.api_variant
         and row.owner_email == connection.owner_email
         and (
             row.id == connection.id
