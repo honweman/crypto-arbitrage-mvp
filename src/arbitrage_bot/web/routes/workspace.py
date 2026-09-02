@@ -501,6 +501,13 @@ async def _sync_workspace_connection(
                 "discovery did not return it"
             )
 
+    if replace_markets:
+        api_connection = store.upsert_api_connection(
+            replace(
+                api_connection,
+                allow_all_markets=not bool(selected_market_rows),
+            )
+        )
     existing_by_market = {
         (account.market_type, account.symbol): account for account in existing_rows
     }

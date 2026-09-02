@@ -21,6 +21,7 @@ class ExchangeConfig:
     credential_owner_email: str | None = None
     credential_store_path: str | None = None
     credential_master_key_env: str | None = None
+    all_markets_enabled: bool = False
     http_proxy_env: str | None = None
     https_proxy_env: str | None = None
     socks_proxy_env: str | None = None
@@ -563,6 +564,7 @@ def _exchange_from_dict(raw: dict[str, Any]) -> ExchangeConfig:
         credential_owner_email=raw.get("credential_owner_email"),
         credential_store_path=raw.get("credential_store_path"),
         credential_master_key_env=raw.get("credential_master_key_env"),
+        all_markets_enabled=bool(raw.get("all_markets_enabled", False)),
         http_proxy_env=raw.get("http_proxy_env"),
         https_proxy_env=raw.get("https_proxy_env"),
         socks_proxy_env=raw.get("socks_proxy_env"),

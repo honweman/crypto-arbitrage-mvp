@@ -48,6 +48,9 @@ def workspace_exchange_allowed_symbols(exchange: ExchangeConfig) -> set[str] | N
         store_path,
         master_key_env=exchange.credential_master_key_env,
     )
+    connection = store.get_api_connection(connection_id)
+    if connection is not None and connection.allow_all_markets is True:
+        return None
     active_projects = {
         project.id
         for project in store.list_projects(owner_email=owner_email, is_admin=False)
@@ -143,6 +146,7 @@ def build_workspace_runtime_accounts(
             credential_owner_email=connection.owner_email,
             credential_store_path=str(store.path),
             credential_master_key_env=store.master_key_env,
+            all_markets_enabled=connection.allow_all_markets or not bindings,
             source_ip=(
                 connection.egress_source_ip
                 if connection.egress_mode == "source_ip"

@@ -125,3 +125,33 @@ def test_selected_account_markets_are_the_runtime_symbol_scope() -> None:
 
         store.list_accounts.return_value = []
         assert workspace_exchange_allowed_symbols(exchange) is None
+
+
+def test_all_market_connection_does_not_inherit_project_symbol_restrictions() -> None:
+    exchange = ExchangeConfig(
+        id="upbit",
+        label="workspace:upbit-korea:spot",
+        market_type="spot",
+        credential_connection_id="upbit-korea",
+        credential_owner_email="trader@example.com",
+        credential_store_path="/tmp/workspace.sqlite3",
+    )
+    binding = SimpleNamespace(
+        connection_id="upbit-korea",
+        market_type="spot",
+        enabled=True,
+        project_id="acs-project",
+        symbol="ACS/KRW",
+    )
+
+    with patch("arbitrage_bot.workspace_runtime.UserWorkspaceStore") as store_cls:
+        store = store_cls.return_value
+        store.get_api_connection.return_value = SimpleNamespace(
+            allow_all_markets=True
+        )
+        store.list_projects.return_value = [
+            SimpleNamespace(id="acs-project", status="active")
+        ]
+        store.list_accounts.return_value = [binding]
+
+        assert workspace_exchange_allowed_symbols(exchange) is None

@@ -2875,6 +2875,24 @@ class WebMonitorTest(unittest.TestCase):
         )
         self.assertEqual(accounts[0]["symbols"], [])
 
+    def test_owner_api_can_allow_all_markets_while_retaining_known_pairs(self) -> None:
+        accounts = slow_execution_accounts(
+            [
+                ExchangeConfig(
+                    id="upbit",
+                    label="workspace:upbit-korea:spot",
+                    market_type="spot",
+                    credential_connection_id="upbit-korea",
+                    credential_owner_email="trader@example.com",
+                    all_markets_enabled=True,
+                )
+            ],
+            {"workspace:upbit-korea:spot": ["ACS/KRW"]},
+        )
+
+        self.assertEqual(accounts[0]["market_scope"], "all_supported_markets")
+        self.assertEqual(accounts[0]["symbols"], ["ACS/KRW"])
+
     def test_strategy_universe_lists_selectable_markets(self) -> None:
         cfg = make_config(
             spot_exchanges=[

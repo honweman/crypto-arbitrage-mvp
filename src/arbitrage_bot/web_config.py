@@ -387,10 +387,10 @@ def slow_execution_accounts(
             "markets": markets,
             "account_source": "user_api" if connection_id else "platform",
             "market_scope": (
-                "configured_symbols"
+                "all_supported_markets"
+                if connection_id and (exchange.all_markets_enabled or not markets)
+                else "configured_symbols"
                 if markets
-                else "all_supported_markets"
-                if connection_id
                 else "none"
             ),
         }

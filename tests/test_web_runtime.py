@@ -5396,6 +5396,8 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                                 "api_variant": "default",
                                 "withdrawal_disabled_confirmed": True,
                                 "trade_permission_confirmed": True,
+                                "replace_markets": True,
+                                "markets": [],
                                 "credentials": {
                                     "api_key": "global-api-key",
                                     "secret": "global-api-secret",
@@ -5474,6 +5476,9 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(save_response.status, 200, save_payload)
         self.assertEqual(save_payload["accounts"], [])
+        self.assertTrue(
+            save_payload["workspace"]["connections"][0]["allow_all_markets"]
+        )
         self.assertEqual(len(save_payload["workspace"]["connections"]), 1)
         self.assertTrue(
             save_payload["workspace"]["connections"][0]["credentials_configured"]
@@ -5496,6 +5501,10 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 "symbol"
             ],
             "ACS/USDC",
+        )
+        self.assertEqual(
+            project_payload["workspace"]["connections"][0]["market_scope"],
+            "all_supported_markets",
         )
         self.assertNotIn(b"global-api-key", database_bytes)
         self.assertNotIn(b"global-api-secret", database_bytes)

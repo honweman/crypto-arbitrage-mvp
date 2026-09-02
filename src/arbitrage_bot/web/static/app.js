@@ -5083,9 +5083,14 @@ function balanceStatusClass(status) {
       const markets = connection?.markets || [];
       setFieldValue(
         "user-exchange-assets",
-        [...new Set(markets.map((market) => market.asset).filter(Boolean))].join(", ")
+        connection?.allow_all_markets
+          ? ""
+          : [...new Set(markets.map((market) => market.asset).filter(Boolean))].join(", ")
       );
-      renderUserExchangeMarketOptions(markets, markets);
+      renderUserExchangeMarketOptions(
+        markets,
+        connection?.allow_all_markets ? [] : markets,
+      );
       setCheckedValue("user-exchange-enabled", connection?.live_enabled);
       setCheckedValue(
         "user-exchange-no-withdraw",
@@ -5630,7 +5635,7 @@ function balanceStatusClass(status) {
         const connection = workspaceConnection(connectionId);
         renderUserExchangeMarketOptions(
           [...(connection?.markets || []), ...(result.markets || [])],
-          connection?.markets || []
+          connection?.allow_all_markets ? [] : (connection?.markets || [])
         );
         setUserWorkspaceNotice(
           `${(result.markets || []).length} ${uiText("trading pairs loaded")}${result.cached ? ` · ${uiText("cached")}` : ""}`
@@ -7917,6 +7922,8 @@ function balanceStatusClass(status) {
     }
 
     function symbolSelectorValue(inputName) {
+      const manual = document.querySelector(`[data-manual-symbol-selector="${inputName}"]`);
+      if (manual && !manual.hidden) return String(manual.value || "").trim().toUpperCase();
       return document.querySelector(`[data-symbol-selector="${inputName}"]`)?.value || "";
     }
 
@@ -7984,10 +7991,18 @@ function balanceStatusClass(status) {
       symbolSelect.className = "account-select";
       symbolSelect.title = uiText("Trading pair");
 
+      const manualSymbol = document.createElement("input");
+      manualSymbol.dataset.manualSymbolSelector = inputName;
+      manualSymbol.className = "account-select";
+      manualSymbol.type = "text";
+      manualSymbol.placeholder = "BTC/USDT";
+      manualSymbol.title = uiText("Trading pair");
+      manualSymbol.value = selectedSymbol || "";
+      manualSymbol.hidden = true;
+
       const usesManualSymbol = () => {
         const account = accountForKey(list, accountSelect.value);
-        return inputName === "slow-account"
-          && account?.market_scope === "all_supported_markets";
+        return account?.market_scope === "all_supported_markets";
       };
 
       const syncSelectorVisibility = () => {
@@ -7995,6 +8010,7 @@ function balanceStatusClass(status) {
         projectSelect.hidden = manual;
         exchangeSelect.hidden = manual;
         symbolSelect.hidden = manual;
+        manualSymbol.hidden = !manual || inputName === "slow-account";
       };
 
       const fillProjects = (preferredProject = "") => {
@@ -8114,6 +8130,11 @@ function balanceStatusClass(status) {
         onDirty();
         updateSlowMarketLimitHint();
       });
+      manualSymbol.addEventListener("input", () => {
+        manualSymbol.value = manualSymbol.value.toUpperCase();
+        onDirty();
+        updateSlowMarketLimitHint();
+      });
       fillProjects(selectedProjectForSymbol(list, selectedSymbol));
       fillExchanges(selectedExchange || accountSelect.value);
       fillSymbols(selectedSymbol || "");
@@ -8122,6 +8143,7 @@ function balanceStatusClass(status) {
       wrapper.appendChild(projectSelect);
       wrapper.appendChild(exchangeSelect);
       wrapper.appendChild(symbolSelect);
+      wrapper.appendChild(manualSymbol);
       body.appendChild(wrapper);
     }
 

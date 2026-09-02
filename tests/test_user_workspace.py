@@ -373,6 +373,7 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                             "label": "Coinbase Global",
                             "exchange": "coinbase",
                             "market_type": "spot",
+                            "allow_all_markets": True,
                             "withdrawal_disabled_confirmed": True,
                             "trade_permission_confirmed": True,
                         }
@@ -390,6 +391,11 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                 self.assertEqual(payload["projects"], [])
                 self.assertEqual(payload["accounts"], [])
                 self.assertEqual(payload["connections"][0]["id"], api_connection.id)
+                self.assertTrue(api_connection.allow_all_markets)
+                self.assertEqual(
+                    payload["connections"][0]["market_scope"],
+                    "all_supported_markets",
+                )
                 self.assertTrue(payload["connections"][0]["credentials_configured"])
                 self.assertEqual(
                     store.delete_connection(

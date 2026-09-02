@@ -614,6 +614,7 @@ class UserApiConnection:
     exchange: str
     market_type: str = "spot"
     market_types: tuple[str, ...] = ()
+    allow_all_markets: bool = False
     api_variant: str = "default"
     runtime_keys: tuple[str, ...] = ()
     egress_mode: str = "default"
@@ -711,6 +712,11 @@ class UserApiConnection:
             exchange=exchange,
             market_type=market_type,
             market_types=market_types,
+            allow_all_markets=_strict_bool(
+                raw.get("allow_all_markets"),
+                label="allow all markets",
+                default=False,
+            ),
             api_variant=api_variant,
             runtime_keys=tuple(
                 dict.fromkeys(
@@ -764,6 +770,7 @@ class UserApiConnection:
             "market_type": self.market_type,
             "market_types": list(self.market_types),
             "market_scope": "unified",
+            "allow_all_markets": self.allow_all_markets,
             "api_variant": self.api_variant,
             "runtime_keys": list(self.runtime_keys),
             "egress_mode": self.egress_mode,
@@ -4132,6 +4139,7 @@ class UserWorkspaceStore:
                 "market_type": row.get("market_type") or "spot",
                 "market_types": list(row.get("market_types") or []),
                 "market_scope": "unified",
+                "allow_all_markets": bool(row.get("allow_all_markets")),
                 "api_variant": row.get("api_variant") or "default",
                 "runtime_keys": list(row.get("runtime_keys") or []),
                 "egress_mode": row.get("egress_mode") or "default",
@@ -4179,6 +4187,7 @@ class UserWorkspaceStore:
                     "market_type": row.get("market_type") or "spot",
                     "market_types": [row.get("market_type") or "spot"],
                     "market_scope": "unified",
+                    "allow_all_markets": False,
                     "api_variant": row.get("api_variant") or "default",
                     "runtime_keys": [],
                     "egress_mode": row.get("egress_mode") or "default",
@@ -4254,7 +4263,9 @@ class UserWorkspaceStore:
                 else group["connection_status"]
             )
             group["market_scope"] = (
-                "selected_markets" if market_count else "all_supported_markets"
+                "all_supported_markets"
+                if group.get("allow_all_markets") or not market_count
+                else "selected_markets"
             )
             group["selected_market_count"] = market_count
             group["permission_source"] = "account_owner"
