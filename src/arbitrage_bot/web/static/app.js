@@ -664,13 +664,7 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       ).trim();
     }
 
-    function accountIdentitySuffix(account, allowAccountId = false) {
-      const value = accountIdentityValue(account, allowAccountId);
-      return value ? value.slice(-8).toUpperCase() : "";
-    }
-
     function exchangeAccountLabel(account, { includeVenue = true, includeSymbol = false, allowAccountId = false } = {}) {
-      const identity = accountIdentitySuffix(account, allowAccountId);
       const connectionId = accountIdentityValue(account, allowAccountId);
       const rawExchange = String(account?.exchange_id || account?.exchange || "").trim();
       const exchangeId = rawExchange
@@ -689,7 +683,6 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       if (includeVenue && venue) parts.push(venue);
       if (label && !parts.some((part) => part.toLowerCase() === label.toLowerCase())) parts.push(label);
       if (marketType && !parts.some((part) => part.toUpperCase().includes(marketType))) parts.push(marketType);
-      if (identity) parts.push(`API #${identity}`);
       if (includeSymbol && account?.symbol) parts.push(account.symbol);
       return parts.filter(Boolean).join(" · ") || "--";
     }
@@ -3837,7 +3830,7 @@ function balanceStatusClass(status) {
       const rows = accounts.map((account) => ({
         value: account.id,
         label: exchangeAccountLabel(account, { allowAccountId: true }),
-        title: `${account.owner_email || "--"} · ${account.id || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
+        title: `${account.owner_email || "--"} · ${account.label || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
       }));
       setSelectOptions(
         "strategy-instance-account",
@@ -3852,7 +3845,7 @@ function balanceStatusClass(status) {
       const exchangeRows = accounts.map((account) => ({
         value: account.key,
         label: exchangeAccountLabel(account),
-        title: `${account.key} · ${accountIdentityValue(account) || account.id || "platform"} · ${accountSymbols(account).join(", ") || "no symbols"}`,
+        title: `${exchangeAccountLabel(account)} · ${accountSymbols(account).join(", ") || "no symbols"}`,
       }));
       setSelectOptions(
         "strategy-instance-exchange",
@@ -4052,7 +4045,7 @@ function balanceStatusClass(status) {
         const envStatus = missing.length ? `missing ${missing.length}` : (auth.configured ? "set" : "not set");
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td title="${escapeHtml(account.id || "")}">${escapeHtml(account.label || shortId(account.id))}</td>
+          <td>${escapeHtml(account.label || uiText("Unnamed account"))}</td>
           <td>${escapeHtml(account.owner_email || "--")}</td>
           <td>${escapeHtml(displayExchange(account.exchange, account.exchange_label) || "--")}<br><span class="subtle">${escapeHtml(account.market_type || "spot")}</span></td>
           <td>${escapeHtml((account.asset_scope || []).join(", ") || "all")}</td>
@@ -7702,7 +7695,7 @@ function balanceStatusClass(status) {
       const accounts = (tradingConsole?.accounts || []).map((account) => ({
         key: account.key,
         label: exchangeAccountLabel(account),
-        title: `${account.key} · ${accountIdentityValue(account) || account.id || "platform"}`,
+        title: exchangeAccountLabel(account, { includeSymbol: true }),
       }));
       const strategies = (tradingConsole?.strategies || []).map((strategy) => ({
         key: strategy.id,
@@ -8009,7 +8002,7 @@ function balanceStatusClass(status) {
         const option = document.createElement("option");
         option.value = account.key;
         option.textContent = exchangeAccountLabel(account);
-        option.title = `${account.key} · ${accountIdentityValue(account) || account.id || "platform"} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
+        option.title = `${exchangeAccountLabel(account)} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
         accountSelect.appendChild(option);
       }
       if (selectedExchange && list.some((account) => account.key === selectedExchange)) {
@@ -8110,7 +8103,9 @@ function balanceStatusClass(status) {
           option.textContent = account
             ? exchangeAccountLabel(account)
             : `${market.exchangeLabel || market.exchangeId} (${market.marketType || "spot"})`;
-          option.title = market.accountKey;
+          option.title = account
+            ? exchangeAccountLabel(account, { includeSymbol: true })
+            : `${market.exchangeLabel || market.exchangeId} · ${market.symbol || ""}`;
           exchangeSelect.appendChild(option);
         }
         if (preferredExchange && exchangeRows.some((market) => market.accountKey === preferredExchange)) {
