@@ -175,6 +175,42 @@ class FakePricedWorkspaceManager(FakeWorkspaceManager):
         }
 
 
+class FakeCoinbaseReserveClient(FakeWorkspaceClient):
+    async def fetch_open_orders(self):
+        return [
+            {
+                "id": "buy-1",
+                "symbol": "ACS/USDC",
+                "side": "buy",
+                "price": 0.2,
+                "amount": 100.0,
+                "filled": 0.0,
+                "remaining": 100.0,
+            },
+            {
+                "id": "sell-1",
+                "symbol": "ACS/USDC",
+                "side": "sell",
+                "price": 0.3,
+                "amount": 100.0,
+                "filled": 0.0,
+                "remaining": 100.0,
+            },
+        ]
+
+
+class FakeCoinbaseReserveManager(FakeWorkspaceManager):
+    def __init__(self, *, credentials_by_key=None) -> None:
+        super().__init__(credentials_by_key=credentials_by_key)
+        self.client_instance = FakeCoinbaseReserveClient()
+
+    async def fetch_balance(self, _cfg):
+        return {
+            "ACS": {"free": 900.0, "used": 0.0, "total": 900.0},
+            "USDC": {"free": 80.0, "used": 0.0, "total": 80.0},
+        }
+
+
 class FailingWorkspaceManager(FakeWorkspaceManager):
     async def fetch_balance(self, _cfg):
         secret = next(iter(self.credentials_by_key.values()))["secret"]
@@ -405,6 +441,33 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["open_order_count"], 2)
         self.assertEqual(len(FakeWorkspaceManager.instances), 2)
         self.assertTrue(all(row.closed for row in FakeWorkspaceManager.instances))
+
+    async def test_coinbase_api_check_adds_hidden_open_order_reserves(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "Coinbase Main",
+                "exchange": "coinbase",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeCoinbaseReserveManager,
+        )
+
+        balances = {row["currency"]: row for row in result["balances"]}
+        self.assertEqual(balances["USDC"]["free"], 80.0)
+        self.assertEqual(balances["USDC"]["used"], 20.0)
+        self.assertEqual(balances["USDC"]["total"], 100.0)
+        self.assertEqual(balances["ACS"]["free"], 900.0)
+        self.assertEqual(balances["ACS"]["used"], 100.0)
+        self.assertEqual(balances["ACS"]["total"], 1000.0)
+        self.assertEqual(balances["USDC"]["exchange_total"], 80.0)
+        self.assertEqual(balances["USDC"]["open_order_reserved"], 20.0)
 
     async def test_dedicated_egress_mismatch_blocks_account_check(self) -> None:
         connection = UserApiConnection.from_dict(

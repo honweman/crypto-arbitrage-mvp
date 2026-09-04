@@ -183,6 +183,92 @@ def _balance_rows(
     return rows
 
 
+def _open_order_remaining(raw: dict[str, Any]) -> float | None:
+    remaining = _number(raw.get("remaining"))
+    if remaining is not None:
+        return max(0.0, remaining)
+    amount = _number(raw.get("amount"))
+    if amount is None:
+        return None
+    filled = _number(raw.get("filled")) or 0.0
+    return max(0.0, amount - filled)
+
+
+def _apply_spot_open_order_reserves(
+    balances: list[dict[str, Any]],
+    open_orders: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    reserves: dict[str, float] = {}
+    for raw in open_orders:
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or "")
+        base, quote = _base_currency(symbol), _quote_currency(symbol)
+        remaining = _open_order_remaining(raw)
+        if remaining is None or remaining <= 0:
+            continue
+        side = str(raw.get("side") or "").lower()
+        if side == "sell" and base:
+            reserves[base] = reserves.get(base, 0.0) + remaining
+        elif side == "buy" and quote:
+            price = _number(raw.get("price")) or _number(raw.get("average"))
+            if price is not None and price > 0:
+                reserves[quote] = reserves.get(quote, 0.0) + remaining * price
+
+    rows = {
+        (str(row.get("currency") or "").upper(), str(row.get("wallet") or "trading")):
+        dict(row)
+        for row in balances
+        if isinstance(row, dict) and row.get("currency")
+    }
+    for currency, reserved in reserves.items():
+        key = (currency, "trading")
+        row = rows.setdefault(
+            key,
+            {
+                "currency": currency,
+                "free": None,
+                "used": None,
+                "total": None,
+                "wallet": "trading",
+                "tradable": True,
+            },
+        )
+        raw_free = _number(row.get("free"))
+        raw_used = _number(row.get("used"))
+        raw_total = _number(row.get("total"))
+        if raw_total is None and (raw_free is not None or raw_used is not None):
+            raw_total = float(raw_free or 0.0) + float(raw_used or 0.0)
+        adjusted_used = max(float(raw_used or 0.0), reserved)
+        hidden_reserve = (
+            raw_total is not None
+            and raw_free is not None
+            and abs(raw_total - raw_free) <= 1e-9
+            and float(raw_used or 0.0) <= 1e-9
+        )
+        if hidden_reserve:
+            adjusted_free = float(raw_free or 0.0)
+            adjusted_total = adjusted_free + adjusted_used
+            adjustment = "added_to_total"
+        else:
+            adjusted_total = max(float(raw_total or 0.0), adjusted_used)
+            adjusted_free = max(0.0, adjusted_total - adjusted_used)
+            adjustment = "within_total"
+        row.update(
+            {
+                "exchange_free": raw_free,
+                "exchange_used": raw_used,
+                "exchange_total": raw_total,
+                "open_order_reserved": reserved,
+                "open_order_reserve_adjustment": adjustment,
+                "free": adjusted_free,
+                "used": adjusted_used,
+                "total": adjusted_total,
+            }
+        )
+    return sorted(rows.values(), key=lambda row: (row["currency"], row["wallet"]))
+
+
 def _ticker_price(ticker: dict[str, Any]) -> float | None:
     for field in ("last", "close", "vwap"):
         price = _number(ticker.get(field))
@@ -402,6 +488,11 @@ async def check_workspace_account(
             _quote_currency(account.symbol),
         }
         balances = _balance_rows(balance, currencies)
+        if account.market_type == "spot":
+            balances = _apply_spot_open_order_reserves(
+                balances,
+                list(open_orders or []),
+            )
         balance_warnings: list[str] = []
         if account.exchange == "bybit":
             try:
@@ -629,6 +720,11 @@ async def check_workspace_api_connection(
                 warnings.append(
                     f"{market_type} open orders unavailable: "
                     + _safe_error(exc, credentials)
+                )
+            if market_type == "spot":
+                balances = _apply_spot_open_order_reserves(
+                    balances,
+                    open_orders,
                 )
             if api_connection.exchange == "bybit" and market_type == market_types[0]:
                 try:
