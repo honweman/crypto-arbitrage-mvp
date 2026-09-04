@@ -655,11 +655,52 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       ].filter((row) => row && row.key);
     }
 
+    function accountIdentityValue(account, allowAccountId = false) {
+      return String(
+        account?.workspace_connection_id
+        || account?.connection_id
+        || (allowAccountId || account?.account_source === "user_api" ? account?.id : "")
+        || ""
+      ).trim();
+    }
+
+    function accountIdentitySuffix(account, allowAccountId = false) {
+      const value = accountIdentityValue(account, allowAccountId);
+      return value ? value.slice(-8).toUpperCase() : "";
+    }
+
+    function exchangeAccountLabel(account, { includeVenue = true, includeSymbol = false, allowAccountId = false } = {}) {
+      const identity = accountIdentitySuffix(account, allowAccountId);
+      const connectionId = accountIdentityValue(account, allowAccountId);
+      const rawExchange = String(account?.exchange_id || account?.exchange || "").trim();
+      const exchangeId = rawExchange
+        && rawExchange !== connectionId
+        && !rawExchange.startsWith("workspace:")
+        ? rawExchange
+        : String(connectionId ? account?.id || "" : rawExchange).trim();
+      const venue = String(
+        account?.exchange_label
+        || workspaceExchange(exchangeId)?.label
+        || exchangeId
+      ).trim();
+      const label = String(account?.label || account?.account_label || account?.key || account?.id || "").trim();
+      const marketType = String(account?.market_type || "spot").toUpperCase();
+      const parts = [];
+      if (includeVenue && venue) parts.push(venue);
+      if (label && !parts.some((part) => part.toLowerCase() === label.toLowerCase())) parts.push(label);
+      if (marketType && !parts.some((part) => part.toUpperCase().includes(marketType))) parts.push(marketType);
+      if (identity) parts.push(`API #${identity}`);
+      if (includeSymbol && account?.symbol) parts.push(account.symbol);
+      return parts.filter(Boolean).join(" · ") || "--";
+    }
+
     function accountLabelForKey(key) {
       const accountKey = String(key || "");
       if (!accountKey) return "";
       const account = coreAccountRows().find((row) => row.key === accountKey);
-      return account?.label || accountKey;
+      return account
+        ? exchangeAccountLabel(account, { includeVenue: false })
+        : accountKey;
     }
 
     function displayExchange(exchange, explicitLabel = "") {
@@ -1750,7 +1791,9 @@ function balanceStatusClass(status) {
         const ownerLabel = account.workspace_connection_id
           ? uiText("My API")
           : uiText("Platform account");
-        option.textContent = `${displayExchange(account.exchange, account.label)} · ${ownerLabel}`;
+        option.textContent = account.workspace_connection_id
+          ? exchangeAccountLabel(account)
+          : `${displayExchange(account.exchange, account.label)} · ${ownerLabel}`;
         option.title = (account.symbols || [])
           .filter(Boolean)
           .join(" · ");
@@ -2100,7 +2143,7 @@ function balanceStatusClass(status) {
         const button = document.createElement("button");
         button.className = "danger-button";
         button.type = "button";
-        button.textContent = `Cancel ${account.label || account.key}`;
+        button.textContent = `Cancel ${exchangeAccountLabel(account)}`;
         button.disabled = (account.open_order_count || 0) <= 0;
         button.addEventListener("click", () => cancelBulkOrders({
           scope: "account",
@@ -2292,7 +2335,7 @@ function balanceStatusClass(status) {
           const tr = document.createElement("tr");
           const notes = (account.reasons || []).join(" · ") || "--";
           tr.innerHTML = `
-            <td>${escapeHtml(account.label || account.key)}</td>
+            <td>${escapeHtml(exchangeAccountLabel(account))}</td>
             <td>${escapeHtml(account.market_type || "--")}</td>
             <td title="${escapeHtml((account.symbols || []).join(", "))}">${escapeHtml(account.symbol_count ? String(account.symbol_count) : "--")}</td>
             <td class="${account.api_ready ? "risk-ok" : account.symbol_count ? "risk-blocked" : "risk-off"}">${escapeHtml(account.api_status || "--")}</td>
@@ -3472,7 +3515,7 @@ function balanceStatusClass(status) {
         ))
         .map((account) => ({
           value: account.id,
-          label: `${account.label || displayExchange(account.exchange, account.exchange_label)} · ${displayExchange(account.exchange, account.exchange_label)} · ${account.symbol}`,
+          label: exchangeAccountLabel(account, { includeSymbol: true }),
         }));
       const accountId = replaceBacktestOptions(
         document.getElementById("backtest-account"),
@@ -3793,8 +3836,8 @@ function balanceStatusClass(status) {
       const accounts = lastState?.strategy_center?.user_api_accounts || [];
       const rows = accounts.map((account) => ({
         value: account.id,
-        label: `${account.label || account.id} · ${displayExchange(account.exchange, account.exchange_label) || "--"}`,
-        title: `${account.owner_email || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
+        label: exchangeAccountLabel(account, { allowAccountId: true }),
+        title: `${account.owner_email || "--"} · ${account.id || "--"} · ${(account.asset_scope || []).join(", ") || "all assets"}`,
       }));
       setSelectOptions(
         "strategy-instance-account",
@@ -3808,8 +3851,8 @@ function balanceStatusClass(status) {
       const accounts = strategyUniverseAccounts("all");
       const exchangeRows = accounts.map((account) => ({
         value: account.key,
-        label: `${account.label || account.key} (${account.market_type || "spot"})`,
-        title: `${account.id || account.key} · ${accountSymbols(account).join(", ") || "no symbols"}`,
+        label: exchangeAccountLabel(account),
+        title: `${account.key} · ${accountIdentityValue(account) || account.id || "platform"} · ${accountSymbols(account).join(", ") || "no symbols"}`,
       }));
       setSelectOptions(
         "strategy-instance-exchange",
@@ -5992,7 +6035,7 @@ function balanceStatusClass(status) {
           const venueType = ["hyperliquid", "polymarket", "dydx", "aster"].includes(account.exchange)
             ? "DEX"
             : "CEX";
-          name.textContent = `${account.label} · ${venueType} ${account.market_type} · ${displayExchange(account.exchange, account.exchange_label)} ${account.symbol}`;
+          name.textContent = `${exchangeAccountLabel(account, { includeSymbol: true })} · ${venueType}`;
           label.append(input, name);
           container.appendChild(label);
         }
@@ -6453,7 +6496,7 @@ function balanceStatusClass(status) {
           new Set([runtimeReason, ...blockers].filter(Boolean))
         ).join("; ");
         const accounts = (strategy.accounts || [])
-          .map((account) => `${displayExchange(account.exchange, account.exchange_label)} ${account.symbol}`)
+          .map((account) => exchangeAccountLabel(account, { includeSymbol: true }))
           .join(" · ");
         const statusClass = paperRuntimeStatusClass(runtimeStatus);
         const progress = Number(runtime.progress_pct);
@@ -6588,7 +6631,7 @@ function balanceStatusClass(status) {
         const instanceStateSupported = isLive
           && strategy.strategy_type === "market_maker";
         const accountDetail = strategy.accounts
-          ?.map((row) => `${row.label} ${row.symbol}`)
+          ?.map((row) => exchangeAccountLabel(row, { includeSymbol: true }))
           .join(" · ") || "selected account";
         if (runState === "running" && isLive && !dangerConfirm(
           strategy.run_state === "stopped"
@@ -7658,8 +7701,8 @@ function balanceStatusClass(status) {
 
       const accounts = (tradingConsole?.accounts || []).map((account) => ({
         key: account.key,
-        label: account.label || account.key,
-        title: `${account.id || account.key} · ${account.market_type || "spot"}`,
+        label: exchangeAccountLabel(account),
+        title: `${account.key} · ${accountIdentityValue(account) || account.id || "platform"}`,
       }));
       const strategies = (tradingConsole?.strategies || []).map((strategy) => ({
         key: strategy.id,
@@ -7936,7 +7979,7 @@ function balanceStatusClass(status) {
       const body = document.getElementById(containerId);
       const list = Array.isArray(accounts) ? accounts : [];
       const signature = JSON.stringify({
-        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols, account.projects, account.markets, account.account_source, account.market_scope, account.workspace_connection_id]),
+        accounts: list.map((account) => [account.key, account.label, account.id, account.market_type, account.symbol, account.symbols, account.projects, account.markets, account.account_source, account.market_scope, account.workspace_connection_id, account.connection_id, account.exchange, account.exchange_label]),
         selectedExchange,
         selectedSymbol,
       });
@@ -7965,11 +8008,8 @@ function balanceStatusClass(status) {
       for (const account of list) {
         const option = document.createElement("option");
         option.value = account.key;
-        const sourceLabel = account.account_source === "user_api"
-          ? ` · ${uiText("My API")}`
-          : "";
-        option.textContent = `${account.label || account.key}${sourceLabel} (${account.market_type || "spot"})`;
-        option.title = `${account.id || account.key} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
+        option.textContent = exchangeAccountLabel(account);
+        option.title = `${account.key} · ${accountIdentityValue(account) || account.id || "platform"} · ${(accountSymbols(account)).join(", ") || "no symbols"}`;
         accountSelect.appendChild(option);
       }
       if (selectedExchange && list.some((account) => account.key === selectedExchange)) {
@@ -8066,7 +8106,10 @@ function balanceStatusClass(status) {
         for (const market of exchangeRows) {
           const option = document.createElement("option");
           option.value = market.accountKey;
-          option.textContent = `${market.exchangeLabel || market.exchangeId} (${market.marketType || "spot"})`;
+          const account = accountForKey(list, market.accountKey);
+          option.textContent = account
+            ? exchangeAccountLabel(account)
+            : `${market.exchangeLabel || market.exchangeId} (${market.marketType || "spot"})`;
           option.title = market.accountKey;
           exchangeSelect.appendChild(option);
         }
@@ -10509,7 +10552,7 @@ function balanceStatusClass(status) {
       for (const account of accounts) {
         const option = document.createElement("option");
         option.value = account.key;
-        option.textContent = `${account.label} · ${uiText(account.market_type === "swap" ? "Perpetual" : "Spot")}`;
+        option.textContent = exchangeAccountLabel(account);
         accountSelect.appendChild(option);
       }
       if (accounts.some((account) => account.key === previousAccount)) {
