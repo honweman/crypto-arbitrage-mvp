@@ -5198,8 +5198,18 @@ function balanceStatusClass(status) {
         "user-exchange-secret-label",
         uiText(exchange?.credential_labels?.secret || "API Secret / Private Key"),
       );
+      text(
+        "user-exchange-passphrase-label",
+        uiText(exchange?.credential_labels?.passphrase || "Passphrase"),
+      );
       const passphraseField = document.getElementById("user-exchange-passphrase-field");
       if (passphraseField) passphraseField.hidden = !needsPassphrase;
+      const passphraseInput = document.getElementById("user-exchange-passphrase");
+      if (passphraseInput) {
+        passphraseInput.placeholder = uiText(
+          needsPassphrase ? "Leave blank to keep existing" : "Optional"
+        );
+      }
       const isHyperliquid = exchangeId === "hyperliquid";
       const apiKeyField = document.getElementById("user-exchange-api-key-field");
       const secretField = document.getElementById("user-exchange-secret-field");

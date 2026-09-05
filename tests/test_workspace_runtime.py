@@ -199,7 +199,17 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
                 ("gateio", "Gate Main"),
                 ("htx", "HTX Main"),
                 ("mexc", "MEXC Main"),
+                ("kucoin", "KuCoin Main"),
             ):
+                credentials = {
+                    "api_key": f"{exchange}-key",
+                    "secret": "secret",
+                    **(
+                        {"passphrase": "passphrase"}
+                        if exchange == "kucoin"
+                        else {}
+                    ),
+                }
                 connection = store.upsert_api_connection(
                     UserApiConnection.from_dict(
                         {
@@ -210,7 +220,7 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
                             "trade_permission_confirmed": True,
                         }
                     ),
-                    credentials={"api_key": f"{exchange}-key", "secret": "secret"},
+                    credentials=credentials,
                 )
                 account = store.upsert_account(
                     UserExchangeAccount.from_dict(
@@ -226,7 +236,7 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
                             "trade_permission_confirmed": True,
                         }
                     ),
-                    credentials={"api_key": f"{exchange}-key", "secret": "secret"},
+                    credentials=credentials,
                 )
                 store.update_api_connection_check(
                     connection.id,
@@ -249,10 +259,18 @@ class WorkspaceRuntimeAccountsTest(unittest.TestCase):
             )
 
         dynamic = [row for row in cfg.spot_exchanges if row.key.startswith("workspace:")]
-        self.assertEqual({row.id for row in dynamic}, {"gateio", "htx", "mexc"})
+        self.assertEqual(
+            {row.id for row in dynamic},
+            {"gateio", "htx", "mexc", "kucoin"},
+        )
         self.assertEqual(
             {row.display_label for row in dynamic},
-            {"Gate Main · SPOT", "HTX Main · SPOT", "MEXC Main · SPOT"},
+            {
+                "Gate Main · SPOT",
+                "HTX Main · SPOT",
+                "MEXC Main · SPOT",
+                "KuCoin Main · SPOT",
+            },
         )
         dynamic_keys = {row.key for row in dynamic}
         self.assertEqual(

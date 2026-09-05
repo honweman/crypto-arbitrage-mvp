@@ -505,6 +505,15 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                     exchange_catalog[exchange_id]["required_credentials"],
                     ["api_key", "secret"],
                 )
+            self.assertEqual(
+                exchange_catalog["kucoin"]["market_types"],
+                ["spot", "swap"],
+            )
+            self.assertEqual(
+                exchange_catalog["kucoin"]["required_credentials"],
+                ["api_key", "secret", "passphrase"],
+            )
+            self.assertEqual(exchange_catalog["kucoin"]["default_variant"], "global")
             with self.assertRaisesRegex(ValueError, "already been used"):
                 store.verify_wallet_challenge(
                     owner_email="trader@example.com",

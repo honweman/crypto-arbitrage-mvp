@@ -568,6 +568,8 @@ class ExchangeProxyConfigTest(unittest.TestCase):
             ("gateio", True),
             ("htx", False),
             ("mexc", True),
+            ("kucoin", True),
+            ("kucoinfutures", True),
         ):
             with self.subTest(exchange=exchange_id):
                 cfg = ExchangeConfig(
@@ -653,7 +655,7 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
             def price_to_precision(self, _: str, price: float) -> str:
                 return f"{price:.1f}"
 
-        for exchange_id in ("gateio", "htx", "mexc"):
+        for exchange_id in ("gateio", "htx", "mexc", "kucoinfutures"):
             with self.subTest(exchange=exchange_id):
                 cfg = ExchangeConfig(
                     id=exchange_id,
@@ -686,7 +688,7 @@ class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 self.leverage_args = args
                 return {"configured": True}
 
-        for exchange_id in ("gateio", "htx", "mexc"):
+        for exchange_id in ("gateio", "htx", "mexc", "kucoinfutures"):
             with self.subTest(exchange=exchange_id):
                 cfg = ExchangeConfig(
                     id=exchange_id,

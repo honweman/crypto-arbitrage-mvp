@@ -141,6 +141,21 @@ class FakeBinanceWorkspaceManager(FakeWorkspaceManager):
         }
 
 
+class FakeKucoinWorkspaceClient(FakeWorkspaceClient):
+    async def fetch_balance(self, params=None):
+        assert (params or {}).get("type") == "main"
+        return {
+            "KCS": {"free": 2.0, "used": 0.0, "total": 2.0},
+            "USDT": {"free": 5.0, "used": 0.0, "total": 5.0},
+        }
+
+
+class FakeKucoinWorkspaceManager(FakeBinanceWorkspaceManager):
+    def __init__(self, *, credentials_by_key=None) -> None:
+        super().__init__(credentials_by_key=credentials_by_key)
+        self.client_instance = FakeKucoinWorkspaceClient()
+
+
 class FakePricedWorkspaceClient(FakeWorkspaceClient):
     def __init__(self) -> None:
         super().__init__()
@@ -275,6 +290,18 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
             api_variant="default",
             runtime_key="account-mexc",
         )
+        kucoin_spot = workspace_exchange_config(
+            exchange="kucoin",
+            market_type="spot",
+            api_variant="global",
+            runtime_key="account-kucoin-spot",
+        )
+        kucoin_swap = workspace_exchange_config(
+            exchange="kucoin",
+            market_type="swap",
+            api_variant="global",
+            runtime_key="account-kucoin-swap",
+        )
 
         self.assertEqual(upbit.options["hostname"], "id-api.upbit.com")
         self.assertEqual(upbit_korea.options["hostname"], "api.upbit.com")
@@ -288,6 +315,10 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(htx.options["defaultSubType"], "linear")
         self.assertEqual(mexc.id, "mexc")
         self.assertEqual(mexc.options["defaultType"], "swap")
+        self.assertEqual(kucoin_spot.id, "kucoin")
+        self.assertEqual(kucoin_spot.options["defaultType"], "spot")
+        self.assertEqual(kucoin_swap.id, "kucoinfutures")
+        self.assertEqual(kucoin_swap.options["defaultType"], "swap")
         self.assertEqual(
             hyperliquid_testnet.options["hostname"],
             "hyperliquid-testnet.xyz",
@@ -573,6 +604,45 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
                     balances,
                     {("USDT", "spot"): 25.0, ("USDT", "swap"): 100.0},
                 )
+
+    async def test_kucoin_keeps_trading_funding_and_contract_wallets_separate(
+        self,
+    ) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "KuCoin Main",
+                "exchange": "kucoin",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={
+                "api_key": "key",
+                "secret": "secret",
+                "passphrase": "passphrase",
+            },
+            manager_factory=FakeKucoinWorkspaceManager,
+        )
+
+        balances = {
+            (row["currency"], row["wallet"]): row["total"]
+            for row in result["balances"]
+        }
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(
+            balances,
+            {
+                ("KCS", "funding"): 2.0,
+                ("USDT", "funding"): 5.0,
+                ("USDT", "spot"): 25.0,
+                ("USDT", "swap"): 100.0,
+            },
+        )
+        self.assertEqual(result["balance_warnings"], [])
 
     async def test_account_check_service_applies_per_account_cooldown(self) -> None:
         project = UserProject.from_dict(

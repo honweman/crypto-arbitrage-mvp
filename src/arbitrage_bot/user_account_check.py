@@ -38,7 +38,14 @@ def workspace_exchange_config(
     variant = str(api_variant or "default").strip().lower()
     options: dict[str, Any] = {}
 
-    if exchange_id in {"binance", "bybit", "gateio", "htx", "mexc"}:
+    if exchange_id in {
+        "binance",
+        "bybit",
+        "gateio",
+        "htx",
+        "mexc",
+        "kucoin",
+    }:
         options["defaultType"] = market
     if exchange_id == "htx" and market == "swap":
         options["defaultSubType"] = "linear"
@@ -52,9 +59,12 @@ def workspace_exchange_config(
     elif exchange_id == "hyperliquid" and variant == "testnet":
         options["hostname"] = "hyperliquid-testnet.xyz"
 
-    ccxt_id = (
-        "binanceusdm" if exchange_id == "binance" and market == "swap" else exchange_id
-    )
+    if exchange_id == "binance" and market == "swap":
+        ccxt_id = "binanceusdm"
+    elif exchange_id == "kucoin" and market == "swap":
+        ccxt_id = "kucoinfutures"
+    else:
+        ccxt_id = exchange_id
     return ExchangeConfig(
         id=ccxt_id,
         label=f"workspace:{runtime_key}",
@@ -514,6 +524,26 @@ async def check_workspace_account(
                 balance_warnings.append(
                     f"Bybit funding wallet unavailable: {_safe_error(exc, credentials)}"
                 )
+        elif account.exchange == "kucoin" and account.market_type == "spot":
+            try:
+                funding_balance = await asyncio.wait_for(
+                    manager.client(cfg).fetch_balance({"type": "main"}),
+                    timeout=max(1.0, timeout_seconds),
+                )
+                balances.extend(
+                    _balance_rows(
+                        funding_balance,
+                        currencies,
+                        wallet="funding",
+                        tradable=False,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                balance_warnings.append(
+                    f"KuCoin funding wallet unavailable: {_safe_error(exc, credentials)}"
+                )
         return {
             "status": "healthy",
             "checked_at": time.time(),
@@ -699,7 +729,8 @@ async def check_workspace_api_connection(
             # whenever the same currency exists in both scopes.
             wallet = (
                 market_type
-                if api_connection.exchange in {"binance", "gateio", "htx", "mexc"}
+                if api_connection.exchange
+                in {"binance", "gateio", "htx", "mexc", "kucoin"}
                 and len(market_types) > 1
                 else "trading"
             )
@@ -751,6 +782,33 @@ async def check_workspace_api_connection(
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(
                         "Bybit funding wallet unavailable: "
+                        + _safe_error(exc, credentials)
+                    )
+            elif api_connection.exchange == "kucoin" and market_type == "spot":
+                try:
+                    funding_balance = await asyncio.wait_for(
+                        client.fetch_balance({"type": "main"}),
+                        timeout=max(1.0, timeout_seconds),
+                    )
+                    funding_currencies = {
+                        str(key).upper()
+                        for key, value in funding_balance.items()
+                        if isinstance(value, dict)
+                        and any(name in value for name in ("free", "used", "total"))
+                    }
+                    balances.extend(
+                        _balance_rows(
+                            funding_balance,
+                            funding_currencies,
+                            wallet="funding",
+                            tradable=False,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(
+                        "KuCoin funding wallet unavailable: "
                         + _safe_error(exc, credentials)
                     )
             if market_type == "spot":

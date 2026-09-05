@@ -18,6 +18,68 @@ from arbitrage_bot.user_workspace import UserApiConnection, UserWorkspaceStore
 
 
 class RuntimeAccountMigrationTest(unittest.TestCase):
+    def test_kucoin_spot_and_futures_runtime_configs_merge_into_one_connection(
+        self,
+    ) -> None:
+        base = load_config("config.acs.example.json")
+        credentials = {
+            "api_key_env": "KUCOIN_KEY",
+            "secret_env": "KUCOIN_SECRET",
+            "password_env": "KUCOIN_PASSPHRASE",
+        }
+        cfg = replace(
+            base,
+            spot_exchanges=[
+                ExchangeConfig(id="kucoin", label="kucoin-spot", **credentials)
+            ],
+            derivative_exchanges=[
+                ExchangeConfig(
+                    id="kucoinfutures",
+                    label="kucoin-swap",
+                    market_type="swap",
+                    **credentials,
+                )
+            ],
+        )
+        master_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
+        environment = {
+            "TEST_MASTER_KEY": master_key,
+            "KUCOIN_KEY": "key",
+            "KUCOIN_SECRET": "secret",
+            "KUCOIN_PASSPHRASE": "passphrase",
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            environment,
+            clear=False,
+        ):
+            store = UserWorkspaceStore(
+                Path(tmp) / "workspace.sqlite3",
+                master_key_env="TEST_MASTER_KEY",
+            )
+            result = import_runtime_accounts(
+                store,
+                cfg,
+                owner_email="owner@example.com",
+                withdrawal_disabled_confirmed=True,
+            )
+            connections = store.list_api_connections(
+                owner_email="owner@example.com",
+                is_admin=False,
+            )
+
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(connections[0].exchange, "kucoin")
+        self.assertEqual(connections[0].api_variant, "global")
+        self.assertEqual(set(connections[0].market_types), {"spot", "swap"})
+        self.assertEqual(
+            result["runtime_links"],
+            {
+                "kucoin-spot": connections[0].id,
+                "kucoin-swap": connections[0].id,
+            },
+        )
+
     def test_import_matches_existing_api_and_separates_multiple_exchange_accounts(self) -> None:
         base = load_config("config.acs.example.json")
         cfg = replace(

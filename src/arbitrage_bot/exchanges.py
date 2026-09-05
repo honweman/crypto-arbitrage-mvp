@@ -208,6 +208,16 @@ LIMIT_ORDER_FEATURE_OVERRIDES: dict[str, LimitOrderFeatures] = {
         client_order_id=True,
         recover_by_client_order_id=True,
     ),
+    "kucoin": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
+    "kucoinfutures": LimitOrderFeatures(
+        post_only=True,
+        client_order_id=True,
+        recover_by_client_order_id=True,
+    ),
     "coinbase": LimitOrderFeatures(
         post_only=True,
         client_order_id=True,
@@ -1876,7 +1886,7 @@ class ExchangeManager:
         ):
             raise ValueError(
                 "perpetual Auto Buy/Sell supports Binance USDM, Bybit, Gate.io, "
-                "HTX, and MEXC stablecoin linear swaps only"
+                "HTX, MEXC, and KuCoin stablecoin linear swaps only"
             )
         symbol_quote, symbol_settle = stable_linear_contract_currencies(symbol)
         client = self.client(cfg)

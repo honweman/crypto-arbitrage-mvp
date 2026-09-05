@@ -23,7 +23,11 @@ class RuntimeAccountGroup:
 
 
 def _catalog_exchange_id(exchange: ExchangeConfig) -> str:
-    return "binance" if exchange.id == "binanceusdm" else exchange.id
+    aliases = {
+        "binanceusdm": "binance",
+        "kucoinfutures": "kucoin",
+    }
+    return aliases.get(exchange.id, exchange.id)
 
 
 def _api_variant(exchange: ExchangeConfig) -> str:
@@ -32,6 +36,8 @@ def _api_variant(exchange: ExchangeConfig) -> str:
     if exchange.id == "upbit":
         hostname = str(exchange.options.get("hostname") or "").lower()
         return "indonesia" if hostname.startswith("id-") else "korea"
+    if exchange.id in {"kucoin", "kucoinfutures"}:
+        return "global"
     return "default"
 
 

@@ -21,6 +21,7 @@ DEFAULT_WORKSPACE_FEE_BPS = {
     "gateio": 20.0,
     "htx": 20.0,
     "mexc": 20.0,
+    "kucoin": 10.0,
     "upbit": 5.0,
 }
 
