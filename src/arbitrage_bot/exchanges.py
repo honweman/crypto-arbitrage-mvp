@@ -64,6 +64,13 @@ def _request_batches(items: list[Any], size: int | None) -> list[list[Any]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
+def _order_book_request_depth(cfg: ExchangeConfig, depth: int) -> int:
+    requested = max(1, int(depth))
+    if cfg.id in {"kucoin", "kucoinfutures"}:
+        return 20 if requested <= 20 else 100
+    return requested
+
+
 def _workspace_credential_revision(cfg: ExchangeConfig) -> float | None:
     connection_id = str(cfg.credential_connection_id or "").strip()
     store_path = str(cfg.credential_store_path or "").strip()
@@ -1230,8 +1237,12 @@ class ExchangeManager:
         depth: int,
     ) -> OrderBookSnapshot | None:
         client = self.client(cfg)
+        requested_depth = max(1, int(depth))
         try:
-            raw = await client.fetch_order_book(symbol, limit=depth)
+            raw = await client.fetch_order_book(
+                symbol,
+                limit=_order_book_request_depth(cfg, requested_depth),
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "failed to fetch order book",
@@ -1246,8 +1257,8 @@ class ExchangeManager:
         return OrderBookSnapshot(
             exchange=cfg.key,
             symbol=symbol,
-            bids=normalize_levels(raw.get("bids", [])),
-            asks=normalize_levels(raw.get("asks", [])),
+            bids=normalize_levels(raw.get("bids", []))[:requested_depth],
+            asks=normalize_levels(raw.get("asks", []))[:requested_depth],
             timestamp_ms=raw.get("timestamp"),
             source="rest",
             received_at=time.time(),

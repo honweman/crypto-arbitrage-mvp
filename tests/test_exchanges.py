@@ -628,6 +628,46 @@ class ExchangeProxyConfigTest(unittest.TestCase):
 
 
 class ExchangeManagerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_kucoin_order_book_uses_supported_depth_and_trims_result(
+        self,
+    ) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.limits: list[int] = []
+
+            async def fetch_order_book(self, _symbol, *, limit):
+                self.limits.append(limit)
+                return {
+                    "bids": [[100 - index, 1.0] for index in range(limit)],
+                    "asks": [[101 + index, 1.0] for index in range(limit)],
+                    "timestamp": 1_700_000_000_000,
+                }
+
+        for exchange_id, requested_depth, expected_limit in (
+            ("kucoin", 5, 20),
+            ("kucoinfutures", 50, 100),
+        ):
+            with self.subTest(exchange=exchange_id):
+                cfg = ExchangeConfig(
+                    id=exchange_id,
+                    label=f"{exchange_id}-account",
+                    market_type="spot" if exchange_id == "kucoin" else "swap",
+                )
+                client = FakeClient()
+                manager = ExchangeManager()
+                manager._clients[cfg.key] = client  # noqa: SLF001
+
+                snapshot = await manager.fetch_order_book(
+                    cfg,
+                    "ACS/USDT" if exchange_id == "kucoin" else "BTC/USDT:USDT",
+                    requested_depth,
+                )
+
+                self.assertEqual(client.limits, [expected_limit])
+                self.assertIsNotNone(snapshot)
+                self.assertEqual(len(snapshot.bids), requested_depth)
+                self.assertEqual(len(snapshot.asks), requested_depth)
+
     async def test_new_cex_prepare_stable_linear_contract_orders(self) -> None:
         class FakeClient:
             async def load_markets(self) -> dict[str, object]:
