@@ -226,6 +226,46 @@ class FakeCoinbaseReserveManager(FakeWorkspaceManager):
         }
 
 
+class FakeMexcReserveClient(FakeWorkspaceClient):
+    async def fetch_open_orders(self):
+        return [
+            {
+                "id": "buy-1",
+                "symbol": "ACS/USDT",
+                "side": "buy",
+                "price": 0.2,
+                "amount": 100.0,
+                "filled": 0.0,
+                "remaining": 100.0,
+            },
+            {
+                "id": "sell-1",
+                "symbol": "ACS/USDT",
+                "side": "sell",
+                "price": 0.3,
+                "amount": 50.0,
+                "filled": 0.0,
+                "remaining": 50.0,
+            },
+        ]
+
+
+class FakeMexcReserveManager(FakeWorkspaceManager):
+    def __init__(self, *, credentials_by_key=None) -> None:
+        super().__init__(credentials_by_key=credentials_by_key)
+        self.client_instance = FakeMexcReserveClient()
+
+    async def fetch_balance(self, cfg):
+        if cfg.market_type == "spot":
+            return {
+                "ACS": {"free": 1000.0, "used": 0.0, "total": 1000.0},
+                "USDT": {"free": 100.0, "used": 0.0, "total": 100.0},
+            }
+        return {
+            "USDT": {"free": 200.0, "used": 0.0, "total": 200.0},
+        }
+
+
 class FailingWorkspaceManager(FakeWorkspaceManager):
     async def fetch_balance(self, _cfg):
         secret = next(iter(self.credentials_by_key.values()))["secret"]
@@ -604,6 +644,34 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
                     balances,
                     {("USDT", "spot"): 25.0, ("USDT", "swap"): 100.0},
                 )
+
+    async def test_mexc_spot_reserves_do_not_create_duplicate_trading_wallet(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "MEXC Main",
+                "exchange": "mexc",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeMexcReserveManager,
+        )
+
+        balances = {
+            (row["currency"], row["wallet"]): row for row in result["balances"]
+        }
+        self.assertNotIn(("ACS", "trading"), balances)
+        self.assertNotIn(("USDT", "trading"), balances)
+        self.assertEqual(balances[("ACS", "spot")]["used"], 50.0)
+        self.assertEqual(balances[("ACS", "spot")]["total"], 1050.0)
+        self.assertEqual(balances[("USDT", "spot")]["used"], 20.0)
+        self.assertEqual(balances[("USDT", "spot")]["total"], 120.0)
+        self.assertEqual(balances[("USDT", "swap")]["total"], 200.0)
 
     async def test_kucoin_keeps_trading_funding_and_contract_wallets_separate(
         self,

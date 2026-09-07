@@ -207,7 +207,10 @@ def _open_order_remaining(raw: dict[str, Any]) -> float | None:
 def _apply_spot_open_order_reserves(
     balances: list[dict[str, Any]],
     open_orders: list[dict[str, Any]],
+    *,
+    wallet: str = "trading",
 ) -> list[dict[str, Any]]:
+    target_wallet = str(wallet or "trading")
     reserves: dict[str, float] = {}
     for raw in open_orders:
         if not isinstance(raw, dict):
@@ -232,7 +235,7 @@ def _apply_spot_open_order_reserves(
         if isinstance(row, dict) and row.get("currency")
     }
     for currency, reserved in reserves.items():
-        key = (currency, "trading")
+        key = (currency, target_wallet)
         row = rows.setdefault(
             key,
             {
@@ -240,7 +243,7 @@ def _apply_spot_open_order_reserves(
                 "free": None,
                 "used": None,
                 "total": None,
-                "wallet": "trading",
+                "wallet": target_wallet,
                 "tradable": True,
             },
         )
@@ -756,6 +759,7 @@ async def check_workspace_api_connection(
                 balances = _apply_spot_open_order_reserves(
                     balances,
                     open_orders,
+                    wallet=wallet,
                 )
             if api_connection.exchange == "bybit" and market_type == market_types[0]:
                 try:
