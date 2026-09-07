@@ -1,5 +1,9 @@
 const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
     const wholeNumberFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+    const stableBalanceFormatter = new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 6,
+    });
     const wholeNumber = {
       format(value) {
         const numeric = Number(value);
@@ -894,8 +898,11 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       }
     }
 
-    function formatBalanceAmount(value) {
+    function formatBalanceAmount(value, currency = "") {
       if (value == null) return "--";
+      if (USD_STABLE_CURRENCIES.has(String(currency || "").toUpperCase())) {
+        return stableBalanceFormatter.format(Number(value));
+      }
       return wholeQuantity.format(Number(value));
     }
 
@@ -1161,12 +1168,12 @@ function balanceStatusClass(status) {
       }
 
       valueEl.textContent = totals.length === 1
-        ? `${formatBalanceAmount(totals[0].total)} ${totals[0].currency}`
+        ? `${formatBalanceAmount(totals[0].total, totals[0].currency)} ${totals[0].currency}`
         : `${totals.length} currencies`;
       const accountCount = Number(accountBalances?.total_account_count || 0);
       const balanceDetail = totals
         .slice(0, 5)
-        .map((row) => `${row.currency} ${formatBalanceAmount(row.total)}`)
+        .map((row) => `${row.currency} ${formatBalanceAmount(row.total, row.currency)}`)
         .join(" · ");
       const detail = [
         accountCount > 0 ? `${uiText("All accounts")} (${accountCount})` : "",
@@ -1177,8 +1184,8 @@ function balanceStatusClass(status) {
       const totalsTitle = totals
         .map((row) => {
           const reserved = Number(row.open_order_reserved || 0);
-          const reserveText = reserved > 0 ? ` · reserved ${formatBalanceAmount(reserved)}` : "";
-          return `${row.currency} free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · total ${formatBalanceAmount(row.total)}${reserveText}`;
+          const reserveText = reserved > 0 ? ` · reserved ${formatBalanceAmount(reserved, row.currency)}` : "";
+          return `${row.currency} free ${formatBalanceAmount(row.free, row.currency)} · used ${formatBalanceAmount(row.used, row.currency)} · total ${formatBalanceAmount(row.total, row.currency)}${reserveText}`;
         })
         .join(" | ");
       detailEl.title = [
@@ -1279,17 +1286,17 @@ function balanceStatusClass(status) {
           if (!row) return `<td class="num balance-matrix-cell balance-matrix-empty">--</td>`;
           const reserved = Number(row.open_order_reserved || 0);
           const wallets = (row.wallets || []).join(", ") || "trading";
-          const title = `${currency} · free ${formatBalanceAmount(row.free)} · used ${formatBalanceAmount(row.used)} · orders ${formatBalanceAmount(reserved)} · wallets ${wallets}`;
+          const title = `${currency} · free ${formatBalanceAmount(row.free, currency)} · used ${formatBalanceAmount(row.used, currency)} · orders ${formatBalanceAmount(reserved, currency)} · wallets ${wallets}`;
           return `
             <td class="num balance-matrix-cell" title="${escapeHtml(title)}">
-              <strong>${formatBalanceAmount(row.total)}</strong>
-              <small>${escapeHtml(uiText("Free"))} ${formatBalanceAmount(row.free)}${reserved > 0 ? ` · ${escapeHtml(uiText("In Orders"))} ${formatBalanceAmount(reserved)}` : ""}</small>
+              <strong>${formatBalanceAmount(row.total, currency)}</strong>
+              <small>${escapeHtml(uiText("Free"))} ${formatBalanceAmount(row.free, currency)}${reserved > 0 ? ` · ${escapeHtml(uiText("In Orders"))} ${formatBalanceAmount(reserved, currency)}` : ""}</small>
             </td>
           `;
         }).join("");
         tr.innerHTML = `
           <td class="balance-currency-cell"><strong>${escapeHtml(currency)}</strong></td>
-          <td class="num"><strong>${formatBalanceAmount(total)}</strong></td>
+          <td class="num"><strong>${formatBalanceAmount(total, currency)}</strong></td>
           <td class="num">${priceCommon == null ? "--" : priceNumber.format(priceCommon)}</td>
           <td class="num">${valueCommon == null ? "--" : `${money.format(valueCommon)} ${escapeHtml(commonCurrency)}`}</td>
           ${accountCells}

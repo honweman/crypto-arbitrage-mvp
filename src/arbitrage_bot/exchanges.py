@@ -1056,6 +1056,14 @@ class ExchangeManager:
         }
         if cfg.market_type != "spot":
             options["options"].setdefault("defaultType", cfg.market_type)
+        if cfg.id == "coinbase":
+            # Coinbase's legacy v2 accounts response exposes available balances
+            # only. Advanced Trade v3 includes the exchange-reported hold, which
+            # is required for an exact total while limit orders are open.
+            options["options"].setdefault(
+                "fetchBalance",
+                "v3PrivateGetBrokerageAccounts",
+            )
 
         direct_credentials = self._credentials_by_key.get(cfg.key, {})
         workspace_credentials = (

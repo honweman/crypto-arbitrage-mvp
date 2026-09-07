@@ -254,13 +254,26 @@ def _apply_spot_open_order_reserves(
         if raw_total is None and (raw_free is not None or raw_used is not None):
             raw_total = float(raw_free or 0.0) + float(raw_used or 0.0)
         adjusted_used = max(float(raw_used or 0.0), reserved)
+        exchange_reports_hold = (
+            raw_total is not None
+            and raw_free is not None
+            and raw_used is not None
+            and abs(raw_total - raw_free - raw_used)
+            <= max(1e-9, abs(raw_total) * 1e-12)
+            and raw_used > 0
+        )
         hidden_reserve = (
             raw_total is not None
             and raw_free is not None
             and abs(raw_total - raw_free) <= 1e-9
             and float(raw_used or 0.0) <= 1e-9
         )
-        if hidden_reserve:
+        if exchange_reports_hold:
+            adjusted_free = raw_free
+            adjusted_used = raw_used
+            adjusted_total = raw_total
+            adjustment = "exchange_reported"
+        elif hidden_reserve:
             adjusted_free = float(raw_free or 0.0)
             adjusted_total = adjusted_free + adjusted_used
             adjustment = "added_to_total"

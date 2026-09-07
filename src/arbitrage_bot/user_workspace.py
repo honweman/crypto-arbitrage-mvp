@@ -126,7 +126,11 @@ def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
         reserve_adjustment = str(
             item.get("open_order_reserve_adjustment") or ""
         ).strip()
-        if reserve_adjustment in {"added_to_total", "within_total"}:
+        if reserve_adjustment in {
+            "added_to_total",
+            "exchange_reported",
+            "within_total",
+        }:
             row["open_order_reserve_adjustment"] = reserve_adjustment
         wallet = str(item.get("wallet") or "trading").strip().lower()[:20]
         row["wallet"] = wallet or "trading"

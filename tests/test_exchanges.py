@@ -267,6 +267,10 @@ class ExchangeProxyConfigTest(unittest.TestCase):
         self.assertEqual(client.options_payload["apiKey"], "direct-key")
         self.assertEqual(client.options_payload["secret"], "direct-secret")
         self.assertEqual(client.options_payload["password"], "direct-passphrase")
+        self.assertEqual(
+            client.options_payload["options"]["fetchBalance"],
+            "v3PrivateGetBrokerageAccounts",
+        )
         self.assertEqual(global_api_key_after, "global-key")
 
     def test_encrypted_workspace_credentials_rotate_without_changing_runtime_key(self) -> None:

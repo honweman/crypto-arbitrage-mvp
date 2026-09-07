@@ -244,6 +244,14 @@ class FakeCoinbaseReserveManager(FakeWorkspaceManager):
         }
 
 
+class FakeCoinbaseReportedHoldManager(FakeCoinbaseReserveManager):
+    async def fetch_balance(self, _cfg):
+        return {
+            "ACS": {"free": 900.0, "used": 100.0, "total": 1000.0},
+            "USDC": {"free": 80.0, "used": 22.25, "total": 102.25},
+        }
+
+
 class FakeMexcReserveClient(FakeWorkspaceClient):
     async def fetch_open_orders(self):
         return [
@@ -557,6 +565,32 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(balances["ACS"]["total"], 1000.0)
         self.assertEqual(balances["USDC"]["exchange_total"], 80.0)
         self.assertEqual(balances["USDC"]["open_order_reserved"], 20.0)
+
+    async def test_coinbase_api_check_trusts_exchange_reported_hold(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "Coinbase Main",
+                "exchange": "coinbase",
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeCoinbaseReportedHoldManager,
+        )
+
+        balances = {row["currency"]: row for row in result["balances"]}
+        self.assertEqual(balances["USDC"]["free"], 80.0)
+        self.assertEqual(balances["USDC"]["used"], 22.25)
+        self.assertEqual(balances["USDC"]["total"], 102.25)
+        self.assertEqual(
+            balances["USDC"]["open_order_reserve_adjustment"],
+            "exchange_reported",
+        )
 
     async def test_dedicated_egress_mismatch_blocks_account_check(self) -> None:
         connection = UserApiConnection.from_dict(
