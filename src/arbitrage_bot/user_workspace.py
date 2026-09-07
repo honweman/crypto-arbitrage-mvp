@@ -109,6 +109,25 @@ def _clean_balance_snapshot(value: Any) -> tuple[dict[str, Any], ...]:
             except (TypeError, ValueError):
                 numeric = 0.0
             row[field_name] = numeric if math.isfinite(numeric) else 0.0
+        for field_name in (
+            "exchange_free",
+            "exchange_used",
+            "exchange_total",
+            "open_order_reserved",
+        ):
+            if item.get(field_name) is None:
+                continue
+            try:
+                numeric = float(item[field_name])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                row[field_name] = numeric
+        reserve_adjustment = str(
+            item.get("open_order_reserve_adjustment") or ""
+        ).strip()
+        if reserve_adjustment in {"added_to_total", "within_total"}:
+            row["open_order_reserve_adjustment"] = reserve_adjustment
         wallet = str(item.get("wallet") or "trading").strip().lower()[:20]
         row["wallet"] = wallet or "trading"
         row["tradable"] = bool(item.get("tradable", True))

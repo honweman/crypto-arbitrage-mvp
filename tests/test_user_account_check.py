@@ -190,6 +190,24 @@ class FakePricedWorkspaceManager(FakeWorkspaceManager):
         }
 
 
+class FakeWideSpreadWorkspaceClient(FakeWorkspaceClient):
+    async def fetch_tickers(self, symbols):
+        return {
+            "ACS/USDC": {
+                "symbol": "ACS/USDC",
+                "last": 0.000017,
+                "bid": 0.000021,
+                "ask": 0.00017,
+            }
+        }
+
+
+class FakeWideSpreadWorkspaceManager(FakeWorkspaceManager):
+    def __init__(self, *, credentials_by_key=None) -> None:
+        super().__init__(credentials_by_key=credentials_by_key)
+        self.client_instance = FakeWideSpreadWorkspaceClient()
+
+
 class FakeCoinbaseReserveClient(FakeWorkspaceClient):
     async def fetch_open_orders(self):
         return [
@@ -613,6 +631,29 @@ class UserAccountCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bnb["valuation_quote"], "USDT")
         self.assertEqual(bnb["valuation_symbol"], "BNB/USDT")
         self.assertEqual(result["valuation_warnings"], [])
+
+    async def test_unified_check_rejects_wide_spread_balance_valuation(self) -> None:
+        connection = UserApiConnection.from_dict(
+            {
+                "owner_email": "member@example.com",
+                "label": "HTX Main",
+                "exchange": "htx",
+                "market_types": ["spot"],
+                "withdrawal_disabled_confirmed": True,
+                "trade_permission_confirmed": True,
+            }
+        )
+
+        result = await check_workspace_api_connection(
+            api_connection=connection,
+            credentials={"api_key": "key", "secret": "secret"},
+            manager_factory=FakeWideSpreadWorkspaceManager,
+        )
+
+        acs = next(row for row in result["balances"] if row["currency"] == "ACS")
+        self.assertNotIn("valuation_price", acs)
+        self.assertEqual(len(result["valuation_warnings"]), 1)
+        self.assertIn("excessive spread", result["valuation_warnings"][0])
 
     async def test_multi_market_exchanges_keep_spot_and_contract_wallets_separate(
         self,

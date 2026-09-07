@@ -344,6 +344,11 @@ class UserWorkspaceStoreTest(unittest.TestCase):
                                         "valuation_quote": "USDT",
                                         "valuation_symbol": "ASSET0/USDT",
                                         "valuation_at": 123.0,
+                                        "exchange_free": 0.5,
+                                        "exchange_used": 0.5,
+                                        "exchange_total": 1.0,
+                                        "open_order_reserved": 0.5,
+                                        "open_order_reserve_adjustment": "within_total",
                                     }
                                     if index == 0
                                     else {}
@@ -384,6 +389,12 @@ class UserWorkspaceStoreTest(unittest.TestCase):
         self.assertEqual(len(normalized.balance_snapshot), 150)
         self.assertEqual(normalized.balance_snapshot[0]["valuation_price"], 600.0)
         self.assertEqual(normalized.balance_snapshot[0]["valuation_quote"], "USDT")
+        self.assertEqual(normalized.balance_snapshot[0]["exchange_total"], 1.0)
+        self.assertEqual(normalized.balance_snapshot[0]["open_order_reserved"], 0.5)
+        self.assertEqual(
+            normalized.balance_snapshot[0]["open_order_reserve_adjustment"],
+            "within_total",
+        )
         self.assertEqual(stored["market_types"], ["spot", "swap"])
         self.assertEqual(stored["market_scope"], "unified")
 

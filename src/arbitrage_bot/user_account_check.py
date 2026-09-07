@@ -12,6 +12,7 @@ from .user_workspace import UserApiConnection, UserExchangeAccount, UserProject
 DEFAULT_CHECK_TIMEOUT_SECONDS = 20.0
 DEFAULT_DISCOVERY_CACHE_SECONDS = 300.0
 BALANCE_VALUATION_QUOTES = ("USDT", "USDC", "USD", "FDUSD", "KRW")
+BALANCE_VALUATION_MAX_SPREAD_BPS = 2_000.0
 
 
 def _base_currency(symbol: str) -> str:
@@ -283,14 +284,22 @@ def _apply_spot_open_order_reserves(
 
 
 def _ticker_price(ticker: dict[str, Any]) -> float | None:
+    bid = _number(ticker.get("bid"))
+    ask = _number(ticker.get("ask"))
+    if bid is not None and bid > 0 and ask is not None and ask >= bid:
+        mid = (bid + ask) / 2
+        spread_bps = (ask - bid) / mid * 10_000
+        if spread_bps > BALANCE_VALUATION_MAX_SPREAD_BPS:
+            return None
+        for field in ("last", "close", "vwap"):
+            price = _number(ticker.get(field))
+            if price is not None and bid <= price <= ask:
+                return price
+        return mid
     for field in ("last", "close", "vwap"):
         price = _number(ticker.get(field))
         if price is not None and price > 0:
             return price
-    bid = _number(ticker.get("bid"))
-    ask = _number(ticker.get("ask"))
-    if bid is not None and bid > 0 and ask is not None and ask > 0:
-        return (bid + ask) / 2
     return bid if bid is not None and bid > 0 else ask if ask is not None and ask > 0 else None
 
 
@@ -345,6 +354,7 @@ async def _fetch_balance_valuations(
         return {}, ["balance valuation unavailable: ticker response is invalid"]
     observed_at = time.time()
     valuations: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
     for currency, (symbol, quote) in candidates.items():
         ticker = tickers.get(symbol)
         if not isinstance(ticker, dict):
@@ -358,6 +368,10 @@ async def _fetch_balance_valuations(
             )
         price = _ticker_price(ticker) if isinstance(ticker, dict) else None
         if price is None:
+            warnings.append(
+                f"balance valuation skipped for {currency}: "
+                f"{symbol} ticker is unavailable or has an excessive spread"
+            )
             continue
         valuations[currency] = {
             "valuation_price": price,
@@ -365,7 +379,7 @@ async def _fetch_balance_valuations(
             "valuation_symbol": symbol,
             "valuation_at": observed_at,
         }
-    return valuations, []
+    return valuations, warnings
 
 
 def _order_book_summary(book: Any) -> dict[str, Any]:
