@@ -14,6 +14,13 @@ from arbitrage_bot.web.market_tickers import (
 
 
 class MarketTickerUiTest(unittest.TestCase):
+    def test_market_watch_wraps_without_horizontal_scrolling(self) -> None:
+        ticker_styles = STYLES_CSS.split(".market-ticker-list {", 1)[1].split("}", 1)[0]
+
+        self.assertIn("display: grid", ticker_styles)
+        self.assertIn("repeat(auto-fit, minmax(164px, 1fr))", ticker_styles)
+        self.assertNotIn("overflow-x: auto", ticker_styles)
+
     def test_editor_supports_persistent_reordering(self) -> None:
         self.assertIn("function moveMarketTickerDraftItem(index, offset)", APP_JS)
         self.assertIn('moveUp.setAttribute("aria-label", uiText("Move up"))', APP_JS)

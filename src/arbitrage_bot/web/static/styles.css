@@ -248,23 +248,18 @@ main {
 }
 
 .market-ticker-list {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
+  gap: 1px;
   min-height: 72px;
-  overflow-x: auto;
-  scrollbar-width: thin;
-  scroll-snap-type: x proximity;
+  overflow: hidden;
+  background: var(--line);
 }
 
 .market-ticker-item {
-  flex: 1 0 168px;
-  min-width: 168px;
+  min-width: 0;
   padding: 11px 14px;
-  border-right: 1px solid var(--line);
-  scroll-snap-align: start;
-}
-
-.market-ticker-item:last-child {
-  border-right: 0;
+  background: var(--surface);
 }
 
 .market-ticker-symbol-row,
@@ -320,8 +315,10 @@ main {
 
 .market-ticker-empty {
   display: flex;
+  grid-column: 1 / -1;
   align-items: center;
   padding: 12px;
+  background: var(--surface);
 }
 
 .market-ticker-editor {
@@ -2672,10 +2669,11 @@ tbody tr:last-child td {
   .status-detail-item { padding: 14px; }
   .status-detail-item-heading { align-items: flex-start; }
   .status-detail-meta { display: grid; gap: 4px; }
-  .market-ticker-list { min-height: 68px; }
+  .market-ticker-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-height: 68px;
+  }
   .market-ticker-item {
-    flex-basis: 138px;
-    min-width: 138px;
     padding: 9px 10px;
   }
   .market-ticker-price { font-size: 15px; }
