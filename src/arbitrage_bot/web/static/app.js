@@ -722,8 +722,12 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       const accountKey = String(key || "");
       if (!accountKey) return "";
       const account = coreAccountRows().find((row) => row.key === accountKey);
-      return account
-        ? exchangeAccountLabel(account, { includeVenue: false })
+      if (account) return exchangeAccountLabel(account, { includeVenue: false });
+      const workspaceMatch = accountKey.match(
+        /^workspace:[A-Za-z0-9._-]+:(spot|swap|future)$/i,
+      );
+      return workspaceMatch
+        ? `${uiText("Account")} · ${workspaceMatch[1].toUpperCase()}`
         : accountKey;
     }
 
@@ -744,7 +748,10 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       for (const [key, label] of [...labels.entries()].sort((left, right) => right[0].length - left[0].length)) {
         if (key && label !== key) textValue = textValue.split(key).join(label);
       }
-      return textValue;
+      return textValue.replace(
+        /workspace:[A-Za-z0-9._-]+:(spot|swap|future)/gi,
+        (_key, marketType) => `${uiText("Account")} · ${String(marketType).toUpperCase()}`,
+      );
     }
 
     function coreLiveRiskReadiness(strategyId, exchanges = []) {

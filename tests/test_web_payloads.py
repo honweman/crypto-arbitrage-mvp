@@ -673,6 +673,7 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("accountBalanceDetailPayload?.accounts || []", APP_JS)
         self.assertIn("for (const runtimeKey of (row.runtime_keys || []))", APP_JS)
         self.assertIn("if (key && label !== key && !labels.has(key))", APP_JS)
+        self.assertIn("/^workspace:[A-Za-z0-9._-]+:(spot|swap|future)$/i", APP_JS)
 
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(
