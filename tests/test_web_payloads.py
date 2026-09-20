@@ -668,6 +668,12 @@ class WebMonitorTest(unittest.TestCase):
         self.assertIn("function controlMarketMakerInstance(instance, runState, button)", APP_JS)
         self.assertIn('action: "set_strategy_state"', APP_JS)
 
+    def test_alert_account_labels_include_workspace_and_balance_directories(self) -> None:
+        self.assertIn("lastState?.user_workspace?.connections || []", APP_JS)
+        self.assertIn("accountBalanceDetailPayload?.accounts || []", APP_JS)
+        self.assertIn("for (const runtimeKey of (row.runtime_keys || []))", APP_JS)
+        self.assertIn("if (key && label !== key && !labels.has(key))", APP_JS)
+
     def test_compact_account_balances_keep_platform_and_workspace_totals(self) -> None:
         merged = _merge_workspace_account_balances(
             {

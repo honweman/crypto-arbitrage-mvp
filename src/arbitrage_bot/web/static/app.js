@@ -651,12 +651,39 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
     }
 
     function coreAccountRows() {
-      return [
+      const rows = [
+        ...(lastState?.user_workspace?.connections || []),
+        ...(accountBalanceDetailPayload?.accounts || []),
+        ...(lastState?.account_balances?.accounts || []),
         ...(lastState?.market_maker?.accounts || []),
         ...(lastState?.slow_execution?.accounts || []),
         ...(lastState?.cross_exchange_rebalance?.accounts || []),
         ...(lastState?.trading_console?.accounts || []),
-      ].filter((row) => row && row.key);
+      ].filter((row) => row && typeof row === "object");
+      const expanded = [];
+      for (const row of rows) {
+        const connectionId = String(
+          row.workspace_connection_id
+          || row.credential_connection_id
+          || row.connection_id
+          || row.id
+          || ""
+        ).trim();
+        const primaryKey = String(row.key || row.exchange || connectionId).trim();
+        if (primaryKey) expanded.push({ ...row, key: primaryKey });
+        for (const runtimeKey of (row.runtime_keys || [])) {
+          const key = String(runtimeKey || "").trim();
+          if (!key || key === primaryKey) continue;
+          const marketType = key.split(":").at(-1) || row.market_type || "spot";
+          expanded.push({
+            ...row,
+            key,
+            market_type: marketType,
+            workspace_connection_id: connectionId,
+          });
+        }
+      }
+      return expanded;
     }
 
     function accountIdentityValue(account, allowAccountId = false) {
@@ -708,9 +735,12 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
 
     function friendlyAccountMessage(message) {
       let textValue = String(message || "");
-      const labels = new Map(
-        coreAccountRows().map((row) => [String(row.key), String(row.label || row.key)]),
-      );
+      const labels = new Map();
+      for (const row of coreAccountRows()) {
+        const key = String(row.key || "");
+        const label = String(row.label || row.account_label || key);
+        if (key && label !== key && !labels.has(key)) labels.set(key, label);
+      }
       for (const [key, label] of [...labels.entries()].sort((left, right) => right[0].length - left[0].length)) {
         if (key && label !== key) textValue = textValue.split(key).join(label);
       }
