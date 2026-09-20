@@ -822,6 +822,36 @@
           <input id="user-strategy-scan-seconds" type="number" min="0.1" step="any">
         </div>
 
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-quote">Quote / Leg</label>
+          <input id="user-strategy-rv-quote" type="number" min="0" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-hedge">Hedge Ratio</label>
+          <input id="user-strategy-rv-hedge" type="number" min="0" max="10" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-lookback">Lookback Bars</label>
+          <input id="user-strategy-rv-lookback" type="number" min="5" max="500" step="1">
+        </div>
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-entry">Entry Z</label>
+          <input id="user-strategy-rv-entry" type="number" min="0.01" max="20" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-exit">Exit Z</label>
+          <input id="user-strategy-rv-exit" type="number" min="0" max="20" step="any">
+        </div>
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-holding">Max Holding Bars</label>
+          <input id="user-strategy-rv-holding" type="number" min="0" step="1">
+        </div>
+        <div class="field" data-user-strategy-types="relative_value">
+          <label for="user-strategy-rv-scan">Scan Seconds</label>
+          <input id="user-strategy-rv-scan" type="number" min="1" step="any">
+        </div>
+        <div class="subtle wide-field" data-user-strategy-types="relative_value">Select exactly two spot accounts. Paper runtime records z-score signals; historical backtest simulates paired long/short P/L from completed candles.</div>
+
         <div class="field" data-user-strategy-types="contract_arbitrage">
           <label for="user-strategy-contract-basis">Min Basis Bps</label>
           <input id="user-strategy-contract-basis" type="number" min="0" max="10000" step="any">

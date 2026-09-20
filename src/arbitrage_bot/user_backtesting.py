@@ -10,8 +10,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .backtesting import run_paper_backtest
-from .config import BacktestConfig, DcaConfig, SpotGridConfig
+from .backtesting import run_paper_backtest, run_relative_value_backtest
+from .config import BacktestConfig, DcaConfig, RelativeValueConfig, SpotGridConfig
 from .exchanges import ExchangeManager
 from .user_account_check import workspace_exchange_config
 from .user_strategies import UserStrategy
@@ -26,7 +26,7 @@ TIMEFRAME_SECONDS: dict[str, int] = {
     "4h": 14_400,
     "1d": 86_400,
 }
-SUPPORTED_STRATEGIES = {"spot_grid", "dca"}
+SUPPORTED_STRATEGIES = {"spot_grid", "dca", "relative_value"}
 MIN_HISTORY_BARS = 20
 MAX_HISTORY_BARS = 500
 DEFAULT_HISTORY_BARS = 200
@@ -331,8 +331,29 @@ def _strategy_configs(
             ),
         )
     raise ValueError(
-        "historical backtests currently support Spot Grid and DCA strategies"
+        "historical backtests currently support Spot Grid, DCA, and Relative Value strategies"
     )
+
+
+def _aligned_relative_value_rows(
+    primary_rows: list[dict[str, float | int]],
+    hedge_rows: list[dict[str, float | int]],
+) -> list[dict[str, float | int]]:
+    primary_by_ts = {int(row["timestamp_ms"]): row for row in primary_rows}
+    hedge_by_ts = {int(row["timestamp_ms"]): row for row in hedge_rows}
+    timestamps = sorted(set(primary_by_ts).intersection(hedge_by_ts))
+    return [
+        {
+            "timestamp_ms": timestamp,
+            "primary_close": float(primary_by_ts[timestamp]["close"]),
+            "hedge_close": float(hedge_by_ts[timestamp]["close"]),
+            "primary_volume": float(primary_by_ts[timestamp].get("volume") or 0.0),
+            "hedge_volume": float(hedge_by_ts[timestamp].get("volume") or 0.0),
+            "primary_gap_filled": bool(primary_by_ts[timestamp].get("gap_filled")),
+            "hedge_gap_filled": bool(hedge_by_ts[timestamp].get("gap_filled")),
+        }
+        for timestamp in timestamps
+    ]
 
 
 class UserBacktestStore:
@@ -588,7 +609,7 @@ class UserBacktestService:
             raise ValueError("backtest strategy is outside the selected project")
         if strategy.strategy_type not in SUPPORTED_STRATEGIES:
             raise ValueError(
-                "historical backtests currently support Spot Grid and DCA strategies"
+                "historical backtests currently support Spot Grid, DCA, and Relative Value strategies"
             )
         account = self.workspace_store.get_account(account_id)
         if account is None:
@@ -597,6 +618,34 @@ class UserBacktestService:
             raise ValueError("backtest account is outside the selected project")
         if account.id not in strategy.account_ids:
             raise ValueError("select an exchange account assigned to the strategy")
+        if strategy.strategy_type == "relative_value":
+            if len(strategy.account_ids) != 2:
+                raise ValueError("relative value backtests require exactly two accounts")
+            accounts = [
+                self.workspace_store.get_account(row_id)
+                for row_id in strategy.account_ids
+            ]
+            if any(row is None for row in accounts):
+                raise ValueError("relative value strategy account is missing")
+            for row in accounts:
+                assert row is not None
+                if row.owner_email != owner_email or row.project_id != project_id:
+                    raise ValueError("relative value account is outside the selected project")
+                if row.market_type != "spot" or not row.symbol:
+                    raise ValueError("relative value backtests require spot trading pairs")
+            quotes = {
+                row.symbol.split("/", 1)[1].split(":", 1)[0]
+                for row in accounts
+                if row is not None and row.symbol and "/" in row.symbol
+            }
+            if len(quotes) != 1:
+                raise ValueError(
+                    "relative value backtests require one shared quote currency"
+                )
+            if next(iter(quotes)) != project.quote_currency:
+                raise ValueError(
+                    "relative value quote currency must match the project quote"
+                )
         if account.market_type != "spot" or not account.symbol:
             raise ValueError("historical backtests require a spot trading pair")
         return project.to_dict(), strategy, account
@@ -665,6 +714,14 @@ class UserBacktestService:
             maximum=20,
         )
         now = _now()
+        strategy_accounts = [account]
+        if strategy.strategy_type == "relative_value":
+            strategy_accounts = [
+                self.workspace_store.get_account(row_id)
+                for row_id in strategy.account_ids
+            ]  # type: ignore[list-item]
+            if any(row is None for row in strategy_accounts):
+                raise ValueError("relative value strategy account is missing")
         run = {
             "id": _new_run_id(),
             "owner_email": owner,
@@ -682,6 +739,7 @@ class UserBacktestService:
             "project": project,
             "strategy": strategy.to_dict(),
             "account": account.to_dict(),
+            "accounts": [row.to_dict() for row in strategy_accounts if row is not None],
             "request": {
                 "timeframe": timeframe,
                 "history_bars": bars,
@@ -751,20 +809,55 @@ class UserBacktestService:
                 )
                 strategy = UserStrategy.from_dict(run["strategy"])
                 account = UserExchangeAccount.from_dict(run["account"])
+                project_snapshot = dict(run.get("project") or {})
                 request = run["request"]
-                bars, cached = await self._cached_history(
-                    account,
-                    timeframe=str(request["timeframe"]),
-                    limit=int(request["history_bars"]),
-                )
+                cached = False
+                if strategy.strategy_type == "relative_value":
+                    accounts = [
+                        UserExchangeAccount.from_dict(row)
+                        for row in run.get("accounts", [])
+                    ]
+                    if len(accounts) != 2:
+                        raise ValueError("relative value backtest needs two account snapshots")
+                    primary_bars, primary_cached = await self._cached_history(
+                        accounts[0],
+                        timeframe=str(request["timeframe"]),
+                        limit=int(request["history_bars"]),
+                    )
+                    hedge_bars, hedge_cached = await self._cached_history(
+                        accounts[1],
+                        timeframe=str(request["timeframe"]),
+                        limit=int(request["history_bars"]),
+                    )
+                    cached = primary_cached and hedge_cached
+                    bars = _aligned_relative_value_rows(primary_bars, hedge_bars)
+                    if len(bars) < MIN_HISTORY_BARS:
+                        raise ValueError(
+                            f"relative value histories share only {len(bars)} completed bars; "
+                            f"at least {MIN_HISTORY_BARS} are required"
+                        )
+                else:
+                    bars, cached = await self._cached_history(
+                        account,
+                        timeframe=str(request["timeframe"]),
+                        limit=int(request["history_bars"]),
+                    )
                 self.store.update(
                     run_id,
                     status="running",
                     progress_pct=55.0,
                 )
                 timestamps = [int(row["timestamp_ms"]) for row in bars]
-                prices = [float(row["close"]) for row in bars]
-                spot_grid, dca = _strategy_configs(strategy, account)
+                prices: list[float] = []
+                primary_prices: list[float] = []
+                hedge_prices: list[float] = []
+                if strategy.strategy_type == "relative_value":
+                    primary_prices = [float(row["primary_close"]) for row in bars]
+                    hedge_prices = [float(row["hedge_close"]) for row in bars]
+                    price_count = len(primary_prices)
+                else:
+                    prices = [float(row["close"]) for row in bars]
+                    price_count = len(prices)
                 backtest_cfg = BacktestConfig(
                     enabled=True,
                     strategy=strategy.strategy_type,
@@ -774,39 +867,110 @@ class UserBacktestService:
                     initial_base=float(request["initial_base"]),
                     fee_bps=float(request["fee_bps"]),
                     slippage_bps=float(request["slippage_bps"]),
-                    step_count=len(prices),
-                    max_recent_points=min(MAX_HISTORY_BARS, len(prices)),
+                    step_count=price_count,
+                    max_recent_points=min(MAX_HISTORY_BARS, price_count),
                     data_source="exchange_ohlcv",
                     latency_steps=int(request["latency_bars"]),
                 )
-                result = run_paper_backtest(
-                    backtest_cfg,
-                    spot_grid=spot_grid,
-                    dca=dca,
-                    price_series=prices,
-                    timestamps_ms=timestamps,
-                    timeframe_seconds=TIMEFRAME_SECONDS[str(request["timeframe"])],
-                    data_source="exchange_ohlcv",
-                ).to_dict()
-                result["market_data"] = {
-                    "exchange": account.exchange,
-                    "market_type": account.market_type,
-                    "api_variant": account.api_variant,
-                    "symbol": account.symbol,
-                    "timeframe": request["timeframe"],
-                    "requested_bars": request["history_bars"],
-                    "received_bars": len(bars),
-                    "actual_bars": sum(
-                        1 for row in bars if not bool(row.get("gap_filled"))
-                    ),
-                    "gap_filled_bars": sum(
-                        1 for row in bars if bool(row.get("gap_filled"))
-                    ),
-                    "cached": cached,
-                    "first_timestamp_ms": timestamps[0],
-                    "last_timestamp_ms": timestamps[-1],
-                    "total_volume": sum(float(row["volume"]) for row in bars),
-                }
+                if strategy.strategy_type == "relative_value":
+                    accounts = [
+                        UserExchangeAccount.from_dict(row)
+                        for row in run.get("accounts", [])
+                    ]
+                    parameters = strategy.parameters
+                    result = run_relative_value_backtest(
+                        backtest_cfg,
+                        RelativeValueConfig(
+                            enabled=True,
+                            live_enabled=False,
+                            primary_exchange=accounts[0].exchange,
+                            primary_symbol=accounts[0].symbol,
+                            hedge_exchange=accounts[1].exchange,
+                            hedge_symbol=accounts[1].symbol,
+                            quote_currency=project_snapshot.get("quote_currency") or "USDT",
+                            quote_per_leg=float(parameters["quote_per_leg"]),
+                            hedge_ratio=float(parameters["hedge_ratio"]),
+                            lookback_bars=int(parameters["lookback_bars"]),
+                            entry_zscore=float(parameters["entry_zscore"]),
+                            exit_zscore=float(parameters["exit_zscore"]),
+                            max_holding_bars=int(parameters["max_holding_bars"]),
+                            scan_interval_seconds=float(parameters["scan_interval_seconds"]),
+                        ),
+                        primary_prices=primary_prices,
+                        hedge_prices=hedge_prices,
+                        timestamps_ms=timestamps,
+                        timeframe_seconds=TIMEFRAME_SECONDS[str(request["timeframe"])],
+                        data_source="exchange_ohlcv",
+                    ).to_dict()
+                    result["market_data"] = {
+                        "strategy_type": "relative_value",
+                        "primary": {
+                            "exchange": accounts[0].exchange,
+                            "market_type": accounts[0].market_type,
+                            "api_variant": accounts[0].api_variant,
+                            "symbol": accounts[0].symbol,
+                        },
+                        "hedge": {
+                            "exchange": accounts[1].exchange,
+                            "market_type": accounts[1].market_type,
+                            "api_variant": accounts[1].api_variant,
+                            "symbol": accounts[1].symbol,
+                        },
+                        "timeframe": request["timeframe"],
+                        "requested_bars": request["history_bars"],
+                        "received_bars": len(bars),
+                        "actual_bars": sum(
+                            1
+                            for row in bars
+                            if not bool(row.get("primary_gap_filled"))
+                            and not bool(row.get("hedge_gap_filled"))
+                        ),
+                        "gap_filled_bars": sum(
+                            1
+                            for row in bars
+                            if bool(row.get("primary_gap_filled"))
+                            or bool(row.get("hedge_gap_filled"))
+                        ),
+                        "cached": cached,
+                        "first_timestamp_ms": timestamps[0],
+                        "last_timestamp_ms": timestamps[-1],
+                        "primary_total_volume": sum(
+                            float(row["primary_volume"]) for row in bars
+                        ),
+                        "hedge_total_volume": sum(
+                            float(row["hedge_volume"]) for row in bars
+                        ),
+                    }
+                else:
+                    spot_grid, dca = _strategy_configs(strategy, account)
+                    result = run_paper_backtest(
+                        backtest_cfg,
+                        spot_grid=spot_grid,
+                        dca=dca,
+                        price_series=prices,
+                        timestamps_ms=timestamps,
+                        timeframe_seconds=TIMEFRAME_SECONDS[str(request["timeframe"])],
+                        data_source="exchange_ohlcv",
+                    ).to_dict()
+                    result["market_data"] = {
+                        "exchange": account.exchange,
+                        "market_type": account.market_type,
+                        "api_variant": account.api_variant,
+                        "symbol": account.symbol,
+                        "timeframe": request["timeframe"],
+                        "requested_bars": request["history_bars"],
+                        "received_bars": len(bars),
+                        "actual_bars": sum(
+                            1 for row in bars if not bool(row.get("gap_filled"))
+                        ),
+                        "gap_filled_bars": sum(
+                            1 for row in bars if bool(row.get("gap_filled"))
+                        ),
+                        "cached": cached,
+                        "first_timestamp_ms": timestamps[0],
+                        "last_timestamp_ms": timestamps[-1],
+                        "total_volume": sum(float(row["volume"]) for row in bars),
+                    }
                 gap_filled_bars = result["market_data"]["gap_filled_bars"]
                 if gap_filled_bars:
                     result["warnings"].append(

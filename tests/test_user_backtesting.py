@@ -342,6 +342,131 @@ class UserBacktestServiceTest(unittest.IsolatedAsyncioTestCase):
                 is_admin=False,
             )
 
+    async def test_relative_value_historical_run_aligns_two_accounts(self) -> None:
+        project = self.workspace.upsert_project(
+            UserProject.from_dict(
+                {
+                    "id": "project-skhy-pair",
+                    "owner_email": "trader@example.com",
+                    "name": "SKHY pair research",
+                    "asset": "SKHY",
+                    "quote_currency": "USDT",
+                    "status": "active",
+                }
+            )
+        )
+        primary_account = self.workspace.upsert_account(
+            UserExchangeAccount.from_dict(
+                {
+                    "id": "account-skhy",
+                    "owner_email": "trader@example.com",
+                    "project_id": project.id,
+                    "label": "SKHY market",
+                    "exchange": "binance",
+                    "market_type": "spot",
+                    "symbol": "SKHY/USDT",
+                }
+            )
+        )
+        hedge_account = self.workspace.upsert_account(
+            UserExchangeAccount.from_dict(
+                {
+                    "id": "account-cos",
+                    "owner_email": "trader@example.com",
+                    "project_id": project.id,
+                    "label": "COSPKHYNIX2L market",
+                    "exchange": "binance",
+                    "market_type": "spot",
+                    "symbol": "COSPKHYNIX2L/USDT",
+                }
+            )
+        )
+        strategy = self.workspace.upsert_strategy(
+            UserStrategy.from_dict(
+                {
+                    "id": "strategy-relative-value",
+                    "owner_email": "trader@example.com",
+                    "project_id": project.id,
+                    "name": "SKHY pair research",
+                    "strategy_type": "relative_value",
+                    "account_ids": [primary_account.id, hedge_account.id],
+                    "parameters": {
+                        "quote_per_leg": 100.0,
+                        "hedge_ratio": 1.0,
+                        "lookback_bars": 5,
+                        "entry_zscore": 1.0,
+                        "exit_zscore": 0.3,
+                    },
+                }
+            )
+        )
+
+        async def relative_fetcher(account, *, timeframe, limit):
+            self.assertEqual(timeframe, "1h")
+            await asyncio.sleep(0)
+            primary = [
+                100.0,
+                100.2,
+                99.8,
+                100.1,
+                99.9,
+                110.0,
+                108.0,
+                102.0,
+                100.2,
+                100.0,
+            ]
+            series = primary if account.id == primary_account.id else [100.0] * len(primary)
+            start = 1_700_000_000_000
+            rows = []
+            for index in range(limit):
+                close = series[index % len(series)]
+                rows.append(
+                    {
+                        "timestamp_ms": start + index * 3_600_000,
+                        "open": close,
+                        "high": close * 1.01,
+                        "low": close * 0.99,
+                        "close": close,
+                        "volume": 100.0 + index,
+                    }
+                )
+            return rows
+
+        service = UserBacktestService(
+            self.workspace,
+            self.store,
+            fetcher=relative_fetcher,
+            cache_seconds=60.0,
+        )
+        try:
+            run = await service.create_run(
+                owner_email="trader@example.com",
+                project_id=project.id,
+                strategy_id=strategy.id,
+                account_id=primary_account.id,
+                timeframe="1h",
+                history_bars=40,
+                initial_cash=1000.0,
+                fee_bps=10.0,
+                slippage_bps=5.0,
+            )
+            completed = await self._wait_terminal(run["id"])
+        finally:
+            await service.close()
+
+        self.assertEqual(completed["status"], "complete")
+        self.assertEqual(completed["result"]["strategy"], "relative_value")
+        self.assertEqual(
+            completed["result"]["market_data"]["primary"]["symbol"],
+            "SKHY/USDT",
+        )
+        self.assertEqual(
+            completed["result"]["market_data"]["hedge"]["symbol"],
+            "COSPKHYNIX2L/USDT",
+        )
+        self.assertGreater(completed["result"]["trade_count"], 0)
+
     async def test_rejects_strategy_outside_supported_scope(self) -> None:
         unsupported = self.workspace.upsert_strategy(
             UserStrategy.from_dict(
@@ -356,7 +481,7 @@ class UserBacktestServiceTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with self.assertRaisesRegex(ValueError, "Spot Grid and DCA"):
+        with self.assertRaisesRegex(ValueError, "Relative Value"):
             await self.service.create_run(
                 owner_email="trader@example.com",
                 project_id=self.project.id,

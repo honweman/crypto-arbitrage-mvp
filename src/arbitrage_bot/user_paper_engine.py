@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import statistics
 import time
 import uuid
 from collections.abc import Awaitable
@@ -88,6 +89,8 @@ def _strategy_interval(strategy: UserStrategy) -> float:
         return max(1.0, float(parameters["interval_seconds"]))
     if strategy.strategy_type == "spot_grid":
         return max(1.0, float(parameters["refresh_seconds"]))
+    if strategy.strategy_type == "relative_value":
+        return max(1.0, float(parameters["scan_interval_seconds"]))
     return max(0.1, float(parameters["scan_interval_seconds"]))
 
 
@@ -955,6 +958,110 @@ def _simulate_spot_spread(
     )
 
 
+def _simulate_relative_value(
+    strategy: UserStrategy,
+    state: dict[str, Any],
+    accounts: list[UserExchangeAccount],
+    books: dict[str, OrderBookSnapshot],
+    *,
+    now: float,
+) -> tuple[str, str, str, dict[str, Any]]:
+    if len(accounts) != 2:
+        return (
+            "blocked_scope",
+            "relative value paper scan requires exactly two accounts",
+            "blocked",
+            {},
+        )
+    parameters = strategy.parameters
+    primary_book = books[accounts[0].id]
+    hedge_book = books[accounts[1].id]
+    primary_mid = _mid_price(primary_book)
+    hedge_mid = _mid_price(hedge_book)
+    hedge_ratio = float(parameters["hedge_ratio"])
+    spread = math.log(primary_mid) - hedge_ratio * math.log(hedge_mid)
+    lookback = int(parameters["lookback_bars"])
+    raw_history = state.get("relative_value_history")
+    history = list(raw_history) if isinstance(raw_history, list) else []
+    history.append(
+        {
+            "timestamp": now,
+            "primary_mid": primary_mid,
+            "hedge_mid": hedge_mid,
+            "spread": spread,
+        }
+    )
+    history = history[-max(lookback + 200, 250) :]
+    state["relative_value_history"] = history
+    metrics = {
+        "primary_mid": primary_mid,
+        "hedge_mid": hedge_mid,
+        "spread": spread,
+        "hedge_ratio": hedge_ratio,
+        "sample_count": len(history),
+    }
+    if len(history) <= lookback:
+        return (
+            "warming_up",
+            f"relative value needs {lookback} prior samples",
+            "waiting",
+            metrics,
+        )
+    window = [float(row["spread"]) for row in history[-lookback - 1 : -1]]
+    mean = statistics.fmean(window)
+    stdev = statistics.stdev(window) if len(window) >= 2 else 0.0
+    metrics["spread_mean"] = mean
+    metrics["spread_stdev"] = stdev
+    if stdev <= 0:
+        return (
+            "waiting",
+            "relative value spread variance is zero",
+            "waiting",
+            metrics,
+        )
+    zscore = (spread - mean) / stdev
+    metrics["zscore"] = zscore
+    entry = float(parameters["entry_zscore"])
+    exit_level = float(parameters["exit_zscore"])
+    state["relative_value_signal"] = {
+        "zscore": zscore,
+        "entry_zscore": entry,
+        "exit_zscore": exit_level,
+        "primary_account_id": accounts[0].id,
+        "hedge_account_id": accounts[1].id,
+        "primary_symbol": accounts[0].symbol,
+        "hedge_symbol": accounts[1].symbol,
+        "updated_at": now,
+    }
+    if zscore >= entry:
+        return (
+            "signal_short_primary",
+            "relative value spread is above entry threshold",
+            "signal",
+            metrics,
+        )
+    if zscore <= -entry:
+        return (
+            "signal_long_primary",
+            "relative value spread is below entry threshold",
+            "signal",
+            metrics,
+        )
+    if abs(zscore) <= exit_level:
+        return (
+            "neutral",
+            "relative value spread is inside exit band",
+            "waiting",
+            metrics,
+        )
+    return (
+        "waiting",
+        "relative value spread has no entry signal",
+        "waiting",
+        metrics,
+    )
+
+
 def _paper_event(
     strategy: UserStrategy,
     state: dict[str, Any],
@@ -1150,6 +1257,15 @@ def simulate_user_paper_cycle(
             )
         )
         state["prediction_scan"] = prediction_scan
+        fills = []
+    elif strategy.strategy_type == "relative_value":
+        status, reason, event_type, metrics = _simulate_relative_value(
+            strategy,
+            state,
+            accounts,
+            books,
+            now=cycle_at,
+        )
         fills = []
     else:
         fills, status, reason, event_type, metrics = _simulate_spot_spread(

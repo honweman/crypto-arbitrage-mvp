@@ -87,7 +87,7 @@ class UserStrategyTest(unittest.TestCase):
         self.assertEqual(strategy.mode, "paper")
         self.assertFalse(strategy.to_dict()["live_enabled"])
         self.assertEqual(strategy.parameters["levels"], 2)
-        self.assertEqual(len(user_strategy_catalog()), 7)
+        self.assertEqual(len(user_strategy_catalog()), 8)
         live = UserStrategy.from_dict({**base, "live_enabled": True})
         self.assertEqual(live.mode, "live")
         self.assertTrue(live.to_dict()["live_enabled"])
@@ -193,6 +193,45 @@ class UserStrategyTest(unittest.TestCase):
         self.assertIn(
             "strategy budget exceeds max total quote",
             strategy_parameter_blockers(underfunded_grid),
+        )
+
+        relative_value = UserStrategy.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "project_id": "project-acs",
+                "strategy_type": "relative_value",
+                "account_ids": ["account-skhy", "account-cos"],
+                "parameters": {
+                    "quote_per_leg": 100.0,
+                    "hedge_ratio": 1.0,
+                    "lookback_bars": 20,
+                    "entry_zscore": 2.0,
+                    "exit_zscore": 0.5,
+                },
+                "risk": {
+                    "max_order_quote": 100.0,
+                    "max_total_quote": 250.0,
+                    "max_open_orders": 4,
+                },
+            }
+        )
+        self.assertEqual(strategy_parameter_blockers(relative_value), [])
+
+        bad_relative_value = UserStrategy.from_dict(
+            {
+                "owner_email": "trader@example.com",
+                "project_id": "project-acs",
+                "strategy_type": "relative_value",
+                "account_ids": ["account-skhy", "account-cos"],
+                "parameters": {
+                    "entry_zscore": 1.0,
+                    "exit_zscore": 1.0,
+                },
+            }
+        )
+        self.assertIn(
+            "relative value exit z-score must be below entry z-score",
+            strategy_parameter_blockers(bad_relative_value),
         )
 
     def test_user_open_order_limit_reserves_planned_mm_levels_not_risk_ceiling(

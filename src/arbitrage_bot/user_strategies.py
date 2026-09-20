@@ -85,6 +85,20 @@ USER_STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
             "scan_interval_seconds": 1.0,
         },
     },
+    "relative_value": {
+        "label": "Relative Value",
+        "min_accounts": 2,
+        "max_accounts": 2,
+        "parameters": {
+            "quote_per_leg": 100.0,
+            "hedge_ratio": 1.0,
+            "lookback_bars": 30,
+            "entry_zscore": 2.0,
+            "exit_zscore": 0.5,
+            "max_holding_bars": 0,
+            "scan_interval_seconds": 60.0,
+        },
+    },
     "contract_arbitrage": {
         "label": "Contract Arbitrage (CEX/DEX)",
         "min_accounts": 2,
@@ -496,6 +510,49 @@ def _clean_parameters(strategy_type: str, value: Any) -> dict[str, Any]:
                 default=True,
             ),
         }
+    if strategy_type == "relative_value":
+        return {
+            "quote_per_leg": _finite_float(
+                merged["quote_per_leg"],
+                label="quote_per_leg",
+                minimum=0.00000001,
+            ),
+            "hedge_ratio": _finite_float(
+                merged["hedge_ratio"],
+                label="hedge_ratio",
+                minimum=0.00000001,
+                maximum=10.0,
+            ),
+            "lookback_bars": _bounded_int(
+                merged["lookback_bars"],
+                label="lookback_bars",
+                minimum=5,
+                maximum=500,
+            ),
+            "entry_zscore": _finite_float(
+                merged["entry_zscore"],
+                label="entry_zscore",
+                minimum=0.01,
+                maximum=20.0,
+            ),
+            "exit_zscore": _finite_float(
+                merged["exit_zscore"],
+                label="exit_zscore",
+                maximum=20.0,
+            ),
+            "max_holding_bars": _bounded_int(
+                merged["max_holding_bars"],
+                label="max_holding_bars",
+                minimum=0,
+                maximum=100_000,
+            ),
+            "scan_interval_seconds": _finite_float(
+                merged["scan_interval_seconds"],
+                label="scan_interval_seconds",
+                minimum=1.0,
+                maximum=86_400.0,
+            ),
+        }
     if strategy_type == "prediction_arbitrage":
         mechanism = str(merged["mechanism"] or "").strip().lower()
         if mechanism not in {"auto", "complete_set", "neg_risk", "cross_venue"}:
@@ -779,6 +836,12 @@ def strategy_parameter_blockers(strategy: UserStrategy) -> list[str]:
         planned_orders = 2
         if parameters["max_leverage"] > 3:
             blockers.append("contract arbitrage leverage above 3x is not allowed")
+    elif strategy.strategy_type == "relative_value":
+        order_quote = parameters["quote_per_leg"] * max(1.0, parameters["hedge_ratio"])
+        total_quote = parameters["quote_per_leg"] * (1 + parameters["hedge_ratio"])
+        planned_orders = 4
+        if parameters["exit_zscore"] >= parameters["entry_zscore"]:
+            blockers.append("relative value exit z-score must be below entry z-score")
     elif strategy.strategy_type == "prediction_arbitrage":
         token_ids = parameters["outcome_asset_ids"]
         no_token_ids = parameters["neg_risk_no_asset_ids"]

@@ -3,10 +3,17 @@ import unittest
 from arbitrage_bot.backtesting import (
     estimate_depth_execution,
     run_paper_backtest,
+    run_relative_value_backtest,
     synthetic_depth_levels,
     synthetic_price_series,
 )
-from arbitrage_bot.config import BacktestConfig, DcaConfig, ExecutionAlgoConfig, SpotGridConfig
+from arbitrage_bot.config import (
+    BacktestConfig,
+    DcaConfig,
+    ExecutionAlgoConfig,
+    RelativeValueConfig,
+    SpotGridConfig,
+)
 
 
 class BacktestingTest(unittest.TestCase):
@@ -225,6 +232,58 @@ class BacktestingTest(unittest.TestCase):
                 price_series=[1.0, 1.1],
                 timestamps_ms=[1_700_000_000_000],
             )
+
+    def test_relative_value_backtest_pairs_two_symbols(self) -> None:
+        timestamps = [1_700_000_000_000 + index * 3_600_000 for index in range(12)]
+        primary = [
+            100.0,
+            100.2,
+            99.8,
+            100.1,
+            99.9,
+            110.0,
+            108.0,
+            102.0,
+            100.2,
+            100.0,
+            99.9,
+            100.1,
+        ]
+        hedge = [100.0] * len(primary)
+
+        result = run_relative_value_backtest(
+            BacktestConfig(
+                enabled=True,
+                strategy="relative_value",
+                symbol="SKHY/USDT",
+                initial_cash=1000.0,
+                fee_bps=10.0,
+                slippage_bps=5.0,
+                max_recent_points=20,
+            ),
+            RelativeValueConfig(
+                enabled=True,
+                primary_symbol="SKHY/USDT",
+                hedge_symbol="COSPKHYNIX2L/USDT",
+                quote_currency="USDT",
+                quote_per_leg=100.0,
+                hedge_ratio=1.0,
+                lookback_bars=5,
+                entry_zscore=1.0,
+                exit_zscore=0.3,
+            ),
+            primary_prices=primary,
+            hedge_prices=hedge,
+            timestamps_ms=timestamps,
+            timeframe_seconds=3_600.0,
+        )
+
+        self.assertEqual(result.strategy, "relative_value")
+        self.assertEqual(result.symbol, "SKHY/USDT|COSPKHYNIX2L/USDT")
+        self.assertGreaterEqual(result.trade_count, 4)
+        self.assertEqual(result.bar_count, len(primary))
+        self.assertTrue(all(trade.reason.startswith(("SKHY", "COSPKHYNIX2L")) for trade in result.trades))
+        self.assertTrue(any("rolling window" in warning for warning in result.warnings))
 
 
 if __name__ == "__main__":

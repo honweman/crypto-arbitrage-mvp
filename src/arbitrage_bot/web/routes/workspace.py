@@ -13,7 +13,6 @@ from ..users import (
     WebUser,
 )
 from ..user_scope import (
-    _base_asset_from_symbol,
     _require_admin_user,
 )
 
@@ -747,10 +746,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                 }
             )
             account = UserExchangeAccount.from_dict(raw)
-            if _base_asset_from_symbol(account.symbol) != project.asset:
-                raise ValueError(
-                    f"account symbol base must match project asset {project.asset}"
-                )
             authorization = store.prepare_hyperliquid_authorization(
                 owner_email=user.email,
                 wallet=wallet,
@@ -1340,10 +1335,6 @@ async def api_user_workspace(request: web.Request) -> web.Response:
                     else ""
                 )
             account = UserExchangeAccount.from_dict(raw)
-            if _base_asset_from_symbol(account.symbol) != project.asset:
-                raise ValueError(
-                    f"account symbol base must match project asset {project.asset}"
-                )
             exchange_changed = bool(
                 existing is not None and existing.exchange != account.exchange
             )

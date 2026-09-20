@@ -248,6 +248,24 @@ class ExecutionAlgoConfig:
 
 
 @dataclass(frozen=True)
+class RelativeValueConfig:
+    enabled: bool = False
+    live_enabled: bool = False
+    primary_exchange: str = ""
+    primary_symbol: str = ""
+    hedge_exchange: str = ""
+    hedge_symbol: str = ""
+    quote_currency: str = "USDT"
+    quote_per_leg: float = 100.0
+    hedge_ratio: float = 1.0
+    lookback_bars: int = 30
+    entry_zscore: float = 2.0
+    exit_zscore: float = 0.5
+    max_holding_bars: int = 0
+    scan_interval_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
 class BacktestConfig:
     enabled: bool = False
     strategy: str = "spot_grid"

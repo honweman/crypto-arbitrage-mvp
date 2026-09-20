@@ -3495,7 +3495,7 @@ function balanceStatusClass(status) {
     }
 
     const USER_BACKTEST_ACTIVE_STATUSES = new Set(["queued", "fetching", "running"]);
-    const USER_BACKTEST_STRATEGIES = new Set(["spot_grid", "dca"]);
+    const USER_BACKTEST_STRATEGIES = new Set(["spot_grid", "dca", "relative_value"]);
 
     function backtestStatusClass(status) {
       if (status === "complete") return "risk-ok";
@@ -3586,7 +3586,7 @@ function balanceStatusClass(status) {
         document.getElementById("backtest-strategy"),
         strategies,
         preferredStrategy,
-        "No Spot Grid or DCA strategy",
+        "No backtestable strategy",
       );
       syncBacktestAccountOptions(preferredAccount, false);
     }
@@ -6165,6 +6165,14 @@ function balanceStatusClass(status) {
         setFieldValue("user-strategy-profit-bps", values.min_profit_bps);
         setFieldValue("user-strategy-cycle-quote", values.max_cycle_quote);
         setFieldValue("user-strategy-scan-seconds", values.scan_interval_seconds);
+      } else if (strategyType === "relative_value") {
+        setFieldValue("user-strategy-rv-quote", values.quote_per_leg);
+        setFieldValue("user-strategy-rv-hedge", values.hedge_ratio);
+        setFieldValue("user-strategy-rv-lookback", values.lookback_bars);
+        setFieldValue("user-strategy-rv-entry", values.entry_zscore);
+        setFieldValue("user-strategy-rv-exit", values.exit_zscore);
+        setFieldValue("user-strategy-rv-holding", values.max_holding_bars);
+        setFieldValue("user-strategy-rv-scan", values.scan_interval_seconds);
       } else if (strategyType === "contract_arbitrage") {
         setFieldValue("user-strategy-contract-basis", values.min_basis_bps);
         setFieldValue("user-strategy-contract-funding", values.min_funding_bps);
@@ -6319,6 +6327,17 @@ function balanceStatusClass(status) {
           quote_per_grid: numericValue("user-strategy-grid-quote"),
           spacing: document.getElementById("user-strategy-grid-spacing").value,
           refresh_seconds: numericValue("user-strategy-grid-refresh"),
+        };
+      }
+      if (strategyType === "relative_value") {
+        return {
+          quote_per_leg: numericValue("user-strategy-rv-quote"),
+          hedge_ratio: numericValue("user-strategy-rv-hedge"),
+          lookback_bars: numericValue("user-strategy-rv-lookback"),
+          entry_zscore: numericValue("user-strategy-rv-entry"),
+          exit_zscore: numericValue("user-strategy-rv-exit"),
+          max_holding_bars: numericValue("user-strategy-rv-holding"),
+          scan_interval_seconds: numericValue("user-strategy-rv-scan"),
         };
       }
       if (strategyType === "contract_arbitrage") {
@@ -7498,6 +7517,7 @@ function balanceStatusClass(status) {
       if (value === "market_maker") return "Market Maker";
       if (value === "spot_grid") return "Spot Grid";
       if (value === "dca") return "DCA Bot";
+      if (value === "relative_value") return "Relative Value";
       if (value === "execution_algo") return "TWAP/VWAP/POV";
       if (value === "backtest") return "Backtest/Paper";
       if (value === "spot_spread") return "Spot Arbitrage";

@@ -5,7 +5,13 @@ import statistics
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .config import BacktestConfig, DcaConfig, ExecutionAlgoConfig, SpotGridConfig
+from .config import (
+    BacktestConfig,
+    DcaConfig,
+    ExecutionAlgoConfig,
+    RelativeValueConfig,
+    SpotGridConfig,
+)
 from .models import BookLevel, Side
 
 
@@ -662,6 +668,311 @@ def _run_execution_algo(
             peak_equity=peak,
         )
     return points, trades, cash, base
+
+
+def _relative_spread(
+    primary_price: float,
+    hedge_price: float,
+    hedge_ratio: float,
+) -> float:
+    if primary_price <= 0 or hedge_price <= 0:
+        raise ValueError("relative value prices must be positive")
+    return math.log(primary_price) - hedge_ratio * math.log(hedge_price)
+
+
+def _relative_leg_trade(
+    *,
+    step: int,
+    symbol: str,
+    side: str,
+    price: float,
+    quote_notional: float,
+    fee_bps: float,
+    slippage_bps: float,
+    reason: str,
+) -> PaperTrade:
+    slip = abs(slippage_bps) / 10_000
+    fee_quote = quote_notional * fee_bps / 10_000
+    slippage_quote = quote_notional * slip
+    execution_price = price * (1 + slip if side == "buy" else 1 - slip)
+    return PaperTrade(
+        step=step,
+        strategy="relative_value",
+        side=side,
+        price=execution_price,
+        amount=quote_notional / max(execution_price, 1e-12),
+        quote_notional=quote_notional,
+        fee_quote=fee_quote,
+        slippage_quote=slippage_quote,
+        reason=f"{symbol}: {reason}",
+    )
+
+
+def _relative_position_pnl(
+    *,
+    direction: int,
+    entry_primary: float,
+    entry_hedge: float,
+    current_primary: float,
+    current_hedge: float,
+    primary_notional: float,
+    hedge_notional: float,
+) -> float:
+    primary_return = current_primary / entry_primary - 1
+    hedge_return = current_hedge / entry_hedge - 1
+    return direction * primary_notional * primary_return - direction * hedge_notional * hedge_return
+
+
+def run_relative_value_backtest(
+    cfg: BacktestConfig,
+    strategy_cfg: RelativeValueConfig,
+    *,
+    primary_prices: list[float],
+    hedge_prices: list[float],
+    timestamps_ms: list[int] | None = None,
+    timeframe_seconds: float | None = None,
+    data_source: str = "exchange_ohlcv",
+) -> BacktestResult:
+    if cfg.initial_cash < 0:
+        raise ValueError("relative value backtest initial cash must be non-negative")
+    if cfg.fee_bps < 0 or cfg.slippage_bps < 0:
+        raise ValueError("backtest fee_bps and slippage_bps must be non-negative")
+    primary = _validated_price_series(primary_prices)
+    hedge = _validated_price_series(hedge_prices)
+    if len(primary) != len(hedge):
+        raise ValueError("relative value price series must have matching lengths")
+    if len(primary) < 2:
+        raise ValueError("relative value backtest requires at least two prices")
+    normalized_timestamps: list[int] | None = None
+    if timestamps_ms is not None:
+        if len(timestamps_ms) != len(primary):
+            raise ValueError("backtest timestamps must match the price series")
+        normalized_timestamps = [int(value) for value in timestamps_ms]
+        if any(
+            current <= previous
+            for previous, current in zip(
+                normalized_timestamps,
+                normalized_timestamps[1:],
+            )
+        ):
+            raise ValueError("backtest timestamps must be strictly increasing")
+
+    lookback = max(2, int(strategy_cfg.lookback_bars))
+    entry_zscore = max(0.01, float(strategy_cfg.entry_zscore))
+    exit_zscore = max(0.0, float(strategy_cfg.exit_zscore))
+    hedge_ratio = max(0.0, float(strategy_cfg.hedge_ratio))
+    primary_notional = max(0.0, float(strategy_cfg.quote_per_leg))
+    hedge_notional = primary_notional * hedge_ratio
+    max_holding = max(0, int(strategy_cfg.max_holding_bars))
+    if primary_notional <= 0 or hedge_notional <= 0:
+        raise ValueError("relative value quote_per_leg and hedge_ratio must be positive")
+
+    spreads = [
+        _relative_spread(primary_price, hedge_price, hedge_ratio)
+        for primary_price, hedge_price in zip(primary, hedge)
+    ]
+    cash = float(cfg.initial_cash)
+    points: list[EquityPoint] = []
+    trades: list[PaperTrade] = []
+    position: dict[str, float | int] | None = None
+    peak = cash
+
+    for step, (primary_price, hedge_price, spread) in enumerate(
+        zip(primary, hedge, spreads)
+    ):
+        zscore: float | None = None
+        if step >= lookback:
+            window = spreads[step - lookback : step]
+            mean = statistics.fmean(window)
+            stdev = statistics.stdev(window) if len(window) >= 2 else 0.0
+            if stdev > 0:
+                zscore = (spread - mean) / stdev
+
+        unrealized = 0.0
+        if position is not None:
+            unrealized = _relative_position_pnl(
+                direction=int(position["direction"]),
+                entry_primary=float(position["entry_primary"]),
+                entry_hedge=float(position["entry_hedge"]),
+                current_primary=primary_price,
+                current_hedge=hedge_price,
+                primary_notional=float(position["primary_notional"]),
+                hedge_notional=float(position["hedge_notional"]),
+            )
+            held_bars = step - int(position["entry_step"])
+            should_exit = (
+                zscore is not None
+                and abs(zscore) <= exit_zscore
+            ) or (max_holding > 0 and held_bars >= max_holding)
+            if should_exit:
+                direction = int(position["direction"])
+                reason = "spread mean-reversion exit"
+                trades.extend(
+                    [
+                        _relative_leg_trade(
+                            step=step,
+                            symbol=strategy_cfg.primary_symbol,
+                            side="sell" if direction > 0 else "buy",
+                            price=primary_price,
+                            quote_notional=float(position["primary_notional"]),
+                            fee_bps=cfg.fee_bps,
+                            slippage_bps=cfg.slippage_bps,
+                            reason=reason,
+                        ),
+                        _relative_leg_trade(
+                            step=step,
+                            symbol=strategy_cfg.hedge_symbol,
+                            side="buy" if direction > 0 else "sell",
+                            price=hedge_price,
+                            quote_notional=float(position["hedge_notional"]),
+                            fee_bps=cfg.fee_bps,
+                            slippage_bps=cfg.slippage_bps,
+                            reason=reason,
+                        ),
+                    ]
+                )
+                exit_cost = sum(
+                    trade.fee_quote + trade.slippage_quote
+                    for trade in trades[-2:]
+                )
+                cash += unrealized - exit_cost
+                position = None
+                unrealized = 0.0
+
+        if position is None and zscore is not None and abs(zscore) >= entry_zscore:
+            direction = 1 if zscore <= -entry_zscore else -1
+            if cash >= primary_notional + hedge_notional:
+                reason = (
+                    "long primary / short hedge entry"
+                    if direction > 0
+                    else "short primary / long hedge entry"
+                )
+                entry_trades = [
+                    _relative_leg_trade(
+                        step=step,
+                        symbol=strategy_cfg.primary_symbol,
+                        side="buy" if direction > 0 else "sell",
+                        price=primary_price,
+                        quote_notional=primary_notional,
+                        fee_bps=cfg.fee_bps,
+                        slippage_bps=cfg.slippage_bps,
+                        reason=reason,
+                    ),
+                    _relative_leg_trade(
+                        step=step,
+                        symbol=strategy_cfg.hedge_symbol,
+                        side="sell" if direction > 0 else "buy",
+                        price=hedge_price,
+                        quote_notional=hedge_notional,
+                        fee_bps=cfg.fee_bps,
+                        slippage_bps=cfg.slippage_bps,
+                        reason=reason,
+                    ),
+                ]
+                trades.extend(entry_trades)
+                cash -= sum(
+                    trade.fee_quote + trade.slippage_quote
+                    for trade in entry_trades
+                )
+                position = {
+                    "direction": direction,
+                    "entry_step": step,
+                    "entry_primary": primary_price,
+                    "entry_hedge": hedge_price,
+                    "primary_notional": primary_notional,
+                    "hedge_notional": hedge_notional,
+                }
+
+        equity = cash + unrealized
+        peak = max(peak, equity)
+        drawdown_pct = 0.0 if peak <= 0 else max(0.0, (peak - equity) / peak * 100)
+        points.append(
+            EquityPoint(
+                step=step,
+                price=spread,
+                cash=equity,
+                base=0.0,
+                equity=equity,
+                drawdown_pct=drawdown_pct,
+                timestamp_ms=(
+                    normalized_timestamps[step]
+                    if normalized_timestamps is not None
+                    else None
+                ),
+            )
+        )
+
+    if position is not None:
+        final_pnl = _relative_position_pnl(
+            direction=int(position["direction"]),
+            entry_primary=float(position["entry_primary"]),
+            entry_hedge=float(position["entry_hedge"]),
+            current_primary=primary[-1],
+            current_hedge=hedge[-1],
+            primary_notional=float(position["primary_notional"]),
+            hedge_notional=float(position["hedge_notional"]),
+        )
+        final_equity = cash + final_pnl
+        if points:
+            last = points[-1]
+            points[-1] = replace(last, cash=final_equity, equity=final_equity)
+    else:
+        final_equity = cash
+
+    initial_equity = float(cfg.initial_cash)
+    total_return = final_equity - initial_equity
+    return_pct = 0.0 if initial_equity <= 0 else total_return / initial_equity * 100
+    filled_quote = sum(trade.quote_notional for trade in trades)
+    metrics = _performance_metrics(
+        points,
+        primary,
+        timeframe_seconds=timeframe_seconds,
+        filled_quote=filled_quote,
+        initial_equity=initial_equity,
+        strategy_return_pct=return_pct,
+    )
+    max_recent = max(1, cfg.max_recent_points)
+    warnings = [
+        "relative value backtest uses completed OHLCV closes only; intrabar sequence, borrow, funding, short availability, and queue priority are not modeled",
+        "z-score signals use a rolling window that excludes the current bar",
+    ]
+    if cfg.latency_steps <= 0:
+        warnings.append("zero-bar execution latency may overstate tradability")
+    return BacktestResult(
+        status="ok",
+        strategy="relative_value",
+        symbol=f"{strategy_cfg.primary_symbol}|{strategy_cfg.hedge_symbol}",
+        quote_currency=strategy_cfg.quote_currency,
+        initial_equity=initial_equity,
+        final_equity=final_equity,
+        total_return_quote=total_return,
+        return_pct=return_pct,
+        max_drawdown_pct=max((point.drawdown_pct for point in points), default=0.0),
+        fee_quote=sum(trade.fee_quote for trade in trades),
+        slippage_quote=sum(trade.slippage_quote for trade in trades),
+        filled_quote=filled_quote,
+        filled_base=sum(trade.amount for trade in trades),
+        fill_rate=1.0 if trades else 0.0,
+        trade_count=len(trades),
+        data_source=data_source,
+        bar_count=len(primary),
+        start_timestamp_ms=(
+            normalized_timestamps[0] if normalized_timestamps is not None else None
+        ),
+        end_timestamp_ms=(
+            normalized_timestamps[-1] if normalized_timestamps is not None else None
+        ),
+        benchmark_return_pct=float(metrics["benchmark_return_pct"] or 0.0),
+        excess_return_pct=float(metrics["excess_return_pct"] or 0.0),
+        annualized_volatility_pct=metrics["annualized_volatility_pct"],
+        sharpe_ratio=metrics["sharpe_ratio"],
+        sortino_ratio=metrics["sortino_ratio"],
+        positive_period_rate=metrics["positive_period_rate"],
+        turnover_pct=float(metrics["turnover_pct"] or 0.0),
+        points=points[-max_recent:],
+        trades=trades[-max_recent:],
+        warnings=warnings,
+    )
 
 
 def run_paper_backtest(

@@ -3017,10 +3017,6 @@ class UserWorkspaceStore:
             raise ValueError("exchange account owner cannot be changed")
         if not account.symbol:
             account = replace(account, symbol=project.symbol)
-        if account.symbol.split("/", 1)[0] != project.asset:
-            raise ValueError(
-                f"account symbol base must match project asset {project.asset}"
-            )
         exchange_changed = bool(
             existing is not None and existing.exchange != account.exchange
         )
@@ -3572,7 +3568,9 @@ class UserWorkspaceStore:
             if not account.symbol:
                 blockers.append(f"account symbol is missing: {account.label}")
             elif (
-                project is not None and account.symbol.split("/", 1)[0] != project.asset
+                project is not None
+                and strategy.strategy_type != "relative_value"
+                and account.symbol.split("/", 1)[0] != project.asset
             ):
                 blockers.append(f"account symbol asset mismatch: {account.label}")
             elif (
@@ -3580,6 +3578,7 @@ class UserWorkspaceStore:
                 and strategy.strategy_type
                 not in {
                     "spot_spread",
+                    "relative_value",
                     "contract_arbitrage",
                     "prediction_arbitrage",
                 }
@@ -3609,6 +3608,20 @@ class UserWorkspaceStore:
             exchanges = {account.exchange for account in accounts}
             if len(exchanges) < 2:
                 blockers.append("spot arbitrage requires two different exchanges")
+        elif strategy.strategy_type == "relative_value":
+            quotes = {
+                account.symbol.split("/", 1)[1].split(":", 1)[0]
+                for account in accounts
+                if account.symbol and "/" in account.symbol
+            }
+            if len(accounts) == 2 and len(quotes) != 1:
+                blockers.append(
+                    "relative value accounts must use the same quote currency"
+                )
+            elif project is not None and quotes and next(iter(quotes)) != project.quote_currency:
+                blockers.append(
+                    "relative value quote currency must match the project quote"
+                )
         elif strategy.strategy_type == "contract_arbitrage":
             spot_accounts = [row for row in accounts if row.market_type == "spot"]
             derivative_accounts = [

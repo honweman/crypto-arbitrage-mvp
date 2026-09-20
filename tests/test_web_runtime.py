@@ -4906,6 +4906,7 @@ class WebMonitorStateTest(unittest.IsolatedAsyncioTestCase):
                 "spot_grid",
                 "dca",
                 "spot_spread",
+                "relative_value",
                 "contract_arbitrage",
                 "prediction_arbitrage",
             ],

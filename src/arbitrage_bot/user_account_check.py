@@ -432,10 +432,6 @@ async def check_workspace_account(
 ) -> dict[str, Any]:
     if not account.symbol:
         raise ValueError("select a trading pair before testing the account")
-    if _base_currency(account.symbol) != project.asset:
-        raise ValueError(
-            f"account symbol base must match project asset {project.asset}"
-        )
     cfg = workspace_exchange_config(
         exchange=account.exchange,
         market_type=account.market_type,
