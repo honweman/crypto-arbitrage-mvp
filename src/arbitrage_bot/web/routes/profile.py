@@ -223,6 +223,15 @@ async def _state_payload_for_request(request: web.Request) -> dict[str, Any]:
     payload = await state.get(view=view, sections=sections)
     runtime_cfg = await state.runtime_config(cfg)
     requesting_user = _request_user(request)
+    if (
+        requesting_user is not None
+        and requesting_user.role == "admin"
+        and "accounts" not in (payload.get("account_balances") or {})
+    ):
+        # Merge using full cached rows so imported runtime connections are
+        # deduplicated before valuing their wallets and contract positions.
+        balance_view = await state.get(view="balances")
+        payload["account_balances"] = balance_view.get("account_balances", {})
     owner_runtime_cfg: BotConfig | None = None
     owner_auto_buy_sell_payload: dict[str, Any] | None = None
     owner_market_maker_payload: dict[str, Any] | None = None

@@ -660,6 +660,7 @@ class UserApiConnection:
     connection_checked_at: float | None = None
     connection_error: str = ""
     balance_snapshot: tuple[dict[str, Any], ...] = ()
+    contract_snapshot: dict[str, Any] = field(default_factory=dict)
     open_order_count: int | None = None
     connection_latency_ms: float | None = None
     created_at: float = field(default_factory=_now)
@@ -784,6 +785,7 @@ class UserApiConnection:
             ),
             connection_error=_clean_text(raw.get("connection_error"), max_length=240),
             balance_snapshot=_clean_balance_snapshot(raw.get("balance_snapshot")),
+            contract_snapshot=dict(raw.get("contract_snapshot") or {}),
             open_order_count=_optional_non_negative_int(raw.get("open_order_count")),
             connection_latency_ms=_optional_non_negative_float(
                 raw.get("connection_latency_ms")
@@ -816,6 +818,7 @@ class UserApiConnection:
             "connection_checked_at": self.connection_checked_at,
             "connection_error": self.connection_error,
             "balance_snapshot": [dict(row) for row in self.balance_snapshot],
+            "contract_snapshot": self.contract_snapshot,
             "open_order_count": self.open_order_count,
             "connection_latency_ms": self.connection_latency_ms,
             "created_at": self.created_at,
@@ -1807,11 +1810,20 @@ class UserWorkspaceStore:
         api_connection = self.get_api_connection(connection_id)
         if api_connection is None:
             raise ValueError(f"API connection not found: {connection_id}")
+        contracts = dict(api_connection.contract_snapshot)
+        if check is not None and isinstance(check.get("contract_snapshot"), dict):
+            candidate = dict(check["contract_snapshot"])
+            if candidate.get("status") != "ok":
+                candidate["positions"] = contracts.get("positions", [])
+            contracts = candidate
+        if normalized_status != "healthy" and contracts:
+            contracts["status"] = "error"
         updated = replace(
             api_connection,
             connection_status=normalized_status,
             connection_checked_at=_now(),
             connection_error=_clean_text(error, max_length=240),
+            contract_snapshot=contracts,
             balance_snapshot=(
                 _clean_balance_snapshot(check.get("balances"))
                 if check is not None and normalized_status == "healthy"
@@ -4212,6 +4224,7 @@ class UserWorkspaceStore:
                     row.get("credentials", {}).get("configured")
                 ),
                 "balances": list(row.get("balance_snapshot") or []),
+                "contract_snapshot": dict(row.get("contract_snapshot") or {}),
                 "open_order_count": row.get("open_order_count"),
                 "latency_ms": row.get("connection_latency_ms"),
                 "checked_at": row.get("connection_checked_at"),

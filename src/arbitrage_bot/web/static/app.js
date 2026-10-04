@@ -55,6 +55,7 @@ const priceNumber = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 }
       let marketTickerLoadedAt = 0;
 	    const PAGE_SECTION_IDS = {
 	      status: [
+	        "contract-positions",
 	        "overview",
 	        "readiness-actions",
 	        "markets",
@@ -7188,6 +7189,7 @@ function balanceStatusClass(status) {
         manual: "Manual",
         unattributed: "Unattributed",
         price_move: "Price",
+        contracts_unrealized: uiText("Contract Unrealized P/L"),
       };
       return Object.entries(portfolio?.sources || {})
         .filter(([, value]) => value != null && Math.abs(value) >= 1e-12)
@@ -7385,6 +7387,10 @@ function balanceStatusClass(status) {
       if (Number.isFinite(cashValue)) {
         pieces.push(`${uiText("Cash Position")} ${currency} ${money.format(cashValue)}`);
       }
+      const adjustment = Object.values(portfolio?.contract_equity_adjustments || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+      if (Math.abs(adjustment) > 1e-9) {
+        pieces.push(`${uiText("Contract Equity Adjustment")} ${currency} ${stableBalanceFormatter.format(adjustment)}`);
+      }
       const missing = portfolio?.total_asset_missing_rates || [];
       if (missing.length > 0) {
         pieces.push(
@@ -7397,6 +7403,7 @@ function balanceStatusClass(status) {
     }
 
     function renderPortfolio(portfolio) {
+      renderContractPositions(portfolio?.contracts);
       const performance = resolvedPortfolioPerformance(portfolio);
       if (!portfolio || portfolio.status === "disabled") {
         text("portfolio-total-assets", "--");
@@ -7495,6 +7502,42 @@ function balanceStatusClass(status) {
         dailyDetail,
         formatPnlSourceDetail(portfolio),
       ].filter(Boolean).join(" | ");
+    }
+
+    function renderContractPositions(contracts) {
+      const currency = contracts?.currency || lastState?.config?.common_quote_currency || "USD";
+      const amount = (value, unit = currency) => value == null || !Number.isFinite(Number(value))
+        ? "--" : `${stableBalanceFormatter.format(Number(value))} ${unit}`;
+      text("portfolio-contract-notional", amount(contracts?.gross_notional));
+      const pnl = document.getElementById("portfolio-contract-pnl");
+      pnl.textContent = amount(contracts?.unrealized_pnl);
+      pnl.className = `value ${pnlClass(contracts?.unrealized_pnl)}`;
+      text("portfolio-contract-margin", `${uiText("Initial Margin")}: ${amount(contracts?.initial_margin)}`);
+      const rows = contracts?.positions || [];
+      const meta = contracts?.status === "partial"
+        ? uiText("Position data incomplete")
+        : `${rows.length} ${uiText("Contract Positions")}`;
+      text("portfolio-contract-meta", contracts ? meta : "--");
+      text("contract-positions-meta", `${meta} · ${formatAge(contracts?.observed_at)}`);
+      const body = document.getElementById("contract-positions");
+      if (!rows.length) {
+        body.innerHTML = `<tr><td colspan="9" class="subtle">${escapeHtml(uiText(contracts?.status === "partial" ? "Position data incomplete" : "No open contract positions"))}</td></tr>`;
+        return;
+      }
+      body.innerHTML = rows.map((row) => {
+        const base = String(row.symbol || "").split("/")[0];
+        const side = row.side === "long" ? "Long" : row.side === "short" ? "Short" : "--";
+        const cells = [
+          ["Account", row.account], ["Symbol", row.symbol], ["Side", uiText(side)],
+          ["Base Quantity", amount(row.base_amount, base)],
+          ["Entry / Mark", `${amount(row.entry_price, row.quote_currency)} / ${amount(row.mark_price, row.quote_currency)}`],
+          ["Contract Notional", amount(row.notional_quote_common)],
+          ["Initial Margin", amount(row.initial_margin_common)],
+          ["Unrealized P/L", amount(row.unrealized_pnl_common), pnlClass(row.unrealized_pnl_common)],
+          ["Leverage / Liquidation", `${row.leverage == null ? "--" : `${row.leverage}x`} / ${amount(row.liquidation_price, row.quote_currency)}`],
+        ];
+        return `<tr>${cells.map(([label, value, cls = ""]) => `<td data-label="${escapeHtml(uiText(label))}" class="${cls}">${escapeHtml(value || "--")}</td>`).join("")}</tr>`;
+      }).join("");
     }
 
     function shortAddress(address) {

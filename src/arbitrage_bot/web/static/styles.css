@@ -465,6 +465,17 @@ main {
   gap: 12px;
 }
 
+.contract-positions-table td { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .contract-positions-table thead { display: none; }
+  .contract-positions-table, .contract-positions-table tbody { display: block; width: 100%; min-width: 0; }
+  .contract-positions-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+  .contract-positions-table td { display: block; min-width: 0; white-space: normal; text-align: left; }
+  .contract-positions-table td::before { content: attr(data-label); display: block; font-size: 11px; opacity: 0.65; margin-bottom: 4px; }
+  .contract-positions-table td[colspan] { grid-column: 1 / -1; }
+  .contract-positions-table td:last-child { grid-column: 1 / -1; }
+}
+
 .statusbar {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }

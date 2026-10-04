@@ -24,6 +24,7 @@ from ...config import (
     SlowExecutionConfig,
 )
 from ...derivatives import derivative_account_summary, normalize_derivative_position
+from ...contract_portfolio import balance_equity_adjustments, contract_snapshot
 from ...exchanges import ExchangeManager
 from ...fill_store import load_fill_rows, persist_fill_pnl
 from ...funding_basis import funding_basis_payload, funding_settings_from_strategy_center
@@ -236,7 +237,7 @@ async def _fetch_exchange_balance_payload(
     if workspace_connection_id:
         account["workspace_connection_id"] = workspace_connection_id
 
-    if not symbols:
+    if not symbols and exchange.market_type == "spot":
         account["status"] = "idle"
         account["balance"]["skipped_reason"] = "no configured symbols"
         return account
@@ -275,7 +276,26 @@ async def _fetch_exchange_balance_payload(
         _balance_currencies(symbols),
         include_zero=False,
     )
-    reserve_payload = await _fetch_open_order_reserves(manager, exchange, symbols)
+    reserve_payload = (
+        await _fetch_open_order_reserves(manager, exchange, symbols)
+        if exchange.market_type == "spot"
+        else {"currencies": {}, "open_order_count": 0, "warnings": []}
+    )
+    if exchange.market_type in {"swap", "future"}:
+        try:
+            client = manager.client(exchange)
+            if (getattr(client, "has", None) or {}).get("fetchPositions") is False:
+                raise NotImplementedError("contract position reads are not supported")
+            raw_positions = await manager.fetch_positions(exchange)
+            account["contract_snapshot"] = contract_snapshot(
+                exchange, raw_positions, markets=getattr(client, "markets", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            account["contract_snapshot"] = {
+                "status": "error", "positions": [], "checked_at": time.time(),
+            }
+            account["warnings"].append(f"positions unavailable: {exc.__class__.__name__}")
+        account["contract_snapshot"]["equity_adjustments"] = balance_equity_adjustments(exchange, balance)
     reserve_warnings = reserve_payload.get("warnings") or []
     if reserve_warnings:
         account["warnings"].extend(reserve_warnings)

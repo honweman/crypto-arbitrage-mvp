@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from .config import AssetPosition, BotConfig
+from .contract_portfolio import apply_contract_portfolio
 from .models import OrderBookSnapshot
 from .pnl import build_portfolio_pnl
 from .risk import portfolio_positions_base
@@ -434,7 +435,11 @@ def build_synced_portfolio_pnl(
     payload["balance_source"] = "live_accounts"
     payload["balance_status"] = account_balances.get("status")
     payload["balance_observed_at"] = account_balances.get("last_finished")
-    return _apply_order_activity_pnl(payload, order_activity)
+    return apply_contract_portfolio(
+        _apply_order_activity_pnl(payload, order_activity),
+        account_balances.get("accounts", []),
+        quote_rates,
+    )
 
 
 def build_market_maker_quality_payload(

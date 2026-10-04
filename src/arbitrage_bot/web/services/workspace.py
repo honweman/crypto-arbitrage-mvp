@@ -12,6 +12,7 @@ from ..users import (
 from ...config import (
     BotConfig,
 )
+from ...contract_portfolio import apply_contract_portfolio
 from ...strategy_center import (
     FundingArbitrageSettings,
     SignalBotSettings,
@@ -566,7 +567,9 @@ def _merge_workspace_account_balances(
                 ),
                 "id": str(connection.get("exchange") or ""),
                 "market_type": str(connection.get("market_type") or "spot"),
+                "market_types": list(connection.get("market_types") or []),
                 "symbols": symbols,
+                "contract_snapshot": dict(connection.get("contract_snapshot") or {}),
                 "auth": {
                     "configured": bool(connection.get("credentials_configured")),
                     "private_checks_enabled": True,
@@ -743,7 +746,7 @@ def _sync_portfolio_with_account_balances(
         for row in (account_balances or {}).get("totals", []) or []
         if isinstance(row, dict) and row.get("currency")
     }
-    if not totals or not payload:
+    if not payload:
         return payload
 
     positions = [
@@ -916,7 +919,7 @@ def _sync_portfolio_with_account_balances(
     payload["balance_source"] = "merged_live_accounts"
     payload["balance_status"] = (account_balances or {}).get("status")
     payload["balance_observed_at"] = (account_balances or {}).get("last_finished")
-    return payload
+    return apply_contract_portfolio(payload, accounts, rates)
 
 def build_strategy_center_payload(
     cfg: BotConfig,

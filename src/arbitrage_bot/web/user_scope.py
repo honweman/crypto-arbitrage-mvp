@@ -694,6 +694,7 @@ def _filter_state_payload_for_user(
             "summary": {},
         }
         payload["operations"] = {}
+        payload["derivatives"] = {"status": "private", "accounts": []}
         if isinstance(config_payload, dict):
             config_payload["risk"] = {}
         for key in (

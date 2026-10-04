@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable
 
 from .config import ExchangeConfig
+from .contract_portfolio import balance_equity_adjustments, contract_snapshot
 from .exchanges import ExchangeManager
 from .user_workspace import UserApiConnection, UserExchangeAccount, UserProject
 
@@ -761,6 +762,23 @@ async def check_workspace_api_connection(
                 else "trading"
             )
             balances = _balance_rows(balance, currencies, wallet=wallet)
+            contracts = None
+            if market_type in {"swap", "future"}:
+                try:
+                    if (getattr(client, "has", None) or {}).get("fetchPositions") is False:
+                        raise NotImplementedError("contract position reads are not supported")
+                    raw_positions = await asyncio.wait_for(
+                        manager.fetch_positions(cfg),
+                        timeout=max(1.0, timeout_seconds),
+                    )
+                    contracts = contract_snapshot(cfg, raw_positions, markets=markets)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    contracts = {
+                        "status": "error", "positions": [], "checked_at": time.time(),
+                        "error": _safe_error(exc, credentials),
+                    }
             warnings: list[str] = []
             valuation_warnings: list[str] = []
             valuations: dict[str, dict[str, Any]] = {}
@@ -860,6 +878,8 @@ async def check_workspace_api_connection(
                     "warnings": warnings,
                     "valuations": valuations,
                     "valuation_warnings": valuation_warnings,
+                    "contract_snapshot": contracts,
+                    "equity_adjustments": balance_equity_adjustments(cfg, balance),
                 }
             )
         except asyncio.CancelledError:
@@ -885,7 +905,21 @@ async def check_workspace_api_connection(
     valuations: dict[str, dict[str, Any]] = {}
     warnings = list(scope_errors)
     valuation_warnings: list[str] = []
+    contract_scopes = [r["contract_snapshot"] for r in scope_results if r.get("contract_snapshot")]
+    failed_contract_scopes = (set(market_types) & {"swap", "future"}) - {
+        r["market_type"] for r in scope_results
+    }
+    contracts = {
+        "status": "error" if failed_contract_scopes or any(
+            r["status"] != "ok" for r in contract_scopes
+        ) else "ok",
+        "positions": [p for r in contract_scopes for p in r["positions"]],
+        "checked_at": time.time(),
+        "equity_adjustments": {},
+    }
     for result in scope_results:
+        # A unified wallet can be returned by both spot and swap API scopes.
+        contracts["equity_adjustments"].update(result["equity_adjustments"])
         warnings.extend(result["warnings"])
         valuation_warnings.extend(result["valuation_warnings"])
         valuations.update(result["valuations"])
@@ -914,6 +948,7 @@ async def check_workspace_api_connection(
             result["market_type"]: result["market_count"] for result in scope_results
         },
         "balances": list(balance_rows.values()),
+        "contract_snapshot": contracts,
         "balance_warnings": warnings,
         "valuation_warnings": valuation_warnings,
         "open_order_count": sum(result["open_order_count"] for result in scope_results),

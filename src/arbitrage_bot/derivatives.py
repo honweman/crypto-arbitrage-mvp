@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 
 from .config import ExchangeConfig, RiskConfig
 
@@ -56,7 +57,7 @@ def _number_or_none(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number == number else None
+    return number if math.isfinite(number) else None
 
 
 def _nested_number(raw: dict[str, Any], *keys: str) -> float | None:
@@ -152,8 +153,13 @@ def normalize_derivative_position(
         or _nested_number(raw, "info", "notional")
         or _nested_number(raw, "info", "positionValue")
     )
+    inverse = raw.get("inverse") is True or (
+        ":" in symbol and symbol.partition(":")[2] == symbol.partition("/")[0]
+    )
+    if inverse and contracts is not None:
+        notional = contracts * contract_size
     if notional is None and contracts is not None and mark_price is not None:
-        notional = contracts * contract_size * mark_price
+        notional = contracts * contract_size * (1.0 if inverse else mark_price)
 
     leverage = (
         _number_or_none(raw.get("leverage"))
@@ -166,10 +172,12 @@ def normalize_derivative_position(
     )
     side = _position_side(raw, contracts)
     base_amount = abs(contracts or 0.0) * contract_size
+    if inverse:
+        base_amount = base_amount / mark_price if mark_price else None
     notional_abs = abs(notional or 0.0)
-    if not symbol and notional_abs <= 0 and base_amount <= 0:
+    if not symbol and notional_abs <= 0 and not base_amount:
         return None
-    if notional_abs <= 0 and base_amount <= 0:
+    if notional_abs <= 0 and not base_amount:
         return None
 
     row: dict[str, Any] = {
@@ -182,6 +190,10 @@ def normalize_derivative_position(
         "contracts": contracts,
         "contract_size": contract_size,
         "base_amount": base_amount,
+        "inverse": inverse,
+        "quote_currency": symbol.partition("/")[2].partition(":")[0],
+        "settle_currency": str(raw.get("settle") or symbol.partition(":")[2]
+                               or symbol.partition("/")[2]),
         "notional_quote": notional_abs,
         "entry_price": entry_price,
         "mark_price": mark_price,
@@ -195,7 +207,8 @@ def normalize_derivative_position(
         "margin_mode": str(raw.get("marginMode") or raw.get("margin_mode") or ""),
         "initial_margin": (
             _number_or_none(raw.get("initialMargin"))
-            or _nested_number(raw, "info", "initialMargin")
+            if raw.get("initialMargin") is not None
+            else _nested_number(raw, "info", "initialMargin")
         ),
         "maintenance_margin": (
             _number_or_none(raw.get("maintenanceMargin"))
@@ -205,11 +218,11 @@ def normalize_derivative_position(
             _number_or_none(raw.get("marginRatio"))
             or _nested_number(raw, "info", "marginRatio")
         ),
-        "unrealized_pnl": (
-            _number_or_none(raw.get("unrealizedPnl"))
-            or _number_or_none(raw.get("unrealizedProfit"))
-            or _nested_number(raw, "info", "unRealizedProfit")
-        ),
+        "unrealized_pnl": next((value for value in (
+            _number_or_none(raw.get("unrealizedPnl")),
+            _number_or_none(raw.get("unrealizedProfit")),
+            _nested_number(raw, "info", "unRealizedProfit"),
+        ) if value is not None), None),
         "timestamp": _number_or_none(raw.get("timestamp")),
     }
     status, reasons = _position_status(row, risk)

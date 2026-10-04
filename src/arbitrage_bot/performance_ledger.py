@@ -396,7 +396,9 @@ def account_values_from_balances(
                 break
             value += float(amount) * rate
         if complete and has_value:
-            result[account_key] = value
+            result[account_key] = value + float(
+                (portfolio.get("contract_equity_adjustments") or {}).get(account_key, 0.0)
+            )
     return result
 
 
@@ -635,6 +637,7 @@ def update_portfolio_performance(
         )
     if state is None:
         payload = {
+            "contract_valuation_accounts": sorted(portfolio.get("contract_equity_adjustments") or {}),
             "status": "ok" if coverage["status"] == "complete" else "warning",
             "reason": "" if coverage["status"] == "complete" else "cash-flow coverage is partial",
             "currency": currency,
@@ -711,6 +714,15 @@ def update_portfolio_performance(
 
     membership_flow = sum(normalized_values.get(key, 0.0) for key in keys - previous_keys)
     membership_flow -= sum(previous_values.get(key, 0.0) for key in previous_keys - keys)
+    previous_payload = json.loads(state["payload_json"] or "{}")
+    previous_contract_accounts = set(previous_payload.get("contract_valuation_accounts", []))
+    adjustments = portfolio.get("contract_equity_adjustments") or {}
+    # Adding previously unobserved floating P/L is a coverage change, not a new profit.
+    valuation_coverage_flow = sum(
+        value for key, value in adjustments.items()
+        if key in previous_keys and key not in previous_contract_accounts
+    )
+    membership_flow += valuation_coverage_flow
 
     pending_rates: set[str] = set()
     applied_flow = 0.0
@@ -802,6 +814,8 @@ def update_portfolio_performance(
         "applied_cash_flow_count": flow_count,
         "applied_cash_flow_value": applied_flow,
         "account_membership_flow": membership_flow,
+        "valuation_coverage_flow": valuation_coverage_flow,
+        "contract_valuation_accounts": sorted(set(adjustments) | previous_contract_accounts),
         "pending_cash_flow_currencies": sorted(pending_rates),
     }
     should_persist = bool(

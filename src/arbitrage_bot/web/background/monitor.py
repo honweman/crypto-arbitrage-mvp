@@ -1124,7 +1124,7 @@ async def monitor_loop(
                         }
                     next_order_activity_scan = now + ORDER_ACTIVITY_POLL_SECONDS
 
-                if portfolio_books:
+                if portfolio_books or account_balances_payload.get("checked_account_count"):
                     portfolio_payload = build_synced_portfolio_pnl(
                         runtime_cfg,
                         portfolio_books,

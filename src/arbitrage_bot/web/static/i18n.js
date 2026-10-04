@@ -2,6 +2,17 @@
   const STORAGE_KEY = "cryptoArbLanguage";
   const SUPPORTED = new Set(["en", "zh", "ko"]);
   const ZH = {
+    "Contract Positions": "合约持仓",
+    "Contract Equity Adjustment": "合约权益调整",
+    "Contract Notional": "合约名义价值",
+    "Contract Unrealized P/L": "合约未实现盈亏",
+    "Unrealized P/L": "未实现盈亏",
+    "Initial Margin": "初始保证金",
+    "Base Quantity": "标的数量",
+    "Entry / Mark": "开仓价 / 标记价",
+    "Leverage / Liquidation": "杠杆 / 强平价",
+    "Position data incomplete": "持仓数据不完整",
+    "No open contract positions": "暂无合约持仓",
     "Crypto Trading Dashboard": "加密交易控制台",
     "Multi-asset arbitrage · market making · auto buy/sell": "多币种套利 · 做市 · 自动买卖",
     "Language": "语言",
@@ -1243,6 +1254,17 @@
   ];
 
   const KO = {
+    "Contract Positions": "선물 포지션",
+    "Contract Equity Adjustment": "선물 자산 조정",
+    "Contract Notional": "선물 명목 가치",
+    "Contract Unrealized P/L": "선물 미실현 손익",
+    "Unrealized P/L": "미실현 손익",
+    "Initial Margin": "개시 증거금",
+    "Base Quantity": "기초 자산 수량",
+    "Entry / Mark": "진입가 / 표시 가격",
+    "Leverage / Liquidation": "레버리지 / 청산가",
+    "Position data incomplete": "포지션 데이터 불완전",
+    "No open contract positions": "열린 선물 포지션 없음",
     "Crypto Trading Dashboard": "암호화폐 트레이딩 대시보드",
     "Multi-asset arbitrage · market making · auto buy/sell": "다중 자산 차익거래 · 마켓메이킹 · 자동 매수/매도",
     "Language": "언어",

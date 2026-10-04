@@ -135,6 +135,16 @@
         <div class="label">Today MM P/L</div>
         <div id="portfolio-mm-pnl" class="value">--</div>
       </div>
+      <div class="metric">
+        <div class="label">Contract Notional</div>
+        <div id="portfolio-contract-notional" class="value">--</div>
+        <div id="portfolio-contract-meta" class="subtle detail">--</div>
+      </div>
+      <div class="metric">
+        <div class="label">Contract Unrealized P/L</div>
+        <div id="portfolio-contract-pnl" class="value">--</div>
+        <div id="portfolio-contract-margin" class="subtle detail">--</div>
+      </div>
       <div class="metric secondary-metric">
         <div class="label">Today Arb P/L</div>
         <div id="portfolio-arb-pnl" class="value">--</div>
@@ -152,6 +162,19 @@
         <div id="portfolio-price-pnl" class="value">--</div>
       </div>
     </div>
+
+    <section id="contract-positions-section" data-page="status" class="compact-section section-open">
+      <div class="section-title">
+        <h2>Contract Positions</h2>
+        <span id="contract-positions-meta" class="subtle"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="contract-positions-table">
+          <thead><tr><th>Account</th><th>Symbol</th><th>Side</th><th>Base Quantity</th><th>Entry / Mark</th><th>Contract Notional</th><th>Initial Margin</th><th>Unrealized P/L</th><th>Leverage / Liquidation</th></tr></thead>
+          <tbody id="contract-positions"></tbody>
+        </table>
+      </div>
+    </section>
 
     <section id="overview" data-page="status" class="compact-section section-open">
       <div class="section-title">
