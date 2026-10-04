@@ -7508,6 +7508,8 @@ function balanceStatusClass(status) {
       const currency = contracts?.currency || lastState?.config?.common_quote_currency || "USD";
       const amount = (value, unit = currency) => value == null || !Number.isFinite(Number(value))
         ? "--" : `${stableBalanceFormatter.format(Number(value))} ${unit}`;
+      const preciseAmount = (value, unit) => value == null || !Number.isFinite(Number(value))
+        ? "--" : `${fmt.format(Number(value))} ${unit}`;
       text("portfolio-contract-notional", amount(contracts?.gross_notional));
       const pnl = document.getElementById("portfolio-contract-pnl");
       pnl.textContent = amount(contracts?.unrealized_pnl);
@@ -7529,12 +7531,12 @@ function balanceStatusClass(status) {
         const side = row.side === "long" ? "Long" : row.side === "short" ? "Short" : "--";
         const cells = [
           ["Account", row.account], ["Symbol", row.symbol], ["Side", uiText(side)],
-          ["Base Quantity", amount(row.base_amount, base)],
-          ["Entry / Mark", `${amount(row.entry_price, row.quote_currency)} / ${amount(row.mark_price, row.quote_currency)}`],
+          ["Base Quantity", preciseAmount(row.base_amount, base)],
+          ["Entry / Mark", `${preciseAmount(row.entry_price, row.quote_currency)} / ${preciseAmount(row.mark_price, row.quote_currency)}`],
           ["Contract Notional", amount(row.notional_quote_common)],
           ["Initial Margin", amount(row.initial_margin_common)],
           ["Unrealized P/L", amount(row.unrealized_pnl_common), pnlClass(row.unrealized_pnl_common)],
-          ["Leverage / Liquidation", `${row.leverage == null ? "--" : `${row.leverage}x`} / ${amount(row.liquidation_price, row.quote_currency)}`],
+          ["Leverage / Liquidation", `${row.leverage == null ? "--" : `${row.leverage}x`} / ${preciseAmount(row.liquidation_price, row.quote_currency)}`],
         ];
         return `<tr>${cells.map(([label, value, cls = ""]) => `<td data-label="${escapeHtml(uiText(label))}" class="${cls}">${escapeHtml(value || "--")}</td>`).join("")}</tr>`;
       }).join("");

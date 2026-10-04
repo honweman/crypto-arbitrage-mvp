@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -14,6 +15,7 @@ from arbitrage_bot.contract_portfolio import (
     contract_snapshot,
 )
 from arbitrage_bot.derivatives import normalize_derivative_position
+from arbitrage_bot.exchanges import ExchangeManager
 from arbitrage_bot.user_account_check import check_workspace_api_connection
 from arbitrage_bot.user_workspace import UserApiConnection
 from arbitrage_bot.web.services.workspace import (
@@ -298,3 +300,14 @@ def test_only_passed_owner_accounts_are_used():
     )
     assert [row["exchange"] for row in result["contracts"]["positions"]] == ["owner"]
     assert result["contracts"]["unrealized_pnl"] == 5
+
+
+def test_bybit_unfiltered_positions_include_both_linear_settlements():
+    client = Mock(has={"fetchPositions": True})
+    client.fetch_positions = AsyncMock(side_effect=[[position()], [position(symbol="ETH/USDC:USDC")]])
+    manager = ExchangeManager()
+    manager.client = Mock(return_value=client)
+    result = asyncio.run(manager.fetch_positions(ExchangeConfig(id="bybit", market_type="swap")))
+    assert len(result) == 2
+    assert [call.kwargs["params"]["settleCoin"] for call in client.fetch_positions.await_args_list] == ["USDT", "USDC"]
+    assert all(call.kwargs["params"]["paginate"] for call in client.fetch_positions.await_args_list)

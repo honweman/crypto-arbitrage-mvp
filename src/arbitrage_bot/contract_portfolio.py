@@ -29,6 +29,9 @@ def contract_snapshot(
             key: market.get(key) for key in ("inverse", "settle", "contractSize")
         }
         enriched.update(raw)
+        for key in ("inverse", "settle", "contractSize"):
+            if enriched.get(key) is None:
+                enriched[key] = market.get(key)
         row = normalize_derivative_position(exchange, enriched, risk=RiskConfig())
         if row is not None:
             positions.append(row)

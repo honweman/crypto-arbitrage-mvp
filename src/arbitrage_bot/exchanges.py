@@ -2313,6 +2313,13 @@ class ExchangeManager:
         symbols_list = sorted({symbol for symbol in symbols or [] if symbol})
         if symbols_list:
             return await fetcher(symbols_list)
+        if cfg.id == "bybit" and cfg.options.get("defaultSubType", "linear") == "linear":
+            positions = []
+            for settle in ("USDT", "USDC"):
+                positions.extend(await fetcher(params={
+                    "subType": "linear", "settleCoin": settle, "paginate": True,
+                }))
+            return positions
         return await fetcher()
 
     async def fetch_balance(self, cfg: ExchangeConfig) -> dict[str, Any]:
